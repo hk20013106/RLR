@@ -8,7 +8,7 @@ independent subagent with physical context isolation.
 > (Path B). The execution agent (Turing) is isolated by workspace + command
 > allowlist (Path A). We do not pretend spawn_agent is an OS sandbox.
 
-**Current version: v0.3.0** (2026-06-25)
+**Current version: v0.4.0** (2026-06-25)
 
 ---
 
@@ -18,7 +18,8 @@ independent subagent with physical context isolation.
 |----------|--------|-------------|
 | v0.1 | **DELETED** | 7-agent linear loop (Idea, Value, Evidence, Falsification, Biology, Decision, Execution) with 9 statuses. Lacked skill gates, method triage, execution safety. Architecture deemed unreasonable; removed. |
 | v0.2 | **DEPRECATED** | 10-persona single-context council with gates and Obsidian sync. Still works; `research_loop_v02.py` and existing v0.2 projects preserved untouched. See [README_v0.2.md](README_v0.2.md). |
-| v0.3 | **CURRENT** | Subagent physical isolation architecture. 14-node DAG, delta JSON, Path A/B isolation, L9a/L9b parallel. See [README_v0.3.md](README_v0.3.md) and [DAG_TOPOLOGY.md](DAG_TOPOLOGY.md). |
+| v0.3 | SUPERSEDED | Subagent physical isolation architecture. 14-node DAG, delta JSON, Path A/B isolation, L9a/L9b parallel. `research_loop_v03.py` preserved for reference. See [README_v0.3.md](README_v0.3.md) and [DAG_TOPOLOGY.md](DAG_TOPOLOGY.md). |
+| v0.4 | **CURRENT** | Adds three pre-research steps to the main-agent protocol — **deep research before L1**, **method literature review before L4**, **code search before L7** — grounded in the candidate's question and embedded into `assemble-context` (recorded in the context manifest). DAG topology unchanged (still 14 nodes). `research_loop_v04.py`. |
 
 ---
 
@@ -113,11 +114,12 @@ filesystem access for cognitive agents, no candidate body access.
 | Command | Description |
 |---------|-------------|
 | `demo` | Generate a demo project walking all 14 nodes |
-| `new-project` | Create a v0.3 project folder |
+| `new-project` | Create a v0.4 project folder |
 | `preflight` | L0 Linnaeus boot gate (creates 00_Preflight/) |
 | `new-candidate` | Create a candidate with split frontmatter (question/claim) |
 | `next-step` | Get next DAG node scheduling packet (JSON) |
-| `assemble-context` | Build isolated context text for a node (Path B) |
+| `pre-research` | **(v0.4)** Print the pre-research prompt for L1/L4/L7 (deep research / method review / code search), grounded in the candidate's question |
+| `assemble-context` | Build isolated context text for a node (Path B); embeds the pre-research summary for L1/L4/L7 |
 | `emit-delta` | Validate and save a subagent's delta JSON |
 | `route` | Hand a candidate to a persona |
 | `note` | Append a persona note |
@@ -134,6 +136,9 @@ filesystem access for cognitive agents, no candidate body access.
 
 ```
 step = next-step(PROJECT, CAND)
+if step.node in (L1, L4, L7):   # v0.4 pre-research, BEFORE the node
+    pre-research(--node step.node)   # deep research / method review / code search
+    # write 02_Agent_Notes/_pre_research/<node>_research.md; assemble-context embeds it
 if step.is_parallel:        # L9a + L9b
     ctx_a = assemble-context(--node L9a)
     ctx_b = assemble-context(--node L9b)
@@ -168,17 +173,17 @@ else:                       # cognitive layer, Path B
 
 ```
 research_loop/
-|-- research_loop_v03.py          # Main script (v0.3.0, dependency-free)
-|-- research_loop_v02.py          # Preserved (deprecated)
-|-- README_v0.3.md                # Detailed v0.3 documentation
-|-- README_v0.2.md                # v0.2 documentation
-|-- DAG_TOPOLOGY.md               # Full DAG dependency table
-|-- HANDOFF_V03_SUBAGENT_ARCHITECTURE.md
+|-- research_loop_v04.py          # Main controller (v0.4.0, dependency-free) + pre-research
+|-- research_loop_v03.py          # Preserved for reference (v0.3.0)
+|-- run_loop.py                   # Loop runner (main-agent / headless / manual)
+|-- orchestrator.py               # Provider abstraction (headless / manual) + config
+|-- MAIN_AGENT_RUN.md             # Main-agent execution protocol
+|-- MAIN_AGENT_PROMPT.md          # Paste-ready main-agent startup prompt
+|-- RUNNER.md                     # Runner modes + StopPolicy
+|-- DAG_TOPOLOGY.md               # Full DAG dependency table (14 nodes, unchanged)
 |-- templates/
 |   |-- v03_personas/             # 10 persona templates
    `-- v03_layers/               # 14 layer templates (L0-L10c)
-|-- DemoProject_v03/              # Demo walking all 14 nodes
-|-- Yigene_WGCNA_v03/             # Real WGCNA project (status=KEEP)
 `-- ...
 ```
 

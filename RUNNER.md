@@ -1,11 +1,11 @@
-# RLR v0.3 Loop Runner
+# RLR v0.4 Loop Runner
 
 Three run modes, in order of recommendation:
 
 ## 1. Main-agent mode (RECOMMENDED)
 
 The current host agent (Claude Code / Codex / AntiGravity / Hermes) acts as the
-orchestrator. It loops through the DAG by calling `research_loop_v03.py` CLI,
+orchestrator. It loops through the DAG by calling `research_loop_v04.py` CLI,
 playing each persona, generating delta JSON, and advancing state.
 
 - No per-node copy-paste
@@ -26,6 +26,18 @@ Default config (`rlr_runner.yaml`):
 mode: main_agent
 max_rounds: 3
 ```
+
+### Pre-research (v0.4)
+
+Before **L1 / L4 / L7** the orchestrator runs a pre-step and embeds the result
+into that node's `assemble-context` (the 14-node DAG is unchanged):
+
+- **L1** deep research → **L4** method literature review → **L7** code search.
+- Main-agent mode: the host agent runs `pre-research PROJECT CAND --node Lx`,
+  follows the printed (question-grounded) prompt, and writes
+  `02_Agent_Notes/_pre_research/Lx_research.md`.
+- Headless mode: `run_loop.py` auto-produces it via the configured `headless`
+  command (skipped, not fatal, if no command is set).
 
 ## 2. Headless command mode (UNATTENDED)
 
@@ -70,4 +82,4 @@ After L10c, the loop evaluates whether to stop or continue:
 | `orchestrator.py` | Provider abstraction (HeadlessProvider, CommandProvider, ManualProvider) |
 | `MAIN_AGENT_RUN.md` | Main-agent execution protocol |
 | `MAIN_AGENT_PROMPT.md` | Copy-paste startup prompt for host agents |
-| `research_loop_v03.py` | Core DAG controller (UNCHANGED) |
+| `research_loop_v04.py` | Core DAG controller (UNCHANGED) |

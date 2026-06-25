@@ -251,6 +251,21 @@ def _run_command_agent(command, node, persona, context, output_schema,
     return json.loads(of.read_text(encoding="utf-8"))
 
 
+def run_text_command(command, prompt, run_dir, tag, timeout=None):
+    """Run a headless command for a FREE-TEXT step (e.g. v0.4 pre-research):
+    write the prompt, run the command (which must write its output to
+    {output_file}), and return the raw text (NOT parsed as JSON)."""
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    pf = run_dir / f"{tag}_prompt.txt"
+    of = run_dir / f"{tag}_out.md"
+    pf.write_text(prompt, encoding="utf-8")
+    cmd = command.format(prompt_file=str(pf), output_file=str(of), node=tag,
+                         persona="Researcher", workspace="")
+    subprocess.run(cmd, shell=True, check=True, timeout=timeout)
+    return of.read_text(encoding="utf-8")
+
+
 class CommandProvider(AgentProvider):
     """Automatic provider for an external headless CLI. Runs a shell command
     template once per node; the command MUST write the delta JSON to

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""RLR v0.3 loop runner — half/auto-automated multi-round driver.
+"""RLR v0.4 loop runner — half/auto-automated multi-round driver.
 
-Drives research_loop_v03.py (the controller) around its DAG using a
+Drives research_loop_v04.py (the controller) around its DAG using a
 provider-neutral orchestrator, and decides whether to open another round with a
 hybrid StopPolicy (hard cap + L10b decision + optional Review gate + marginal
 gain). It does NOT replace the controller and does NOT touch the core DAG/state
@@ -18,15 +18,16 @@ the conclusion". See StopPolicy.
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-CONTROLLER = HERE / "research_loop_v03.py"
+CONTROLLER = HERE / "research_loop_v04.py"
 sys.path.insert(0, str(HERE))
 
-import research_loop_v03 as rl       # noqa: E402  (controller: DAG metadata + helpers)
+import research_loop_v04 as rl       # noqa: E402  (controller: DAG metadata + helpers)
 import orchestrator as orch          # noqa: E402
 
 
@@ -310,6 +311,37 @@ def exec_turing(project, cand, step, cfg, args, run_dir, round_id, exec_state):
     return True
 
 
+def ensure_pre_research(project, cand, node, cfg, args, run_dir):
+    """v0.4 trigger: before L1/L4/L7, make sure the node's pre-research summary
+    exists (deep research / method literature review / code search). If already
+    present, do nothing. In headless mode, produce it via the configured
+    headless command; in main-agent mode the host agent does this per the
+    protocol (here we just note it -- assemble-context will flag if missing)."""
+    if node not in rl.PRE_RESEARCH_MAP:
+        return
+    target = (Path(project) / "02_Agent_Notes" / "_pre_research"
+              / f"{node}_research.md")
+    if target.exists():
+        log(f"pre-research {node}: already present")
+        return
+    prompt = _ctl("pre-research", project, cand, "--node", node).stdout
+    hl = getattr(cfg, "headless", {}) or {}
+    cmd = (hl.get("command") if isinstance(hl, dict) else None) \
+        or os.environ.get("RLR_HEADLESS_CMD") or os.environ.get("RLR_HOST_AGENT_CMD")
+    if not cmd:
+        log(f"pre-research {node}: no headless command -- the orchestrator must run "
+            f"`pre-research {project} {cand} --node {node}` (main-agent mode)")
+        return
+    try:
+        timeout = hl.get("timeout") if isinstance(hl, dict) else None
+        md = orch.run_text_command(cmd, prompt, run_dir, f"prefetch_{node}", timeout)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(md, encoding="utf-8")
+        log(f"pre-research {node}: produced {target}")
+    except Exception as e:
+        log(f"pre-research {node}: failed ({e}); continuing without it")
+
+
 def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
     """Drive one full DAG pass for a candidate. Returns an outcome string."""
     run_dir = Path(project) / "08_Run_Receipts" / cand / f"round_{round_id:02d}"
@@ -329,6 +361,7 @@ def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
         if args.stop_after_node and node == args.stop_after_node:
             log(f"--stop-after-node {node}: halting round")
             return "stopped_after_node"
+        ensure_pre_research(project, cand, node, cfg, args, run_dir)
         if node == "L10c":
             _ctl("aggregate-report", project, cand)
             # sync human-readable output to Obsidian
@@ -644,26 +677,36 @@ def cmd_run(args):
     return 0
 
 
-MAIN_AGENT_PROMPT_TEMPLATE = """You are now the RLR main-agent orchestrator.
+MAIN_AGENT_PROMPT_TEMPLATE = """You are now the RLR v0.4 main-agent orchestrator.
 
 Project: {project}
 Candidate: {cand_id}
 
 Instructions:
-1. Run:  python research_loop_v03.py next-step {project} {cand_id}
+1. Run:  python research_loop_v04.py next-step {project} {cand_id}
 2. Read the JSON output to get the current DAG node, persona, and context_files.
-3. Run:  python research_loop_v03.py assemble-context {project} {cand_id} --node NODE
-4. The assemble-context output is your ONLY input for this node. Do NOT read other delta files.
-5. Act as the specified persona. Generate a strict JSON delta matching the schema.
-6. Write the delta to a temp file, then run:
-   python research_loop_v03.py emit-delta {project} {cand_id} --node NODE --persona PERSONA --file TEMP_DELTA.json
-7. If emit-delta says VALIDATION: PASS, run the advance_command.
-8. Repeat from step 1 until next-step returns L10c (aggregate-report).
-9. After L10c, evaluate StopPolicy: if KEEP + review accept, stop. If REVISE with executable next_steps, create child candidate.
-10. Maximum rounds: {max_rounds}.
+3. PRE-RESEARCH (v0.4): if the node is L1, L4, or L7, you MUST do its pre-step FIRST:
+     python research_loop_v04.py pre-research {project} {cand_id} --node NODE
+   Follow the printed prompt: L1 = deep literature research (academic-research-suite),
+   L4 = method literature review, L7 = code search (GitHub/Bioconductor). Write the
+   structured summary to 02_Agent_Notes/_pre_research/NODE_research.md. assemble-context
+   will then embed it automatically. Skip this for all other nodes.
+4. Run:  python research_loop_v04.py assemble-context {project} {cand_id} --node NODE
+5. The assemble-context output is your ONLY input for this node (it now includes the
+   pre-research summary when present). Do NOT read other delta files.
+6. Act as the specified persona. Generate a strict JSON delta matching the schema.
+7. Write the delta to a temp file, then run:
+   python research_loop_v04.py emit-delta {project} {cand_id} --node NODE --persona PERSONA --file TEMP_DELTA.json
+8. If emit-delta says VALIDATION: PASS, run the advance_command.
+9. Repeat from step 1 until next-step returns L10c (aggregate-report).
+10. After L10c, evaluate StopPolicy: if KEEP + review accept, stop. If REVISE with
+    executable next_steps, create child candidate.
+11. Maximum rounds: {max_rounds}.
 
 Key rules:
 - Do NOT read DAG-disallowed delta files. Only use assemble-context output.
+- Pre-research runs BEFORE L1/L4/L7 and is embedded via assemble-context; it does NOT
+  change the 14-node DAG topology.
 - L7 Turing: use prepare-turing-workspace, run scripts only in that workspace.
 - L9a/L9b: run both before advancing. They must be independent.
 - If emit-delta fails validation, fix the JSON and retry. Do NOT skip.
@@ -685,7 +728,7 @@ def cmd_print_main_agent_prompt(args):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="run_loop.py",
-        description="RLR v0.3 loop runner (main-agent / headless / manual).")
+        description="RLR v0.4 loop runner (main-agent / headless / manual).")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     ma = sub.add_parser("print-main-agent-prompt",
