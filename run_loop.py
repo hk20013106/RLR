@@ -49,6 +49,50 @@ stop_policy:
 everos:
   enabled: false
   scope: project_only
+
+# ---------------------------------------------------------------------------
+# CommandProvider templates (commented placeholders -- tool-agnostic).
+#
+# To drive a node non-interactively, set its provider to `command` and give a
+# shell `command` template. Available placeholders: {prompt_file} {output_file}
+# {node} {persona} {workspace}. CONTRACT: the command MUST write the delta JSON
+# to {output_file}. Raw chat CLIs usually emit prose -> wrap them so the wrapper
+# extracts/writes pure JSON (the generic wrapper below is the safest path).
+#
+# Swap these into provider.default or provider.nodes.<Lx>. Adjust flags to match
+# your actual CLI -- the commands here are SHAPES, not verified invocations.
+#
+# Codex CLI (placeholder flags):
+#   provider:
+#     default:
+#       type: command
+#       command: "codex exec --input {prompt_file} --output {output_file}"
+#       timeout: 600
+#
+# Claude CLI (headless; redirection works since the runner uses shell=True):
+#   provider:
+#     default:
+#       type: command
+#       command: "claude -p < {prompt_file} > {output_file}"
+#       timeout: 600
+#   # NOTE: `claude -p` prints the model's text. If it isn't pure JSON, pipe it
+#   # through a tiny extractor or use the generic wrapper instead.
+#
+# Generic wrapper (RECOMMENDED -- write ~10 lines that call any SDK and dump the
+# delta JSON to {output_file}); works for Codex / Claude / AntiGravity / Hermes:
+#   provider:
+#     default:
+#       type: command
+#       command: "python my_agent.py --prompt {prompt_file} --out {output_file}
+#                 --node {node} --persona {persona}"
+#       timeout: 600
+#
+# Per-node mix example (auto cognition via command, manual sandboxed L7):
+#   provider:
+#     default: {type: command, command: "python my_agent.py --prompt {prompt_file} --out {output_file}"}
+#     nodes:
+#       L7: {type: manual, filesystem: workspace_only}
+# ---------------------------------------------------------------------------
 """
 
 REVIEW_SCHEMA = {
