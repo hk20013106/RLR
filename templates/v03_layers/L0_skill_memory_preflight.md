@@ -68,3 +68,10 @@ single delta JSON instead of Markdown notes.
   "forbidden_shortcuts": list
 }
 ```
+## Dependency gate (hard stop)
+
+L0 also runs a **dependency gate**. `preflight` writes `00_Preflight/dependencies.md`
+(framework deps: PyYAML; declare project deps as `- python: X` / `- command: X`
+under "## Required") and verifies each. If any **required dependency is missing,
+preflight exits non-zero and the loop MUST halt at L0** — never skip. Re-run
+`preflight` (or `check-deps PROJECT`) after installing it.

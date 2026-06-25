@@ -611,6 +611,15 @@ def cmd_run(args):
         log(f"ERROR: no candidate {cand} in {project}")
         return 2
 
+    # L0 dependency gate (hard stop; must never be skipped). The controller
+    # check-deps returns non-zero if a required dependency is missing.
+    dep = _ctl("check-deps", project)
+    if dep.returncode != 0:
+        log("L0 DEPENDENCY GATE FAILED -- halting (not skipping):")
+        for ln in (dep.stderr or dep.stdout).strip().splitlines():
+            log(f"  {ln}")
+        return 3
+
     cfg_path = args.config or str(Path(project) / "rlr_runner.yaml")
     if not Path(cfg_path).exists():
         Path(cfg_path).write_text(DEFAULT_CONFIG, encoding="utf-8")

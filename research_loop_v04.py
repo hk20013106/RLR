@@ -188,7 +188,7 @@ DAG_NODES = [
         "agent_type": "default",
     },
     {
-        "node": "L8.5", "persona": "Research", "layer": 8,
+        "node": "L8.5", "persona": "Curie", "layer": 8,
         "status_before": "AUDITED", "advance_command": "decision",
         "advance_status": "UNDER_REVIEW", "advance_reason": "L8.5 literature verification complete, route to review",
         "context_inputs": ["L7", "L8", "candidate_frontmatter"],
@@ -385,7 +385,7 @@ DELTA_SCHEMAS = {
         "evidence_verified": [{"file": str, "check": str, "result": str}],
         "evidence_level": str, "caveats": list
     },
-    "L8.5_research": {
+    "L8.5_curie": {
         "searched_keywords": list,
         "papers": [{"pmid": str, "title": str, "abstract": str, "comparison": str, "relevance": str}],
         "summary": str
@@ -414,7 +414,7 @@ DELTA_PERSONA = {
     "L2_feynman": "Feynman", "L3_oppenheimer": "Oppenheimer",
     "L4_fisher": "Fisher", "L5_tukey": "Tukey",
     "L6_oppenheimer": "Oppenheimer", "L7_turing": "Turing",
-    "L8_curie": "Curie", "L8.5_research": "Curie", "L9a_feynman": "Feynman",
+    "L8_curie": "Curie", "L8.5_curie": "Curie", "L9a_feynman": "Feynman",
     "L9b_darwin": "Darwin", "L10a_jobs": "Jobs",
     "L10b_oppenheimer": "Oppenheimer",
 }
@@ -423,7 +423,7 @@ DELTA_PERSONA = {
 DELTA_DAG_ORDER = [
     "L0_linnaeus", "L1_einstein", "L2_feynman", "L3_oppenheimer",
     "L4_fisher", "L5_tukey", "L6_oppenheimer", "L7_turing",
-    "L8_curie", "L8.5_research", "L9a_feynman", "L9b_darwin",
+    "L8_curie", "L8.5_curie", "L9a_feynman", "L9b_darwin",
     "L10a_jobs", "L10b_oppenheimer",
 ]
 
@@ -433,6 +433,98 @@ PREFLIGHT_FILES = [
     "skill_use_plan.md", "input_manifest.md",
     "output_manifest.md", "forbidden_shortcuts.md",
 ]
+
+# --- L0 dependency gate -----------------------------------------------------
+# Runtime dependencies the L0 preflight HARD-CHECKS. A missing REQUIRED
+# dependency STOPS the loop (preflight exits non-zero) -- it must NEVER be
+# skipped. Project-specific deps are declared in 00_Preflight/dependencies.md
+# and are checked the same way.
+REQUIRED_DEPENDENCIES = [
+    {"kind": "python", "name": "yaml", "label": "PyYAML",
+     "needed_for": "manage_literature_db.py (growable literature DB; L1/L4/L8.5)"},
+]
+
+
+def _dep_present(kind, name):
+    if kind == "python":
+        import importlib.util
+        return importlib.util.find_spec(name) is not None
+    if kind == "command":
+        return shutil.which(name) is not None
+    return False
+
+
+def _parse_declared_deps(project_dir):
+    """Extra required deps declared in 00_Preflight/dependencies.md: lines of the
+    form '- python: NAME' or '- command: NAME' under a '## Required' heading."""
+    f = Path(project_dir) / "00_Preflight" / "dependencies.md"
+    deps, required = [], False
+    if not f.exists():
+        return deps
+    for line in f.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if s.startswith("##"):
+            required = "required" in s.lower()
+            continue
+        if required:
+            m = re.match(r"-\s*(python|command):\s*([^\s(]+)", s, re.I)
+            if m:
+                deps.append((m.group(1).lower(), m.group(2)))
+    return deps
+
+
+def _check_dependencies(project_dir=None):
+    """Check framework + project-declared dependencies. Returns (ok, missing),
+    each a list of dicts with kind/name/needed_for/present."""
+    items = [(d["kind"], d["name"], d.get("needed_for", "")) for d in REQUIRED_DEPENDENCIES]
+    if project_dir:
+        seen = {(i[0], i[1]) for i in items}
+        for kind, name in _parse_declared_deps(project_dir):
+            if (kind, name) not in seen:
+                items.append((kind, name, "declared in dependencies.md"))
+    ok, missing = [], []
+    for kind, name, why in items:
+        rec = {"kind": kind, "name": name, "needed_for": why,
+               "present": _dep_present(kind, name)}
+        (ok if rec["present"] else missing).append(rec)
+    return ok, missing
+
+
+def _dependencies_md(name):
+    req = "\n".join(f"- {d['kind']}: {d['name']}  ({d.get('label', d['name'])}) "
+                    f"-- {d.get('needed_for','')}" for d in REQUIRED_DEPENDENCIES)
+    return f"""---
+project_name: {_yaml_value(name)}
+preflight_file: dependencies.md
+owner: Linnaeus
+created_at: {_yaml_value(_now())}
+---
+
+# Dependencies -- {name}  (L0 gate)
+
+> Linnaeus L0 HARD-CHECKS every dependency in the '## Required' sections below.
+> If any REQUIRED dependency is MISSING, `preflight` STOPS (non-zero exit) and
+> the loop MUST NOT proceed past L0. Do not skip. Install it, then re-run
+> `preflight` (or `check-deps`).
+>
+> Declare extra deps as lines: `- python: <module>` or `- command: <exe>`.
+
+## Required (framework)
+
+{req}
+
+## Required (project)
+
+_Add project-specific runtime deps here as checkable lines, e.g.:_
+_(uncomment / copy the example from Notes below; only listed lines are checked)_
+
+## Notes
+
+- To require R for L7 execution, add this line under '## Required (project)':
+  `- command: Rscript`
+- R packages (WGCNA, clusterProfiler, ...) are verified by the R scripts at L7
+  (.libPaths + requireNamespace), not by L0.
+"""
 
 LAYERS = [
     ("L0",  "Skill & Memory Preflight",            "Linnaeus"),
@@ -1383,8 +1475,8 @@ def _condense_delta(delta_key, data):
         if "evidence_verified" in d and isinstance(d["evidence_verified"], list) and len(d["evidence_verified"]) > 10:
             d["evidence_verified"] = d["evidence_verified"][:5] + [f"... ({len(d['evidence_verified'])} files audited in total)"]
 
-    # 5. Truncate long paper abstracts in L8.5 Research
-    elif delta_key == "L8.5_research":
+    # 5. Truncate long paper abstracts in L8.5 (Curie literature verification)
+    elif delta_key == "L8.5_curie":
         if "papers" in d and isinstance(d["papers"], list):
             for p in d["papers"]:
                 if isinstance(p, dict) and "abstract" in p and isinstance(p["abstract"], str) and len(p["abstract"]) > 150:
@@ -1758,11 +1850,55 @@ def cmd_preflight(args):
             continue
         target.write_text(_preflight_template(name, fname), encoding="utf-8")
         created.append(fname)
+    dep_target = pf / "dependencies.md"
+    if not dep_target.exists() or args.force:
+        dep_target.write_text(_dependencies_md(name), encoding="utf-8")
+        created.append("dependencies.md")
+    else:
+        skipped.append("dependencies.md")
     print(f"Preflight (Linnaeus L0) for {name}:")
     for f in created:
         print(f"  created  00_Preflight/{f}")
     for f in skipped:
         print(f"  skipped  00_Preflight/{f} (exists; use --force to overwrite)")
+
+    # --- L0 DEPENDENCY GATE (hard stop; must never be skipped) ---
+    ok, missing = _check_dependencies(project_dir)
+    print("\nL0 dependency gate:")
+    for d in ok:
+        print(f"  OK       {d['kind']}:{d['name']}")
+    for d in missing:
+        print(f"  MISSING  {d['kind']}:{d['name']}  -- {d['needed_for']}",
+              file=sys.stderr)
+    if missing:
+        print("\nPREFLIGHT GATE: STOP -- required dependencies missing.",
+              file=sys.stderr)
+        print("The loop must NOT proceed past L0. Install the above, then "
+              "re-run `preflight` (or `check-deps`):", file=sys.stderr)
+        for d in missing:
+            if d["kind"] == "python":
+                print(f"  pip install {d['name']}", file=sys.stderr)
+            elif d["kind"] == "command":
+                print(f"  (install / put on PATH: {d['name']})", file=sys.stderr)
+        return 3
+    print("\nPREFLIGHT GATE: PASS -- all required dependencies present.")
+    return 0
+
+
+def cmd_check_deps(args):
+    """Standalone L0 dependency check (same gate as preflight); non-zero = STOP."""
+    project_dir = Path(args.project_dir) if getattr(args, "project_dir", None) else None
+    ok, missing = _check_dependencies(project_dir)
+    for d in ok:
+        print(f"OK       {d['kind']}:{d['name']}")
+    for d in missing:
+        print(f"MISSING  {d['kind']}:{d['name']}  -- {d['needed_for']}",
+              file=sys.stderr)
+    if missing:
+        print("DEPENDENCY GATE: STOP -- install the missing dependencies above; "
+              "the loop must not proceed.", file=sys.stderr)
+        return 3
+    print("DEPENDENCY GATE: PASS")
     return 0
 
 
@@ -2712,6 +2848,13 @@ def build_parser():
     sp.add_argument("project_dir")
     sp.add_argument("--force", action="store_true", help="overwrite existing files")
     sp.set_defaults(func=cmd_preflight)
+
+    # check-deps (L0 dependency gate, standalone)
+    sp = sub.add_parser("check-deps",
+                        help="L0 dependency gate: verify required deps; STOP (non-zero) if missing")
+    sp.add_argument("project_dir", nargs="?", default=None,
+                    help="project dir (to also check 00_Preflight/dependencies.md)")
+    sp.set_defaults(func=cmd_check_deps)
 
     # new-candidate
     sp = sub.add_parser("new-candidate", help="create a candidate with split frontmatter")

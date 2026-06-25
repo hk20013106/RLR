@@ -17,6 +17,16 @@ session, no copy-paste.
   `orchestrator.py` providers (HeadlessProvider, CommandProvider,
   ManualProvider) are not involved.
 
+## L0 dependency gate (run FIRST, do not skip)
+
+Before the loop, run `python research_loop_v04.py preflight PROJECT` (or
+`check-deps PROJECT`). This is the **L0 hard gate**: it verifies every required
+dependency listed in `00_Preflight/dependencies.md` (framework: PyYAML; plus any
+project deps you declare, e.g. `- command: Rscript`). If any required dependency
+is **MISSING, the command exits non-zero and you MUST HALT** — do not proceed to
+L1, do not skip. Install the missing dependency, re-run preflight, then continue.
+`run_loop.py` enforces this automatically before round 1.
+
 ## Pre-research (v0.4)
 
 Three pre-research steps run automatically *before* their node — they do **not**
