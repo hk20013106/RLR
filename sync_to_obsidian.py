@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sync RLR v0.4 project to Obsidian vault - human-readable format.
+"""Sync RLR v0.4.5 project to Obsidian vault - human-readable format.
 
 A REQUIRED step of the loop: run after aggregate-report at the end of EVERY
 round (run_loop drives it automatically at L10c; in main-agent mode the host

@@ -1,4 +1,4 @@
-# RLR v0.4 Loop Runner
+# RLR v0.4.5 Loop Runner
 
 Three run modes, in order of recommendation:
 
@@ -82,4 +82,4 @@ After L10c, the loop evaluates whether to stop or continue:
 | `orchestrator.py` | Provider abstraction (HeadlessProvider, CommandProvider, ManualProvider) |
 | `MAIN_AGENT_RUN.md` | Main-agent execution protocol |
 | `MAIN_AGENT_PROMPT.md` | Copy-paste startup prompt for host agents |
-| `research_loop_v04.py` | Core DAG controller (UNCHANGED) |
+| `research_loop_v04.py` | Core DAG controller (v0.4.5; called via CLI) |

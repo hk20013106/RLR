@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""RLR v0.3 orchestration layer — provider-neutral agent invocation.
+"""RLR v0.4.5 orchestration layer — provider-neutral agent invocation.
 
-This module is the *external* orchestration the controller (research_loop_v03.py)
+This module is the *external* orchestration the controller (research_loop_v04.py)
 deliberately does not do: it actually invokes a subagent for a DAG node. It is
 tool-agnostic by design -- it never hard-codes Codex / Claude / AntiGravity. Two
 providers ship here:
