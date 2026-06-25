@@ -18,3 +18,17 @@ Thumbs.db
 desktop.ini
 .DS_Store
 _tmp_*.json
+
+# --- Generated RLR project RUN DATA (output, NOT source) ---
+# Live research projects are runtime output (deltas, run-receipts, audit
+# manifests, reports, decision logs, turing workspaces, literature DB).
+# Keep them on disk but OUT of the source repo. DemoProject_v03 is kept as the
+# tracked example.
+Yigene_WGCNA_v03/
+Yigene_Enhancer_v04/
+
+# Stray run artifacts accidentally written to the repo root
+scripts_wgcna_loop/
+nul
+_codex_write_probe.txt
+*.bak
