@@ -100,7 +100,7 @@ library). `emit-delta` validates structure before writing.
    claim are stripped and embedded in every subagent context. The candidate
    body (status/history) is never passed to subagents.
 3. **EverOS** (cross-session, optional): durable technical facts at
-   http://127.0.0.1:9000. A subagent MAY search EverOS at startup. EverOS does
+   http://localhost:9000 (configurable). A subagent MAY search EverOS at startup. EverOS does
    NOT store project state.
 
 Not a memory mechanism: no shared context window, no shared variables, no
@@ -194,6 +194,7 @@ research_loop/
 ## Environment
 
 - Python 3.13, R 4.6.0, Windows 11 / PowerShell
-- Obsidian vault: `C:/Users/hk200/Documents/Obsidian Vault`
-- EverOS memory: http://127.0.0.1:9000 (user_id=kai, agent_id=codex)
-| AGENTS.md: `C:/Users/hk200/.codex/AGENTS.md`
+- Obsidian vault: `OBSIDIAN_VAULT env var`
+- EverOS memory: http://localhost:9000 (configure via env vars)
+| AGENTS.md: `AGENTS.md (local config)`
+

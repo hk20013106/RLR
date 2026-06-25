@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 
 # --- config ---
-DEFAULT_VAULT = Path("C:/Users/hk200/Documents/Obsidian Vault")
+DEFAULT_VAULT = Path("OBSIDIAN_VAULT env var")
 DEFAULT_RESULTS = Path("D:/R-HK/yigene/results_wgcna_loop")
 
 PERSONAS = {

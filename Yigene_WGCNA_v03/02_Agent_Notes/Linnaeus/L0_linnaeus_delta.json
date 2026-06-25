@@ -26,8 +26,8 @@
     "python": "3.13",
     "r_version": "4.6.0 at D:/Programs/R/R-4.6.0/bin/Rscript.exe",
     "r_library": "D:/R-HK/Seurat5_lib (798 packages including clusterProfiler, org.Mm.eg.db)",
-    "everos": "online at http://127.0.0.1:9000",
-    "obsidian_vault": "C:/Users/hk200/Documents/Obsidian Vault"
+    "everos": "online at http://localhost:9000 (configurable)",
+    "obsidian_vault": "OBSIDIAN_VAULT env var"
   },
   "skill_use_plan": [
     "bat-heart-target-screen: verify sample provenance unchanged from round 1",
@@ -71,8 +71,8 @@
       "python": "3.13",
       "r_version": "4.6.0 at D:/Programs/R/R-4.6.0/bin/Rscript.exe",
       "r_library": "D:/R-HK/Seurat5_lib (798 packages including clusterProfiler, org.Mm.eg.db)",
-      "everos": "online at http://127.0.0.1:9000",
-      "obsidian_vault": "C:/Users/hk200/Documents/Obsidian Vault"
+      "everos": "online at http://localhost:9000 (configurable)",
+      "obsidian_vault": "OBSIDIAN_VAULT env var"
     },
     "skill_use_plan": [
       "bat-heart-target-screen: verify sample provenance unchanged from round 1",

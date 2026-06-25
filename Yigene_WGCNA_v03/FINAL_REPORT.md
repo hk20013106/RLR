@@ -18,7 +18,7 @@ High heart-rate species Sk and Sm share co-expression modules in atrium and/or v
 **Skills found:** bat-heart-target-screen, bulk-rnaseq, systematic-debugging, academic-research-suite
 **Skills gaps:** No dedicated WGCNA skill; scripts written from scratch using v0.1 crash log patterns
 **Input verified:** expression_matrix=11974 genes x 71 samples (length_scaled_counts.csv); sample_metadata=71 samples after filtering (sample_metadata_corrected.csv); sample_breakdown=Rn=24 (8A+16V), Sk=23 (7A+16V), Sm=24 (8A+16V); deg_gene_sets=20 files in gene_sets/; gene_mapping=11648 rows (rat_symbol -> mouse_entrez); wgcna_results=all_sample, atrium, ventricle, preservation, overlap, enrichment, reports directories verified
-**Environment:** python=3.13; r_version=4.6.0 at D:/Programs/R/R-4.6.0/bin/Rscript.exe; r_library=D:/R-HK/Seurat5_lib (798 packages); everos=online at http://127.0.0.1:9000; obsidian_vault=C:/Users/hk200/Documents/Obsidian Vault
+**Environment:** python=3.13; r_version=4.6.0 at D:/Programs/R/R-4.6.0/bin/Rscript.exe; r_library=D:/R-HK/Seurat5_lib (798 packages); everos=online at http://localhost:9000 (configurable); obsidian_vault=OBSIDIAN_VAULT env var
 **Skill use plan:** bat-heart-target-screen: sample provenance verification, bulk-rnaseq: TMM/voom normalization confirmation, systematic-debugging: WGCNA crash prevention (CRASH_LOG.md, 9 crash points), academic-research-suite: literature for hypothesis generation and biology interpretation
 **Forbidden shortcuts:** No sink() in R scripts, No multi-threaded WGCNA (nThreads=1, disableWGCNAThreads), No apply_patch for large files or JSON with special characters, No PowerShell pipe of Python code, No os.link (use shutil.copy2)
 

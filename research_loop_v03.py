@@ -1801,7 +1801,7 @@ def cmd_obsidian_sync(args):
         return 2
     name = _load_yaml_front(idx).get("project_name", project_dir.name)
 
-    vault_str = getattr(args, "vault", None) or "C:/Users/hk200/Documents/Obsidian Vault"
+    vault_str = getattr(args, "vault", None) or "OBSIDIAN_VAULT env var"
     vault = Path(vault_str)
     if not vault.exists():
         print(f"WARNING: vault not found: {vault} - writing index only", file=sys.stderr)
@@ -2404,7 +2404,7 @@ def build_parser():
     # obsidian-sync
     sp = sub.add_parser("obsidian-sync", help="sync deltas + report to Obsidian vault")
     sp.add_argument("project_dir")
-    sp.add_argument("--vault", help="Obsidian vault root (default: C:/Users/hk200/Documents/Obsidian Vault)")
+    sp.add_argument("--vault", help="Obsidian vault root (default: OBSIDIAN_VAULT env var)")
     sp.set_defaults(func=cmd_obsidian_sync)
 
     # list
