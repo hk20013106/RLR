@@ -10,12 +10,13 @@ Run after aggregate-report. Produces:
 """
 
 import json
+import os
 import shutil
 import re
 from pathlib import Path
 
 # --- config ---
-DEFAULT_VAULT = Path("OBSIDIAN_VAULT env var")
+DEFAULT_VAULT = Path(os.environ.get("OBSIDIAN_VAULT", ""))
 DEFAULT_RESULTS = Path("D:/R-HK/yigene/results_wgcna_loop")
 
 PERSONAS = {
@@ -335,6 +336,18 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
         src = project_dir / fname
         if src.exists():
             shutil.copy2(src, vault_project / fname)
+            # Append figure embeds to FINAL_REPORT
+            if fname in ("FINAL_REPORT.md", "FINAL_REPORT_CN.md"):
+                fig_dir = vault_project / "03_Figures"
+                if fig_dir.exists():
+                    figs = sorted(fig_dir.glob("*"))
+                    if figs:
+                        lines = ["", "## Figures", ""]
+                        for fig in figs:
+                            lines.append(f"![{fig.stem}](03_Figures/{fig.name})")
+                        lines.append("")
+                        with open(vault_project / fname, "a", encoding="utf-8") as f:
+                            f.write("\n".join(lines))
 
     # --- 08_Audit: remove from vault (machine-only) ---
     audit_dir = vault_project / "08_Audit"
@@ -379,4 +392,7 @@ if __name__ == "__main__":
     p.add_argument("--cand", default=None, help="specific candidate ID")
     args = p.parse_args()
     sync_project(args.project_dir, args.vault, args.results, args.cand)
+
+
+
 
