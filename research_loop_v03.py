@@ -1786,7 +1786,12 @@ def cmd_show(args):
 # --- obsidian sync ----------------------------------------------------------
 
 def cmd_obsidian_sync(args):
-    """Sync delta JSON + FINAL_REPORT to Obsidian vault and build index."""
+    """Sync delta JSON + FINAL_REPORT + audit trail to Obsidian vault and index.
+
+    Copies candidates, decision logs, delta JSON, final reports, and the
+    08_Audit/ manifests+receipts into the vault, and builds an index whose
+    "Audit Trail" section lets the info-flow be replayed from inside Obsidian.
+    """
     import shutil
 
     project_dir = Path(args.project_dir)
@@ -1850,6 +1855,21 @@ def cmd_obsidian_sync(args):
                 shutil.copy2(f, vault_dest / sub / f.name)
                 copied += 1
 
+    # Copy audit artifacts (08_Audit/*.json) and collect them for the index
+    audit_dir = project_dir / "08_Audit"
+    manifest_files, receipt_files = [], []
+    if audit_dir.exists():
+        if vault_dest:
+            (vault_dest / "08_Audit").mkdir(parents=True, exist_ok=True)
+        for f in sorted(audit_dir.glob("*.json")):
+            if f.name.startswith("run_receipt_"):
+                receipt_files.append(f)
+            elif f.name.startswith("context_manifest_"):
+                manifest_files.append(f)
+            if vault_dest:
+                shutil.copy2(f, vault_dest / "08_Audit" / f.name)
+                copied += 1
+
     # Build wikilink index
     sections = [
         f"---\nproject_name: {_yaml_value(name)}\nkind: obsidian_index\n"
@@ -1899,6 +1919,35 @@ def cmd_obsidian_sync(args):
     if not rpt_lines:
         rpt_lines = ["_none_"]
     sections.append("## Final Reports\n\n" + "\n".join(rpt_lines) + "\n")
+
+    # Audit trail section: run receipts (chronological) + context manifests.
+    # Makes the info-flow replayable from inside Obsidian: which node saw what,
+    # and whether its upstream hashes verified.
+    receipts = []
+    for f in receipt_files:
+        try:
+            r = json.loads(f.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            r = {}
+        receipts.append((r.get("emitted_at", ""), f, r))
+    receipts.sort(key=lambda t: t[0])
+    audit_block = ""
+    if receipts:
+        rows = ["| node | persona | upstream | emitted_at | receipt |",
+                "| ---- | ------- | -------- | ---------- | ------- |"]
+        for _ts, f, r in receipts:
+            rows.append(
+                f"| {r.get('node', '?')} | {r.get('persona', '?')} "
+                f"| {r.get('upstream_verification', '?')} "
+                f"| {r.get('emitted_at', '?')} "
+                f"| [[08_Audit/{f.stem}|{f.stem}]] |")
+        audit_block += "### Run receipts\n\n" + "\n".join(rows) + "\n\n"
+    if manifest_files:
+        mani = [f"- [[08_Audit/{f.stem}|{f.stem}]]" for f in manifest_files]
+        audit_block += "### Context manifests\n\n" + "\n".join(mani) + "\n"
+    if not audit_block:
+        audit_block = "_none_\n"
+    sections.append("## Audit Trail (info-flow)\n\n" + audit_block)
 
     index_text = "\n".join(sections)
 
