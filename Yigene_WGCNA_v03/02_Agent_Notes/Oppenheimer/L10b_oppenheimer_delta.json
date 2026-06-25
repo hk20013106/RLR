@@ -6,8 +6,27 @@
     "Raise preservation permutations to 200+",
     "Run power sensitivity analysis",
     "Address species confound with 4th species if available",
-    "Signed network analysis",
+    "Signed network analysis (verify turquoise/brown not unsigned-network artifacts)",
     "Functional validation of hub genes",
+    "ORA on turquoise CORE only (top kME genes), not whole-module ORA",
+    "kME-ranked GSEA instead of ORA-only for module gene lists",
+    "ECM score vs module eigengene correlation",
     "Generate final report and sync to Obsidian"
-  ]
+  ],
+  "cn": {
+    "decision": "KEEP",
+    "evidence_level": "MODERATE",
+    "reason": "两个趋同模块确认（turquoise：与高心率负相关 r=-0.955，Sk-Sm 保存性 Z=16.9，与心室 shared-down DEG 重叠；brown：与高心率正相关 r=+0.80，Z=4.5，与心房 shared-up DEG 重叠）。Green 模块标记为心脏身份模块（保存性最强 Z=20.2，富集心肌相关 GO terms），但未通过 DEG 重叠标准。关键 caveat：三物种设计下物种 vs 心率混淆无法解决。可作为探索性趋同研究发表。",
+    "next_steps": [
+      "保存性排列提至 200+",
+      "power 敏感性分析",
+      "加第四物种解决混淆",
+      "signed network 分析（验证 turquoise/brown 不是无符号网络假象）",
+      "hub 基因功能验证",
+      "仅对 turquoise core（高 kME 基因）做 ORA，不对整个大模块做",
+      "kME 排序 GSEA 替代仅 ORA",
+      "ECM score 与 module eigengene 相关分析",
+      "生成最终报告并同步 Obsidian"
+    ]
+  }
 }

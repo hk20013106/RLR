@@ -87,5 +87,82 @@
     "Preservation used nPermutations=50 (feasibility), raise to >=100 for publication",
     "GO/KEGG found terms only in green module (large-module universe-size effect)"
   ],
-  "failures": []
+  "failures": [],
+  "cn": {
+    "scripts_run": [
+      {
+        "name": "02_run_wgcna_atrium.R",
+        "exit_code": 0,
+        "output_files": [
+          "atrium_network.RData",
+          "atrium_module_assignment.csv",
+          "atrium_module_eigengenes.csv",
+          "atrium_soft_threshold.pdf"
+        ]
+      },
+      {
+        "name": "03_run_wgcna_ventricle.R",
+        "exit_code": 0,
+        "output_files": [
+          "ventricle_network.RData",
+          "ventricle_module_assignment.csv",
+          "ventricle_module_eigengenes.csv",
+          "ventricle_soft_threshold.pdf"
+        ]
+      },
+      {
+        "name": "04_module_preservation.R",
+        "exit_code": 0,
+        "output_files": [
+          "module_preservation.RData",
+          "preservation_summary.csv",
+          "Sk_ref_Sm_test_preservation.csv",
+          "Sm_ref_Sk_test_preservation.csv"
+        ]
+      },
+      {
+        "name": "05_gene_set_overlap.R",
+        "exit_code": 0,
+        "output_files": [
+          "overlap_matrix.csv"
+        ]
+      },
+      {
+        "name": "06_go_kegg_enrichment.R",
+        "exit_code": 0,
+        "output_files": [
+          "enrichment_summary.csv",
+          "green_GO_BP.csv",
+          "green_GO_MF.csv",
+          "green_KEGG.csv"
+        ]
+      },
+      {
+        "name": "07_convergent_module_summary.R",
+        "exit_code": 0,
+        "output_files": [
+          "convergent_module_summary.csv"
+        ]
+      }
+    ],
+    "key_results": {
+      "atrium_modules": "4 个模块",
+      "ventricle_modules": "5 个模块",
+      "preservation_turquoise_Z": 16.9,
+      "preservation_brown_Z": 4.5,
+      "preservation_green_Z": 20.2,
+      "turquoise_heart_rate_cor": -0.955,
+      "brown_heart_rate_cor": 0.8,
+      "green_heart_rate_cor": -0.524,
+      "turquoise_DEG_overlap": "ventricle_shared_down",
+      "brown_DEG_overlap": "atrium_shared_up",
+      "enrichment_only_in": "green (49 GO-BP / 15 MF / 1 KEGG)"
+    },
+    "warnings": [
+      "心房 n=23 偏小，模块为探索性",
+      "保存性仅 50 次排列",
+      "大模块 ORA 统计功效不足"
+    ],
+    "failures": []
+  }
 }

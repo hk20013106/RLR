@@ -31,5 +31,40 @@
     "Atrium modules exploratory due to small sample size",
     "GO/KEGG enrichment underpowered in large modules (universe-size effect)",
     "No outgroup with intermediate heart rate to test dose-response"
-  ]
+  ],
+  "cn": {
+    "module_interpretations": [
+      {
+        "module": "turquoise",
+        "meaning": "高心率负相关模块——可能代表低心率物种（Rn）中活跃、高心率物种中抑制的通路",
+        "genes": [
+          "未列出具体 hub 基因"
+        ],
+        "evidence": "r=-0.955 与 high_heart_rate，Z=16.9 保存性，与心室 shared-down DEG 重叠"
+      },
+      {
+        "module": "brown",
+        "meaning": "高心率正相关模块——可能代表高心率物种中激活的适应性通路",
+        "genes": [
+          "未列出具体 hub 基因"
+        ],
+        "evidence": "r=+0.80 与 high_heart_rate，Z=4.5 保存性，与心房 shared-up DEG 重叠"
+      },
+      {
+        "module": "green",
+        "meaning": "心脏身份模块——保存性最强，富集心肌相关 GO terms",
+        "genes": [
+          "未列出具体 hub 基因"
+        ],
+        "evidence": "Z=20.2 保存性，49 GO-BP / 15 MF / 1 KEGG 富集，但未通过 DEG 重叠标准"
+      }
+    ],
+    "convergent_evolution": "turquoise 和 brown 模块满足趋同三标准（高心率相关 + Sk-Sm 保存性 + DEG 重叠），支持 Sk 和 Sm 独立演化出共享共表达模块的假说。但物种 vs 心率混淆是主要限制。",
+    "limitations": [
+      "物种 vs 心率混淆无法解决",
+      "心房样本量不足",
+      "保存性排列次数不足",
+      "大模块 ORA 统计功效不足"
+    ]
+  }
 }

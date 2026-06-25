@@ -44,5 +44,53 @@
     }
   ],
   "key_uncertainty": "All-sample WGCNA (round 1) found species-specific modules (turquoise=species, yellow=Sm, brown=Sk) but could not test chamber-specific convergence. Atrium n=23 (7 Sk) is borderline for WGCNA module stability.",
-  "primary_hypothesis": "H2"
+  "primary_hypothesis": "H2",
+  "cn": {
+    "hypotheses": [
+      {
+        "id": "H1",
+        "text": "Sk 和 Sm 共享心房趋同共表达模块，在 Rn 中不存在",
+        "testable": true,
+        "rationale": "心房 n=23 处于边界但可检验；Sk 心房仅 7 个样本，统计效力有限"
+      },
+      {
+        "id": "H2",
+        "text": "Sk 和 Sm 共享心室趋同共表达模块，在 Rn 中不存在",
+        "testable": true,
+        "rationale": "心室 n=48 样本量充足，是最强可检验假设"
+      },
+      {
+        "id": "H3",
+        "text": "Sk 和 Sm 共享全心趋同签名",
+        "testable": false,
+        "rationale": "不区分腔室则太宽泛，无法定位信号来源"
+      },
+      {
+        "id": "H4",
+        "text": "共享模块富集能量代谢通路",
+        "testable": true,
+        "rationale": "高心率需要高 ATP 供给，但需 GO/KEGG 验证"
+      },
+      {
+        "id": "H5",
+        "text": "共享模块富集钙离子处理基因",
+        "testable": true,
+        "rationale": "钙循环是心率调控核心，但需 GO/KEGG 验证"
+      },
+      {
+        "id": "H6",
+        "text": "共享模块富集 ECM/结构重塑基因",
+        "testable": true,
+        "rationale": "心肌重塑可能伴随高心率适应，但需 GO/KEGG 验证"
+      },
+      {
+        "id": "H7",
+        "text": "零假设：无趋同模块",
+        "testable": true,
+        "rationale": "可通过保存性 Z < 2 检验"
+      }
+    ],
+    "key_uncertainty": "全样本 WGCNA（第一轮）发现物种特异性模块（turquoise=物种, yellow=Sm, brown=Sk），但无法测试腔室特异性趋同",
+    "primary_hypothesis": "H2"
+  }
 }

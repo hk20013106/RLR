@@ -14,5 +14,24 @@
     "Signed network analysis to confirm unsigned results",
     "Functional validation of hub genes"
   ],
-  "manuscript_framing": "Frame as exploratory convergent evolution study. Emphasize the multi-criteria convergence approach (correlation + preservation + DEG overlap). Acknowledge 3-species limitation upfront. Highlight turquoise (energy/metabolism suppression) and brown (structural remodeling activation) as the convergent signal. Position green module as cardiac identity context, not convergence."
+  "manuscript_framing": "Frame as exploratory convergent evolution study. Emphasize the multi-criteria convergence approach (correlation + preservation + DEG overlap). Acknowledge 3-species limitation upfront. Highlight turquoise (energy/metabolism suppression) and brown (structural remodeling activation) as the convergent signal. Position green module as cardiac identity context, not convergence.",
+  "cn": {
+    "value_assessment": "作为探索性趋同研究具有发表价值。turquoise 和 brown 模块的趋同证据中等偏强，但物种混淆是审稿人必问的硬伤。",
+    "headline": "高心率蝙蝠和鼩鼱共享两个共表达模块，提示趋同分子适应",
+    "publishable_now": [
+      "turquoise/brown 趋同模块发现",
+      "保存性分析",
+      "DEG 重叠验证"
+    ],
+    "needs_more_work": [
+      "保存性排列提至 200+",
+      "signed network 验证",
+      "hub 基因功能验证",
+      "物种混淆解决（第四物种）",
+      "turquoise core ORA",
+      "kME-ranked GSEA",
+      "ECM score 相关分析"
+    ],
+    "manuscript_framing": "定位为 exploratory convergence study，强调发现性而非确证性。在 discussion 中明确物种混淆限制，提出第四物种作为后续计划。"
+  }
 }

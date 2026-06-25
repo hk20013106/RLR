@@ -33,5 +33,41 @@
       "GO/KEGG enrichment tables",
       "convergent module summary"
     ]
+  },
+  "cn": {
+    "approved_strategy": "A+B+C（三网络 WGCNA + 保存性 + 基因集重叠 + 富集）",
+    "modifications": [
+      "脚本拆分为独立步骤",
+      "每步保存 RData",
+      "心房标记为探索性"
+    ],
+    "reason": "策略 A+B+C 覆盖所有假设检验需求。Tukey QC 门控已接受。脚本按轮-1 教训拆分为模块化步骤。",
+    "analysis_plan": {
+      "scripts": [
+        "02_run_wgcna_atrium.R",
+        "03_run_wgcna_ventricle.R",
+        "04_module_preservation.R",
+        "05_gene_set_overlap.R",
+        "06_go_kegg_enrichment.R",
+        "07_convergent_module_summary.R"
+      ],
+      "parameters": {
+        "networkType": "unsigned",
+        "power": 4,
+        "maxBlockSize": 6000,
+        "minModuleSize": 30,
+        "mergeCutHeight": 0.25,
+        "nThreads": 1,
+        "top_genes": 5000
+      },
+      "outputs": [
+        "atrium_network.RData",
+        "ventricle_network.RData",
+        "preservation_summary.csv",
+        "overlap_matrix.csv",
+        "enrichment_summary.csv",
+        "convergent_module_summary.csv"
+      ]
+    }
   }
 }

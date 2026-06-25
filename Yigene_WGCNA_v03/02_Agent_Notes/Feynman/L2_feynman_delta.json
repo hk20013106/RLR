@@ -52,5 +52,61 @@
       "text": "Re-run with signed network to check if unsigned merging creates artifacts."
     }
   ],
-  "verdict": "H2 (ventricular convergence) is strongest testable hypothesis. H1 (atrial) should be attempted but may fail on sample size. H7 (null) must be reported alongside."
+  "verdict": "H2 (ventricular convergence) is strongest testable hypothesis. H1 (atrial) should be attempted but may fail on sample size. H7 (null) must be reported alongside.",
+  "cn": {
+    "attacks": [
+      {
+        "hypothesis_id": "H1",
+        "severity": "HIGH",
+        "text": "心房样本量不足：Sk 心房仅 7 个样本，n=23 的 WGCNA 处于边界，模块稳定性存疑"
+      },
+      {
+        "hypothesis_id": "H2",
+        "severity": "MEDIUM",
+        "text": "批次混淆：batch1=59, batch2=12，需验证批次与物种不混淆"
+      },
+      {
+        "hypothesis_id": "H1",
+        "severity": "MEDIUM",
+        "text": "无符号网络：上调和下调基因合并到同一模块，共享模块可能是基因方向相反的假象"
+      },
+      {
+        "hypothesis_id": "H2",
+        "severity": "LOW",
+        "text": "强制 power=4：自动选择为 1，强制 4 可能制造人工结构"
+      },
+      {
+        "hypothesis_id": "H2",
+        "severity": "MEDIUM",
+        "text": "动物伪重复：12 个 animal_id 跨 71 个样本，配对设计非完全独立"
+      }
+    ],
+    "confounders": [
+      {
+        "name": "批次效应",
+        "severity": "MEDIUM",
+        "text": "batch1=59, batch2=12，子集无法包含批次协变量"
+      },
+      {
+        "name": "物种 vs 心率混淆",
+        "severity": "HIGH",
+        "text": "三物种设计中物种与心率完全混淆，无法分离"
+      }
+    ],
+    "diagnostic_tests": [
+      {
+        "name": "table(species, chamber, batch)",
+        "text": "检查批次与物种/腔室的混淆"
+      },
+      {
+        "name": "模块保存性 Zsummary",
+        "text": "Sk vs Sm 保存性检验"
+      },
+      {
+        "name": "signed network 对比",
+        "text": "验证 unsigned 模块是否为假象"
+      }
+    ],
+    "verdict": "H2（心室趋同）是最强可检验假设。H1（心房）应尝试但可能因样本量失败。H7（零假设）必须同时报告。"
+  }
 }

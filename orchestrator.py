@@ -41,7 +41,7 @@ def _scalar(v):
         return True
     if low in ("false", "no"):
         return False
-    if low in ("null", "none", "~", ""):
+    if low in ("null", "~", ""):
         return None
     try:
         return int(s)
@@ -95,20 +95,27 @@ def load_config(path):
 
 
 class ProviderConfig:
-    """Provider-neutral runner config with per-node overrides."""
+    """Runner config. Top-level `mode` selects how nodes are executed:
+      - main_agent (default): the current host agent IS the orchestrator; NO
+        python provider is used (an execution protocol, not a provider).
+      - headless: python calls an external AI CLI/wrapper per node.
+      - manual: DEBUG-ONLY human-in-the-loop.
+    """
 
     def __init__(self, data=None):
         self.data = data or {}
+        self.mode = self.data.get("mode", "main_agent")
         self.max_rounds = self.data.get("max_rounds", 3)
+        self.main_agent = self.data.get("main_agent", {}) or {}
+        self.headless = self.data.get("headless", {}) or {}
+        self.manual = self.data.get("manual", {}) or {}
         prov = self.data.get("provider", {}) or {}
-        self.default = prov.get("default", {"type": "manual"})
+        self.default = prov.get("default", {"type": "none"})
         self.nodes = prov.get("nodes", {}) or {}
         self.timeout = self.data.get("timeout")
-        self.retry = self.data.get("retry", 0)
         self.review = self.data.get("review", {"enabled": True}) or {"enabled": True}
         self.stop_policy = self.data.get("stop_policy", {}) or {}
         self.everos = self.data.get("everos", {"enabled": False}) or {"enabled": False}
-        self.override_type = None  # set from --provider on the CLI
 
     def for_node(self, node):
         spec = dict(self.default)
@@ -272,36 +279,37 @@ class CommandProvider(AgentProvider):
                                   self.timeout, self)
 
 
-class HostAgentProvider(AgentProvider):
-    """Automatic provider for the CURRENT host agent (Codex / Claude Code /
-    AntiGravity / Hermes / ...), invoked headlessly once per node (a fresh
-    subprocess = fresh session). The command is resolved, in order, from:
-      1. spec['command'];
-      2. $RLR_HOST_AGENT_CMD (a template using {prompt_file}/{output_file});
-      3. best-effort host detection.
-    If none resolves it raises ProviderError -- it NEVER falls back to manual.
+class HeadlessProvider(AgentProvider):
+    """Headless-command-mode provider: invokes an external AI CLI / wrapper
+    headlessly, once per node (a fresh subprocess = fresh session). This is
+    Python automatically calling an external AI -- it is NOT the current live
+    chat session (Python cannot drive that). The command is resolved, in order,
+    from: spec['command']; $RLR_HEADLESS_CMD (or legacy $RLR_HOST_AGENT_CMD);
+    best-effort detection. If none resolves it raises ProviderError -- it NEVER
+    falls back to manual.
     """
 
-    type = "host"
+    type = "headless"
 
     def __init__(self, spec=None):
         self.spec = spec or {}
-        self.name = "host"
+        self.name = "headless"
         self.timeout = self.spec.get("timeout")
         self.last_prompt_file = None
         self.last_delta_file = None
         self.last_fresh_session = True
         self.command = (self.spec.get("command")
+                        or os.environ.get("RLR_HEADLESS_CMD")
                         or os.environ.get("RLR_HOST_AGENT_CMD")
                         or self._detect())
         if not self.command:
             raise ProviderError(
-                "HostAgentProvider could not resolve a host command. Set "
-                "$RLR_HOST_AGENT_CMD to a headless command template (it MUST "
-                "write the delta JSON to {output_file}), e.g.\n"
-                "  export RLR_HOST_AGENT_CMD='claude -p < {prompt_file} > {output_file}'\n"
-                "or set provider.command in rlr_runner.yaml, or use a "
-                "CommandProvider. (Manual mode is debug-only: --provider manual.)")
+                "headless mode could not resolve a command. Set $RLR_HEADLESS_CMD "
+                "to a headless command template (it MUST write the delta JSON to "
+                "{output_file}), e.g.\n"
+                "  export RLR_HEADLESS_CMD='claude -p < {prompt_file} > {output_file}'\n"
+                "or set headless.command in rlr_runner.yaml. "
+                "(For interactive use prefer main-agent mode; manual is debug-only.)")
 
     @staticmethod
     def _detect():
@@ -318,18 +326,22 @@ class HostAgentProvider(AgentProvider):
 
 
 def make_provider(spec, override_type=None):
-    """Construct a provider from a spec dict (optionally forcing a type). There
-    is no silent default: an unknown/missing type raises ProviderError."""
+    """Construct a python provider from a spec dict (optionally forcing a type).
+    No silent default. Note: main-agent mode uses NO python provider -- the host
+    agent itself orchestrates; do not call this for it."""
     t = override_type or (spec or {}).get("type")
-    if t in ("host", "auto"):
-        return HostAgentProvider(spec)
+    if t in ("headless", "host", "auto"):
+        return HeadlessProvider(spec)
     if t == "command":
         return CommandProvider(spec)
     if t == "manual":
         return ManualProvider(spec)
-    raise ProviderError(
-        f"no/unknown provider type: {t!r}. Configure provider.type = "
-        "host | command (automatic). Manual is debug-only via --provider manual.")
+    if t in (None, "none"):
+        raise ProviderError(
+            "no python provider for this mode. main-agent mode is the default "
+            "and uses NO python provider (the host agent orchestrates). For "
+            "unattended runs set mode=headless + a command; manual is debug-only.")
+    raise ProviderError(f"unknown provider type: {t!r}")
 
 
 # --- run receipt ------------------------------------------------------------

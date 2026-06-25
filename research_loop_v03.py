@@ -2069,10 +2069,12 @@ def _translate_delta_body_cn(text):
     return text
 
 
-def _format_delta_body(delta_key, delta):
+def _format_delta_body(delta_key, delta, lang="en"):
     """Format a delta dict as markdown content (language-agnostic)."""
     if delta is None:
         return "_No delta found._\n"
+    if isinstance(delta, dict) and "cn" in delta and lang == "cn":
+        delta = delta["cn"]
     if isinstance(delta, dict) and "_error" in delta:
         return f"_Error reading delta: {delta['_error']}_\n"
 
@@ -2243,7 +2245,7 @@ def cmd_aggregate_report(args):
         title_cn = SECTION_TITLES_CN.get(delta_key, delta_key)
         cn.append(f"## {title_cn}\n")
         cn.append(_translate_delta_body_cn(
-            _format_delta_body(delta_key, deltas.get(delta_key))))
+            _format_delta_body(delta_key, deltas.get(delta_key), lang="cn")))
         cn.append("")
 
     cn.append("---\n")
@@ -2428,3 +2430,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     sys.exit(main())
+

@@ -35,5 +35,44 @@
     "No apply_patch for large files or JSON with special characters",
     "No PowerShell pipe of Python code",
     "No os.link (use shutil.copy2)"
-  ]
+  ],
+  "cn": {
+    "skills_found": [
+      "bat-heart-target-screen",
+      "bulk-rnaseq",
+      "systematic-debugging",
+      "academic-research-suite"
+    ],
+    "skills_gaps": [
+      "无专用 WGCNA 技能；基于 v0.1 崩溃日志模式从零编写脚本"
+    ],
+    "input_verified": {
+      "expression_matrix": "11974 基因 x 71 样本 (length_scaled_counts.csv)",
+      "sample_metadata": "过滤后 71 样本 (sample_metadata_corrected.csv)",
+      "sample_breakdown": "Rn=24 (8A+16V), Sk=23 (7A+16V), Sm=24 (8A+16V)",
+      "deg_gene_sets": "gene_sets/ 下 20 个文件",
+      "gene_mapping": "11648 行 (rat_symbol -> mouse_entrez)",
+      "wgcna_results": "all_sample, atrium, ventricle, preservation, overlap, enrichment, reports 目录已验证"
+    },
+    "environment": {
+      "python": "3.13",
+      "r_version": "4.6.0 (D:/Programs/R/R-4.6.0/bin/Rscript.exe)",
+      "r_library": "D:/R-HK/Seurat5_lib (798 包)",
+      "everos": "在线 (http://127.0.0.1:9000)",
+      "obsidian_vault": "C:/Users/hk200/Documents/Obsidian Vault"
+    },
+    "skill_use_plan": [
+      "bat-heart-target-screen: 样本来源验证",
+      "bulk-rnaseq: TMM/voom 标准化方法确认",
+      "systematic-debugging: WGCNA 崩溃预防 (CRASH_LOG.md, 9 个崩溃点)",
+      "academic-research-suite: 假设生成的文献支持与生物学解释"
+    ],
+    "forbidden_shortcuts": [
+      "R 脚本中禁止 sink()",
+      "禁止多线程 WGCNA (nThreads=1, disableWGCNAThreads)",
+      "禁止对大文件或含特殊字符的 JSON 使用 apply_patch",
+      "禁止通过 PowerShell 管道传递 Python 代码",
+      "禁止 os.link (使用 shutil.copy2)"
+    ]
+  }
 }

@@ -47,5 +47,56 @@
       "name": "no_overlap",
       "text": "No module overlaps with DEG shared sets: report null result honestly."
     }
-  ]
+  ],
+  "cn": {
+    "attacks": [
+      {
+        "target": "心房样本量",
+        "severity": "HIGH",
+        "text": "Sk 心房仅 7 样本，模块稳定性存疑"
+      },
+      {
+        "target": "批次混淆",
+        "severity": "MEDIUM",
+        "text": "子集无法包含批次协变量"
+      },
+      {
+        "target": "无符号网络",
+        "severity": "MEDIUM",
+        "text": "上调下调基因合并可能产生假模块"
+      }
+    ],
+    "qc_checkpoints": [
+      {
+        "name": "WGCNA 前检查",
+        "text": "table(species, chamber, batch) 检查混淆"
+      },
+      {
+        "name": "blockwiseModules 后",
+        "text": "模块数 >= 3，否则停止"
+      },
+      {
+        "name": "保存性后",
+        "text": "报告 Zsummary 值，不只是 pass/fail"
+      },
+      {
+        "name": "富集后",
+        "text": "FDR < 0.05，每 GO term 至少 5 基因"
+      }
+    ],
+    "failure_stop_rules": [
+      {
+        "name": "心房 0 模块",
+        "text": "停止，报告"
+      },
+      {
+        "name": "批次与物种混淆",
+        "text": "停止，无法分离效应"
+      },
+      {
+        "name": "无 DEG 重叠",
+        "text": "诚实报告零结果"
+      }
+    ]
+  }
 }

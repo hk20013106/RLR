@@ -35,5 +35,41 @@
     "turquoise: high-rate anti-correlation (r=-0.955) + strong preservation (Z=16.9) + DEG overlap",
     "brown: high-rate correlation (r=+0.80) + moderate preservation (Z=4.5) + DEG overlap"
   ],
-  "falsified": []
+  "falsified": [],
+  "cn": {
+    "falsification_risks": [
+      {
+        "name": "物种 vs 心率混淆",
+        "severity": "HIGH",
+        "resolvable": false,
+        "text": "三物种设计中物种与心率完全混淆，无法分离趋同信号与物种特异性信号。需第四物种解决。"
+      },
+      {
+        "name": "无符号网络假象",
+        "severity": "MEDIUM",
+        "resolvable": true,
+        "text": "turquoise 模块可能合并了上调和下调基因。signed network 可验证。"
+      },
+      {
+        "name": "心房样本量不足",
+        "severity": "HIGH",
+        "resolvable": false,
+        "text": "Sk 心房仅 7 样本，心房模块稳定性无法保证。"
+      },
+      {
+        "name": "保存性排列次数不足",
+        "severity": "LOW",
+        "resolvable": true,
+        "text": "50 次排列，p 值不稳定。提至 200+ 可解决。"
+      }
+    ],
+    "survives": [
+      "turquoise 趋同信号（保存性 Z=16.9 极强）",
+      "brown 趋同信号（Z=4.5，中等）",
+      "green 心脏身份模块（Z=20.2）"
+    ],
+    "falsified": [
+      "H1（心房趋同）：心房样本量不足以确信模块稳定性"
+    ]
+  }
 }

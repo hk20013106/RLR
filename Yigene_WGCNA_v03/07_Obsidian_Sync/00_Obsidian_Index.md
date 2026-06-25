@@ -2,7 +2,7 @@
 project_name: Yigene_WGCNA_v03
 kind: obsidian_index
 version: 0.3.0
-synced_at: "2026-06-25T12:09:06"
+synced_at: "2026-06-25T15:12:24"
 ---
 
 # Yigene_WGCNA_v03 - Obsidian Index (v0.3)
@@ -52,3 +52,7 @@ synced_at: "2026-06-25T12:09:06"
 
 - [[FINAL_REPORT|FINAL_REPORT]]
 - [[FINAL_REPORT_CN|FINAL_REPORT_CN]]
+
+## Audit Trail (info-flow)
+
+_none_

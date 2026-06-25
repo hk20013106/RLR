@@ -66,5 +66,82 @@
     "top-5000 MAD genes",
     "cor=WGCNA::cor",
     "no sink()"
-  ]
+  ],
+  "cn": {
+    "strategies": [
+      {
+        "id": "A",
+        "name": "三网络 WGCNA + 模块保存性",
+        "steps": [
+          "全样本网络",
+          "心房网络",
+          "心室网络",
+          "Sk vs Sm 保存性",
+          "模块-性状相关"
+        ],
+        "samples": 71,
+        "status": "部分完成（全样本已跑）"
+      },
+      {
+        "id": "B",
+        "name": "基因集重叠 (Fisher exact)",
+        "steps": [
+          "模块基因 vs DEG 共享集",
+          "108 个 Fisher 检验"
+        ],
+        "samples": 0,
+        "status": "新增"
+      },
+      {
+        "id": "C",
+        "name": "GO/KEGG 富集",
+        "steps": [
+          "每个模块 enrichGO (BP/MF/CC)",
+          "enrichKEGG (mmu)"
+        ],
+        "samples": 0,
+        "status": "新增"
+      }
+    ],
+    "recommended": "A+B+C 全部执行",
+    "scripts_needed": [
+      {
+        "name": "02_run_wgcna_atrium.R",
+        "purpose": "心房 WGCNA (n=23)",
+        "status": "待执行"
+      },
+      {
+        "name": "03_run_wgcna_ventricle.R",
+        "purpose": "心室 WGCNA (n=48)",
+        "status": "待执行"
+      },
+      {
+        "name": "04_module_preservation.R",
+        "purpose": "Sk vs Sm 模块保存性",
+        "status": "待执行"
+      },
+      {
+        "name": "05_gene_set_overlap.R",
+        "purpose": "模块 vs DEG Fisher 检验",
+        "status": "待执行"
+      },
+      {
+        "name": "06_go_kegg_enrichment.R",
+        "purpose": "GO/KEGG 富集",
+        "status": "待执行"
+      },
+      {
+        "name": "07_convergent_module_summary.R",
+        "purpose": "趋同模块汇总",
+        "status": "待执行"
+      }
+    ],
+    "key_decisions": [
+      "unsigned 网络",
+      "power=4",
+      "top-5000 MAD 基因",
+      "minModuleSize=30",
+      "mergeCutHeight=0.25"
+    ]
+  }
 }

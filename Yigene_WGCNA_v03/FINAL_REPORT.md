@@ -2,7 +2,7 @@
 
 **Candidate:** C20260625114729640306
 **Status:** KEEP
-**Generated:** 2026-06-25T12:08:49
+**Generated:** 2026-06-25T15:25:59
 **Framework:** RLR v0.3.0
 
 ## Scientific Question
@@ -206,8 +206,11 @@ High heart-rate species Sk and Sm share co-expression modules in atrium and/or v
 - Raise preservation permutations to 200+
 - Run power sensitivity analysis
 - Address species confound with 4th species if available
-- Signed network analysis
+- Signed network analysis (verify turquoise/brown not unsigned-network artifacts)
 - Functional validation of hub genes
+- ORA on turquoise CORE only (top kME genes), not whole-module ORA
+- kME-ranked GSEA instead of ORA-only for module gene lists
+- ECM score vs module eigengene correlation
 - Generate final report and sync to Obsidian
 
 

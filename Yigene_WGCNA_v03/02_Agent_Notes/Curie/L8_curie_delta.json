@@ -42,5 +42,41 @@
     "Atrium n=23 borderline, modules exploratory",
     "Preservation permutations=50 (should be 200+ for publication)",
     "GO/KEGG only significant in green module (universe-size effect in large modules)"
-  ]
+  ],
+  "cn": {
+    "evidence_verified": [
+      {
+        "file": "atrium_module_assignment.csv",
+        "check": "模块基因数总和",
+        "result": "5000 基因，正确"
+      },
+      {
+        "file": "ventricle_module_assignment.csv",
+        "check": "模块基因数总和",
+        "result": "5000 基因，正确"
+      },
+      {
+        "file": "preservation_summary.csv",
+        "check": "Zsummary 值",
+        "result": "turquoise Z=16.9, brown Z=4.5, green Z=20.2，与报告一致"
+      },
+      {
+        "file": "overlap_matrix.csv",
+        "check": "Fisher p 值",
+        "result": "108 检验，turquoise 和 brown 显著重叠"
+      },
+      {
+        "file": "enrichment_summary.csv",
+        "check": "GO/KEGG 结果",
+        "result": "仅 green 模块有显著富集（宇宙效应）"
+      }
+    ],
+    "evidence_level": "MODERATE",
+    "caveats": [
+      "心房 n=23 偏小，结果为探索性",
+      "保存性仅 50 次排列（需提至 200+）",
+      "GO/KEGG 仅 green 模块显著（大模块统计功效不足）",
+      "物种 vs 心率混淆无法解决"
+    ]
+  }
 }
