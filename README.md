@@ -58,8 +58,9 @@ version, and **what it added**.
 
 ### v0.4.x — CURRENT
 - **Did:** added **three pre-research steps** to the protocol, run *before* their
-  node, **without changing the 14-node DAG** — deep research before **L1**,
-  method literature review before **L4**, code search before **L7**.
+  node, **adding no DAG nodes** (the 14-node decision DAG was unchanged at this
+  point) — deep research before **L1**, method literature review before **L4**,
+  code search before **L7**.
 - **Fixed:** pre-research is now actually **injected into `assemble-context`**
   (the initial build wrote it but never embedded it — the feature was inert) and
   is **grounded in the candidate's own question/claim** (the initial build
@@ -269,8 +270,9 @@ else:                       # cognitive layer, Path B
 - Candidate file is read-only; state flows only through delta JSON.
 - All deltas are append-only and auditable.
 - L9a and L9b are mutually invisible.
-- Pre-research (L1/L4/L7) and L8.5 literature verification do **not** change the
-  14-node decision DAG — they ground it in real literature/code.
+- Pre-research (L1/L4/L7) adds no nodes; L8.5 adds a verification node but no new
+  decision/gate — the **gated decision flow** (triage / gates / status machine)
+  is unchanged. These steps ground the science in real literature/code.
 - End-of-round Obsidian sync is a required step (it fails loud if no vault).
 
 ---
@@ -279,33 +281,43 @@ else:                       # cognitive layer, Path B
 
 ```
 research_loop/
-|-- research_loop_v04.py          # Main controller (v0.4.0, dependency-free) + pre-research
+|-- research_loop_v04.py          # Main controller (v0.4.5, stdlib-only) + pre-research + L8.5 + L0 gate
 |-- research_loop_v03.py          # Preserved for reference (v0.3.0)
-|-- run_loop.py                   # Loop runner (main-agent / headless / manual)
+|-- run_loop.py                   # Loop runner (main-agent / headless / manual) + dep gate
 |-- orchestrator.py               # Provider abstraction (headless / manual) + config
+|-- manage_literature_db.py       # Growable literature database (needs PyYAML)
+|-- sync_to_obsidian.py           # Human-readable end-of-round Obsidian sync (required step)
 |-- MAIN_AGENT_RUN.md             # Main-agent execution protocol
 |-- MAIN_AGENT_PROMPT.md          # Paste-ready main-agent startup prompt
 |-- RUNNER.md                     # Runner modes + StopPolicy
-|-- DAG_TOPOLOGY.md               # Full DAG dependency table (14 nodes, unchanged)
-|-- templates/
-|   |-- v03_personas/             # 10 persona templates
-   `-- v03_layers/               # 14 layer templates (L0-L10c)
-`-- ...
+|-- DAG_TOPOLOGY.md               # Full DAG dependency table (15 nodes incl. L8.5)
+|-- templates/v03_layers/         # 15 layer templates (L0-L10c incl. L8.5)
+|-- templates/v03_personas/       # 10 persona templates
+|-- DemoProject_v03/              # Tracked EXAMPLE (one full walk)
+`-- ...                           # live research projects are gitignored (generated output, not source)
 ```
+
+> **Source vs generated:** the `.py`/`.md`/`templates` are source; live research
+> project folders (deltas, run-receipts, audit manifests, reports, workspaces,
+> literature DB) are *generated output* and are gitignored. `DemoProject_v03/` is
+> kept as the one tracked example.
 
 ## Projects
 
-| Project | Version | Status | Description |
-|---------|---------|--------|-------------|
-| DemoProject_v03 | v0.3 | COMPLETE | Demo walking all 14 DAG nodes |
-| Yigene_WGCNA_v03 | v0.3 | KEEP | Convergent co-expression modules in bat + shrew |
-| DemoProject_v02 | v0.2 | COMPLETE | v0.2 demo (preserved) |
-| Yigene_WGCNA_v02 | v0.2 | KEEP | v0.2 WGCNA analysis (preserved) |
+| Project | Status | Description |
+|---------|--------|-------------|
+| DemoProject_v03 | tracked example | One full walk of the DAG |
+| Yigene_WGCNA_v03 | local (gitignored) | Convergent cardiac co-expression in bat + shrew; tissue-controlled (atrium/ventricle) rounds |
+
+(v0.1/v0.2 projects and scripts were removed; v0.2 is documented in
+[README_v0.2.md](README_v0.2.md).)
 
 ## Environment
 
-- Python 3.13, R 4.6.0, Windows 11 / PowerShell
-- Obsidian vault: `OBSIDIAN_VAULT env var`
-- EverOS memory: http://localhost:9000 (configure via env vars)
-| AGENTS.md: `AGENTS.md (local config)`
+- Python 3.13 (stdlib) + **PyYAML**; R 4.6.0 (per-project, for L7); Windows 11 / PowerShell.
+- **Required external deps (L0 gate):** Academic Research skill, **Zotero**,
+  **Obsidian vault** (`$OBSIDIAN_VAULT`). Attest skills/apps via `RLR_*` env vars
+  (`RLR_SKILL_ACADEMIC_RESEARCH`, `RLR_ZOTERO`, `RLR_OBSIDIAN`); the loop STOPS at
+  L0 if any required dependency is missing.
+- EverOS memory: optional, configurable endpoint.
 
