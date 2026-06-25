@@ -32,12 +32,17 @@ import orchestrator as orch          # noqa: E402
 
 DEFAULT_CONFIG = """\
 max_rounds: 3
+# Default runs AUTOMATICALLY end-to-end (L0->L10). The default provider is the
+# current host agent, invoked headlessly once per node. Set the host command via
+# $RLR_HOST_AGENT_CMD (a template using {prompt_file}/{output_file}), or replace
+# the default below with a `command` provider. Manual mode is DEBUG-ONLY and must
+# be requested explicitly with `--provider manual` (it is never a fallback).
 provider:
   default:
-    type: manual
+    type: host
   nodes:
     L7:
-      type: manual
+      type: host
       filesystem: workspace_only
 review:
   enabled: true
@@ -51,47 +56,32 @@ everos:
   scope: project_only
 
 # ---------------------------------------------------------------------------
-# CommandProvider templates (commented placeholders -- tool-agnostic).
+# Automatic provider templates (tool-agnostic; commented placeholders).
 #
-# To drive a node non-interactively, set its provider to `command` and give a
-# shell `command` template. Available placeholders: {prompt_file} {output_file}
-# {node} {persona} {workspace}. CONTRACT: the command MUST write the delta JSON
-# to {output_file}. Raw chat CLIs usually emit prose -> wrap them so the wrapper
-# extracts/writes pure JSON (the generic wrapper below is the safest path).
+# CONTRACT (host & command): the command MUST write the delta JSON to
+# {output_file}. Placeholders: {prompt_file} {output_file} {node} {persona}
+# {workspace}. Each node = one fresh subprocess (a fresh session). Raw chat CLIs
+# emit prose -> wrap them so the wrapper writes pure JSON (the generic wrapper is
+# the safest path). Adjust flags to your CLI -- these are SHAPES, not verified.
 #
-# Swap these into provider.default or provider.nodes.<Lx>. Adjust flags to match
-# your actual CLI -- the commands here are SHAPES, not verified invocations.
+# A) HostAgentProvider via env (no config edit needed):
+#      export RLR_HOST_AGENT_CMD='python my_agent.py --prompt {prompt_file} --out {output_file} --node {node} --persona {persona}'
+#    (or 'claude -p < {prompt_file} > {output_file}', etc.)
 #
-# Codex CLI (placeholder flags):
+# B) Pin a command provider in config:
 #   provider:
 #     default:
 #       type: command
+#       command: "python my_agent.py --prompt {prompt_file} --out {output_file} --node {node} --persona {persona}"
+#       timeout: 600
+#
+#   Codex CLI (placeholder flags):
 #       command: "codex exec --input {prompt_file} --output {output_file}"
-#       timeout: 600
+#   Claude CLI (headless; shell redirection works):
+#       command: "claude -p < {prompt_file} > {output_file}"   # wrap if not pure JSON
 #
-# Claude CLI (headless; redirection works since the runner uses shell=True):
-#   provider:
-#     default:
-#       type: command
-#       command: "claude -p < {prompt_file} > {output_file}"
-#       timeout: 600
-#   # NOTE: `claude -p` prints the model's text. If it isn't pure JSON, pipe it
-#   # through a tiny extractor or use the generic wrapper instead.
-#
-# Generic wrapper (RECOMMENDED -- write ~10 lines that call any SDK and dump the
-# delta JSON to {output_file}); works for Codex / Claude / AntiGravity / Hermes:
-#   provider:
-#     default:
-#       type: command
-#       command: "python my_agent.py --prompt {prompt_file} --out {output_file}
-#                 --node {node} --persona {persona}"
-#       timeout: 600
-#
-# Per-node mix example (auto cognition via command, manual sandboxed L7):
-#   provider:
-#     default: {type: command, command: "python my_agent.py --prompt {prompt_file} --out {output_file}"}
-#     nodes:
-#       L7: {type: manual, filesystem: workspace_only}
+# Manual mode is DEBUG-ONLY (run with: --provider manual). Do NOT set
+# type: manual as a default -- the runner will fail loud if you do.
 # ---------------------------------------------------------------------------
 """
 
@@ -199,6 +189,34 @@ def advance(project, cand, step):
 
 def provider_for(node, cfg, args):
     return orch.make_provider(cfg.for_node(node), override_type=args.provider)
+
+
+def preflight_providers(cfg, args):
+    """Fail loud unless an AUTOMATIC provider is configured and constructible.
+    Manual is debug-only: allowed only via `--provider manual`, never as a
+    default and never as a silent fallback. Returns True if good to run."""
+    if args.provider == "manual":
+        log("provider: MANUAL (debug mode, explicitly requested via --provider manual)")
+        return True
+    specs = [("provider.default", cfg.default)]
+    specs += [(f"provider.nodes.{n}", s) for n, s in cfg.nodes.items()]
+    for label, spec in specs:
+        t = args.provider or (spec or {}).get("type")
+        if t == "manual":
+            log(f"ERROR: {label}.type = 'manual', but manual is DEBUG-ONLY.")
+            log("       Configure an automatic provider (type: host | command),")
+            log("       e.g. set $RLR_HOST_AGENT_CMD, or run with --provider manual "
+                "to force debug mode.")
+            return False
+        try:
+            orch.make_provider(spec, override_type=args.provider)
+        except orch.ProviderError as e:
+            log(f"ERROR: {label} is not runnable automatically:")
+            for ln in str(e).splitlines():
+                log(f"       {ln}")
+            return False
+    log(f"provider: AUTOMATIC ({args.provider or cfg.default.get('type')})")
+    return True
 
 
 def write_receipt(run_dir, node, persona, prov, context, step, cand, round_id,
@@ -506,6 +524,12 @@ def dry_run_plan(project, cand, cfg, max_rounds, review_on):
     print()
     tail = "review gate -> " if review_on else ""
     log(f"after L10c: {tail}StopPolicy(max_rounds={max_rounds}) decides stop/continue")
+    # show whether the default automatic provider is actually runnable now
+    try:
+        orch.make_provider(cfg.default, override_type=None)
+        log(f"default provider '{cfg.default.get('type')}' resolves OK (automatic)")
+    except orch.ProviderError as e:
+        log(f"NOTE: default provider not runnable yet -- {str(e).splitlines()[0]}")
     log("dry-run complete (one round planned; loop is bounded by max_rounds)")
     return 0
 
@@ -530,6 +554,10 @@ def cmd_run(args):
         return dry_run_plan(project, cand, cfg, max_rounds,
                             review_on=(not args.no_review
                                        and cfg.review.get("enabled", True)))
+
+    if not preflight_providers(cfg, args):
+        log("aborting: no automatic provider configured (see RUNNER.md).")
+        return 2
 
     sp = StopPolicy(
         max_rounds=max_rounds,
@@ -593,8 +621,10 @@ def build_parser():
     sp.add_argument("cand_id")
     sp.add_argument("--config", help="runner config (default: PROJECT_DIR/rlr_runner.yaml)")
     sp.add_argument("--max-rounds", dest="max_rounds", type=int, default=None)
-    sp.add_argument("--provider", choices=["manual", "command"], default=None,
-                    help="force a provider type for all nodes")
+    sp.add_argument("--provider", choices=["host", "command", "manual"],
+                    default=None,
+                    help="force a provider type for all nodes "
+                         "(manual is debug-only)")
     sp.add_argument("--dry-run", action="store_true",
                     help="print the plan; no model calls, no state changes")
     sp.add_argument("--stop-after-node", dest="stop_after_node",

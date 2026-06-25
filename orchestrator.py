@@ -17,11 +17,17 @@ call can be recorded as a RunReceipt under 08_Run_Receipts/.
 """
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
 import datetime as _dt
+
+
+class ProviderError(Exception):
+    """Raised when a provider cannot be constructed / resolved. The runner turns
+    this into a fail-loud error (it never silently falls back to manual)."""
 
 
 # --- config loading (dependency-free; PyYAML used if available) -------------
@@ -142,8 +148,30 @@ def _schema_repr(s):
     return str(s)
 
 
+def _compose_auto_prompt(node, persona, context, output_schema=None,
+                         workspace=None, tools=None):
+    """Prompt for an automatic (non-interactive) provider: instruct the agent to
+    return ONLY the JSON delta, include the schema, then the scoped context."""
+    lines = [
+        f"# RLR auto agent task — node={node} persona={persona}",
+        "# Return ONLY a single JSON object (the delta) and nothing else.",
+    ]
+    if workspace:
+        lines.append(f"# WORKSPACE (Path A; read/write ONLY inside): {workspace}")
+    if tools:
+        lines.append(f"# tools / policy: {tools}")
+    if output_schema:
+        lines += ["# JSON delta schema:",
+                  json.dumps(_schema_repr(output_schema), indent=2,
+                             ensure_ascii=False)]
+    lines += ["", "=== CONTEXT ===", context]
+    return "\n".join(lines)
+
+
 class ManualProvider(AgentProvider):
-    """Human-in-the-loop provider: write the prompt, wait for a delta JSON path."""
+    """DEBUG / manual-test provider only. Human-in-the-loop: writes the prompt,
+    waits for a delta JSON path. NOT a default -- enable with `--provider manual`.
+    The automatic path is HostAgentProvider / CommandProvider."""
 
     type = "manual"
 
@@ -198,12 +226,29 @@ class ManualProvider(AgentProvider):
         return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-class CommandProvider(AgentProvider):
-    """Generic external-tool provider: run a shell command template.
+def _run_command_agent(command, node, persona, context, output_schema,
+                       workspace, tools, run_dir, timeout, provider):
+    """Shared body for command-style providers: write prompt, run the command
+    template (one fresh subprocess), read the delta JSON it must write."""
+    run_dir = Path(run_dir or ".")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    pf = run_dir / f"{node}_{persona}_prompt.txt"
+    of = run_dir / f"{node}_{persona}_delta.json"
+    pf.write_text(_compose_auto_prompt(node, persona, context, output_schema,
+                                       workspace, tools), encoding="utf-8")
+    provider.last_prompt_file = str(pf)
+    provider.last_delta_file = str(of)
+    cmd = command.format(prompt_file=str(pf), output_file=str(of), node=node,
+                         persona=persona, workspace=workspace or "")
+    subprocess.run(cmd, shell=True, check=True, timeout=timeout)
+    return json.loads(of.read_text(encoding="utf-8"))
 
-    The command may use {prompt_file}, {output_file}, {node}, {persona},
-    {workspace}. The command must write the delta JSON to {output_file}.
-    """
+
+class CommandProvider(AgentProvider):
+    """Automatic provider for an external headless CLI. Runs a shell command
+    template once per node; the command MUST write the delta JSON to
+    {output_file}. Placeholders: {prompt_file} {output_file} {node} {persona}
+    {workspace}. Each node = a fresh subprocess (fresh session)."""
 
     type = "command"
 
@@ -214,34 +259,77 @@ class CommandProvider(AgentProvider):
         self.timeout = self.spec.get("timeout")
         self.last_prompt_file = None
         self.last_delta_file = None
-        self.last_fresh_session = True  # each call is a fresh subprocess
+        self.last_fresh_session = True
         if not self.command:
-            raise ValueError("command provider requires a 'command' template")
+            raise ProviderError(
+                "command provider requires a 'command' template (using "
+                "{prompt_file} and {output_file})")
 
     def run_agent(self, node, persona, context, output_schema=None,
                   workspace=None, tools=None, run_dir=None):
-        run_dir = Path(run_dir or ".")
-        run_dir.mkdir(parents=True, exist_ok=True)
-        pf = run_dir / f"{node}_{persona}_prompt.txt"
-        of = run_dir / f"{node}_{persona}_delta.json"
-        pf.write_text(context, encoding="utf-8")
-        self.last_prompt_file = str(pf)
-        self.last_delta_file = str(of)
-        cmd = self.command.format(prompt_file=str(pf), output_file=str(of),
-                                  node=node, persona=persona,
-                                  workspace=workspace or "")
-        subprocess.run(cmd, shell=True, check=True, timeout=self.timeout)
-        return json.loads(of.read_text(encoding="utf-8"))
+        return _run_command_agent(self.command, node, persona, context,
+                                  output_schema, workspace, tools, run_dir,
+                                  self.timeout, self)
+
+
+class HostAgentProvider(AgentProvider):
+    """Automatic provider for the CURRENT host agent (Codex / Claude Code /
+    AntiGravity / Hermes / ...), invoked headlessly once per node (a fresh
+    subprocess = fresh session). The command is resolved, in order, from:
+      1. spec['command'];
+      2. $RLR_HOST_AGENT_CMD (a template using {prompt_file}/{output_file});
+      3. best-effort host detection.
+    If none resolves it raises ProviderError -- it NEVER falls back to manual.
+    """
+
+    type = "host"
+
+    def __init__(self, spec=None):
+        self.spec = spec or {}
+        self.name = "host"
+        self.timeout = self.spec.get("timeout")
+        self.last_prompt_file = None
+        self.last_delta_file = None
+        self.last_fresh_session = True
+        self.command = (self.spec.get("command")
+                        or os.environ.get("RLR_HOST_AGENT_CMD")
+                        or self._detect())
+        if not self.command:
+            raise ProviderError(
+                "HostAgentProvider could not resolve a host command. Set "
+                "$RLR_HOST_AGENT_CMD to a headless command template (it MUST "
+                "write the delta JSON to {output_file}), e.g.\n"
+                "  export RLR_HOST_AGENT_CMD='claude -p < {prompt_file} > {output_file}'\n"
+                "or set provider.command in rlr_runner.yaml, or use a "
+                "CommandProvider. (Manual mode is debug-only: --provider manual.)")
+
+    @staticmethod
+    def _detect():
+        env = os.environ
+        if env.get("CLAUDECODE") or env.get("CLAUDE_CODE"):
+            return "claude -p < {prompt_file} > {output_file}"
+        return None
+
+    def run_agent(self, node, persona, context, output_schema=None,
+                  workspace=None, tools=None, run_dir=None):
+        return _run_command_agent(self.command, node, persona, context,
+                                  output_schema, workspace, tools, run_dir,
+                                  self.timeout, self)
 
 
 def make_provider(spec, override_type=None):
-    """Construct a provider from a spec dict (optionally forcing a type)."""
-    t = override_type or (spec or {}).get("type", "manual")
-    if t == "manual":
-        return ManualProvider(spec)
+    """Construct a provider from a spec dict (optionally forcing a type). There
+    is no silent default: an unknown/missing type raises ProviderError."""
+    t = override_type or (spec or {}).get("type")
+    if t in ("host", "auto"):
+        return HostAgentProvider(spec)
     if t == "command":
         return CommandProvider(spec)
-    raise ValueError(f"unknown provider type: {t}")
+    if t == "manual":
+        return ManualProvider(spec)
+    raise ProviderError(
+        f"no/unknown provider type: {t!r}. Configure provider.type = "
+        "host | command (automatic). Manual is debug-only via --provider manual.")
 
 
 # --- run receipt ------------------------------------------------------------
