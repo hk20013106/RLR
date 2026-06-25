@@ -14,12 +14,59 @@ independent subagent with physical context isolation.
 
 ## Version history
 
-| Version | Status | Description |
-|----------|--------|-------------|
-| v0.1 | **DELETED** | 7-agent linear loop (Idea, Value, Evidence, Falsification, Biology, Decision, Execution) with 9 statuses. Lacked skill gates, method triage, execution safety. Architecture deemed unreasonable; removed. |
-| v0.2 | **DEPRECATED** | 10-persona single-context council with gates and Obsidian sync. Still works; `research_loop_v02.py` and existing v0.2 projects preserved untouched. See [README_v0.2.md](README_v0.2.md). |
-| v0.3 | SUPERSEDED | Subagent physical isolation architecture. 14-node DAG, delta JSON, Path A/B isolation, L9a/L9b parallel. `research_loop_v03.py` preserved for reference. See [README_v0.3.md](README_v0.3.md) and [DAG_TOPOLOGY.md](DAG_TOPOLOGY.md). |
-| v0.4 | **CURRENT** | Adds three pre-research steps to the main-agent protocol — **deep research before L1**, **method literature review before L4**, **code search before L7** — grounded in the candidate's question and embedded into `assemble-context` (recorded in the context manifest). DAG topology unchanged (still 14 nodes). `research_loop_v04.py`. |
+Each version is described by **what it did**, **what it fixed** vs the prior
+version, and **what it added**.
+
+### v0.1 — DELETED
+- **Did:** a 7-agent *linear* loop (Idea, Value, Evidence, Falsification,
+  Biology, Decision, Execution) with 9 statuses, all agents sharing one context.
+- **Why removed:** no skill gate, no method triage, no execution safety, and no
+  context isolation. The architecture was judged unsound and deleted (not kept
+  for reference).
+
+### v0.2 — DEPRECATED (preserved, still runs)
+- **Did:** reworked it into a **gated 10-persona council** (Linnaeus … Jobs) in a
+  single shared context, with a decision log and Obsidian sync.
+- **Fixed vs v0.1:** added the missing **gates** — L0 skill/preflight gate,
+  candidate triage, method triage, and an execution gate (only Turing runs code,
+  and only after the gate). Grew 7→10 personas and 9→15 statuses.
+- **Added:** gated multi-loop flow, append-only decision log, Obsidian sync.
+- **Still wrong:** all 10 personas shared **one context window**, so reasoning
+  cross-contaminated (e.g. an idea's author saw the critique of its own idea).
+- `research_loop_v02.py` and v0.2 projects are preserved untouched. See
+  [README_v0.2.md](README_v0.2.md).
+
+### v0.3 — SUPERSEDED (preserved for reference)
+- **Did:** turned every persona into an **isolated subagent** over a **14-node
+  DAG** (L0–L10c; L9a/L9b run in parallel).
+- **Fixed vs v0.2:** the single-shared-context contamination. Each node now sees
+  **only its DAG-allowed inputs** (Path B = context invisibility); execution is
+  isolated to a workspace (Path A). Free-form notes were replaced by **structured
+  delta JSON** with **recursive schema validation**.
+- **Added:** the `next-step` / `assemble-context` / `emit-delta` /
+  `prepare-turing-workspace` controller commands; **audit trail** (context
+  manifests + run receipts with hashes); declared `tools_policy` +
+  `everos_read_scopes`; graded input visibility (`input_alias`); a `decision`
+  transition guard (with `--force`); the **loop runner** (`run_loop.py` +
+  `orchestrator.py`) with **main-agent / headless / manual** modes, a hybrid
+  **StopPolicy**, and child-candidate rounds; bilingual `FINAL_REPORT`; and the
+  human-readable Obsidian sync (`sync_to_obsidian.py`). See
+  [README_v0.3.md](README_v0.3.md) and [DAG_TOPOLOGY.md](DAG_TOPOLOGY.md).
+
+### v0.4 — CURRENT
+- **Did:** added **three pre-research steps** to the protocol, run *before* their
+  node, **without changing the 14-node DAG** — deep research before **L1**,
+  method literature review before **L4**, code search before **L7**.
+- **Fixed:** pre-research is now actually **injected into `assemble-context`**
+  (the initial build wrote it but never embedded it — the feature was inert) and
+  is **grounded in the candidate's own question/claim** (the initial build
+  ignored the candidate and hard-coded one project's queries). `sync_to_obsidian`
+  no longer creates junk directories when `$OBSIDIAN_VAULT` is unset (it now
+  **fails loud**) and no longer hard-codes a local results path.
+- **Added:** the `pre-research` command; pre-research summaries embedded in
+  context and recorded in the manifest (`pre_research` field); run_loop triggers
+  + updated main-agent protocol; **end-of-round Obsidian sync is now an explicit,
+  required loop step**. `research_loop_v04.py`.
 
 ---
 

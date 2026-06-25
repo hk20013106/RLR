@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Sync RLR v0.3 project to Obsidian vault - human-readable format.
+"""Sync RLR v0.4 project to Obsidian vault - human-readable format.
+
+A REQUIRED step of the loop: run after aggregate-report at the end of EVERY
+round (run_loop drives it automatically at L10c; in main-agent mode the host
+agent must run it per the protocol).
 
 Run after aggregate-report. Produces:
 - 02_Agent_Notes/<persona>/L<n>_<persona>_NOTE.md  (human-readable delta summary)
@@ -13,11 +17,18 @@ import json
 import os
 import shutil
 import re
+import sys
 from pathlib import Path
 
-# --- config ---
-DEFAULT_VAULT = Path(os.environ.get("OBSIDIAN_VAULT", ""))
-DEFAULT_RESULTS = Path("D:/R-HK/yigene/results_wgcna_loop")
+# --- config (no hard-coded local paths) ---
+# Vault comes from --vault or $OBSIDIAN_VAULT (validated at runtime). Results
+# come from --results or $RLR_RESULTS_DIR, defaulting to the project's own
+# 04_Analysis_Outputs/. Nothing is created if no real vault is configured.
+
+def _resolve_vault(vault_arg):
+    """Vault path from --vault, else $OBSIDIAN_VAULT. Empty string -> None."""
+    v = (vault_arg or os.environ.get("OBSIDIAN_VAULT") or "").strip()
+    return v or None
 
 PERSONAS = {
     "Linnaeus": ("L0", "Catalog Master"),
@@ -203,8 +214,22 @@ def slugify(s):
 
 def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
     project_dir = Path(project_dir)
-    vault_dir = Path(vault_dir or DEFAULT_VAULT)
-    results_dir = Path(results_dir or DEFAULT_RESULTS)
+    # Fail loud if no real vault is configured -- never create junk dirs from an
+    # unset env var (the old code did `Path("")` -> cwd / literal strings).
+    vault = _resolve_vault(vault_dir)
+    if not vault:
+        print("ERROR: no Obsidian vault configured. Set $OBSIDIAN_VAULT or pass "
+              "--vault PATH. Skipping Obsidian sync (nothing written).",
+              file=sys.stderr)
+        return 1
+    vault_dir = Path(vault).expanduser()
+    if not vault_dir.exists():
+        print(f"ERROR: Obsidian vault not found: {vault_dir}. Point "
+              "$OBSIDIAN_VAULT / --vault at an existing vault. Skipping sync.",
+              file=sys.stderr)
+        return 1
+    results_dir = Path(results_dir or os.environ.get("RLR_RESULTS_DIR")
+                       or (project_dir / "04_Analysis_Outputs"))
     project_name = project_dir.name
     vault_project = vault_dir / "ResearchLoop" / project_name
 
@@ -386,12 +411,15 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser(description="Sync RLR project to Obsidian (human-readable)")
-    p.add_argument("project_dir", help="RLR project directory (e.g. Yigene_WGCNA_v03)")
-    p.add_argument("--vault", default=str(DEFAULT_VAULT), help="Obsidian vault root")
-    p.add_argument("--results", default=str(DEFAULT_RESULTS), help="WGCNA results root")
+    p.add_argument("project_dir", help="RLR project directory")
+    p.add_argument("--vault", default=None,
+                   help="Obsidian vault root (default: $OBSIDIAN_VAULT)")
+    p.add_argument("--results", default=None,
+                   help="results root for figures (default: $RLR_RESULTS_DIR or "
+                        "PROJECT/04_Analysis_Outputs)")
     p.add_argument("--cand", default=None, help="specific candidate ID")
     args = p.parse_args()
-    sync_project(args.project_dir, args.vault, args.results, args.cand)
+    sys.exit(sync_project(args.project_dir, args.vault, args.results, args.cand))
 
 
 

@@ -28,7 +28,10 @@ Loop:
 6. Run `python research_loop_v04.py emit-delta PROJECT_DIR CAND_ID --node NODE --persona PERSONA --file TEMP_DELTA.json`
 7. If emit-delta says VALIDATION: PASS, run the advance_command.
 8. If emit-delta fails, fix the JSON and retry. Do NOT skip.
-9. Repeat until L10c (aggregate-report), then evaluate StopPolicy.
+9. Repeat until L10c (aggregate-report). After aggregate-report, ALWAYS run
+   `python sync_to_obsidian.py PROJECT_DIR --cand CAND_ID` (needs $OBSIDIAN_VAULT)
+   to sync the human-readable view to Obsidian -- this is a required end-of-round
+   step. Then evaluate StopPolicy.
 10. Maximum rounds: 3.
 
 Key rules:

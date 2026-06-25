@@ -66,10 +66,21 @@ while not terminal:
     5. run step.advance_command (decision / triage-idea / triage-method / execution-gate)
     6. if step.node == L10c:
          python research_loop_v04.py aggregate-report PROJECT CAND
+         # REQUIRED end-of-round step: sync human-readable output to Obsidian
+         python sync_to_obsidian.py PROJECT --cand CAND   # needs $OBSIDIAN_VAULT
          evaluate StopPolicy
          if stop: break
          else: create child candidate, continue
 ```
+
+## End-of-round Obsidian sync (REQUIRED)
+
+After `aggregate-report` at the end of **every round**, run
+`python sync_to_obsidian.py PROJECT --cand CAND`. It writes the human-readable
+view (per-node NOTE.md, ROUND_SUMMARY, figures, FINAL_REPORT, index) into the
+vault at `$OBSIDIAN_VAULT/ResearchLoop/<project>/`. Set `$OBSIDIAN_VAULT` (or
+pass `--vault`) first; if it is unset the script fails loud and writes nothing
+(it does NOT create stray directories). This is part of the loop, not optional.
 
 ## L7 Turing workspace
 

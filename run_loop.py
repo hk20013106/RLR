@@ -371,9 +371,11 @@ def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
                     [sys.executable, str(sync_script), project, "--cand", cand],
                     capture_output=True, text=True)
                 if _ctl_sync.returncode == 0:
-                    log("Obsidian sync complete")
+                    log("Obsidian sync complete (end-of-round)")
                 else:
-                    log("Obsidian sync warning: " + _ctl_sync.stdout.strip())
+                    warn = (_ctl_sync.stderr.strip() or _ctl_sync.stdout.strip()
+                            or "unknown error")
+                    log(f"Obsidian sync skipped: {warn}")
             else:
                 log("sync_to_obsidian.py not found; skipping Obsidian sync")
             log("L10c: aggregate-report generated FINAL_REPORT")
