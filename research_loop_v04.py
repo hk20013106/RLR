@@ -1786,11 +1786,24 @@ def cmd_assemble_context(args):
             pre_research_meta = {"type": pr_cfg["type"], "path": str(prf),
                                  "sha256": None, "present": False}
 
-    # Append persona + layer template hints
+    # Inject persona template (full role definition: personality, responsibilities,
+    # forbidden actions, delta schema)
     persona = node_info["persona"]
     sections.append(f"=== PERSONA: {persona} | {PERSONA_TITLE.get(persona, '')} ===")
     sections.append(f"Action: {node_info['action_hint']}")
     sections.append("")
+    _script_dir = Path(__file__).resolve().parent
+    ptpl = _script_dir / _persona_template_path(persona)
+    if ptpl.exists():
+        sections.append(f"--- PERSONA TEMPLATE ({ptpl.name}) ---")
+        sections.append(ptpl.read_text(encoding="utf-8"))
+        sections.append("")
+    # Inject layer template (step-specific execution instructions)
+    ltpl = _script_dir / _layer_template_path(node_id)
+    if ltpl.exists():
+        sections.append(f"--- LAYER TEMPLATE ({ltpl.name}) ---")
+        sections.append(ltpl.read_text(encoding="utf-8"))
+        sections.append("")
 
     # v0.4 bilingual: instruct agent to include Chinese translations
     sections.append("=== BILINGUAL OUTPUT DIRECTIVE ===")
