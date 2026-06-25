@@ -1,0 +1,12 @@
+{
+  "receipt_id": "20260625161711114277",
+  "candidate_id": "C20260625155135814538",
+  "node": "L7",
+  "persona": "Turing",
+  "delta_key": "L7_turing",
+  "emitted_at": "2026-06-25T16:17:11",
+  "output_delta_sha256": "3d4c5c9c0f1c827543c85f29b5fab59b71683bdfbd6549f4600119b83b58a2a0",
+  "context_manifest_id": null,
+  "upstream_verification": "skipped (no receipt)",
+  "mismatches": []
+}

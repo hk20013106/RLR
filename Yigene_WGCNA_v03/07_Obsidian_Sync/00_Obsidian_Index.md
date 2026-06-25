@@ -2,7 +2,7 @@
 project_name: Yigene_WGCNA_v03
 kind: obsidian_index
 version: 0.3.0
-synced_at: "2026-06-25T15:12:24"
+synced_at: "2026-06-25T15:26:10"
 ---
 
 # Yigene_WGCNA_v03 - Obsidian Index (v0.3)

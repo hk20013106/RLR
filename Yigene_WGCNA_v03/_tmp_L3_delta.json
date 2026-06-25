@@ -1,0 +1,28 @@
+{
+  "selected": [
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "H5"
+  ],
+  "rejected": [
+    "H6"
+  ],
+  "reason": "H1-H4 address the four key gaps from round 1. H5 (null) is required as falsification baseline. H6 (brown core) is secondary; include if resources permit but not critical.",
+  "route_to": "Fisher",
+  "cn": {
+    "selected": [
+      "H1",
+      "H2",
+      "H3",
+      "H4",
+      "H5"
+    ],
+    "rejected": [
+      "H6"
+    ],
+    "reason": "H1-H4 解决第一轮的四个关键缺口。H5（零假设）作为证伪基线必须包含。H6（brown 核心）是次要的；资源允许时纳入但非关键。",
+    "route_to": "Fisher"
+  }
+}

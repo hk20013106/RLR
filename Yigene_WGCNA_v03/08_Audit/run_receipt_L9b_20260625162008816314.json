@@ -1,0 +1,12 @@
+{
+  "receipt_id": "20260625162008816314",
+  "candidate_id": "C20260625155135814538",
+  "node": "L9b",
+  "persona": "Darwin",
+  "delta_key": "L9b_darwin",
+  "emitted_at": "2026-06-25T16:20:08",
+  "output_delta_sha256": "140cc225e579dbe1f0f52af3bb9d479fec40c1880f4d4b0be733000c0db14f89",
+  "context_manifest_id": null,
+  "upstream_verification": "skipped (no receipt)",
+  "mismatches": []
+}
