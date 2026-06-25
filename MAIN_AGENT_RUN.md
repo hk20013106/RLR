@@ -1,0 +1,83 @@
+# Main-Agent Run Protocol (RLR v0.3)
+
+## What this is
+
+The main-agent mode is the recommended way to run RLR. The current host agent
+(Claude Code / Codex / AntiGravity / Hermes) acts as the orchestrator. It loops
+through the DAG by calling `research_loop_v03.py` CLI commands, playing each
+persona in turn, generating delta JSON, and advancing state -- all in one
+session, no copy-paste.
+
+## What this is NOT
+
+- **NOT ManualProvider**: the user does not copy-paste prompts between nodes.
+- **NOT Python controlling the chat UI**: Python cannot drive the current live
+  session. The host agent itself reads the protocol and executes it.
+- **NOT a Python provider**: main-agent mode uses NO python provider. The
+  `orchestrator.py` providers (HeadlessProvider, CommandProvider,
+  ManualProvider) are not involved.
+
+## Step-by-step protocol
+
+```
+while not terminal:
+    1. step = python research_loop_v03.py next-step PROJECT CAND
+    2. if step.is_parallel:  # L9a + L9b
+         for sub in step.nodes:
+             ctx = python research_loop_v03.py assemble-context PROJECT CAND --node sub.node
+             delta = act_as(sub.persona, ctx)
+             write delta to temp file
+             python research_loop_v03.py emit-delta PROJECT CAND --node sub.node --persona sub.persona --file temp.json
+    3. elif step.is_execution:  # L7 Turing
+         python research_loop_v03.py prepare-turing-workspace PROJECT CAND
+         run approved scripts in the workspace
+         build L7 delta from results
+         python research_loop_v03.py emit-delta PROJECT CAND --node L7 --persona Turing --file delta.json
+    4. else:  # cognitive node
+         ctx = python research_loop_v03.py assemble-context PROJECT CAND --node step.node
+         delta = act_as(step.persona, ctx)
+         write delta to temp file
+         python research_loop_v03.py emit-delta PROJECT CAND --node step.node --persona step.persona --file temp.json
+    5. run step.advance_command (decision / triage-idea / triage-method / execution-gate)
+    6. if step.node == L10c:
+         python research_loop_v03.py aggregate-report PROJECT CAND
+         evaluate StopPolicy
+         if stop: break
+         else: create child candidate, continue
+```
+
+## L7 Turing workspace
+
+Turing is the only node with filesystem access (Path A). Use
+`prepare-turing-workspace` to create an isolated workspace. Run R/Python scripts
+only inside that workspace. Copy results out, build the L7 delta JSON, emit it.
+
+## L9a/L9b independence
+
+L9a (Feynman falsification) and L9b (Darwin biology) must be as independent as
+possible. Generate L9a's delta WITHOUT looking at L9b's output, and vice versa.
+The `assemble-context` command enforces this: L9a's context does not include
+L9b's delta, and L9b's context does not include L9a's delta.
+
+## StopPolicy
+
+After L10c (FINAL_REPORT generated), evaluate:
+
+- **STOP** if: KEEP + review accept; DROP/DOWNGRADE/ARCHIVED; max_rounds
+  reached; REVISE with no executable next_steps; marginal_gain <= 2; L7 failed
+  2x; two consecutive rounds with no new evidence.
+- **CONTINUE** if: REVISE with executable next_steps; review major_revision;
+  round < max_rounds. Continue = create a child candidate (not overwrite parent).
+
+## Child candidate
+
+When continuing, create a new candidate with `parent_candidate_id` and
+`round_id` set. The child inherits the question/claim but focuses on the
+executable next_steps from the parent's L10b decision.
+
+## Avoiding context pollution
+
+- Only use `assemble-context` output as input for each node.
+- Do NOT read other delta files directly.
+- Do NOT carry over reasoning from one persona to the next.
+- The `assemble-context` output includes an isolation directive.

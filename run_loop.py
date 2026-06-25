@@ -31,26 +31,34 @@ import orchestrator as orch          # noqa: E402
 
 
 DEFAULT_CONFIG = """\
+mode: main_agent
 max_rounds: 3
-# Default runs AUTOMATICALLY end-to-end (L0->L10). The default provider is the
-# current host agent, invoked headlessly once per node. Set the host command via
-# $RLR_HOST_AGENT_CMD (a template using {prompt_file}/{output_file}), or replace
-# the default below with a `command` provider. Manual mode is DEBUG-ONLY and must
-# be requested explicitly with `--provider manual` (it is never a fallback).
+
+main_agent:
+  enabled: true
+  description: "The current Claude Code/Codex/AntiGravity/Hermes session acts as the orchestrator. No per-node copy-paste."
+
 provider:
   default:
-    type: host
-  nodes:
-    L7:
-      type: host
-      filesystem: workspace_only
+    type: none
+
+headless:
+  enabled: false
+  command: ""
+
+manual:
+  enabled: false
+  debug_only: true
+
 review:
   enabled: true
   academy_research_skill: optional
+
 stop_policy:
   keep_requires_review_accept: true
   marginal_gain_stop_threshold: 2
   max_l7_failures: 2
+
 everos:
   enabled: false
   scope: project_only
@@ -195,6 +203,9 @@ def preflight_providers(cfg, args):
     """Fail loud unless an AUTOMATIC provider is configured and constructible.
     Manual is debug-only: allowed only via `--provider manual`, never as a
     default and never as a silent fallback. Returns True if good to run."""
+    if cfg.mode == "main_agent":
+        log("mode: main_agent (host session orchestrates; no python provider needed)")
+        return True
     if args.provider == "manual":
         log("provider: MANUAL (debug mode, explicitly requested via --provider manual)")
         return True
@@ -611,17 +622,63 @@ def cmd_run(args):
     return 0
 
 
+MAIN_AGENT_PROMPT_TEMPLATE = """You are now the RLR main-agent orchestrator.
+
+Project: {project}
+Candidate: {cand_id}
+
+Instructions:
+1. Run:  python research_loop_v03.py next-step {project} {cand_id}
+2. Read the JSON output to get the current DAG node, persona, and context_files.
+3. Run:  python research_loop_v03.py assemble-context {project} {cand_id} --node NODE
+4. The assemble-context output is your ONLY input for this node. Do NOT read other delta files.
+5. Act as the specified persona. Generate a strict JSON delta matching the schema.
+6. Write the delta to a temp file, then run:
+   python research_loop_v03.py emit-delta {project} {cand_id} --node NODE --persona PERSONA --file TEMP_DELTA.json
+7. If emit-delta says VALIDATION: PASS, run the advance_command.
+8. Repeat from step 1 until next-step returns L10c (aggregate-report).
+9. After L10c, evaluate StopPolicy: if KEEP + review accept, stop. If REVISE with executable next_steps, create child candidate.
+10. Maximum rounds: {max_rounds}.
+
+Key rules:
+- Do NOT read DAG-disallowed delta files. Only use assemble-context output.
+- L7 Turing: use prepare-turing-workspace, run scripts only in that workspace.
+- L9a/L9b: run both before advancing. They must be independent.
+- If emit-delta fails validation, fix the JSON and retry. Do NOT skip.
+- You are the orchestrator. Do not ask the user to copy-paste between nodes.
+"""
+
+def cmd_print_main_agent_prompt(args):
+    project, cand = args.project_dir, args.cand_id
+    cfg_path = args.config or str(Path(project) / "rlr_runner.yaml")
+    max_rounds = 3
+    if Path(cfg_path).exists():
+        cfg = orch.ProviderConfig.load(cfg_path)
+        max_rounds = cfg.max_rounds or 3
+    prompt = MAIN_AGENT_PROMPT_TEMPLATE.format(
+        project=project, cand_id=cand, max_rounds=max_rounds)
+    print(prompt)
+    return 0
+
 def build_parser():
     p = argparse.ArgumentParser(
         prog="run_loop.py",
-        description="RLR v0.3 loop runner (provider-neutral; StopPolicy-bounded).")
+        description="RLR v0.3 loop runner (main-agent / headless / manual).")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    ma = sub.add_parser("print-main-agent-prompt",
+                        help="print the main-agent orchestration protocol")
+    ma.add_argument("project_dir")
+    ma.add_argument("cand_id")
+    ma.add_argument("--config")
+    ma.set_defaults(func=cmd_print_main_agent_prompt)
+
     sp = sub.add_parser("run", help="run the loop for a candidate")
     sp.add_argument("project_dir")
     sp.add_argument("cand_id")
     sp.add_argument("--config", help="runner config (default: PROJECT_DIR/rlr_runner.yaml)")
     sp.add_argument("--max-rounds", dest="max_rounds", type=int, default=None)
-    sp.add_argument("--provider", choices=["host", "command", "manual"],
+    sp.add_argument("--provider", choices=["main_agent", "host", "command", "manual"],
                     default=None,
                     help="force a provider type for all nodes "
                          "(manual is debug-only)")
