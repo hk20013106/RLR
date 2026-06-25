@@ -1,8 +1,0 @@
-{
-  "skills_found": ["wgcna-skill", "bulk-rnaseq"],
-  "skills_gaps": ["single-cell-rna-qc"],
-  "input_verified": {"expression_matrix": "OK", "metadata": "OK"},
-  "environment": {"python": "3.13", "r": "4.6.0"},
-  "skill_use_plan": ["reuse WGCNA code pattern", "check Seurat5_lib"],
-  "forbidden_shortcuts": ["skip preflight", "ad-hoc debugging"]
-}
