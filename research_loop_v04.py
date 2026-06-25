@@ -41,7 +41,7 @@ import shutil
 import sys
 from pathlib import Path
 
-__version__ = "0.4.0"
+__version__ = "0.4.5"
 
 
 class RLRError(Exception):
@@ -440,23 +440,75 @@ PREFLIGHT_FILES = [
 # skipped. Project-specific deps are declared in 00_Preflight/dependencies.md
 # and are checked the same way.
 REQUIRED_DEPENDENCIES = [
-    {"kind": "python", "name": "yaml", "label": "PyYAML",
+    {"kind": "python", "name": "yaml", "label": "PyYAML", "pip": "PyYAML",
      "needed_for": "manage_literature_db.py (growable literature DB; L1/L4/L8.5)"},
+    {"kind": "skill", "name": "academic-research-suite", "label": "Academic Research skill",
+     "attest_env": "RLR_SKILL_ACADEMIC_RESEARCH",
+     "needed_for": "real literature search in pre-research (L1/L4) + L8.5 verification"},
+    {"kind": "port", "name": "zotero", "label": "Zotero", "addr": "127.0.0.1:23119",
+     "attest_env": "RLR_ZOTERO",
+     "needed_for": "reference manager / citation source for the literature DB"},
+    {"kind": "env", "name": "obsidian", "label": "Obsidian vault", "env": "OBSIDIAN_VAULT",
+     "check_path": True, "attest_env": "RLR_OBSIDIAN",
+     "needed_for": "end-of-round human-readable sync (sync_to_obsidian.py)"},
 ]
 
 
-def _dep_present(kind, name):
+def _port_open(host, port, timeout=0.6):
+    import socket
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _dep_present(dep):
+    """True if a dependency is satisfied. A non-empty `attest_env` env var ALWAYS
+    satisfies it -- the fail-closed escape hatch for things Python cannot
+    introspect (Claude skills, GUI apps like Zotero/Obsidian)."""
+    import os
+    ae = dep.get("attest_env")
+    if ae and os.environ.get(ae, "").strip():
+        return True
+    kind, name = dep.get("kind"), dep.get("name", "")
     if kind == "python":
         import importlib.util
         return importlib.util.find_spec(name) is not None
     if kind == "command":
         return shutil.which(name) is not None
+    if kind == "env":
+        v = os.environ.get(dep.get("env", name), "").strip()
+        return bool(v) and (not dep.get("check_path") or Path(v).expanduser().exists())
+    if kind == "port":
+        host, _, port = (dep.get("addr") or "").partition(":")
+        return bool(port) and _port_open(host or "127.0.0.1", port)
+    if kind == "skill":
+        return False  # only satisfiable via attest_env (handled above): fail closed
     return False
+
+
+def _dep_fix_hint(dep):
+    kind, ae = dep.get("kind"), dep.get("attest_env")
+    if kind == "python":
+        return f"pip install {dep.get('pip', dep['name'])}"
+    if kind == "command":
+        return f"install / put on PATH: {dep['name']}"
+    if kind == "skill":
+        return f"enable {dep.get('label', dep['name'])}, then attest: set {ae}=1"
+    if kind == "port":
+        return (f"start {dep.get('label', dep['name'])} (connector {dep.get('addr')})"
+                + (f", or set {ae}=1" if ae else ""))
+    if kind == "env":
+        return (f"set ${dep.get('env')}" + (" to an existing path" if dep.get("check_path") else "")
+                + (f", or set {ae}=1" if ae else ""))
+    return "(see 00_Preflight/dependencies.md)"
 
 
 def _parse_declared_deps(project_dir):
     """Extra required deps declared in 00_Preflight/dependencies.md: lines of the
-    form '- python: NAME' or '- command: NAME' under a '## Required' heading."""
+    form '- python: NAME', '- command: NAME', or '- env: VAR' under a
+    '## Required' heading."""
     f = Path(project_dir) / "00_Preflight" / "dependencies.md"
     deps, required = [], False
     if not f.exists():
@@ -467,32 +519,37 @@ def _parse_declared_deps(project_dir):
             required = "required" in s.lower()
             continue
         if required:
-            m = re.match(r"-\s*(python|command):\s*([^\s(]+)", s, re.I)
+            m = re.match(r"-\s*(python|command|env):\s*([^\s(]+)", s, re.I)
             if m:
-                deps.append((m.group(1).lower(), m.group(2)))
+                deps.append({"kind": m.group(1).lower(), "name": m.group(2),
+                             "needed_for": "declared in dependencies.md"})
     return deps
 
 
 def _check_dependencies(project_dir=None):
     """Check framework + project-declared dependencies. Returns (ok, missing),
-    each a list of dicts with kind/name/needed_for/present."""
-    items = [(d["kind"], d["name"], d.get("needed_for", "")) for d in REQUIRED_DEPENDENCIES]
+    each a list of dep dicts with an added 'present' flag."""
+    items = [dict(d) for d in REQUIRED_DEPENDENCIES]
     if project_dir:
-        seen = {(i[0], i[1]) for i in items}
-        for kind, name in _parse_declared_deps(project_dir):
-            if (kind, name) not in seen:
-                items.append((kind, name, "declared in dependencies.md"))
+        seen = {(d["kind"], d["name"]) for d in items}
+        for d in _parse_declared_deps(project_dir):
+            if (d["kind"], d["name"]) not in seen:
+                items.append(d)
     ok, missing = [], []
-    for kind, name, why in items:
-        rec = {"kind": kind, "name": name, "needed_for": why,
-               "present": _dep_present(kind, name)}
-        (ok if rec["present"] else missing).append(rec)
+    for d in items:
+        d = dict(d)
+        d["present"] = _dep_present(d)
+        (ok if d["present"] else missing).append(d)
     return ok, missing
 
 
 def _dependencies_md(name):
-    req = "\n".join(f"- {d['kind']}: {d['name']}  ({d.get('label', d['name'])}) "
-                    f"-- {d.get('needed_for','')}" for d in REQUIRED_DEPENDENCIES)
+    blocks = []
+    for d in REQUIRED_DEPENDENCIES:
+        blocks.append(f"- {d['kind']}: {d['name']}  ({d.get('label', d['name'])})")
+        blocks.append(f"    needed for: {d.get('needed_for','')}")
+        blocks.append(f"    satisfy:    {_dep_fix_hint(d)}")
+    req = "\n".join(blocks)
     return f"""---
 project_name: {_yaml_value(name)}
 preflight_file: dependencies.md
@@ -502,12 +559,16 @@ created_at: {_yaml_value(_now())}
 
 # Dependencies -- {name}  (L0 gate)
 
-> Linnaeus L0 HARD-CHECKS every dependency in the '## Required' sections below.
-> If any REQUIRED dependency is MISSING, `preflight` STOPS (non-zero exit) and
-> the loop MUST NOT proceed past L0. Do not skip. Install it, then re-run
-> `preflight` (or `check-deps`).
+> Linnaeus L0 HARD-CHECKS every required dependency below. If any is MISSING,
+> `preflight` STOPS (non-zero exit) and the loop MUST NOT proceed past L0. Do not
+> skip. Satisfy it, then re-run `preflight` (or `check-deps`).
 >
-> Declare extra deps as lines: `- python: <module>` or `- command: <exe>`.
+> Things Python cannot introspect (Claude skills, GUI apps) are FAIL-CLOSED: they
+> are only considered present if their `attest_env` env var is set (or auto-detected,
+> e.g. Zotero's connector port / the Obsidian vault path). Set the env vars in your
+> shell/profile to attest availability.
+>
+> Declare extra deps as lines: `- python: <module>`, `- command: <exe>`, `- env: <VAR>`.
 
 ## Required (framework)
 
@@ -515,15 +576,15 @@ created_at: {_yaml_value(_now())}
 
 ## Required (project)
 
-_Add project-specific runtime deps here as checkable lines, e.g.:_
-_(uncomment / copy the example from Notes below; only listed lines are checked)_
+_Add project-specific runtime deps here as checkable lines (only listed lines are
+checked). Example for R at L7:_  `- command: Rscript`
 
 ## Notes
 
-- To require R for L7 execution, add this line under '## Required (project)':
-  `- command: Rscript`
 - R packages (WGCNA, clusterProfiler, ...) are verified by the R scripts at L7
   (.libPaths + requireNamespace), not by L0.
+- Attestation env vars: RLR_SKILL_ACADEMIC_RESEARCH, RLR_ZOTERO, RLR_OBSIDIAN
+  (set to 1 to attest), and OBSIDIAN_VAULT (path to your vault).
 """
 
 LAYERS = [
@@ -1868,18 +1929,15 @@ def cmd_preflight(args):
     for d in ok:
         print(f"  OK       {d['kind']}:{d['name']}")
     for d in missing:
-        print(f"  MISSING  {d['kind']}:{d['name']}  -- {d['needed_for']}",
-              file=sys.stderr)
+        print(f"  MISSING  {d['kind']}:{d['name']} ({d.get('label', d['name'])})"
+              f"  -- {d['needed_for']}", file=sys.stderr)
     if missing:
         print("\nPREFLIGHT GATE: STOP -- required dependencies missing.",
               file=sys.stderr)
-        print("The loop must NOT proceed past L0. Install the above, then "
-              "re-run `preflight` (or `check-deps`):", file=sys.stderr)
+        print("The loop must NOT proceed past L0. Satisfy each, then re-run "
+              "`preflight` (or `check-deps`):", file=sys.stderr)
         for d in missing:
-            if d["kind"] == "python":
-                print(f"  pip install {d['name']}", file=sys.stderr)
-            elif d["kind"] == "command":
-                print(f"  (install / put on PATH: {d['name']})", file=sys.stderr)
+            print(f"  {d['name']}: {_dep_fix_hint(d)}", file=sys.stderr)
         return 3
     print("\nPREFLIGHT GATE: PASS -- all required dependencies present.")
     return 0
@@ -1892,10 +1950,11 @@ def cmd_check_deps(args):
     for d in ok:
         print(f"OK       {d['kind']}:{d['name']}")
     for d in missing:
-        print(f"MISSING  {d['kind']}:{d['name']}  -- {d['needed_for']}",
+        print(f"MISSING  {d['kind']}:{d['name']} ({d.get('label', d['name'])})"
+              f"  -- {d['needed_for']}\n         satisfy: {_dep_fix_hint(d)}",
               file=sys.stderr)
     if missing:
-        print("DEPENDENCY GATE: STOP -- install the missing dependencies above; "
+        print("DEPENDENCY GATE: STOP -- satisfy the missing dependencies above; "
               "the loop must not proceed.", file=sys.stderr)
         return 3
     print("DEPENDENCY GATE: PASS")

@@ -8,7 +8,7 @@ independent subagent with physical context isolation.
 > (Path B). The execution agent (Turing) is isolated by workspace + command
 > allowlist (Path A). We do not pretend spawn_agent is an OS sandbox.
 
-**Current version: v0.4.0** (2026-06-25)
+**Current version: v0.4.5** (2026-06-26)
 
 ---
 
@@ -53,7 +53,7 @@ version, and **what it added**.
   human-readable Obsidian sync (`sync_to_obsidian.py`). See
   [README_v0.3.md](README_v0.3.md) and [DAG_TOPOLOGY.md](DAG_TOPOLOGY.md).
 
-### v0.4 — CURRENT
+### v0.4.x — CURRENT
 - **Did:** added **three pre-research steps** to the protocol, run *before* their
   node, **without changing the 14-node DAG** — deep research before **L1**,
   method literature review before **L4**, code search before **L7**.
@@ -67,6 +67,13 @@ version, and **what it added**.
   context and recorded in the manifest (`pre_research` field); run_loop triggers
   + updated main-agent protocol; **end-of-round Obsidian sync is now an explicit,
   required loop step**. `research_loop_v04.py`.
+- **v0.4.5:** added the **L8.5 literature-verification node** (Curie-owned;
+  verifies L7/L8 results against PubMed/EuropePMC after results exist) + a
+  **growable literature database** (`manage_literature_db.py`, cited via Obsidian
+  wikilinks); a UTF-8 stdout fix; and a hard **L0 dependency gate** — `preflight`
+  / `check-deps` verify required dependencies (**PyYAML, Academic Research skill,
+  Zotero, Obsidian vault**, plus per-project deps) and **STOP the loop if any is
+  missing** (fail-closed; skills/apps attested via `RLR_*` env vars).
 
 ---
 
