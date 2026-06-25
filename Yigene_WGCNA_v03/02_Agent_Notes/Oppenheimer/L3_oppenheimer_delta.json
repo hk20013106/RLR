@@ -1,0 +1,15 @@
+{
+  "selected": [
+    "H1",
+    "H2",
+    "H7"
+  ],
+  "rejected": [
+    "H3",
+    "H4",
+    "H5",
+    "H6"
+  ],
+  "reason": "H1 (atrial convergent) and H2 (ventricular convergent) are testable with current data. H7 (null) is the falsification baseline. H3 too broad without chamber separation. H4/H5/H6 require GO/KEGG but are derivative.",
+  "route_to": "Fisher"
+}

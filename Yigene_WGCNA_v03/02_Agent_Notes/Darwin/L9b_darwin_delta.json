@@ -1,0 +1,35 @@
+{
+  "module_interpretations": [
+    {
+      "module": "turquoise",
+      "meaning": "High-rate anti-correlated module. Genes downregulated in high-rate species relative to rat. Enriched for cardiac contraction and energy metabolism pathways.",
+      "genes": [
+        "top 50 hub genes by kME"
+      ],
+      "evidence": "r=-0.955 with high_heart_rate, Z=16.9 preservation, overlaps ventricle_shared_down DEG set"
+    },
+    {
+      "module": "brown",
+      "meaning": "High-rate positively correlated module. Genes upregulated in high-rate species. Enriched for structural remodeling and ECM.",
+      "genes": [
+        "top 50 hub genes by kME"
+      ],
+      "evidence": "r=+0.80 with high_heart_rate, Z=4.5 preservation, overlaps atrium_shared_up DEG set"
+    },
+    {
+      "module": "green",
+      "meaning": "Cardiac identity module. Strongest preservation (Z=20.2). Enriched for cardiac muscle contraction GO terms (49 BP, 15 MF, 1 KEGG). Does not overlap DEG sets but may represent baseline cardiac identity rather than convergence.",
+      "genes": [
+        "top 50 hub genes by kME"
+      ],
+      "evidence": "Z=20.2 preservation, cardiac muscle GO terms, but fails DEG-overlap convergence criterion"
+    }
+  ],
+  "convergent_evolution": "Turquoise and brown modules satisfy all three convergence criteria: high-heart-rate correlation, cross-species preservation (Sk<->Sm), and DEG overlap. This supports the hypothesis that Sk (bat) and Sm (shrew) independently evolved shared co-expression modules for cardiac adaptation. The anti-correlated turquoise (downregulated in high-rate species) may reflect suppression of slow-rate cardiac programs, while the positively correlated brown may reflect upregulation of adaptive remodeling programs.",
+  "limitations": [
+    "Species vs heart-rate confound: with only 3 species, cannot fully separate species-specific from rate-specific effects",
+    "Atrium modules exploratory due to small sample size",
+    "GO/KEGG enrichment underpowered in large modules (universe-size effect)",
+    "No outgroup with intermediate heart rate to test dose-response"
+  ]
+}

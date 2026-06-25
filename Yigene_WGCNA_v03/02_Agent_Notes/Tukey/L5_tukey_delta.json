@@ -1,0 +1,51 @@
+{
+  "attacks": [
+    {
+      "target": "atrium_sample_size",
+      "severity": "HIGH",
+      "text": "n=23 for atrium WGCNA is borderline. Module stability questionable at 7 Sk atrial samples."
+    },
+    {
+      "target": "batch_confound",
+      "severity": "MEDIUM",
+      "text": "batch1=59, batch2=12. Subsets cannot include batch covariate. Must verify no species-batch confound."
+    },
+    {
+      "target": "unsigned_network",
+      "severity": "MEDIUM",
+      "text": "Unsigned merges up/down genes. Shared module could be direction-opposite artifact."
+    }
+  ],
+  "qc_checkpoints": [
+    {
+      "name": "pre_wgcna",
+      "text": "Check table(species, chamber, batch) for confounding before WGCNA."
+    },
+    {
+      "name": "post_blockwise",
+      "text": "n_modules >= 3 after blockwiseModules. If 0-1, stop."
+    },
+    {
+      "name": "post_preservation",
+      "text": "Report Zsummary values, not just pass/fail."
+    },
+    {
+      "name": "post_enrichment",
+      "text": "FDR < 0.05, minimum 5 genes per GO term."
+    }
+  ],
+  "failure_stop_rules": [
+    {
+      "name": "no_modules",
+      "text": "Atrium WGCNA gives 0 real modules: stop, report."
+    },
+    {
+      "name": "batch_species_confound",
+      "text": "Batch confounded with species: stop, cannot separate effects."
+    },
+    {
+      "name": "no_overlap",
+      "text": "No module overlaps with DEG shared sets: report null result honestly."
+    }
+  ]
+}

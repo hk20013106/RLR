@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+
+# Temporary scripts (build helpers)
+_*.py
+_*.ps1
+
+# Recovery / temp
+_recovery/
+.tmp-local/
+
+# Obsidian vault (local copy, not for git)
+# (synced copies live in the actual vault)
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store

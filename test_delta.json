@@ -1,0 +1,20 @@
+{
+  "skills_found": [
+    "wgcna-skill"
+  ],
+  "skills_gaps": [
+    "none"
+  ],
+  "input_verified": {
+    "counts": "ok"
+  },
+  "environment": {
+    "R": "4.6"
+  },
+  "skill_use_plan": [
+    "reuse WGCNA"
+  ],
+  "forbidden_shortcuts": [
+    "no sink"
+  ]
+}

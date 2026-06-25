@@ -1,0 +1,56 @@
+{
+  "attacks": [
+    {
+      "hypothesis_id": "H1",
+      "severity": "HIGH",
+      "text": "Atrium sample size: only 7 Sk atrial samples. WGCNA on n=23 total is borderline. Module stability at n=7/group questionable."
+    },
+    {
+      "hypothesis_id": "H2",
+      "severity": "MEDIUM",
+      "text": "Batch confound: batch1=59, batch2=12. Must verify batch not confounded with species. All-sample network included batch covariate; subsets could not."
+    },
+    {
+      "hypothesis_id": "H1",
+      "severity": "MEDIUM",
+      "text": "Unsigned network merges up/down genes into same module. A shared module could be artifact of genes going in opposite directions."
+    },
+    {
+      "hypothesis_id": "H1",
+      "severity": "LOW",
+      "text": "Power=4 forced (auto-pick was 1). Forcing 4 may create artificial structure."
+    },
+    {
+      "hypothesis_id": "H2",
+      "severity": "MEDIUM",
+      "text": "Animal pseudoreplication: 12 animal_ids across 71 samples. Paired design, not fully independent."
+    }
+  ],
+  "confounders": [
+    {
+      "name": "species_vs_heart_rate",
+      "severity": "HIGH",
+      "text": "With only 3 species (2 high-rate, 1 low-rate), species identity and heart rate are perfectly confounded. Cannot distinguish convergent evolution from shared ancestry."
+    },
+    {
+      "name": "batch_effect",
+      "severity": "MEDIUM",
+      "text": "batch1=59, batch2=12. Subsets cannot include batch covariate."
+    }
+  ],
+  "diagnostic_tests": [
+    {
+      "name": "module_preservation",
+      "text": "Test Sk<->Sm module preservation. If Z>2, modules are preserved across species."
+    },
+    {
+      "name": "power_sensitivity",
+      "text": "Run WGCNA at power=1,4,6 to check module stability."
+    },
+    {
+      "name": "signed_network",
+      "text": "Re-run with signed network to check if unsigned merging creates artifacts."
+    }
+  ],
+  "verdict": "H2 (ventricular convergence) is strongest testable hypothesis. H1 (atrial) should be attempted but may fail on sample size. H7 (null) must be reported alongside."
+}

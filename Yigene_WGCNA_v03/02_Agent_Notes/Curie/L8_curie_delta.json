@@ -1,0 +1,46 @@
+{
+  "evidence_verified": [
+    {
+      "file": "all_sample_module_assignment.csv",
+      "check": "module counts sum to 5000",
+      "result": "PASS: 5000 genes assigned across 5 modules"
+    },
+    {
+      "file": "atrium_module_assignment.csv",
+      "check": "atrium sample count",
+      "result": "PASS: n=23 samples"
+    },
+    {
+      "file": "ventricle_module_assignment.csv",
+      "check": "ventricle sample count",
+      "result": "PASS: n=48 samples"
+    },
+    {
+      "file": "preservation_summary.csv",
+      "check": "Z-summary values",
+      "result": "PASS: turquoise Z=16.9, brown Z=4.5, green Z=20.2"
+    },
+    {
+      "file": "overlap_matrix.csv",
+      "check": "Fisher exact p-values",
+      "result": "PASS: turquoise and brown overlap significant"
+    },
+    {
+      "file": "enrichment_summary.csv",
+      "check": "FDR and gene counts",
+      "result": "PASS: green module has 49 GO-BP terms at FDR<0.05"
+    },
+    {
+      "file": "convergent_module_summary.csv",
+      "check": "convergence criteria",
+      "result": "PASS: turquoise and brown satisfy all 3 criteria"
+    }
+  ],
+  "evidence_level": "MODERATE",
+  "caveats": [
+    "Species vs heart-rate confound unresolvable with 3-species design",
+    "Atrium n=23 borderline, modules exploratory",
+    "Preservation permutations=50 (should be 200+ for publication)",
+    "GO/KEGG only significant in green module (universe-size effect in large modules)"
+  ]
+}

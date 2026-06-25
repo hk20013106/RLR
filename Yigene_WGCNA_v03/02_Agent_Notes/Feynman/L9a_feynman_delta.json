@@ -1,0 +1,39 @@
+{
+  "falsification_risks": [
+    {
+      "name": "Species confound",
+      "severity": "HIGH",
+      "resolvable": false,
+      "text": "3-species design cannot separate species effect from heart-rate effect. Turquoise correlates with both species (r=-0.96) and high_heart_rate (r=-0.955) - these are nearly collinear."
+    },
+    {
+      "name": "Unsigned network artifact",
+      "severity": "MEDIUM",
+      "resolvable": true,
+      "text": "Unsigned network merges up/down genes. A shared module could be an artifact of genes going in opposite directions. Signed network analysis would resolve this."
+    },
+    {
+      "name": "Forced power=4",
+      "severity": "LOW",
+      "resolvable": true,
+      "text": "Auto-pick was 1. Forcing 4 may create artificial structure. Sensitivity analysis at power=6,8 would check robustness."
+    },
+    {
+      "name": "Atrium sample size",
+      "severity": "MEDIUM",
+      "resolvable": false,
+      "text": "n=23 atrium samples (7 Sk atrial). Module stability at n=7/group questionable. Atrium modules are exploratory only."
+    },
+    {
+      "name": "Permutation count",
+      "severity": "LOW",
+      "resolvable": true,
+      "text": "nPermutations=50 for preservation. Should be >=100 (preferably 200+) for publication-grade Z-summary."
+    }
+  ],
+  "survives": [
+    "turquoise: high-rate anti-correlation (r=-0.955) + strong preservation (Z=16.9) + DEG overlap",
+    "brown: high-rate correlation (r=+0.80) + moderate preservation (Z=4.5) + DEG overlap"
+  ],
+  "falsified": []
+}

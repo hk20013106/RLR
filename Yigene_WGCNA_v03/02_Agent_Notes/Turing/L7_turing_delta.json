@@ -1,0 +1,91 @@
+{
+  "scripts_run": [
+    {
+      "name": "01_run_wgcna_length_aware.R",
+      "exit_code": 0,
+      "output_files": [
+        "all_sample_network.RData",
+        "all_sample_stepB.RData",
+        "all_sample_module_assignment.csv",
+        "all_sample_module_eigengenes.csv",
+        "all_sample_hub_genes.csv",
+        "all_sample_module_trait_correlation.csv"
+      ]
+    },
+    {
+      "name": "02_run_wgcna_atrium.R",
+      "exit_code": 0,
+      "output_files": [
+        "atrium_network.RData",
+        "atrium_module_assignment.csv",
+        "atrium_module_eigengenes.csv",
+        "atrium_soft_threshold.pdf"
+      ]
+    },
+    {
+      "name": "03_run_wgcna_ventricle.R",
+      "exit_code": 0,
+      "output_files": [
+        "ventricle_network.RData",
+        "ventricle_module_assignment.csv",
+        "ventricle_module_eigengenes.csv",
+        "ventricle_soft_threshold.pdf"
+      ]
+    },
+    {
+      "name": "04_module_preservation.R",
+      "exit_code": 0,
+      "output_files": [
+        "module_preservation.RData",
+        "preservation_summary.csv",
+        "Sk_ref_Sm_test_preservation.csv",
+        "Sm_ref_Sk_test_preservation.csv"
+      ]
+    },
+    {
+      "name": "05_gene_set_overlap.R",
+      "exit_code": 0,
+      "output_files": [
+        "overlap_matrix.csv"
+      ]
+    },
+    {
+      "name": "06_go_kegg_enrichment.R",
+      "exit_code": 0,
+      "output_files": [
+        "enrichment_summary.csv",
+        "green_GO_BP.csv",
+        "green_GO_MF.csv",
+        "green_KEGG.csv"
+      ]
+    },
+    {
+      "name": "07_convergent_module_summary.R",
+      "exit_code": 0,
+      "output_files": [
+        "convergent_module_summary.csv"
+      ]
+    }
+  ],
+  "key_results": {
+    "all_sample_modules": "turquoise, yellow, brown, blue, green (power=4, 5000 genes)",
+    "atrium_modules": "4 modules (n=23)",
+    "ventricle_modules": "5 modules (n=48)",
+    "turquoise_trait_cor": "r=-0.955 with high_heart_rate",
+    "brown_trait_cor": "r=+0.80 with high_heart_rate",
+    "turquoise_preservation_Z": 16.9,
+    "brown_preservation_Z": 4.5,
+    "green_preservation_Z": 20.2,
+    "turquoise_overlap": "ventricle_shared_down DEG set",
+    "brown_overlap": "atrium_shared_up DEG set",
+    "convergent_modules": "turquoise + brown (satisfy all 3 criteria: high-rate correlation + Sk-Sm preservation + DEG overlap)",
+    "enrichment_green": "49 GO-BP, 15 GO-MF, 1 KEGG (cardiac muscle terms)",
+    "gene_universe": "4831 genes (top-5000 MAD filtered)"
+  },
+  "warnings": [
+    "Atrium n=23 is small for WGCNA, modules are exploratory",
+    "Preservation used nPermutations=50 (feasibility), raise to >=100 for publication",
+    "GO/KEGG found terms only in green module (large-module universe-size effect)"
+  ],
+  "failures": []
+}

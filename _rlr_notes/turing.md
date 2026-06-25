@@ -1,0 +1,37 @@
+# Turing (L7) - Execution Report
+
+## Approved plan: Strategy A+B (three-network WGCNA + module preservation + gene set overlap + enrichment)
+
+## Phase 1: All-sample network (DONE from round 1)
+- 71 samples, 5000 genes, power=4 unsigned, 5 modules + grey
+- module-trait correlations computed
+- hub genes computed
+- RData saved: results_wgcna_loop/all_sample/all_sample_network.RData
+
+## Phase 2: Atrium-only network (NEW)
+- 23 samples (8 Rn, 7 Sk, 8 Sm)
+- Reuse stepA_build_network.R with atrium subset
+- Expected risk: small sample size, may give fewer modules
+
+## Phase 3: Ventricle-only network (NEW)
+- 48 samples (16 Rn, 16 Sk, 16 Sm)
+- Reuse stepA_build_network.R with ventricle subset
+
+## Phase 4: Module preservation (NEW)
+- WGCNA modulePreservation() between Sk and Sm within each network
+- Report Zsummary and medianRank
+
+## Phase 5: Gene set overlap (NEW)
+- Fisher exact test: each WGCNA module vs each DEG gene set
+- Key sets: atrium_shared_up, atrium_shared_down, ventricle_shared_up, ventricle_shared_down
+- Report overlap p-value and fold enrichment
+
+## Phase 6: GO/KEGG enrichment (NEW)
+- clusterProfiler enrichGO per module (org.Mm.eg.db)
+- Report top 10 GO terms per module with FDR
+
+## SCRIPT HANDOFF TO CLAUDE CODE
+Due to environment file-creation limitations, R script execution should be handled by Claude Code.
+Existing scripts: D:/R-HK/yigene/scripts_wgcna_loop/stepA_build_network.R through stepD_heatmaps.R
+New scripts needed: 02_run_wgcna_atrium.R, 03_run_wgcna_ventricle.R, 04_module_preservation.R, 05_gene_set_overlap.R, 06_enrichment.R
+All scripts must follow: colnames(datExpr)=gene names, nThreads=1, no sink(), cor<-WGCNA::cor

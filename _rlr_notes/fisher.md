@@ -1,0 +1,41 @@
+# Fisher (L4) - Method Design
+
+## Candidate: Convergent co-expression modules in high heart-rate species
+
+## Strategy A: Three-network WGCNA + module preservation
+1. All-sample WGCNA (71 samples, 5000 genes) - DONE from round 1
+2. Atrium-only WGCNA (23 samples: 8 Rn, 7 Sk, 8 Sm)
+3. Ventricle-only WGCNA (48 samples: 16 Rn, 16 Sk, 16 Sm)
+4. Module preservation: WGCNA modulePreservation() Sk vs Sm
+5. Module-trait correlation with high_heart_rate, Sk_vs_Rn, Sm_vs_Rn, chamber
+6. Key output: modules correlating with high_heart_rate in both Sk+Sm, preserved between Sk+Sm, absent in Rn
+
+## Strategy B: All-sample WGCNA + gene set overlap
+1. All-sample WGCNA (done)
+2. Overlap WGCNA modules with DEG gene sets (atrium_shared, ventricle_shared)
+3. Fisher exact test for enrichment
+
+## Strategy C: Split-network WGCNA + cross-species eigengene comparison
+1. WGCNA separately on Sk-only and Sm-only samples
+2. Compare module eigengenes (Jaccard index)
+3. Check if shared modules absent in Rn
+
+## Recommended: Strategy A + B combined
+A gives network-level evidence. B gives DEG-level validation.
+C is powerful but Sk-only (23) and Sm-only (24) are small for WGCNA.
+
+## Scripts needed
+- 01_run_wgcna_all_sample.R (EXISTS from round 1)
+- 02_run_wgcna_atrium.R (NEW)
+- 03_run_wgcna_ventricle.R (NEW)
+- 04_module_preservation.R (NEW)
+- 05_gene_set_overlap.R (NEW)
+- 06_go_kegg_enrichment.R (NEW)
+
+## Key design decisions
+- Network type: unsigned (signed gives 0 modules at power=8)
+- Soft power: test 1-20, use auto + manual check
+- Variance filter: top 5000 MAD genes
+- minModuleSize=30, mergeCutHeight=0.25
+- For atrium-only: 23 samples is borderline for WGCNA
+- R 4.6.0, library D:/R-HK/Seurat5_lib, nThreads=1

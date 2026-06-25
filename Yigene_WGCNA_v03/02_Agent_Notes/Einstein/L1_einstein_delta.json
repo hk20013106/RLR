@@ -1,0 +1,48 @@
+{
+  "hypotheses": [
+    {
+      "id": "H1",
+      "text": "Sk and Sm share convergent atrial co-expression modules absent in Rn",
+      "testable": true,
+      "rationale": "Atrium n=23 is borderline but testable; 7 Sk atrial samples provide minimal power"
+    },
+    {
+      "id": "H2",
+      "text": "Sk and Sm share convergent ventricular co-expression modules absent in Rn",
+      "testable": true,
+      "rationale": "Ventricle n=48 is adequate for WGCNA; 16 Sk + 16 Sm ventricular samples"
+    },
+    {
+      "id": "H3",
+      "text": "Whole-heart convergent signature exists without chamber separation",
+      "testable": false,
+      "rationale": "Too broad without chamber separation; all-sample WGCNA already showed species-specific modules"
+    },
+    {
+      "id": "H4",
+      "text": "Shared modules are enriched for energy metabolism pathways",
+      "testable": true,
+      "rationale": "Requires GO/KEGG enrichment after module identification"
+    },
+    {
+      "id": "H5",
+      "text": "Shared modules are enriched for calcium handling genes",
+      "testable": true,
+      "rationale": "Cardiac contraction depends on calcium cycling; high heart rate demands rapid calcium turnover"
+    },
+    {
+      "id": "H6",
+      "text": "Shared modules are enriched for ECM/structural remodeling",
+      "testable": true,
+      "rationale": "Cardiac adaptation may involve structural remodeling of extracellular matrix"
+    },
+    {
+      "id": "H7",
+      "text": "NULL: no convergent module exists between Sk and Sm",
+      "testable": true,
+      "rationale": "Falsification baseline; testable via module preservation Z < 2"
+    }
+  ],
+  "key_uncertainty": "All-sample WGCNA (round 1) found species-specific modules (turquoise=species, yellow=Sm, brown=Sk) but could not test chamber-specific convergence. Atrium n=23 (7 Sk) is borderline for WGCNA module stability.",
+  "primary_hypothesis": "H2"
+}

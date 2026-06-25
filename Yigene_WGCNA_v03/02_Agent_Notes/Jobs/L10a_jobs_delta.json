@@ -1,0 +1,18 @@
+{
+  "value_assessment": "This study provides moderate evidence for convergent co-expression modules in two independently high-heart-rate species (bat and shrew). The dual-module finding (turquoise anti-correlated + brown positively correlated) is biologically coherent: one module suppressed, one activated in high-rate species. The green cardiac identity module adds depth. The work is manuscript-worthy as an exploratory convergence study.",
+  "headline": "Two convergent co-expression modules (turquoise + brown) identified in high-heart-rate bat and shrew hearts",
+  "publishable_now": [
+    "Cross-species module preservation analysis",
+    "Module-trait correlation with high_heart_rate",
+    "DEG set overlap (Fisher exact tests)",
+    "GO/KEGG enrichment in green module"
+  ],
+  "needs_more_work": [
+    "Raise preservation permutations to 200+",
+    "Run power sensitivity analysis (power=6,8)",
+    "Address species confound (add 4th species if available)",
+    "Signed network analysis to confirm unsigned results",
+    "Functional validation of hub genes"
+  ],
+  "manuscript_framing": "Frame as exploratory convergent evolution study. Emphasize the multi-criteria convergence approach (correlation + preservation + DEG overlap). Acknowledge 3-species limitation upfront. Highlight turquoise (energy/metabolism suppression) and brown (structural remodeling activation) as the convergent signal. Position green module as cardiac identity context, not convergence."
+}

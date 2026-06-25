@@ -1,0 +1,70 @@
+{
+  "strategies": [
+    {
+      "id": "A",
+      "name": "Three-network WGCNA + module preservation",
+      "steps": [
+        "All-sample WGCNA (done)",
+        "Atrium-only WGCNA (n=23)",
+        "Ventricle-only WGCNA (n=48)",
+        "Module preservation Sk<->Sm both directions"
+      ],
+      "samples": 71,
+      "status": "approved"
+    },
+    {
+      "id": "B",
+      "name": "Gene set overlap + enrichment",
+      "steps": [
+        "Fisher exact test module vs DEG sets",
+        "GO/KEGG enrichment per module"
+      ],
+      "samples": 71,
+      "status": "approved"
+    }
+  ],
+  "recommended": "A+B combined: three-network WGCNA + module preservation + gene set overlap + GO/KEGG enrichment",
+  "scripts_needed": [
+    {
+      "name": "02_run_wgcna_atrium.R",
+      "purpose": "Atrium-only WGCNA",
+      "status": "exists"
+    },
+    {
+      "name": "03_run_wgcna_ventricle.R",
+      "purpose": "Ventricle-only WGCNA",
+      "status": "exists"
+    },
+    {
+      "name": "04_module_preservation.R",
+      "purpose": "Sk<->Sm module preservation",
+      "status": "exists"
+    },
+    {
+      "name": "05_gene_set_overlap.R",
+      "purpose": "Fisher exact overlap",
+      "status": "exists"
+    },
+    {
+      "name": "06_go_kegg_enrichment.R",
+      "purpose": "GO/KEGG per module",
+      "status": "exists"
+    },
+    {
+      "name": "07_convergent_module_summary.R",
+      "purpose": "Summarize convergent modules",
+      "status": "exists"
+    }
+  ],
+  "key_decisions": [
+    "unsigned network",
+    "power=4 forced",
+    "maxBlockSize=6000",
+    "minModuleSize=30",
+    "mergeCutHeight=0.25",
+    "nThreads=1",
+    "top-5000 MAD genes",
+    "cor=WGCNA::cor",
+    "no sink()"
+  ]
+}
