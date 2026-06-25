@@ -41,6 +41,10 @@ from pathlib import Path
 
 __version__ = "0.3.0"
 
+
+class RLRError(Exception):
+    """Recoverable, user-facing error: printed cleanly by main(), no traceback."""
+
 # --- personas ---------------------------------------------------------------
 
 AGENTS = ["Linnaeus", "Einstein", "Feynman", "Oppenheimer", "Fisher",
@@ -65,6 +69,30 @@ VALID_STATUSES = [
     "NEEDS_EXECUTION", "EXECUTED", "UNDER_REVIEW",
     "KEEP", "REVISE", "DOWNGRADE", "DROP", "ARCHIVED",
 ]
+
+# Legal status transitions for the generic `decision` command. triage-idea,
+# triage-method and execution-gate use their own commands and are NOT gated by
+# this table. A same-status decision (logging only) and a transition to
+# ARCHIVED are always allowed; any other transition not listed here requires
+# `decision --force` (so KEEP-from-NEW and similar jumps fail by default while
+# manual recovery stays possible).
+DECISION_TRANSITIONS = {
+    "NEW": {"IDEA_PROPOSED"},
+    "IDEA_PROPOSED": {"IDEA_SELECTED", "IDEA_REJECTED"},
+    "IDEA_SELECTED": {"METHOD_PROPOSED"},
+    "IDEA_REJECTED": {"DROP"},
+    "METHOD_PROPOSED": {"METHOD_APPROVED", "METHOD_REJECTED"},
+    "METHOD_REJECTED": {"IDEA_SELECTED", "METHOD_PROPOSED"},
+    "METHOD_APPROVED": {"NEEDS_EXECUTION"},
+    "NEEDS_EXECUTION": {"EXECUTED"},
+    "EXECUTED": {"UNDER_REVIEW"},
+    "UNDER_REVIEW": {"KEEP", "REVISE", "DOWNGRADE", "DROP"},
+    "REVISE": {"IDEA_PROPOSED", "METHOD_PROPOSED", "NEEDS_EXECUTION", "UNDER_REVIEW"},
+    "DOWNGRADE": {"DROP"},
+    "KEEP": set(),
+    "DROP": set(),
+    "ARCHIVED": set(),
+}
 
 # --- DAG topology (14 nodes, L9a/L9b parallel) ------------------------------
 # Each node: (node_id, persona, layer, status_before, status_after_optional,
@@ -435,6 +463,14 @@ def _save_yaml_front(path, frontmatter):
 
 def _replace_field(path, key, value):
     text = path.read_text(encoding="utf-8")
+    # Fail loud if the file has no YAML frontmatter: otherwise neither the regex
+    # nor the "---\n" fallback below matches, and the field update is silently
+    # dropped (the candidate keeps a stale status with no error). A missing
+    # frontmatter means the file is corrupted -- surface it.
+    if not text.startswith("---") or text.find("\n---", 4) < 0:
+        raise RLRError(
+            f"{path}: missing YAML frontmatter delimiters; refusing to update "
+            f"'{key}' (file may be corrupted or truncated)")
     pat = re.compile(rf"^{re.escape(key)}: .*$", re.M)
     new = f"{key}: {_yaml_value(value)}"
     if pat.search(text):
@@ -1273,6 +1309,20 @@ def cmd_decision(args):
         return 2
     fm = _load_yaml_front(cf)
     frm = fm.get("current_status", "NEW")
+    # Ordering guard: reject illegal jumps (e.g. KEEP from NEW) unless --force.
+    # Same-status logging and -> ARCHIVED are always allowed.
+    legal = (args.status == frm
+             or args.status == "ARCHIVED"
+             or args.status in DECISION_TRANSITIONS.get(frm, set()))
+    if not legal and not args.force:
+        allowed = sorted(DECISION_TRANSITIONS.get(frm, set())) or ["(none)"]
+        print(f"ERROR: illegal transition {frm} -> {args.status}. "
+              f"Allowed from {frm}: {', '.join(allowed)} (plus same-status / "
+              f"ARCHIVED). Use --force to override.", file=sys.stderr)
+        return 1
+    if not legal and args.force:
+        print(f"WARNING: forced illegal transition {frm} -> {args.status}",
+              file=sys.stderr)
     seq = _append_decision(project_dir, args.cand_id, frm, args.status,
                            args.reason, args.route or "", agent="Oppenheimer",
                            kind="decision")
@@ -2097,6 +2147,8 @@ def build_parser():
     sp.add_argument("--status", required=True, choices=VALID_STATUSES)
     sp.add_argument("--reason", required=True)
     sp.add_argument("--route", help="next owner persona")
+    sp.add_argument("--force", action="store_true",
+                    help="override the legal-transition guard (manual recovery)")
     sp.set_defaults(func=cmd_decision)
 
     # aggregate-report
@@ -2126,7 +2178,11 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except RLRError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -26,8 +26,8 @@ Environment confirmed: Python 3.13.12, Windows 11. `py_compile` clean,
 | 2 | **P2** | `cmd_emit_delta` validator | **FIXED** | Schema fields declared as list/dict *literals* (`[{...}]`, `{...}`) were never type-checked. A scalar where a list is expected passed validation **and then crashed `aggregate-report`**. |
 | 3 | **P2** | `cmd_aggregate_report` / `_format_delta_body` | **FIXED** | `FINAL_REPORT_CN.md` translated only section *titles*; all field labels stayed English (handoff Bug 3). |
 | 4 | **P3** | `cmd_assemble_context` | **FIXED** | A delta file that exists but is invalid JSON was reported as `(not yet emitted)`; also removed dead code. |
-| 5 | P3 | `cmd_decision` | DOCUMENTED | `decision` performs no ordering guard (e.g. `--status KEEP` from `NEW` succeeds). See §5. |
-| 6 | P3 | `_replace_field` | DOCUMENTED | On a file with **no** frontmatter delimiters, the field update silently no-ops. Latent only; did not cause the WGCNA 0-byte (see §4 Bug 2). |
+| 5 | P3 | `cmd_decision` | **FIXED** | `decision` had no ordering guard (e.g. `--status KEEP` from `NEW` succeeded). Added `DECISION_TRANSITIONS` legal-transition table: illegal jumps now rejected unless `--force`. |
+| 6 | P3 | `_replace_field` | **FIXED** | On a file with **no** frontmatter delimiters, the field update silently no-opped. Now raises `RLRError` (clean fail-loud, no traceback), leaving the file untouched. |
 | — | — | `_next_seq` (handoff Bug 4) | **NOT A BUG** | Verified correct: D0001..D0009 with no collision; non-`D` log files ignored. |
 | — | — | `_replace_field` (handoff Bug 2) | **NOT A BUG** | 20× stress test with special chars: perfect round-trip, never 0 bytes. The WGCNA 0-byte was an external overwrite, not this function. |
 
@@ -118,9 +118,10 @@ NEW ──decision──▶ IDEA_PROPOSED ──triage-idea(select)──▶ IDE
   `execution-gate` (which independently re-checks `skill_use_plan.md` +
   `input_manifest.md` + `METHOD_APPROVED`). These three gates cannot be skipped
   *if the DAG is driven by `next-step`*.
-- **Caveat:** the generic `decision` command can set any status from any status
-  (no guard), so the gates are advisory, not enforced, against a hand-typed
-  `decision`. See §5.
+- **Guard (fixed, finding #5):** the generic `decision` command now enforces a
+  `DECISION_TRANSITIONS` legal-transition table — illegal jumps (e.g. `KEEP`
+  from `NEW`) are rejected unless `--force` is passed for manual recovery.
+  Same-status logging and `-> ARCHIVED` remain always allowed.
 - `EXECUTED` is reachable (after fix) only by `decision` following Turing; there
   is no dedicated `mark-executed` command — `next-step` now advertises this
   transition explicitly so the operator isn't stuck.
@@ -140,8 +141,8 @@ sequential `_replace_field` calls with values containing `:`, `"`, `\`, `%`,
 `#`, `[]`, `{}`, `|`, trailing space, and Unicode all round-tripped exactly and
 never produced a 0-byte file. The `_yaml_value` quoting/escaping is sound. The
 WGCNA 0-byte was almost certainly an external `Set-Content`/`apply_patch`
-overwrite. (Latent edge documented as finding #6: a file already missing its
-`---` frontmatter silently won't receive new fields.)
+overwrite. (Latent edge fixed as finding #6: a file already missing its `---`
+frontmatter now raises `RLRError` instead of silently dropping the update.)
 
 **Bug 3 (CN translations)** — fixed; see §1/#3.
 
@@ -153,11 +154,6 @@ returns 1 on an empty dir.
 
 ## 5. Accepted-by-Design / Recommendations (not changed)
 
-- **`decision` has no ordering guard (finding #5).** Left as-is: `decision` is
-  the deliberate Oppenheimer manual-override tool, and the architecture names
-  Oppenheimer the sole status authority. Enforcing transitions here would break
-  legitimate manual recovery. If stricter enforcement is wanted, add an opt-in
-  `--force` and otherwise validate `from→to` against an allowed-transition map.
 - **emit-delta nested validation depth.** The fix now enforces the *container*
   type (list/dict). It still does not validate the *shape of objects inside*
   lists (e.g. that each hypothesis has `id`/`text`). This is acceptable (extra
