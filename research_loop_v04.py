@@ -218,7 +218,7 @@ DAG_NODES = [
         "node": "L10a", "persona": "Jobs", "layer": 10,
         "status_before": "UNDER_REVIEW", "advance_command": "decision",
         "advance_status": "UNDER_REVIEW", "advance_reason": "Jobs value assessment complete",
-        "context_inputs": ["candidate_frontmatter", "L8", "L9a", "L9b"],
+        "context_inputs": ["candidate_frontmatter", "L8", "L8.5", "L9a", "L9b"],
         "is_parallel": False, "is_execution": False,
         "action_hint": "Assess value, frame manuscript direction",
         "agent_type": "default",
@@ -227,7 +227,7 @@ DAG_NODES = [
         "node": "L10b", "persona": "Oppenheimer", "layer": 10,
         "status_before": "UNDER_REVIEW", "advance_command": "decision",
         "advance_status": "KEEP", "advance_reason": "",
-        "context_inputs": ["L10a", "L8", "L9a", "L9b"],
+        "context_inputs": ["L10a", "L8", "L8.5", "L9a", "L9b"],
         "is_parallel": False, "is_execution": False,
         "action_hint": "Final decision: KEEP / REVISE / DOWNGRADE / DROP",
         "agent_type": "default",
@@ -270,6 +270,15 @@ PRE_RESEARCH_MAP = {
                "ECM extracellular matrix score gene set R",
                "WGCNA signed network soft threshold power R",
            ]},
+    "L8.5": {"type": "literature_verification", "skill": "academic-research-suite",
+             "description": "Search PubMed/EuropePMC for papers that CONFIRM or "
+                            "CONTRADICT the actual L7/L8 findings (grounded in the "
+                            "real results, not just the question)",
+             "queries": [
+                 "<gene/module from L7 key_results> cardiac expression",
+                 "<phenotype from candidate> convergent evolution heart",
+                 "<method from L6/L7> validation cross-species",
+             ]},
 }
 
 NODE_MAP = {n["node"]: n for n in DAG_NODES}
@@ -1496,6 +1505,50 @@ Format:
 
 ## Gap: What We Must Write Ourselves
 - gap 1 (why no existing tool fits)
+
+This summary will be injected into the {node} assemble-context as additional input.
+"""
+    elif research_type == "literature_verification":
+        # Ground the search in the ACTUAL L7/L8 findings, not just the question,
+        # so L8.5 verifies real results against published literature.
+        def _ld(key):
+            p = _delta_file(project_dir, key)
+            if p and p.exists():
+                try:
+                    return json.loads(p.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    return None
+            return None
+        l7 = _ld("L7_turing") or {}
+        l8 = _ld("L8_curie") or {}
+        findings = json.dumps({"L7_key_results": l7.get("key_results"),
+                               "L8_evidence_level": l8.get("evidence_level"),
+                               "L8_evidence_verified": l8.get("evidence_verified")},
+                              ensure_ascii=False, indent=2)
+        prompt = f"""# Pre-Research: Literature Verification (before {node})
+
+You MUST run this BEFORE generating the {node} delta.
+
+{grounding}
+## Actual results to verify (from L7 execution + L8 audit)
+{findings}
+
+Use the academic-research-suite skill to search PubMed/EuropePMC for papers that
+CONFIRM or CONTRADICT these SPECIFIC findings (use concrete entities: the genes,
+modules, phenotypes, and methods above). Add each paper to the literature DB.
+Seed queries (adapt to the actual results above):
+"""
+        for i, q in enumerate(queries, 1):
+            prompt += f"{i}. {q}\n"
+        prompt += f"""
+Write a structured summary to: {output_file}
+
+Format:
+## Papers Found (verifying actual results)
+- PMID, title -- confirms / contradicts / extends WHICH finding above
+
+## Verdict
+- Does the published literature support the L7/L8 findings? Any contradictions?
 
 This summary will be injected into the {node} assemble-context as additional input.
 """
