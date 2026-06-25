@@ -53,39 +53,39 @@ RLR 是一个**科学研究的自动化审查框架**。它把一个研究问题
 一个研究问题从 L0 走到 L10c，经过 15 个节点。每个节点由一个角色执行，只看该看的东西。
 
 ```
-L0  Linnaeus     预检 + 依赖门禁（缺依赖则停止）
+L0  林奈         预检 + 依赖门禁（缺依赖则停止）
        │
-L1  Einstein     提出假设（前面先做深度文献检索）
+L1  爱因斯坦     提出假设（前面先做深度文献检索）
        │
-L2  Feynman      盲审攻击 L1 的假设
+L2  费曼         盲审攻击 L1 的假设
        │
-L3  Oppenheimer  裁决：选出可测试的假设
+L3  奥本海默     裁决：选出可测试的假设
        │
-L4  Fisher       设计方法（前面先做方法论文综述）
+L4  费舍尔       设计方法（前面先做方法论文综述）
        │
-L5  Tukey        审查方法设计
+L5  图基         审查方法设计
        │
-L6  Oppenheimer  批准分析方案
+L6  奥本海默     批准分析方案
        │
-L7  Turing       执行脚本（前面先做代码搜索）
+L7  图灵         执行脚本（前面先做代码搜索）
        │
-L8  Curie        审计结果，验证可重复性
+L8  居里         审计结果，验证可重复性
        │
-L8.5 Curie       文献验证：拿实际结果去查 PubMed
+L8.5 居里        文献验证：拿实际结果去查 PubMed
        │
-L9a Feynman ╮    并行（互相不可见）
-L9b Darwin  ╰──→  证伪 / 生物学解读
+L9a 费曼 ╮       并行（互相不可见）
+L9b 达尔文 ╰──→  证伪 / 生物学解读
        │
-L10a Jobs        价值评估，规划论文方向
+L10a 乔布斯      价值评估，规划论文方向
        │
-L10b Oppenheimer 终审：KEEP / REVISE / DOWNGRADE / DROP
+L10b 奥本海默    终审：KEEP / REVISE / DOWNGRADE / DROP
        │
-L10c Linnaeus    聚合所有 delta，生成最终报告
+L10c 林奈        聚合所有 delta，生成最终报告
 ```
 
 ### 隔离机制：为什么需要，怎么实现
 
-**问题**：如果 AI 同时扮演假设提出者（Einstein）和假设批判者（Feynman），它会倾向于不攻击自己刚写的东西。这不是 AI 的"性格"问题，而是**信息泄露**——批判者看到了提出者的推理过程，所以它的"批判"本质上是自我辩护的延伸。
+**问题**：如果 AI 同时扮演假设提出者（爱因斯坦）和假设批判者（费曼），它会倾向于不攻击自己刚写的东西。这不是 AI 的"性格"问题，而是**信息泄露**——批判者看到了提出者的推理过程，所以它的"批判"本质上是自我辩护的延伸。
 
 **解决方法**：物理隔离。每个角色只能看到 DAG 允许它看的输入，看不到其他任何东西。代码里通过两种路径实现：
 
@@ -94,8 +94,8 @@ L10c Linnaeus    聚合所有 delta，生成最终报告
 控制器调用 `assemble-context`，把该节点允许看到的 delta 内容拼成一段纯文本，嵌入 `spawn_agent` 的 message。角色只看到这段文本，没有文件系统访问权限，看不到其他节点的 delta。
 
 ```
-Einstein 只看到：candidate frontmatter + L0 delta
-Feynman  只看到：candidate frontmatter + L1 delta（Einstein 的假设）
+爱因斯坦 只看到：candidate frontmatter + L0 delta
+费曼     只看到：candidate frontmatter + L1 delta（爱因斯坦的假设）
                     —— 他不知道 Einstein 的推理过程，只看到结论
 Oppenheimer 看到：L1 + L2（假设 + 攻击），做裁决
 ```
