@@ -193,6 +193,16 @@ def advance(project, cand, step):
         _ctl("execution-gate", project, cand)
     elif ac == "aggregate-report":
         _ctl("aggregate-report", project, cand)
+    # sync human-readable output to Obsidian
+    sync_script = HERE / "sync_to_obsidian.py"
+    if sync_script.exists():
+        _ctl_sync = subprocess.run([sys.executable, str(sync_script), project, "--cand", cand], capture_output=True, text=True)
+        if _ctl_sync.returncode == 0:
+            log("Obsidian sync complete")
+        else:
+            log(f"Obsidian sync warning: {_ctl_sync.stdout.strip()}")
+    else:
+        log("sync_to_obsidian.py not found; skipping Obsidian sync")
 
 
 def provider_for(node, cfg, args):
@@ -321,6 +331,18 @@ def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
             return "stopped_after_node"
         if node == "L10c":
             _ctl("aggregate-report", project, cand)
+            # sync human-readable output to Obsidian
+            sync_script = HERE / "sync_to_obsidian.py"
+            if sync_script.exists():
+                _ctl_sync = subprocess.run(
+                    [sys.executable, str(sync_script), project, "--cand", cand],
+                    capture_output=True, text=True)
+                if _ctl_sync.returncode == 0:
+                    log("Obsidian sync complete")
+                else:
+                    log("Obsidian sync warning: " + _ctl_sync.stdout.strip())
+            else:
+                log("sync_to_obsidian.py not found; skipping Obsidian sync")
             log("L10c: aggregate-report generated FINAL_REPORT")
             return "completed"
         if node == "L7":
@@ -701,3 +723,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     sys.exit(main())
+
