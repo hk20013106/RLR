@@ -889,6 +889,24 @@ def cmd_next_step(args):
         "template_path": f"templates/v03_layers/{node_id}.md",
         "persona_template_path": f"templates/v03_personas/{node_info['persona']}.md",
     }
+    # L7 is reused under both METHOD_APPROVED and NEEDS_EXECUTION. Its DAG
+    # advance_command (execution-gate) only applies at METHOD_APPROVED -- that
+    # gate is what opens NEEDS_EXECUTION. Once the gate is open, Turing runs
+    # and emits the L7 delta, after which the candidate must advance to
+    # EXECUTED via `decision`. Without this override next-step would keep
+    # returning L7/execution-gate and the walk would dead-end before L8.
+    if status == "NEEDS_EXECUTION" and node_id == "L7":
+        l7 = _delta_file(project_dir, "L7_turing")
+        delta_done = bool(l7 and l7.exists())
+        result["advance_command"] = "decision"
+        result["advance_status"] = "EXECUTED"
+        result["advance_reason"] = ("Turing execution complete, mark EXECUTED "
+                                    "and route to Curie")
+        result["action_hint"] = (
+            "L7 delta present; advance to EXECUTED (route to Curie)"
+            if delta_done else
+            "Turing: execute approved scripts in the controlled workspace, "
+            "emit the L7 delta, then advance to EXECUTED")
     print(json.dumps(result, indent=2))
     return 0
 
@@ -937,12 +955,11 @@ def cmd_assemble_context(args):
                         sections.append(f"=== DELTA: {delta_key} (parse error) ===")
                         sections.append("")
         else:
-            # Delta reference (e.g. "L0", "L1", "L9a")
-            # Map short node id to delta key
-            persona_name = node_info["persona"]
-            delta_key = f"{inp}_{persona_name.lower()}"
-            # Try to find the delta file by scanning persona dirs
+            # Delta reference (e.g. "L0", "L1", "L9a"): scan for the delta
+            # whose key matches this node id (e.g. "L1" -> "L1_einstein") and
+            # embed it as text.
             found = False
+            corrupt = False
             for dk in DELTA_DAG_ORDER:
                 if dk.startswith(inp + "_"):
                     df = _delta_file(project_dir, dk)
@@ -955,8 +972,12 @@ def cmd_assemble_context(args):
                             sections.append("")
                             found = True
                         except json.JSONDecodeError:
-                            pass
-            if not found:
+                            # File exists but is unreadable -- surface it as an
+                            # error rather than silently reporting "not emitted".
+                            sections.append(f"=== DELTA: {dk} (parse error) ===")
+                            sections.append("")
+                            corrupt = True
+            if not found and not corrupt:
                 sections.append(f"=== DELTA: {inp} (not yet emitted) ===")
                 sections.append("")
 
@@ -989,21 +1010,30 @@ def cmd_emit_delta(args):
         print(f"ERROR: invalid JSON: {e}", file=sys.stderr)
         return 2
 
-    # Structural validation
+    # Structural validation. A schema value may be a bare type (list/dict/str/
+    # bool/int) OR a literal container declaring shape: [{...}] means "list of
+    # objects", {...} means "object". Both forms must enforce the container
+    # type -- otherwise a scalar supplied where a list/dict is expected slips
+    # through here and later crashes aggregate-report (_format_delta_body
+    # iterating a str and calling .get on each char).
     errors = []
     for key, expected_type in schema.items():
         if key not in data:
             errors.append(f"missing required key: {key}")
-        elif expected_type is list and not isinstance(data[key], list):
-            errors.append(f"{key}: expected list, got {type(data[key]).__name__}")
-        elif expected_type is dict and not isinstance(data[key], dict):
-            errors.append(f"{key}: expected dict, got {type(data[key]).__name__}")
-        elif expected_type is str and not isinstance(data[key], str):
-            errors.append(f"{key}: expected str, got {type(data[key]).__name__}")
-        elif expected_type is bool and not isinstance(data[key], bool):
-            errors.append(f"{key}: expected bool, got {type(data[key]).__name__}")
-        elif expected_type is int and not isinstance(data[key], int):
-            errors.append(f"{key}: expected int, got {type(data[key]).__name__}")
+            continue
+        val = data[key]
+        if expected_type is list or isinstance(expected_type, list):
+            if not isinstance(val, list):
+                errors.append(f"{key}: expected list, got {type(val).__name__}")
+        elif expected_type is dict or isinstance(expected_type, dict):
+            if not isinstance(val, dict):
+                errors.append(f"{key}: expected dict, got {type(val).__name__}")
+        elif expected_type is str and not isinstance(val, str):
+            errors.append(f"{key}: expected str, got {type(val).__name__}")
+        elif expected_type is bool and not isinstance(val, bool):
+            errors.append(f"{key}: expected bool, got {type(val).__name__}")
+        elif expected_type is int and not isinstance(val, int):
+            errors.append(f"{key}: expected int, got {type(val).__name__}")
 
     # Check for extra keys
     extra = set(data.keys()) - set(schema.keys())
@@ -1548,6 +1578,76 @@ SECTION_TITLES_CN = {
     "L10b_oppenheimer": "L10b - \u6700\u7ec8\u51b3\u7b56 (Oppenheimer)",
 }
 
+# EN -> CN translations for the field labels emitted by _format_delta_body.
+# Applied to each delta body when building FINAL_REPORT_CN.md (Bug 3 fix:
+# previously only section TITLES were translated, leaving the body labels in
+# English). Ordered longest-first via the list so a short label (e.g.
+# "**Reason:**") never partially clobbers a longer one.
+DELTA_LABELS_CN = [
+    ("**Skills found:**", "**\u53d1\u73b0\u7684\u6280\u80fd\uff1a**"),
+    ("**Skills gaps:**", "**\u6280\u80fd\u7f3a\u53e3\uff1a**"),
+    ("**Input verified:**", "**\u8f93\u5165\u6821\u9a8c\uff1a**"),
+    ("**Environment:**", "**\u73af\u5883\uff1a**"),
+    ("**Skill use plan:**", "**\u6280\u80fd\u4f7f\u7528\u8ba1\u5212\uff1a**"),
+    ("**Forbidden shortcuts:**", "**\u7981\u6b62\u7684\u6377\u5f84\uff1a**"),
+    ("**Primary hypothesis:**", "**\u4e3b\u5047\u8bf4\uff1a**"),
+    ("**Key uncertainty:**", "**\u5173\u952e\u4e0d\u786e\u5b9a\u6027\uff1a**"),
+    ("**Confounders:**", "**\u6df7\u6742\u56e0\u7d20\uff1a**"),
+    ("**Diagnostic tests:**", "**\u8bca\u65ad\u6027\u68c0\u9a8c\uff1a**"),
+    ("**Verdict:**", "**\u88c1\u51b3\uff1a**"),
+    ("**Selected:**", "**\u5df2\u9009\u4e2d\uff1a**"),
+    ("**Rejected:**", "**\u5df2\u5426\u51b3\uff1a**"),
+    ("**Route to:**", "**\u8def\u7531\u81f3\uff1a**"),
+    ("**Recommended:**", "**\u63a8\u8350\u65b9\u6848\uff1a**"),
+    ("**Scripts needed:**", "**\u6240\u9700\u811a\u672c\uff1a**"),
+    ("**Key decisions:**", "**\u5173\u952e\u51b3\u7b56\uff1a**"),
+    ("**QC checkpoints:**", "**\u8d28\u63a7\u68c0\u67e5\u70b9\uff1a**"),
+    ("**Failure stop rules:**", "**\u5931\u8d25\u505c\u6b62\u89c4\u5219\uff1a**"),
+    ("**Approved strategy:**", "**\u6279\u51c6\u7684\u7b56\u7565\uff1a**"),
+    ("**Modifications:**", "**\u4fee\u6539\u9879\uff1a**"),
+    ("**Analysis plan:**", "**\u5206\u6790\u8ba1\u5212\uff1a**"),
+    ("**Key results:**", "**\u5173\u952e\u7ed3\u679c\uff1a**"),
+    ("**Warnings:**", "**\u8b66\u544a\uff1a**"),
+    ("**Failures:**", "**\u5931\u8d25\uff1a**"),
+    ("**Evidence level:**", "**\u8bc1\u636e\u7ea7\u522b\uff1a**"),
+    ("**Caveats:**", "**\u6ce8\u610f\u4e8b\u9879\uff1a**"),
+    ("**Survives:**", "**\u901a\u8fc7\u9879\uff1a**"),
+    ("**Falsified:**", "**\u88ab\u8bc1\u4f2a\u9879\uff1a**"),
+    ("**Convergent evolution:**", "**\u8d8b\u540c\u8fdb\u5316\uff1a**"),
+    ("**Limitations:**", "**\u5c40\u9650\u6027\uff1a**"),
+    ("**Value assessment:**", "**\u4ef7\u503c\u8bc4\u4f30\uff1a**"),
+    ("**Headline:**", "**\u6838\u5fc3\u7ed3\u8bba\uff1a**"),
+    ("**Publishable now:**", "**\u5f53\u524d\u53ef\u53d1\u8868\uff1a**"),
+    ("**Needs more work:**", "**\u4ecd\u9700\u5de5\u4f5c\uff1a**"),
+    ("**Manuscript framing:**", "**\u8bba\u6587\u6846\u67b6\uff1a**"),
+    ("**Decision:**", "**\u51b3\u5b9a\uff1a**"),
+    ("**Next steps:**", "**\u540e\u7eed\u6b65\u9aa4\uff1a**"),
+    ("**Reason:**", "**\u7406\u7531\uff1a**"),
+    # indented bullet sub-labels
+    ("- Rationale:", "- \u63a8\u7406\uff1a"),
+    ("- Output files:", "- \u8f93\u51fa\u6587\u4ef6\uff1a"),
+    ("- Scripts:", "- \u811a\u672c\uff1a"),
+    ("- Parameters:", "- \u53c2\u6570\uff1a"),
+    ("- Outputs:", "- \u8f93\u51fa\uff1a"),
+    ("- Steps:", "- \u6b65\u9aa4\uff1a"),
+    ("- Genes:", "- \u57fa\u56e0\uff1a"),
+    ("- Evidence:", "- \u8bc1\u636e\uff1a"),
+    # inline key=value tokens
+    ("testable=", "\u53ef\u68c0\u9a8c="),
+    ("resolvable=", "\u53ef\u89e3\u51b3="),
+    ("samples=", "\u6837\u672c\u6570="),
+    ("status=", "\u72b6\u6001="),
+    ("exit=", "\u9000\u51fa\u7801="),
+    ("_none_", "_\u65e0_"),
+]
+
+
+def _translate_delta_body_cn(text):
+    """Translate _format_delta_body output labels into Chinese (Bug 3 fix)."""
+    for en, cn in DELTA_LABELS_CN:
+        text = text.replace(en, cn)
+    return text
+
 
 def _format_delta_body(delta_key, delta):
     """Format a delta dict as markdown content (language-agnostic)."""
@@ -1722,7 +1822,8 @@ def cmd_aggregate_report(args):
     for delta_key in DELTA_DAG_ORDER:
         title_cn = SECTION_TITLES_CN.get(delta_key, delta_key)
         cn.append(f"## {title_cn}\n")
-        cn.append(_format_delta_body(delta_key, deltas.get(delta_key)))
+        cn.append(_translate_delta_body_cn(
+            _format_delta_body(delta_key, deltas.get(delta_key))))
         cn.append("")
 
     cn.append("---\n")
