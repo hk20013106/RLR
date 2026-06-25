@@ -283,18 +283,36 @@ PRE_RESEARCH_MAP = {
 
 NODE_MAP = {n["node"]: n for n in DAG_NODES}
 
+# Per-node access to the external KNOWLEDGE BASE (09_Literature_Database/).
+# Declared explicitly (not derivable -- it is a policy choice):
+#   - read-write: the literature SEARCHERS (they find + add papers).
+#   - read:       L0 (catalogs/declares the KB) + the review/decision/report nodes
+#                 (L9/L10) that CONSULT accumulated literature to falsify/interpret/
+#                 value/decide/report. They cite existing entries; they do NOT add.
+#   - none:       everyone else -- they get literature only via embedded deltas
+#                 (pre-research summaries + the L8.5 papers), never direct DB access.
+KNOWLEDGE_BASE_ACCESS = {
+    "L1": "read-write", "L4": "read-write", "L8.5": "read-write",
+    "L0": "read",
+    "L9a": "read", "L9b": "read",
+    "L10a": "read", "L10b": "read", "L10c": "read",
+}
+
 # Attach the declared info-flow policy to each node (surfaced by next-step and
 # the assemble-context manifest; ENFORCEMENT is the orchestrator's job, not the
-# script's). Both are derived so they cannot drift from the DAG:
+# script's). Derived where possible so they cannot drift from the DAG:
 #   - tools_policy: only the execution node (Turing/L7) gets filesystem access,
 #     and only inside its workspace ("workspace-fs"); every cognitive node is
 #     "no-fs" (its entire input is the embedded context text).
 #   - everos_read_scopes: mirror the node's context_inputs so EverOS routing can
 #     never grant a node a memory channel the delta DAG doesn't already grant.
 #     "<id>" is substituted with the project id when a manifest is built.
+#   - knowledge_base: per the explicit KNOWLEDGE_BASE_ACCESS policy above.
 for _n in DAG_NODES:
     _n.setdefault("tools_policy",
                   "workspace-fs" if _n.get("is_execution") else "no-fs")
+    _n.setdefault("knowledge_base",
+                  KNOWLEDGE_BASE_ACCESS.get(_n["node"], "none"))
     if "everos_read_scopes" not in _n:
         _scopes = ["global_methods", "projects/<id>/public"]
         for _inp in _n["context_inputs"]:
@@ -550,6 +568,43 @@ def _check_dependencies(project_dir=None):
         d["present"] = _dep_present(d)
         (ok if d["present"] else missing).append(d)
     return ok, missing
+
+
+def _knowledge_base_md(name):
+    """L0 declares the external knowledge base exists + the per-node access policy."""
+    rows = "\n".join(f"| {n['node']:5} | {n['persona']:11} | {n.get('knowledge_base','none')} |"
+                     for n in DAG_NODES)
+    return f"""---
+project_name: {_yaml_value(name)}
+preflight_file: knowledge_base.md
+owner: Linnaeus
+created_at: {_yaml_value(_now())}
+---
+
+# External Knowledge Base -- {name}  (declared at L0)
+
+This project has a **growable literature database** at `09_Literature_Database/`
+(managed by `manage_literature_db.py`; papers are cited via Obsidian wikilinks
+`[[09_Literature_Database/<citekey>|Title]]` and reused across rounds).
+
+## Per-node access policy (HARD rule)
+
+The `knowledge_base` permission is declared per node, surfaced in the
+`assemble-context` isolation directive, and recorded in every context manifest
+(audit). The orchestrator enforces it.
+
+- **read-write** -- may search literature AND add papers (`manage_literature_db.py add`).
+- **read** -- may READ the DB to cite existing papers; may NOT add.
+- **none** -- NO direct DB access; gets literature only via embedded deltas
+  (pre-research summaries + the L8.5 papers delta), never by touching the DB.
+
+| node  | persona     | knowledge_base |
+|-------|-------------|----------------|
+{rows}
+
+Rule: only the literature SEARCHERS (L1 / L4 / L8.5) may write; L0 and the
+review/decision/report nodes (L9 / L10) may read; all other nodes have none.
+"""
 
 
 def _dependencies_md(name):
@@ -1216,6 +1271,7 @@ def cmd_next_step(args):
                     "persona_template_path": _persona_template_path(node_info["persona"]),
                     "tools_policy": node_info.get("tools_policy"),
                     "everos_read_scopes": _everos_scopes_for(node_info, project_dir.name),
+                    "knowledge_base": node_info.get("knowledge_base"),
                 }
                 print(json.dumps(result, indent=2))
                 return 0
@@ -1274,6 +1330,7 @@ def cmd_next_step(args):
                 "persona_template_path": _persona_template_path(ni["persona"]),
                 "tools_policy": ni.get("tools_policy"),
                 "everos_read_scopes": _everos_scopes_for(ni, project_dir.name),
+                "knowledge_base": ni.get("knowledge_base"),
             })
         result = {
             "is_parallel": True,
@@ -1297,6 +1354,7 @@ def cmd_next_step(args):
         "persona_template_path": _persona_template_path(node_info["persona"]),
         "tools_policy": node_info.get("tools_policy"),
         "everos_read_scopes": _everos_scopes_for(node_info, project_dir.name),
+        "knowledge_base": node_info.get("knowledge_base"),
     }
     # L7 is reused under both METHOD_APPROVED and NEEDS_EXECUTION. Its DAG
     # advance_command (execution-gate) only applies at METHOD_APPROVED -- that
@@ -1533,9 +1591,16 @@ You MUST run this BEFORE generating the {node} delta.
 ## Actual results to verify (from L7 execution + L8 audit)
 {findings}
 
-Use the academic-research-suite skill to search PubMed/EuropePMC for papers that
-CONFIRM or CONTRADICT these SPECIFIC findings (use concrete entities: the genes,
-modules, phenotypes, and methods above). Add each paper to the literature DB.
+Knowledge base (your access for L8.5 is read-write):
+1. First, scan `{project_dir.as_posix()}/09_Literature_Database` (if it exists) to
+   reuse papers already reviewed in previous rounds.
+2. Use the academic-research-suite skill to search PubMed/EuropePMC for papers that
+   CONFIRM or CONTRADICT these SPECIFIC findings (concrete entities: the genes,
+   modules, phenotypes, methods above).
+3. For every new paper you select, you MUST add it to the database:
+   `python manage_literature_db.py add {project_dir.as_posix()} --round {round_id} --json-data "<JSON_STRING>"`
+4. Cite papers via Obsidian wikilinks `[[09_Literature_Database/<citekey>|Title]]`.
+
 Seed queries (adapt to the actual results above):
 """
         for i, q in enumerate(queries, 1):
@@ -1545,7 +1610,7 @@ Write a structured summary to: {output_file}
 
 Format:
 ## Papers Found (verifying actual results)
-- PMID, title -- confirms / contradicts / extends WHICH finding above
+- [[09_Literature_Database/<citekey>|Title]] (PMID) -- confirms / contradicts / extends WHICH finding above
 
 ## Verdict
 - Does the published literature support the L7/L8 findings? Any contradictions?
@@ -1622,10 +1687,21 @@ def cmd_assemble_context(args):
     node_info = NODE_MAP[node_id]
     inputs = node_info["context_inputs"]
 
+    kb = node_info.get("knowledge_base", "none")
     sections = []
-    sections.append("ISOLATION DIRECTIVE: Your entire input is below. "
-                    "Do not access the filesystem. Work only with the "
-                    "information provided.")
+    directive = ("ISOLATION DIRECTIVE: Your entire input is below. Work only with "
+                 "the information provided; do not access the filesystem")
+    if kb == "read-write":
+        directive += (", EXCEPT the external knowledge base 09_Literature_Database/, "
+                      "which you MAY read AND add to (via manage_literature_db.py).")
+    elif kb == "read":
+        directive += (", EXCEPT the external knowledge base 09_Literature_Database/, "
+                      "which you MAY READ to cite existing papers (Obsidian "
+                      "wikilinks) -- you may NOT add to it.")
+    else:
+        directive += (". You have NO knowledge-base access; cite only papers "
+                      "already present in your context.")
+    sections.append(directive)
     sections.append("")
 
     injected = []  # audit: deltas actually embedded {delta_key, sha256, path}
@@ -1746,6 +1822,7 @@ def cmd_assemble_context(args):
         "injected_deltas": injected,
         "tools_policy": node_info.get("tools_policy"),
         "everos_read_scopes": _everos_scopes_for(node_info, project_id),
+        "knowledge_base": node_info.get("knowledge_base"),
         "workspace": (str(workspaces[-1])
                       if (node_info.get("is_execution") and workspaces) else None),
         "pre_research": pre_research_meta,
@@ -1970,6 +2047,12 @@ def cmd_preflight(args):
         created.append("dependencies.md")
     else:
         skipped.append("dependencies.md")
+    kb_target = pf / "knowledge_base.md"
+    if not kb_target.exists() or args.force:
+        kb_target.write_text(_knowledge_base_md(name), encoding="utf-8")
+        created.append("knowledge_base.md")
+    else:
+        skipped.append("knowledge_base.md")
     print(f"Preflight (Linnaeus L0) for {name}:")
     for f in created:
         print(f"  created  00_Preflight/{f}")
