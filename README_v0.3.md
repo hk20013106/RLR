@@ -65,15 +65,20 @@ returns is_execution=true with allowlisted files.
 
 ### assemble-context
 Path B core. Reads the deltas the DAG allows for the node, plus the stripped
-candidate frontmatter, and emits a plain-text context block for embedding in a
+candidate frontmatter (L0 gets the real `source_input` path; others get
+`input_alias` only), and emits a plain-text context block for embedding in a
 spawn_agent message. Includes the directive: "Your entire input is below. Do not
-access the filesystem." Uses `strip_candidate_to_frontmatter()` to pass only
-candidate metadata, never the body.
+access the filesystem." Also writes a `08_Audit/context_manifest_*.json`
+recording exactly what was shown (per-delta sha256 + declared tools/EverOS
+policy) for later receipt verification.
 
 ### emit-delta
-Validates a subagent's delta JSON against the persona schema (structural:
-required keys present, types match; extra keys allowed with a warning) and
-writes it to `02_Agent_Notes/<persona>/<node>_<persona>_delta.json`.
+Validates a subagent's delta JSON against the persona schema **recursively**
+(container types AND the required keys of objects inside lists/dicts; extra keys
+allowed with a warning) and writes it to
+`02_Agent_Notes/<persona>/<node>_<persona>_delta.json`. With optional
+`--receipt <context_manifest>` it verifies the upstream deltas still match the
+manifest hashes (rejects on mismatch) and writes a `08_Audit/run_receipt_*.json`.
 
 ### aggregate-report
 L10c Linnaeus. Reads all delta JSON in DAG order and generates FINAL_REPORT.md +
@@ -109,20 +114,54 @@ Validation is structural only (no external JSON Schema library).
 
 ## Memory sharing (3 layers)
 
+The design goal is **"enough but not too much" + declared, traceable,
+replayable** — controllable information routing, not maximal isolation.
+
 1. **Delta JSON (primary, project-internal).** Each subagent writes a delta; the
-   next subagent receives relevant deltas as embedded context. This is the only
-   way project state flows between subagents.
+   next subagent receives only the DAG-allowed deltas as embedded context. This
+   is the only way project state flows between subagents.
 2. **Candidate frontmatter (read-only anchor).** candidate_id, title, question,
-   claim are stripped from the candidate YAML and embedded in every subagent's
-   context. The candidate body (which carries status/history) is never passed.
-3. **EverOS (cross-session, optional).** Durable technical facts (crash
-   patterns, verified parameters) at http://127.0.0.1:9000, user_id=kai,
-   agent_id=codex. A subagent MAY search EverOS at startup. EverOS does NOT store
-   project state.
+   claim, current_status, current_owner are embedded in every subagent's
+   context. Input visibility is graded: the input-verification node (L0) sees
+   the real `source_input` path; every other cognitive node sees only
+   `input_alias` (a path-free label) so it has no incentive to "go read the
+   file". The candidate body (status/history) is never passed.
+3. **EverOS (cross-session) with namespace routing.** Durable technical facts at
+   http://127.0.0.1:9000. EverOS is governed by sub-namespaces rather than hard
+   isolation:
+   - `global_methods/` — all nodes: generic experience, failure modes, param
+     conventions.
+   - `projects/<id>/public/` — all nodes of this project: stable project facts.
+   - `projects/<id>/node_outputs/<node>/` — archive; injected to a later node
+     **only if the DAG already grants that node** (mirrors `context_inputs`).
+   - `projects/<id>/execution/L7/` — Turing execution records / env / errors.
+
+   Each node's allowed EverOS scopes are **declared** in its
+   `everos_read_scopes` (derived from `context_inputs`, so EverOS can never open
+   a channel the delta DAG doesn't) and surfaced in the context manifest. The
+   script declares; the orchestrator enforces.
+
+## Audit & info-flow policy (declared, not physically enforced)
+
+Isolation here is **default-soft for cognition + strong sandbox for L7 +
+full-trace audit**. The script can't grant/revoke a subagent's tools or police
+EverOS (that is the orchestrator's job), so instead it *declares and records*:
+
+- `assemble-context` writes `08_Audit/context_manifest_<node>_<ts>.json`: the
+  node, persona, allowed inputs, **sha256 of every injected delta**, the
+  declared `tools_policy` (`no-fs` for cognitive nodes, `workspace-fs` for L7),
+  `everos_read_scopes`, workspace, timestamp. `next-step` also carries
+  `tools_policy` + `everos_read_scopes` so the orchestrator can set tool grants
+  before spawning.
+- `emit-delta --receipt <manifest>` (optional but verified) re-hashes the
+  upstream deltas the node consumed and **rejects** if any changed since
+  `assemble-context` (catches an upstream delta re-emitted mid-flight). It then
+  writes `08_Audit/run_receipt_<node>_<ts>.json` (output hash, manifest id,
+  verification result) — the delta itself stays pure.
 
 Not a memory mechanism: no shared context window, no shared variables, no
-filesystem access for cognitive agents, no EverOS for project state, no
-candidate body access.
+candidate body access. Physical no-fs for cognitive agents and EverOS scoping
+are enforced by the orchestrator using the declared policy above.
 
 ---
 
@@ -171,6 +210,7 @@ Project/
 +-- 05_Decision_Log/
 +-- 06_Manuscript_Direction/
 +-- 07_Obsidian_Sync/
++-- 08_Audit/                     # context_manifest_* + run_receipt_* (info-flow trail)
 +-- _turing_workspace_<ts>/       # Path A isolated execution workspace (L7)
 +-- FINAL_REPORT.md / FINAL_REPORT_CN.md   # L10c aggregate
 ```

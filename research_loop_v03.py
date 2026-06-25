@@ -33,6 +33,7 @@ Usage:
 
 import argparse
 import datetime as _dt
+import hashlib
 import json
 import re
 import shutil
@@ -231,6 +232,32 @@ DAG_NODES = [
 # Map: node_id -> node dict
 NODE_MAP = {n["node"]: n for n in DAG_NODES}
 
+# Attach the declared info-flow policy to each node (surfaced by next-step and
+# the assemble-context manifest; ENFORCEMENT is the orchestrator's job, not the
+# script's). Both are derived so they cannot drift from the DAG:
+#   - tools_policy: only the execution node (Turing/L7) gets filesystem access,
+#     and only inside its workspace ("workspace-fs"); every cognitive node is
+#     "no-fs" (its entire input is the embedded context text).
+#   - everos_read_scopes: mirror the node's context_inputs so EverOS routing can
+#     never grant a node a memory channel the delta DAG doesn't already grant.
+#     "<id>" is substituted with the project id when a manifest is built.
+for _n in DAG_NODES:
+    _n.setdefault("tools_policy",
+                  "workspace-fs" if _n.get("is_execution") else "no-fs")
+    if "everos_read_scopes" not in _n:
+        _scopes = ["global_methods", "projects/<id>/public"]
+        for _inp in _n["context_inputs"]:
+            if _inp == "candidate_frontmatter":
+                continue
+            if _inp == "ALL":
+                _scopes.append("projects/<id>/node_outputs/*")
+                continue
+            _scopes.append(f"projects/<id>/node_outputs/{_inp}")
+        if _n.get("is_execution"):
+            _scopes.append(f"projects/<id>/execution/{_n['node']}")
+        _n["everos_read_scopes"] = _scopes
+del _n
+
 # Order of single-path nodes (L9a and L9b are parallel, listed together)
 DAG_SEQUENCE = ["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8",
                 "L9_parallel", "L10a", "L10b", "L10c"]
@@ -402,6 +429,34 @@ def _delta_file(project_dir, delta_key):
         return None
     return Path(project_dir) / "02_Agent_Notes" / persona / f"{delta_key}_delta.json"
 
+def _sha256(path):
+    """Hex sha256 of a file's bytes, or None if it does not exist."""
+    p = Path(path)
+    if not p.exists():
+        return None
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+def _audit_dir(project_dir):
+    d = Path(project_dir) / "08_Audit"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+def _input_alias(source_input):
+    """Path-free alias for a source_input description: directory parts of any
+    path-like token are dropped, keeping only file/basename + free text. Lets
+    cognitive nodes see *what* the inputs are without the raw filesystem layout.
+    """
+    if not source_input:
+        return ""
+    return re.sub(r"\S*[\\/]\S*",
+                  lambda m: re.split(r"[\\/]", m.group(0).rstrip("\\/"))[-1],
+                  source_input)
+
+def _everos_scopes_for(node_info, project_id):
+    """Concrete EverOS read scopes for a node (declared, not enforced here)."""
+    return [s.replace("<id>", project_id)
+            for s in node_info.get("everos_read_scopes", [])]
+
 def _next_seq(project_dir, prefix):
     d = Path(project_dir) / "05_Decision_Log"
     n = 0
@@ -479,7 +534,7 @@ def _replace_field(path, key, value):
         text = text.replace("---\n", "---\n" + new + "\n", 1)
     path.write_text(text, encoding="utf-8")
 
-def strip_candidate_to_frontmatter(candidate_path):
+def strip_candidate_to_frontmatter(candidate_path, include_source_path=False):
     """Read a candidate .md, return only frontmatter dict (not body).
 
     Returns dict with: candidate_id, title, question, claim, current_status.
@@ -489,9 +544,17 @@ def strip_candidate_to_frontmatter(candidate_path):
     fm = _load_yaml_front(Path(candidate_path))
     keep = {}
     for k in ("candidate_id", "title", "question", "claim",
-              "current_status", "current_owner", "source_input"):
+              "current_status", "current_owner"):
         if k in fm:
             keep[k] = fm[k]
+    # Input visibility (problem 3): cognitive nodes see only the path-free
+    # alias; the input-verification node (L0) sees the real source_input path.
+    if include_source_path and "source_input" in fm:
+        keep["source_input"] = fm["source_input"]
+    if fm.get("input_alias"):
+        keep["input_alias"] = fm["input_alias"]
+    elif not include_source_path and "source_input" in fm:
+        keep["input_alias"] = _input_alias(fm["source_input"])  # back-compat
     return keep
 
 def _require_status(fm, cand_id, expected):
@@ -532,7 +595,8 @@ def _mkdirs(project_dir):
     p = Path(project_dir)
     for sub in ["00_Preflight", "01_Candidates", "03_Handoffs",
                 "04_Analysis_Outputs", "05_Decision_Log",
-                "06_Manuscript_Direction", "07_Obsidian_Sync", "99_Archive"]:
+                "06_Manuscript_Direction", "07_Obsidian_Sync",
+                "08_Audit", "99_Archive"]:
         (p / sub).mkdir(parents=True, exist_ok=True)
     for agent in AGENTS:
         (p / "02_Agent_Notes" / agent).mkdir(parents=True, exist_ok=True)
@@ -570,10 +634,58 @@ def _empty_value_for_schema(v):
         return {}
     return None
 
+def _validate_delta(schema, data, path=""):
+    """Recursively validate *data* against a delta *schema*, returning errors.
+
+    A schema node may be:
+      - a bare type (list/dict/str/bool/int): isinstance check only;
+      - a list literal [elem_schema]: data must be a list and every element is
+        validated against elem_schema (e.g. [{"id": str}] => list of objects);
+      - a dict literal {k: subschema}: data must be a dict; every declared key
+        is required (extra keys allowed) and validated against its subschema.
+
+    This is what lets the validator reject hypotheses=[{"foo": 1}] (element
+    missing the required id/text) instead of only checking the top-level type.
+    """
+    loc = path or "<root>"
+    if isinstance(schema, dict):
+        if not isinstance(data, dict):
+            return [f"{loc}: expected object, got {type(data).__name__}"]
+        errors = []
+        for k, sub in schema.items():
+            kp = f"{path}.{k}" if path else k
+            if k not in data:
+                errors.append(f"missing required key: {kp}")
+            else:
+                errors += _validate_delta(sub, data[k], kp)
+        return errors
+    if isinstance(schema, list):
+        if not isinstance(data, list):
+            return [f"{loc}: expected list, got {type(data).__name__}"]
+        errors = []
+        if schema:  # typed element schema -> validate each element
+            elem = schema[0]
+            for i, item in enumerate(data):
+                errors += _validate_delta(elem, item, f"{path}[{i}]")
+        return errors
+    if schema is list and not isinstance(data, list):
+        return [f"{loc}: expected list, got {type(data).__name__}"]
+    if schema is dict and not isinstance(data, dict):
+        return [f"{loc}: expected dict, got {type(data).__name__}"]
+    if schema is bool and not isinstance(data, bool):
+        return [f"{loc}: expected bool, got {type(data).__name__}"]
+    if schema is int and (not isinstance(data, int) or isinstance(data, bool)):
+        return [f"{loc}: expected int, got {type(data).__name__}"]
+    if schema is str and not isinstance(data, str):
+        return [f"{loc}: expected str, got {type(data).__name__}"]
+    return []
+
 # --- templates --------------------------------------------------------------
 
-def _candidate_template_v03(cand_id, title, source_input, question, claim):
+def _candidate_template_v03(cand_id, title, source_input, question, claim,
+                            input_alias=""):
     claim_or_question = f"{question} | {claim}"
+    alias = input_alias or _input_alias(source_input)
     return f"""---
 candidate_id: {_yaml_value(cand_id)}
 title: {_yaml_value(title)}
@@ -581,6 +693,7 @@ question: {_yaml_value(question)}
 claim: {_yaml_value(claim)}
 hypothesis: ""
 source_input: {_yaml_value(source_input)}
+input_alias: {_yaml_value(alias)}
 current_status: NEW
 current_owner: Linnaeus
 selected_method: ""
@@ -885,6 +998,8 @@ def cmd_next_step(args):
                     "advance_command": "aggregate-report",
                     "template_path": _layer_template_path("L10c"),
                     "persona_template_path": _persona_template_path(node_info["persona"]),
+                    "tools_policy": node_info.get("tools_policy"),
+                    "everos_read_scopes": _everos_scopes_for(node_info, project_dir.name),
                 }
                 print(json.dumps(result, indent=2))
                 return 0
@@ -940,6 +1055,8 @@ def cmd_next_step(args):
                 "advance_command": ni.get("advance_command"),
                 "template_path": _layer_template_path(nid),
                 "persona_template_path": _persona_template_path(ni["persona"]),
+                "tools_policy": ni.get("tools_policy"),
+                "everos_read_scopes": _everos_scopes_for(ni, project_dir.name),
             })
         result = {
             "is_parallel": True,
@@ -961,6 +1078,8 @@ def cmd_next_step(args):
         "advance_reason": node_info.get("advance_reason"),
         "template_path": _layer_template_path(node_id),
         "persona_template_path": _persona_template_path(node_info["persona"]),
+        "tools_policy": node_info.get("tools_policy"),
+        "everos_read_scopes": _everos_scopes_for(node_info, project_dir.name),
     }
     # L7 is reused under both METHOD_APPROVED and NEEDS_EXECUTION. Its DAG
     # advance_command (execution-gate) only applies at METHOD_APPROVED -- that
@@ -1005,9 +1124,14 @@ def cmd_assemble_context(args):
                     "information provided.")
     sections.append("")
 
+    injected = []  # audit: deltas actually embedded {delta_key, sha256, path}
+
     for inp in inputs:
         if inp == "candidate_frontmatter":
-            fm = strip_candidate_to_frontmatter(cf)
+            # L0 (input verification) sees the real source_input path; every
+            # other cognitive node sees only the path-free alias.
+            fm = strip_candidate_to_frontmatter(
+                cf, include_source_path=(node_id == "L0"))
             lines = ["=== CANDIDATE FRONTMATTER ==="]
             for k, v in fm.items():
                 lines.append(f"  {k}: {v}")
@@ -1024,6 +1148,8 @@ def cmd_assemble_context(args):
                         lines.append(json.dumps(data, indent=2, ensure_ascii=False))
                         sections.append("\n".join(lines))
                         sections.append("")
+                        injected.append({"delta_key": delta_key,
+                                         "sha256": _sha256(df), "path": str(df)})
                     except json.JSONDecodeError:
                         sections.append(f"=== DELTA: {delta_key} (parse error) ===")
                         sections.append("")
@@ -1043,6 +1169,8 @@ def cmd_assemble_context(args):
                             lines.append(json.dumps(data, indent=2, ensure_ascii=False))
                             sections.append("\n".join(lines))
                             sections.append("")
+                            injected.append({"delta_key": dk,
+                                             "sha256": _sha256(df), "path": str(df)})
                             found = True
                         except json.JSONDecodeError:
                             # File exists but is unreadable -- surface it as an
@@ -1056,11 +1184,37 @@ def cmd_assemble_context(args):
 
     # Append persona + layer template hints
     persona = node_info["persona"]
-    sections.append(f"=== PERSONA: {persona} | {PERSONA_TITLE.get(persona, "")} ===")
+    sections.append(f"=== PERSONA: {persona} | {PERSONA_TITLE.get(persona, '')} ===")
     sections.append(f"Action: {node_info['action_hint']}")
     sections.append("")
 
+    # Audit (problem 5): write a context_manifest declaring exactly what this
+    # node was allowed and shown -- inputs, per-delta sha256, the DECLARED tools
+    # / EverOS policy (problems 1/2; the script declares, the orchestrator
+    # enforces), workspace, timestamp. emit-delta --receipt verifies against it.
+    project_id = project_dir.name
+    workspaces = sorted(project_dir.glob("_turing_workspace_*"))
+    manifest_id = _stamp()
+    manifest = {
+        "manifest_id": manifest_id,
+        "candidate_id": args.cand_id,
+        "node": node_id,
+        "persona": persona,
+        "timestamp": _now(),
+        "allowed_inputs": list(inputs),
+        "injected_deltas": injected,
+        "tools_policy": node_info.get("tools_policy"),
+        "everos_read_scopes": _everos_scopes_for(node_info, project_id),
+        "workspace": (str(workspaces[-1])
+                      if (node_info.get("is_execution") and workspaces) else None),
+    }
+    mpath = (_audit_dir(project_dir)
+             / f"context_manifest_{node_id}_{manifest_id}.json")
+    mpath.write_text(json.dumps(manifest, indent=2, ensure_ascii=False),
+                     encoding="utf-8")
+
     print("\n".join(sections))
+    print(f"[audit] context manifest: {mpath}", file=sys.stderr)
     return 0
 
 def cmd_emit_delta(args):
@@ -1083,30 +1237,11 @@ def cmd_emit_delta(args):
         print(f"ERROR: invalid JSON: {e}", file=sys.stderr)
         return 2
 
-    # Structural validation. A schema value may be a bare type (list/dict/str/
-    # bool/int) OR a literal container declaring shape: [{...}] means "list of
-    # objects", {...} means "object". Both forms must enforce the container
-    # type -- otherwise a scalar supplied where a list/dict is expected slips
-    # through here and later crashes aggregate-report (_format_delta_body
-    # iterating a str and calling .get on each char).
-    errors = []
-    for key, expected_type in schema.items():
-        if key not in data:
-            errors.append(f"missing required key: {key}")
-            continue
-        val = data[key]
-        if expected_type is list or isinstance(expected_type, list):
-            if not isinstance(val, list):
-                errors.append(f"{key}: expected list, got {type(val).__name__}")
-        elif expected_type is dict or isinstance(expected_type, dict):
-            if not isinstance(val, dict):
-                errors.append(f"{key}: expected dict, got {type(val).__name__}")
-        elif expected_type is str and not isinstance(val, str):
-            errors.append(f"{key}: expected str, got {type(val).__name__}")
-        elif expected_type is bool and not isinstance(val, bool):
-            errors.append(f"{key}: expected bool, got {type(val).__name__}")
-        elif expected_type is int and not isinstance(val, int):
-            errors.append(f"{key}: expected int, got {type(val).__name__}")
+    # Recursive structural validation against the (possibly nested) schema:
+    # enforces container types AND the required keys of objects inside lists and
+    # dicts (so hypotheses=[{"foo":1}] -- element missing id/text -- is rejected,
+    # not just hypotheses="str").
+    errors = _validate_delta(schema, data)
 
     # Check for extra keys
     extra = set(data.keys()) - set(schema.keys())
@@ -1119,15 +1254,67 @@ def cmd_emit_delta(args):
             print(f"  {e}", file=sys.stderr)
         return 1
 
+    # Receipt verification (problem 5). Policy A (optional but verified): if a
+    # context_manifest is supplied, confirm the upstream deltas this node
+    # consumed still hash to what the manifest recorded -- catches an upstream
+    # delta being re-emitted/changed between assemble-context and emit-delta.
+    # No receipt -> skip; receipt + mismatch -> reject.
+    manifest_id = None
+    verification = "skipped (no receipt)"
+    mismatches = []
+    if args.receipt:
+        rp = Path(args.receipt)
+        if not rp.exists():
+            print(f"ERROR: receipt not found: {rp}", file=sys.stderr)
+            return 2
+        try:
+            manifest = json.loads(rp.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            print(f"ERROR: invalid receipt JSON: {e}", file=sys.stderr)
+            return 2
+        manifest_id = manifest.get("manifest_id")
+        for inj in manifest.get("injected_deltas", []):
+            cur = _sha256(_delta_file(project_dir, inj.get("delta_key")))
+            if cur != inj.get("sha256"):
+                mismatches.append(inj.get("delta_key"))
+        verification = "pass" if not mismatches else "FAIL"
+        if mismatches:
+            print("DELTA VALIDATION: REJECT (receipt hash mismatch)",
+                  file=sys.stderr)
+            print(f"  upstream deltas changed since assemble-context: "
+                  f"{', '.join(str(m) for m in mismatches)}", file=sys.stderr)
+            return 1
+
     # Write to 02_Agent_Notes/<persona>/<node>_<persona>_delta.json
     out_dir = Path(project_dir) / "02_Agent_Notes" / args.persona
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / f"{delta_key}_delta.json"
     out_file.write_text(json.dumps(data, indent=2, ensure_ascii=False),
                          encoding="utf-8")
+
+    # Run receipt (problem 5): record what was produced + the verification
+    # outcome, referencing the context_manifest. Keeps the delta itself pure.
+    receipt_id = _stamp()
+    run_receipt = {
+        "receipt_id": receipt_id,
+        "candidate_id": args.cand_id,
+        "node": args.node,
+        "persona": args.persona,
+        "delta_key": delta_key,
+        "emitted_at": _now(),
+        "output_delta_sha256": _sha256(out_file),
+        "context_manifest_id": manifest_id,
+        "upstream_verification": verification,
+        "mismatches": mismatches,
+    }
+    rr = _audit_dir(project_dir) / f"run_receipt_{args.node}_{receipt_id}.json"
+    rr.write_text(json.dumps(run_receipt, indent=2, ensure_ascii=False),
+                  encoding="utf-8")
+
     print(f"DELTA VALIDATION: PASS")
     print(f"  schema: {delta_key}")
     print(f"  written: {out_file}")
+    print(f"  run receipt: {rr} (upstream: {verification})")
     return 0
 
 # --- Phase 2 commands -------------------------------------------------------
@@ -1157,7 +1344,8 @@ def cmd_new_candidate(args):
         return 2
     cand_id = "C" + _stamp()
     body = _candidate_template_v03(cand_id, args.title, args.input,
-                                   args.question, args.claim)
+                                   args.question, args.claim,
+                                   input_alias=getattr(args, "input_alias", "") or "")
     cf = _candidate_file(project_dir, cand_id)
     cf.write_text(body, encoding="utf-8")
     _append_decision(project_dir, cand_id, "-", "NEW", "candidate created",
@@ -2058,6 +2246,9 @@ def build_parser():
     sp.add_argument("--question", required=True, help="scientific question")
     sp.add_argument("--claim", required=True, help="testable claim/hypothesis")
     sp.add_argument("--input", required=True, help="source data description")
+    sp.add_argument("--input-alias", dest="input_alias",
+                    help="path-free input label for cognitive nodes "
+                         "(default: derived from --input)")
     sp.set_defaults(func=cmd_new_candidate)
 
     # next-step
@@ -2080,6 +2271,8 @@ def build_parser():
     sp.add_argument("--node", required=True)
     sp.add_argument("--persona", required=True)
     sp.add_argument("--file", required=True, help="delta JSON file to import")
+    sp.add_argument("--receipt", help="context_manifest JSON from assemble-context; "
+                    "verifies upstream delta hashes if provided")
     sp.set_defaults(func=cmd_emit_delta)
 
     # route

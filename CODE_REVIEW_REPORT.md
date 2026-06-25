@@ -152,14 +152,31 @@ returns 1 on an empty dir.
 
 ---
 
-## 5. Accepted-by-Design / Recommendations (not changed)
+## 5. Accepted-by-Design / Recommendations
 
-- **emit-delta nested validation depth.** The fix now enforces the *container*
-  type (list/dict). It still does not validate the *shape of objects inside*
-  lists (e.g. that each hypothesis has `id`/`text`). This is acceptable (extra
-  keys are allowed by design) but is the natural next hardening step.
+- **emit-delta nested validation depth — DONE.** Now validated recursively
+  (`_validate_delta`): container types AND the required keys of objects inside
+  lists/dicts (e.g. each hypothesis must have `id`/`text`). Extra keys still
+  allowed by design.
 - **f-string nested quotes (line ~965)** rely on Python ≥3.12. Fine today;
   worth a comment if older interpreters are ever targeted.
+
+## 5b. Architecture hardening (info-flow / audit pass)
+
+Implemented after the bug audit, per the agreed direction "enough but not too
+much + declared, traceable, replayable":
+
+- **③ input visibility graded** — candidates carry `input_alias` (path-free);
+  cognitive nodes get the alias, only L0 gets the real `source_input` path.
+- **④ recursive schema validation** — see §5 above.
+- **⑤ audit trail** — `assemble-context` writes `08_Audit/context_manifest_*`
+  (per-delta sha256 + declared policy); `emit-delta --receipt` verifies upstream
+  hashes (rejects on mid-flight change) and writes `08_Audit/run_receipt_*`.
+- **①② declared policy** — each node carries `tools_policy` (`no-fs` /
+  `workspace-fs`) and `everos_read_scopes` (mirrors `context_inputs`), surfaced
+  by `next-step` and the manifest. Declared by the script; enforced by the
+  orchestrator. Isolation model = soft-default cognition + strong L7 sandbox +
+  full audit, not heavyweight physical isolation.
 
 ---
 
