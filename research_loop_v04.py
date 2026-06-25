@@ -2633,6 +2633,14 @@ def build_parser():
     return p
 
 def main(argv=None):
+    # Force UTF-8 stdout/stderr so context/report printing never crashes on a
+    # non-default-codepage char (Windows console is often GBK/cp936). Deltas and
+    # pre-research routinely contain arrows, em-dashes, Greek, <=, etc.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
