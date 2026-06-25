@@ -1,8 +1,11 @@
 # Research Loop Room (RLR)
 
 A gated multi-loop scientific council framework. Each research question walks
-through a 14-node DAG (L0-L10c), each node run by a named persona acting as an
-independent subagent with physical context isolation.
+through a **15-node DAG** (L0-L10c, including **L8.5**), each node run by a named
+persona acting as an independent subagent with physical context isolation. Three
+**pre-research steps** ground L1/L4/L7 in real literature/code before they run,
+and **L0 is a hard dependency gate** that stops the loop if a required dependency
+is missing.
 
 > Core principle: cognitive agents are isolated by information invisibility
 > (Path B). The execution agent (Turing) is isolated by workspace + command
@@ -77,21 +80,54 @@ version, and **what it added**.
 
 ---
 
-## v0.3 Architecture
+## Architecture (v0.4.5)
 
-### DAG topology (14 nodes)
+### DAG topology (15 nodes)
 
 ```
-L0 Linnaeus -> L1 Einstein -> L2 Feynman -> L3 Oppenheimer
-  -> L4 Fisher -> L5 Tukey -> L6 Oppenheimer -> L7 Turing
-  -> L8 Curie -> { L9a Feynman || L9b Darwin } -> L10a Jobs
-  -> L10b Oppenheimer -> L10c Linnaeus
+        [pre: deep research]   [pre: method review]    [pre: code search]
+                v                       v                       v
+L0* Linnaeus -> L1 Einstein -> L2 Feynman -> L3 Oppenheimer -> L4 Fisher
+  -> L5 Tukey -> L6 Oppenheimer -> L7 Turing -> L8 Curie -> L8.5 Curie (lit-verify)
+  -> { L9a Feynman || L9b Darwin } -> L10a Jobs -> L10b Oppenheimer -> L10c Linnaeus
+
+  L0* = boot gate + DEPENDENCY GATE (STOPS the loop if a required dep is missing)
 ```
 
-L9a and L9b run in parallel and cannot see each other. L7 (Turing) is the only
-execution node. All other nodes are cognitive (no code execution).
+- **Pre-research** runs *before* L1/L4/L7 (it does **not** change the DAG; the
+  result is embedded into that node's context). See below.
+- **L8.5** (Curie's 2nd instance) verifies the computed L7/L8 results against
+  **published literature** before falsification/interpretation.
+- L9a/L9b run in parallel and cannot see each other. **L7 (Turing) is the only
+  execution node** (Path A); all others are cognitive (Path B).
+- Status flow adds `AUDITED`: `... EXECUTED --(L8)--> AUDITED --(L8.5)--> UNDER_REVIEW ...`.
 
-### 10 Personas and their roles
+### Pre-research (before L1 / L4 / L7) — v0.4
+
+| Before | Step | What it does |
+|--------|------|--------------|
+| **L1** | deep research | real literature search on the candidate's question (Academic Research skill / PubMed / bioRxiv) → hypotheses are literature-grounded |
+| **L4** | method literature review | how others ran similar analyses → method design is grounded |
+| **L7** | code search | existing pipelines (GitHub / Bioconductor / CRAN) → reuse, don't rebuild |
+
+`pre-research --node L1|L4|L7` prints a prompt grounded in the candidate's
+question; the agent writes the summary to
+`02_Agent_Notes/_pre_research/<node>_research.md`, which `assemble-context` embeds
+into that node and records in the context manifest (`pre_research` field). Papers
+found are added to a **growable literature database** (`manage_literature_db.py`,
+`09_Literature_Database/`), cited via Obsidian wikilinks and reused across rounds.
+
+### L0 dependency gate (hard stop) — v0.4.5
+
+`preflight` / `check-deps` verify every required dependency and **STOP (non-zero
+exit) if any is missing** — the loop must not proceed past L0, never skip.
+Required (framework): **PyYAML**, the **Academic Research skill**, **Zotero**, and
+an **Obsidian vault**. Things Python can't introspect (Claude skills, GUI apps)
+are *fail-closed* and attested via `RLR_*` env vars (or auto-detected: Zotero
+connector port `127.0.0.1:23119`, `$OBSIDIAN_VAULT` path). Projects declare extra
+deps (e.g. `- command: Rscript`) in `00_Preflight/dependencies.md`.
+
+### Personas (10 personas across 15 node instances)
 
 | Node | Persona | Title | Role | Isolation |
 |------|---------|-------|------|-----------|
@@ -104,6 +140,7 @@ execution node. All other nodes are cognitive (no code execution).
 | L6 | Oppenheimer | Decision Maker | Approve or reject the analysis plan | Path B |
 | L7 | Turing | Executor | Execute approved scripts in controlled workspace | **Path A** |
 | L8 | Curie | Evidence Auditor | Audit execution results, verify reproducibility | Path B |
+| **L8.5** | **Curie** | **Literature Verifier** | **Verify L7/L8 results against PubMed/EuropePMC; grow the literature DB** | Path B |
 | L9a | Feynman | Falsifier | Hard falsification of results (statistical/logical) | Path B (parallel with L9b) |
 | L9b | Darwin | Biologist | Biological interpretation of results | Path B (parallel with L9a) |
 | L10a | Jobs | Value Assessor | Assess value, frame manuscript direction | Path B |
@@ -139,24 +176,30 @@ read-only throughout. State flows between subagents only through delta files.
 | L6 | `L6_oppenheimer_delta.json` | approved_strategy, analysis_plan{scripts, parameters, outputs} |
 | L7 | `L7_turing_delta.json` | scripts_run[], key_results{}, warnings[], failures[] |
 | L8 | `L8_curie_delta.json` | evidence_verified[], evidence_level, caveats[] |
+| L8.5 | `L8.5_curie_delta.json` | searched_keywords[], papers[]{pmid,title,abstract,comparison,relevance}, summary |
 | L9a | `L9a_feynman_delta.json` | falsification_risks[], survives[], falsified[] |
 | L9b | `L9b_darwin_delta.json` | module_interpretations[], convergent_evolution, limitations[] |
 | L10a | `L10a_jobs_delta.json` | value_assessment, headline, publishable_now[], manuscript_framing |
 | L10b | `L10b_oppenheimer_delta.json` | decision, evidence_level, reason, next_steps[] |
 
-Schemas are hardcoded in `research_loop_v03.py` (no external JSON Schema
-library). `emit-delta` validates structure before writing.
+Schemas are hardcoded in `research_loop_v04.py` (no external JSON Schema
+library). `emit-delta` validates structure **recursively** (container types +
+required keys of objects inside lists/dicts) before writing.
 
-### Memory sharing (3 layers)
+### Memory sharing (4 layers)
 
 1. **Delta JSON** (primary, project-internal): the only way project state flows
    between subagents.
 2. **Candidate frontmatter** (read-only anchor): candidate_id, title, question,
-   claim are stripped and embedded in every subagent context. The candidate
-   body (status/history) is never passed to subagents.
-3. **EverOS** (cross-session, optional): durable technical facts at
-   http://localhost:9000 (configurable). A subagent MAY search EverOS at startup. EverOS does
-   NOT store project state.
+   claim are stripped and embedded in every subagent context (cognitive nodes
+   see only `input_alias`, not the raw data path). The candidate body
+   (status/history) is never passed to subagents.
+3. **Literature database** (cross-round, project-internal) — `09_Literature_Database/`,
+   managed by `manage_literature_db.py`: papers found during pre-research / L8.5,
+   deduplicated and cited via Obsidian wikilinks, reused across rounds.
+4. **EverOS** (cross-session, optional): durable technical facts (configurable
+   endpoint). A subagent MAY search declared `everos_read_scopes` at startup;
+   EverOS does NOT store project state.
 
 Not a memory mechanism: no shared context window, no shared variables, no
 filesystem access for cognitive agents, no candidate body access.
@@ -167,9 +210,10 @@ filesystem access for cognitive agents, no candidate body access.
 
 | Command | Description |
 |---------|-------------|
-| `demo` | Generate a demo project walking all 14 nodes |
+| `demo` | Generate a demo project walking all 15 nodes |
 | `new-project` | Create a v0.4 project folder |
-| `preflight` | L0 Linnaeus boot gate (creates 00_Preflight/) |
+| `preflight` | L0 boot gate: create `00_Preflight/` **+ run the dependency gate (STOPS if a required dep is missing)** |
+| `check-deps` | **(v0.4.5)** Standalone L0 dependency gate; non-zero exit = STOP |
 | `new-candidate` | Create a candidate with split frontmatter (question/claim) |
 | `next-step` | Get next DAG node scheduling packet (JSON) |
 | `pre-research` | **(v0.4)** Print the pre-research prompt for L1/L4/L7 (deep research / method review / code search), grounded in the candidate's question |
@@ -189,10 +233,13 @@ filesystem access for cognitive agents, no candidate body access.
 ### Orchestration loop (for the controlling agent)
 
 ```
+preflight(PROJECT)              # L0 DEPENDENCY GATE — if it exits non-zero, STOP (do not skip)
 step = next-step(PROJECT, CAND)
 if step.node in (L1, L4, L7):   # v0.4 pre-research, BEFORE the node
     pre-research(--node step.node)   # deep research / method review / code search
     # write 02_Agent_Notes/_pre_research/<node>_research.md; assemble-context embeds it
+if step.node == L8.5:           # v0.4.5 literature verification (Curie)
+    verify L7/L8 results vs PubMed/EuropePMC; add papers to the literature DB
 if step.is_parallel:        # L9a + L9b
     ctx_a = assemble-context(--node L9a)
     ctx_b = assemble-context(--node L9b)
@@ -207,19 +254,24 @@ else:                       # cognitive layer, Path B
     wait_agent(agent)
     emit-delta(--node step.node, --file agent_output)
 # run step.advance_command (triage-idea / triage-method / execution-gate / decision)
-# repeat until L10c -> aggregate-report -> done
+# at L10c: aggregate-report  +  sync_to_obsidian (REQUIRED end-of-round step)
+# then StopPolicy decides stop / open a child-candidate round (max_rounds)
 ```
 
 ---
 
 ## Hard invariants
 
+- **L0 dependency gate: a missing required dependency STOPS the loop — never skip.**
 - Only Oppenheimer changes candidate status (via decision/triage commands).
 - Only Turing executes code, and only after the execution gate passes.
 - Linnaeus runs first (L0); no execution before L0 + L6 complete.
 - Candidate file is read-only; state flows only through delta JSON.
 - All deltas are append-only and auditable.
 - L9a and L9b are mutually invisible.
+- Pre-research (L1/L4/L7) and L8.5 literature verification do **not** change the
+  14-node decision DAG — they ground it in real literature/code.
+- End-of-round Obsidian sync is a required step (it fails loud if no vault).
 
 ---
 

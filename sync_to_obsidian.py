@@ -46,7 +46,7 @@ PERSONAS = {
 DAG_ORDER = [
     "L0_linnaeus", "L1_einstein", "L2_feynman", "L3_oppenheimer",
     "L4_fisher", "L5_tukey", "L6_oppenheimer", "L7_turing",
-    "L8_curie", "L8.5_research", "L9a_feynman", "L9b_darwin",
+    "L8_curie", "L8.5_curie", "L9a_feynman", "L9b_darwin",
     "L10a_jobs", "L10b_oppenheimer",
 ]
 
@@ -55,7 +55,7 @@ DELTA_PERSONA = {
     "L2_feynman": "Feynman", "L3_oppenheimer": "Oppenheimer",
     "L4_fisher": "Fisher", "L5_tukey": "Tukey",
     "L6_oppenheimer": "Oppenheimer", "L7_turing": "Turing",
-    "L8_curie": "Curie", "L8.5_research": "Curie", "L9a_feynman": "Feynman",
+    "L8_curie": "Curie", "L8.5_curie": "Curie", "L9a_feynman": "Feynman",
     "L9b_darwin": "Darwin", "L10a_jobs": "Jobs",
     "L10b_oppenheimer": "Oppenheimer",
 }
@@ -70,7 +70,7 @@ LAYER_TITLES_EN = {
     "L6_oppenheimer": "L6 - Method Approval (Oppenheimer)",
     "L7_turing": "L7 - Execution (Turing)",
     "L8_curie": "L8 - Evidence Audit (Curie)",
-    "L8.5_research": "L8.5 - Literature Verification (Curie)",
+    "L8.5_curie": "L8.5 - Literature Verification (Curie)",
     "L9a_feynman": "L9a - Result Falsification (Feynman)",
     "L9b_darwin": "L9b - Biology Interpretation (Darwin)",
     "L10a_jobs": "L10a - Value Assessment (Jobs)",
@@ -187,7 +187,7 @@ def fmt_delta_note(delta_key, delta):
         if d.get("caveats"):
             L.append(f"**Caveats:** {fmt_list(d.get('caveats'))}")
 
-    elif delta_key == "L8.5_research":
+    elif delta_key == "L8.5_curie":
         L.append(f"**Searched Keywords:** {fmt_list(d.get('searched_keywords'))}")
         L.append(f"\n**Papers Found:**")
         for p in d.get("papers", []):
@@ -363,7 +363,7 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
         summary_path = log_dir / f"ROUND_SUMMARY_R{c['round']}.md"
         l10b = load_delta(project_dir, "L10b_oppenheimer")
         l8 = load_delta(project_dir, "L8_curie")
-        l8_5 = load_delta(project_dir, "L8.5_research")
+        l8_5 = load_delta(project_dir, "L8.5_curie")
         l7 = load_delta(project_dir, "L7_turing")
         lines = [f"# Round {c['round']} Summary\n"]
         lines.append(f"**Candidate:** {c['id']}")
