@@ -58,9 +58,13 @@ same failed method (escalate / hand off instead).
 - **Input deltas:** L6 delta, L0 delta, skill_plan (Path A workspace)
 - **Isolated from:** L1-L5 history
 
-In v0.3 this layer runs as a subagent that receives only the deltas above
-as embedded context (Path B). It does not access the filesystem. It emits a
-single delta JSON instead of Markdown notes.
+In v0.3 this layer runs as an isolated subagent using **Path A** (workspace
+isolation), not Path B. Turing receives the L6 and L0 deltas plus the preflight
+files inside a dedicated `_turing_workspace_<ts>/` built by
+`prepare-turing-workspace`, runs the approved scripts in `scripts/`, and
+reads/writes only within that workspace. Turing is the one node that touches the
+filesystem; all cognitive nodes use Path B. It emits a single delta JSON instead
+of Markdown notes.
 
 ## v0.3 Delta Output
 

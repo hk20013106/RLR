@@ -24,6 +24,7 @@ Usage:
     python research_loop_v03.py triage-idea PROJECT_DIR CAND_ID --decision select|reject --reason R
     python research_loop_v03.py triage-method PROJECT_DIR CAND_ID --decision approve|reject --reason R
     python research_loop_v03.py execution-gate PROJECT_DIR CAND_ID
+    python research_loop_v03.py prepare-turing-workspace PROJECT_DIR CAND_ID [--file F ...] [--clean]
     python research_loop_v03.py aggregate-report PROJECT_DIR CAND_ID
     python research_loop_v03.py obsidian-sync PROJECT_DIR [--vault PATH]
     python research_loop_v03.py list PROJECT_DIR
@@ -205,6 +206,42 @@ NODE_MAP = {n["node"]: n for n in DAG_NODES}
 # Order of single-path nodes (L9a and L9b are parallel, listed together)
 DAG_SEQUENCE = ["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8",
                 "L9_parallel", "L10a", "L10b", "L10c"]
+
+# Map: node_id -> layer template filename on disk. The files are named
+# descriptively (e.g. L7_execution.md), not L7.md, so next-step must map the
+# node id to the real filename or the orchestrator gets a dead path.
+LAYER_TEMPLATE_FILE = {
+    "L0": "L0_skill_memory_preflight.md",
+    "L1": "L1_idea_divergence.md",
+    "L2": "L2_idea_falsification.md",
+    "L3": "L3_candidate_triage.md",
+    "L4": "L4_method_brainstorm.md",
+    "L5": "L5_method_falsification.md",
+    "L6": "L6_analysis_plan.md",
+    "L7": "L7_execution.md",
+    "L8": "L8_evidence_audit.md",
+    "L9a": "L9a_result_falsification.md",
+    "L9b": "L9b_biology_interpretation.md",
+    "L10a": "L10a_value_assessment.md",
+    "L10b": "L10b_final_decision.md",
+    "L10c": "L10c_aggregate_report.md",
+}
+
+# Map: persona -> persona template filename on disk (numbered 01..10 in AGENTS
+# order, e.g. 02_Einstein.md). next-step must map to the real filename.
+PERSONA_TEMPLATE_FILE = {p: f"{i + 1:02d}_{p}.md" for i, p in enumerate(AGENTS)}
+
+
+def _layer_template_path(node_id):
+    """Relative path to a node's layer template (real on-disk filename)."""
+    fname = LAYER_TEMPLATE_FILE.get(node_id, f"{node_id}.md")
+    return f"templates/v03_layers/{fname}"
+
+
+def _persona_template_path(persona):
+    """Relative path to a persona's template (real on-disk filename)."""
+    fname = PERSONA_TEMPLATE_FILE.get(persona, f"{persona}.md")
+    return f"templates/v03_personas/{fname}"
 
 # --- delta schemas ----------------------------------------------------------
 # Each persona outputs a structured delta JSON. Schemas are Python dicts
@@ -810,8 +847,8 @@ def cmd_next_step(args):
                     "context_files": ["ALL"],
                     "action_hint": node_info["action_hint"],
                     "advance_command": "aggregate-report",
-                    "template_path": "templates/v03_layers/L10c.md",
-                    "persona_template_path": "templates/v03_personas/Linnaeus.md",
+                    "template_path": _layer_template_path("L10c"),
+                    "persona_template_path": _persona_template_path(node_info["persona"]),
                 }
                 print(json.dumps(result, indent=2))
                 return 0
@@ -865,8 +902,8 @@ def cmd_next_step(args):
                 "context_files": ni["context_inputs"],
                 "action_hint": ni["action_hint"],
                 "advance_command": ni.get("advance_command"),
-                "template_path": f"templates/v03_layers/{nid}.md",
-                "persona_template_path": f"templates/v03_personas/{ni['persona']}.md",
+                "template_path": _layer_template_path(nid),
+                "persona_template_path": _persona_template_path(ni["persona"]),
             })
         result = {
             "is_parallel": True,
@@ -886,8 +923,8 @@ def cmd_next_step(args):
         "advance_command": node_info.get("advance_command"),
         "advance_status": node_info.get("advance_status"),
         "advance_reason": node_info.get("advance_reason"),
-        "template_path": f"templates/v03_layers/{node_id}.md",
-        "persona_template_path": f"templates/v03_personas/{node_info['persona']}.md",
+        "template_path": _layer_template_path(node_id),
+        "persona_template_path": _persona_template_path(node_info["persona"]),
     }
     # L7 is reused under both METHOD_APPROVED and NEEDS_EXECUTION. Its DAG
     # advance_command (execution-gate) only applies at METHOD_APPROVED -- that
@@ -1379,6 +1416,102 @@ def cmd_execution_gate(args):
     print("  input_manifest.md ........ OK")
     print("  approved analysis plan ... OK (METHOD_APPROVED)")
     print(f"  {args.cand_id} -> NEEDS_EXECUTION (route: Turing)")
+    return 0
+
+
+def cmd_prepare_turing_workspace(args):
+    """Path A: build an isolated execution workspace for Turing (L7).
+
+    Copies the deltas Turing is allowed to see (L0, L6), the preflight files,
+    and any explicitly allowlisted input data files into a fresh
+    PROJECT_DIR/_turing_workspace_<ts>/ tree (same disk, shutil.copy2, never
+    hard links). Turing runs scripts in scripts/, writes to results/, and reads
+    only from inputs/; the project tree and raw inputs stay untouched.
+    """
+    project_dir = Path(args.project_dir)
+    cf = _candidate_file(project_dir, args.cand_id)
+    if not cf.exists():
+        print(f"ERROR: no candidate {args.cand_id}", file=sys.stderr)
+        return 2
+    fm = _load_yaml_front(cf)
+    status = fm.get("current_status", "?")
+    if status != "NEEDS_EXECUTION":
+        print(f"ERROR: {args.cand_id} is {status}; Turing workspace requires "
+              f"NEEDS_EXECUTION (run execution-gate first).", file=sys.stderr)
+        return 1
+
+    if args.clean:
+        for old in sorted(project_dir.glob("_turing_workspace_*")):
+            if old.is_dir():
+                shutil.rmtree(old, ignore_errors=True)
+
+    ws = project_dir / f"_turing_workspace_{_stamp()}"
+    inputs = ws / "inputs"
+    for sub in (inputs, ws / "scripts", ws / "results"):
+        sub.mkdir(parents=True, exist_ok=True)
+
+    copied, missing = [], []
+
+    # Deltas Turing is allowed to see per the DAG (L6 approved plan, L0 skills).
+    for delta_key in ("L0_linnaeus", "L6_oppenheimer"):
+        df = _delta_file(project_dir, delta_key)
+        if df and df.exists():
+            shutil.copy2(df, inputs / df.name)
+            copied.append(f"inputs/{df.name}")
+        else:
+            missing.append(f"{delta_key} delta")
+
+    # Preflight files (skill plan, manifests, forbidden shortcuts).
+    pf = project_dir / "00_Preflight"
+    for fname in PREFLIGHT_FILES:
+        src = pf / fname
+        if src.exists():
+            shutil.copy2(src, inputs / fname)
+            copied.append(f"inputs/{fname}")
+        else:
+            missing.append(f"00_Preflight/{fname}")
+
+    # Explicitly allowlisted input data files (paths drawn from input_manifest).
+    for raw in (args.file or []):
+        src = Path(raw)
+        if src.exists() and src.is_file():
+            shutil.copy2(src, inputs / src.name)
+            copied.append(f"inputs/{src.name} (<- {src})")
+        else:
+            missing.append(f"allowlisted file not found: {raw}")
+
+    manifest = [
+        "---",
+        f"workspace: {_yaml_value(ws.name)}",
+        f"candidate_id: {_yaml_value(args.cand_id)}",
+        f"created_at: {_yaml_value(_now())}",
+        f"status_at_creation: {_yaml_value(status)}",
+        "---",
+        "",
+        f"# Turing Workspace (Path A) - {args.cand_id}",
+        "",
+        "Isolated execution workspace. Turing runs scripts in `scripts/`, writes",
+        "outputs to `results/`, and reads only the files in `inputs/`. The project",
+        "tree and the raw inputs are NOT modified from here.",
+        "",
+        "## Copied in",
+        "",
+    ]
+    manifest += ([f"- {c}" for c in copied] or ["- _none_"])
+    if missing:
+        manifest += ["", "## Missing (not copied)", ""]
+        manifest += [f"- {m}" for m in missing]
+    (ws / "WORKSPACE_MANIFEST.md").write_text("\n".join(manifest) + "\n",
+                                              encoding="utf-8")
+
+    print(f"Turing workspace ready: {ws}")
+    print(f"  inputs/ ... {len(copied)} file(s) copied")
+    print("  scripts/ .. (Turing writes modular scripts here)")
+    print("  results/ .. (Turing writes outputs here)")
+    if missing:
+        print(f"  WARN: {len(missing)} expected item(s) missing:", file=sys.stderr)
+        for m in missing:
+            print(f"    - {m}", file=sys.stderr)
     return 0
 
 
@@ -1945,6 +2078,17 @@ def build_parser():
     sp.add_argument("project_dir")
     sp.add_argument("cand_id")
     sp.set_defaults(func=cmd_execution_gate)
+
+    # prepare-turing-workspace
+    sp = sub.add_parser("prepare-turing-workspace",
+                        help="Path A: build isolated execution workspace for Turing (L7)")
+    sp.add_argument("project_dir")
+    sp.add_argument("cand_id")
+    sp.add_argument("--file", action="append",
+                    help="allowlisted input data file to copy into the workspace (repeatable)")
+    sp.add_argument("--clean", action="store_true",
+                    help="remove existing _turing_workspace_* dirs first")
+    sp.set_defaults(func=cmd_prepare_turing_workspace)
 
     # decision
     sp = sub.add_parser("decision", help="Oppenheimer status change")
