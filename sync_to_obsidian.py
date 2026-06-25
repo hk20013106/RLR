@@ -365,6 +365,36 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
         l8 = load_delta(project_dir, "L8_curie")
         l8_5 = load_delta(project_dir, "L8.5_curie")
         l7 = load_delta(project_dir, "L7_turing")
+
+        # Auto-register papers from L8.5 literature verification into the growable DB
+        if l8_5 and isinstance(l8_5, dict) and l8_5.get("papers"):
+            try:
+                import sys
+                sys.path.append(str(Path(__file__).parent))
+                from manage_literature_db import LiteratureDB
+                db = LiteratureDB(project_dir)
+                for paper in l8_5.get("papers", []):
+                    tags = paper.get("tags") or []
+                    if "l8.5-verification" not in tags:
+                        tags.append("l8.5-verification")
+                    paper["tags"] = tags
+                    pmid = paper.get("pmid") or ""
+                    db_paper = {
+                        "doi": paper.get("doi") or "",
+                        "title": paper.get("title") or "Unknown Title",
+                        "authors": paper.get("authors") or ([f"PMID_{pmid}"] if pmid else ["Unknown"]),
+                        "journal": paper.get("journal") or "PubMed Central",
+                        "year": paper.get("year") or "2026",
+                        "core_arguments": [paper.get("comparison") or ""] if paper.get("comparison") else [],
+                        "evidence_level": paper.get("relevance") or "MODERATE",
+                        "summary": paper.get("abstract") or "",
+                        "url": paper.get("url") or (f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else ""),
+                        "tags": tags
+                    }
+                    db.add_or_update_paper(db_paper, round_id=c['round'])
+                db.sync_index()
+            except Exception as e:
+                print(f"[Warning] Failed to auto-register L8.5 papers to DB: {e}")
         lines = [f"# Round {c['round']} Summary\n"]
         lines.append(f"**Candidate:** {c['id']}")
         lines.append(f"**Title:** {c['title']}")
