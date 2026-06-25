@@ -51,7 +51,14 @@ StopPolicy.
 
 Each agent call writes a `RunReceipt` under
 `08_Run_Receipts/<cand>/round_NN/<node>_<persona>_receipt.json`
-(provider, context hash, prompt/delta paths, workspace, tools, EverOS scope).
+(provider, context hash, prompt/delta paths, workspace, tools, EverOS scope,
+`fresh_session`).
+
+Context-pollution guard: every ManualProvider prompt opens with a "start a NEW
+session, do not carry over the previous node's history" banner (EN+CN), and the
+receipt records `fresh_session: true`. Disable per node with
+`fresh_session: false` in the provider spec. CommandProvider is fresh by
+construction (a new subprocess per node), so it records `fresh_session: true`.
 The per-round `stop_decision.json` records why the loop stopped/continued. This
 is separate from the controller's `08_Audit/` manifests+receipts.
 

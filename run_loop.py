@@ -214,6 +214,7 @@ def write_receipt(run_dir, node, persona, prov, context, step, cand, round_id,
         allowed_tools=([step.get("tools_policy")] if step.get("tools_policy")
                        else None),
         everos_scope=step.get("everos_read_scopes"),
+        fresh_session=getattr(prov, "last_fresh_session", None),
         candidate_id=cand, round_id=round_id)
     rec.write(Path(run_dir) / f"{node}_{persona}_receipt.json")
 

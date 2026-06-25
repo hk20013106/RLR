@@ -152,13 +152,28 @@ class ManualProvider(AgentProvider):
         self.name = "manual"
         self.last_prompt_file = None
         self.last_delta_file = None
+        self.last_fresh_session = None
 
     def run_agent(self, node, persona, context, output_schema=None,
                   workspace=None, tools=None, run_dir=None):
         run_dir = Path(run_dir or ".")
         run_dir.mkdir(parents=True, exist_ok=True)
         pf = run_dir / f"{node}_{persona}_prompt.txt"
-        lines = [f"# RLR manual agent prompt — node={node} persona={persona}", ""]
+        fresh = bool(self.spec.get("fresh_session", True))
+        self.last_fresh_session = fresh
+        lines = []
+        if fresh:
+            lines += [
+                "############################################################",
+                "# START A NEW / FRESH AGENT SESSION FOR THIS PROMPT.",
+                "# Do NOT carry over history from any previous node. Use ONLY",
+                "# the information below -- prior context would pollute it.",
+                "# 请在【新会话】中执行本 prompt，不要带入上一节点的任何历史，",
+                "# 只使用下方提供的信息。",
+                "############################################################",
+                "",
+            ]
+        lines += [f"# RLR manual agent prompt — node={node} persona={persona}", ""]
         if workspace:
             lines.append(f"# WORKSPACE (Path A; read/write ONLY inside): {workspace}")
         if tools:
@@ -199,6 +214,7 @@ class CommandProvider(AgentProvider):
         self.timeout = self.spec.get("timeout")
         self.last_prompt_file = None
         self.last_delta_file = None
+        self.last_fresh_session = True  # each call is a fresh subprocess
         if not self.command:
             raise ValueError("command provider requires a 'command' template")
 
@@ -242,6 +258,7 @@ class RunReceipt:
     workspace: str = None
     allowed_tools: list = None
     everos_scope: list = None
+    fresh_session: bool = None
     candidate_id: str = None
     round_id: int = None
 
