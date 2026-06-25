@@ -1,0 +1,12 @@
+{
+  "receipt_id": "20260625191002494311",
+  "candidate_id": "C20260625190747030569",
+  "node": "L1",
+  "persona": "Einstein",
+  "delta_key": "L1_einstein",
+  "emitted_at": "2026-06-25T19:10:02",
+  "output_delta_sha256": "0764e5954796ece1d5bd07b80f46566be387523d335f2d2458aa15d83e578109",
+  "context_manifest_id": null,
+  "upstream_verification": "skipped (no receipt)",
+  "mismatches": []
+}

@@ -1,56 +1,29 @@
 {
   "scripts_run": [
     {
-      "name": "08_turquoise_core_ora.R",
+      "name": "14_round4_enrichment.R",
       "exit_code": 0,
       "output_files": [
-        "turq_core500_GO_CC.csv"
-      ]
-    },
-    {
-      "name": "09_kme_ranked_gsea.R",
-      "exit_code": 0,
-      "output_files": [
-        "gsea_turquoise_GO_BP.csv",
-        "gsea_turquoise_GO_MF.csv",
-        "gsea_turquoise_KEGG.csv",
-        "gsea_blue_GO_BP.csv",
-        "gsea_blue_GO_MF.csv",
-        "gsea_blue_KEGG.csv",
-        "gsea_brown_GO_BP.csv",
-        "gsea_brown_GO_MF.csv",
-        "gsea_brown_KEGG.csv",
-        "gsea_green_GO_BP.csv",
-        "gsea_green_GO_MF.csv",
-        "gsea_green_KEGG.csv"
-      ]
-    },
-    {
-      "name": "10_ecm_score_correlation.R",
-      "exit_code": 0,
-      "output_files": [
-        "ecm_score_me_correlation.csv"
-      ]
-    },
-    {
-      "name": "11_signed_network.R",
-      "exit_code": 0,
-      "output_files": [
-        "signed_module_assignment.csv",
-        "signed_network.RData"
+        "results_wgcna_loop/round4/turquoise_redistribution.csv",
+        "results_wgcna_loop/round4/atrium_blue_GSEA.csv",
+        "results_wgcna_loop/round4/ventricle_brown_GSEA.csv"
       ]
     }
   ],
   "key_results": {
-    "turquoise_core_ora": "Top-100/200 kME: 0 significant GO terms. Top-500 kME: 1 GO-CC term (p.adj<0.05). Whole-module ORA was underpowered; core-only marginally better.",
-    "kme_ranked_gsea": "GSEA found significant pathways missed by ORA. Turquoise: mitochondrial respiratory chain assembly (NES=-2.80, p.adj=0.047), mitochondrial translation (NES=-2.71, p.adj=0.043), motile cilium assembly (NES=+2.39). Blue: mitochondrion organization (NES=-2.83), energy derivation by oxidation (NES=-2.55), lymphocyte mediated immunity (NES=+2.55). Brown: results present. Green: results present.",
-    "ecm_score_correlation": "ECM score (153 genes) vs module eigengenes: MEgreen r=+0.69 p<0.001, MEturquoise r=+0.41 p<0.001, MEbrown r=-0.43 p<0.001, MEgrey r=+0.62 p<0.001, MEblue r=-0.17 ns, MEyellow r=-0.02 ns.",
-    "signed_network": "Signed network produced 7 modules (vs 5 unsigned). Turquoise persists as a distinct module. Signed network confirms turquoise is not an unsigned-network artifact. Two additional modules (black, red) emerged from splitting."
+    "turquoise_redistribution": "STRONG: all_sample turquoise (1720 genes) is NOT random within tissue - 52.9% (751/1419) land in atrium-BLUE (hypergeom p=7e-121) and 48.4% (661/1367) land in ventricle-BROWN (p=3.6e-264). The round-2 turquoise core IS largely the new convergent modules.",
+    "reconciliation": "Resolves the round-3 paradox: all_sample turquoise was a MIXTURE; its genuine convergent core re-coalesces into atrium-blue (UP in high-HR) and ventricle-brown (DOWN), which DO have consistent Sk/Sm sign. Direction flips by chamber (atrium up / ventricle down) = chamber-specific deployment of a shared gene core.",
+    "ORA": "No significant GO BP terms for either module (1537/921 genes too large/generic; all q>0.1).",
+    "GSEA_atrium_blue": "Only 2 terms FDR<0.05: macroautophagy (NES -3.01, q=0.02), hippo signaling (NES -2.67, q=0.036). NOT cleanly mitochondrial; rRNA processing + ion transport borderline.",
+    "GSEA_ventricle_brown": "NO term FDR<0.05 (top TOR signaling/ribosome biogenesis all q=0.48).",
+    "headline": "Gene-level link STRONG (turquoise = blue/brown core); but pathway identity (the round-2 'mitochondrial' claim) is NOT confirmed by this enrichment and is now uncertain."
   },
   "warnings": [
-    "KEGG failed for turquoise-core ORA (SSL connect error to rest.kegg.jp) - network issue, not data issue",
-    "Signed network trait correlations not generated (script wrote module-module correlation matrix instead) - minor, unsigned trait correlations from round 1 still valid",
-    "Turquoise GSEA results: mitochondrial pathways are negatively enriched (genes at bottom of kME ranking), meaning low-kME turquoise genes are mitochondrial. This is expected - turquoise is a large module with mixed functions."
+    "GSEA here ranked only module MEMBERS by kME -> one-sided distribution; fgsea warned 860 (atrium) / 1408 (ventricle) pathways had NA p-values (unbalanced gene-level statistic). This GSEA is UNRELIABLE.",
+    "Large modules give generic ORA."
   ],
-  "failures": []
+  "failures": [
+    "Pathway identity inconclusive: the proper kME-ranked GSEA must rank ALL network genes by kME-to-module (both signs), as round-2 did, not module-members-only. Re-run needed before any mitochondrial claim.",
+    "Module preservation (Zsummary) not run; partially substituted by the redistribution overlap (strong)."
+  ]
 }

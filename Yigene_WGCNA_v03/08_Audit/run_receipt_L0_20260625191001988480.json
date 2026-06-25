@@ -1,0 +1,12 @@
+{
+  "receipt_id": "20260625191001988480",
+  "candidate_id": "C20260625190747030569",
+  "node": "L0",
+  "persona": "Linnaeus",
+  "delta_key": "L0_linnaeus",
+  "emitted_at": "2026-06-25T19:10:01",
+  "output_delta_sha256": "54c4cb6bcb4375419f7c8e6a7defd9bcab0c840605182fefa38c18ab9b725771",
+  "context_manifest_id": null,
+  "upstream_verification": "skipped (no receipt)",
+  "mismatches": []
+}

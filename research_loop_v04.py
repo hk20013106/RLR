@@ -32,6 +32,7 @@ Usage:
 """
 
 import argparse
+import os
 import datetime as _dt
 import hashlib
 import json
@@ -67,7 +68,7 @@ PERSONA_TITLE = {
 VALID_STATUSES = [
     "NEW", "IDEA_PROPOSED", "IDEA_REJECTED", "IDEA_SELECTED",
     "METHOD_PROPOSED", "METHOD_REJECTED", "METHOD_APPROVED",
-    "NEEDS_EXECUTION", "EXECUTED", "UNDER_REVIEW",
+    "NEEDS_EXECUTION", "EXECUTED", "AUDITED", "UNDER_REVIEW",
     "KEEP", "REVISE", "DOWNGRADE", "DROP", "ARCHIVED",
 ]
 
@@ -79,14 +80,15 @@ VALID_STATUSES = [
 # manual recovery stays possible).
 DECISION_TRANSITIONS = {
     "NEW": {"IDEA_PROPOSED"},
-    "IDEA_PROPOSED": {"IDEA_SELECTED", "IDEA_REJECTED"},
+    "IDEA_PROPOSED": {"IDEA_SELECTED", "IDEA_REJECTED", "DROP"},
     "IDEA_SELECTED": {"METHOD_PROPOSED"},
     "IDEA_REJECTED": {"DROP"},
-    "METHOD_PROPOSED": {"METHOD_APPROVED", "METHOD_REJECTED"},
-    "METHOD_REJECTED": {"IDEA_SELECTED", "METHOD_PROPOSED"},
+    "METHOD_PROPOSED": {"METHOD_APPROVED", "METHOD_REJECTED", "DROP"},
+    "METHOD_REJECTED": {"IDEA_SELECTED", "METHOD_PROPOSED", "DROP"},
     "METHOD_APPROVED": {"NEEDS_EXECUTION"},
     "NEEDS_EXECUTION": {"EXECUTED"},
-    "EXECUTED": {"UNDER_REVIEW"},
+    "EXECUTED": {"AUDITED"},
+    "AUDITED": {"UNDER_REVIEW"},
     "UNDER_REVIEW": {"KEEP", "REVISE", "DOWNGRADE", "DROP"},
     "REVISE": {"IDEA_PROPOSED", "METHOD_PROPOSED", "NEEDS_EXECUTION", "UNDER_REVIEW"},
     "DOWNGRADE": {"DROP"},
@@ -179,17 +181,26 @@ DAG_NODES = [
     {
         "node": "L8", "persona": "Curie", "layer": 8,
         "status_before": "EXECUTED", "advance_command": "decision",
-        "advance_status": "UNDER_REVIEW", "advance_reason": "Curie evidence audit complete, route to review",
+        "advance_status": "AUDITED", "advance_reason": "Curie evidence audit complete, route to literature verification",
         "context_inputs": ["L7", "L6", "candidate_frontmatter"],
         "is_parallel": False, "is_execution": False,
         "action_hint": "Audit execution results, verify reproducibility, assign evidence level",
         "agent_type": "default",
     },
     {
+        "node": "L8.5", "persona": "Research", "layer": 8,
+        "status_before": "AUDITED", "advance_command": "decision",
+        "advance_status": "UNDER_REVIEW", "advance_reason": "L8.5 literature verification complete, route to review",
+        "context_inputs": ["L7", "L8", "candidate_frontmatter"],
+        "is_parallel": False, "is_execution": False,
+        "action_hint": "Search PubMed/EuropePMC based on L7/L8 actual results to verify findings",
+        "agent_type": "default",
+    },
+    {
         "node": "L9a", "persona": "Feynman", "layer": 9,
         "status_before": "UNDER_REVIEW", "advance_command": "decision",
         "advance_status": "UNDER_REVIEW", "advance_reason": "L9a falsification complete",
-        "context_inputs": ["L1", "L7", "L8"],
+        "context_inputs": ["L1", "L7", "L8", "L8.5"],
         "is_parallel": True, "is_execution": False,
         "action_hint": "Hard falsification of results from statistical/logical completeness",
         "agent_type": "default",
@@ -198,7 +209,7 @@ DAG_NODES = [
         "node": "L9b", "persona": "Darwin", "layer": 9,
         "status_before": "UNDER_REVIEW", "advance_command": None,
         "advance_status": None, "advance_reason": None,
-        "context_inputs": ["L1", "L7", "L8"],
+        "context_inputs": ["L1", "L7", "L8", "L8.5"],
         "is_parallel": True, "is_execution": False,
         "action_hint": "Biological interpretation of results",
         "agent_type": "default",
@@ -290,7 +301,7 @@ for _n in DAG_NODES:
 del _n
 
 # Order of single-path nodes (L9a and L9b are parallel, listed together)
-DAG_SEQUENCE = ["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8",
+DAG_SEQUENCE = ["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L8.5",
                 "L9_parallel", "L10a", "L10b", "L10c"]
 
 # Map: node_id -> layer template filename on disk. The files are named
@@ -306,6 +317,7 @@ LAYER_TEMPLATE_FILE = {
     "L6": "L6_analysis_plan.md",
     "L7": "L7_execution.md",
     "L8": "L8_evidence_audit.md",
+    "L8.5": "L8.5_literature_verification.md",
     "L9a": "L9a_result_falsification.md",
     "L9b": "L9b_biology_interpretation.md",
     "L10a": "L10a_value_assessment.md",
@@ -373,6 +385,11 @@ DELTA_SCHEMAS = {
         "evidence_verified": [{"file": str, "check": str, "result": str}],
         "evidence_level": str, "caveats": list
     },
+    "L8.5_research": {
+        "searched_keywords": list,
+        "papers": [{"pmid": str, "title": str, "abstract": str, "comparison": str, "relevance": str}],
+        "summary": str
+    },
     "L9a_feynman": {
         "falsification_risks": [{"name": str, "severity": str, "resolvable": bool, "text": str}],
         "survives": list, "falsified": list
@@ -397,7 +414,7 @@ DELTA_PERSONA = {
     "L2_feynman": "Feynman", "L3_oppenheimer": "Oppenheimer",
     "L4_fisher": "Fisher", "L5_tukey": "Tukey",
     "L6_oppenheimer": "Oppenheimer", "L7_turing": "Turing",
-    "L8_curie": "Curie", "L9a_feynman": "Feynman",
+    "L8_curie": "Curie", "L8.5_research": "Curie", "L9a_feynman": "Feynman",
     "L9b_darwin": "Darwin", "L10a_jobs": "Jobs",
     "L10b_oppenheimer": "Oppenheimer",
 }
@@ -406,7 +423,7 @@ DELTA_PERSONA = {
 DELTA_DAG_ORDER = [
     "L0_linnaeus", "L1_einstein", "L2_feynman", "L3_oppenheimer",
     "L4_fisher", "L5_tukey", "L6_oppenheimer", "L7_turing",
-    "L8_curie", "L9a_feynman", "L9b_darwin",
+    "L8_curie", "L8.5_research", "L9a_feynman", "L9b_darwin",
     "L10a_jobs", "L10b_oppenheimer",
 ]
 
@@ -1051,6 +1068,7 @@ def cmd_next_step(args):
         "METHOD_APPROVED": ["L7"],
         "NEEDS_EXECUTION": ["L7"],
         "EXECUTED": ["L8"],
+        "AUDITED": ["L8.5"],
         "UNDER_REVIEW": ["L9_parallel", "L10a", "L10b"],
     }
 
@@ -1167,6 +1185,11 @@ def cmd_pre_research(args):
     question = fm.get("question", "")
     claim = fm.get("claim", "")
     title = fm.get("title", args.cand_id)
+    round_id = 1
+    try:
+        round_id = int(fm.get("round_id", 1))
+    except Exception:
+        pass
 
     if getattr(args, "output_dir", None):
         output_file = Path(args.output_dir) / f"{node}_research.md"
@@ -1187,27 +1210,52 @@ def cmd_pre_research(args):
         prompt = f"""# Pre-Research: Deep Literature Search (before {node})
 
 You MUST run this BEFORE generating the {node} delta.
+This is Round {round_id} of the research loop.
 
 {grounding}
-Use the academic-research-suite skill to search for papers (seed queries):
+
+## Core Requirements:
+1. **CRITICAL**: You MUST use the `academic-research-suite` skill (which includes literature search tools like PubMed/bioRxiv/OpenAlex/Tavily) to perform a real-literature review.
+2. **Database Verification & Reuse**:
+   - First, scan the literature database directory `{project_dir.as_posix()}/09_Literature_Database` (if it exists) to see what papers have been reviewed in previous rounds.
+   - If there are relevant papers, read them and incorporate/expand on their findings.
+   - Search the web/academic databases for new papers to answer the queries and expand our understanding.
+3. **Database Registration**:
+   - For every new paper you find and select, you MUST add it to the growable literature database by running:
+     `python manage_literature_db.py add {project_dir.as_posix()} --round {round_id} --json-data "<JSON_STRING>"`
+   - Ensure the `<JSON_STRING>` is a single-line valid JSON string. Escape quotes properly. It must contain the following keys:
+     - "doi": string (or empty)
+     - "title": string
+     - "authors": string (or list of strings)
+     - "journal": string
+     - "year": integer/string
+     - "core_arguments": list of strings (key findings or arguments)
+     - "evidence_level": "STRONG", "MODERATE", or "WEAK"
+     - "tags": list of strings
+     - "summary": string (relevance, methods, results summary)
+     - "url": string (or empty)
+
+Use the academic-research-suite / search tools to query (seed queries):
 """
         for i, q in enumerate(queries, 1):
             prompt += f"{i}. {q}\n"
         prompt += f"""
-Write a structured summary to: {output_file}
+Write a structured summary to: {output_file.as_posix()}
 
-Format:
+Format of {output_file.as_posix()}:
+IMPORTANT: Cite papers using Obsidian Wikilinks pointing to the literature database files (e.g., `[[09_Literature_Database/citekey|Paper Title]]` where `citekey` is the filename without `.md`).
+
 ## Key Findings
-- finding 1 (paper, year)
-- finding 2 (paper, year)
+- Finding 1 (citing [[09_Literature_Database/citekey|Paper Title]], Year)
+- Finding 2 (citing [[09_Literature_Database/citekey|Paper Title]], Year)
 
 ## Methods Used in Literature
-- method 1
-- method 2
+- Method 1
+- Method 2
 
 ## Gaps Our Study Addresses
-- gap 1
-- gap 2
+- Gap 1
+- Gap 2
 
 This summary will be injected into the {node} assemble-context as additional input.
 """
@@ -1215,8 +1263,31 @@ This summary will be injected into the {node} assemble-context as additional inp
         prompt = f"""# Pre-Research: Method Literature Review (before {node})
 
 You MUST run this BEFORE generating the {node} delta.
+This is Round {round_id} of the research loop.
 
 {grounding}
+
+## Core Requirements:
+1. **CRITICAL**: You MUST use the `academic-research-suite` skill (which includes literature search tools like PubMed/bioRxiv/OpenAlex/Tavily) to perform a real-literature review.
+2. **Database Verification & Reuse**:
+   - First, scan the literature database directory `{project_dir.as_posix()}/09_Literature_Database` (if it exists) to see what papers have been reviewed in previous rounds.
+   - If there are relevant papers, read them and incorporate/expand on their findings.
+   - Search the web/academic databases for new papers to answer the queries and expand our understanding.
+3. **Database Registration**:
+   - For every new paper you find and select, you MUST add it to the growable literature database by running:
+     `python manage_literature_db.py add {project_dir.as_posix()} --round {round_id} --json-data "<JSON_STRING>"`
+   - Ensure the `<JSON_STRING>` is a single-line valid JSON string. Escape quotes properly. It must contain the following keys:
+     - "doi": string (or empty)
+     - "title": string
+     - "authors": string (or list of strings)
+     - "journal": string
+     - "year": integer/string
+     - "core_arguments": list of strings (key findings or arguments)
+     - "evidence_level": "STRONG", "MODERATE", or "WEAK"
+     - "tags": list of strings
+     - "summary": string (relevance, methods, results summary)
+     - "url": string (or empty)
+
 Search for papers on methodology used in similar studies (seed queries):
 """
         for i, q in enumerate(queries, 1):
@@ -1227,18 +1298,20 @@ Focus on:
 - Standard pipelines and parameters
 - Common pitfalls and how they were addressed
 
-Write a structured summary to: {output_file}
+Write a structured summary to: {output_file.as_posix()}
 
-Format:
+Format of {output_file.as_posix()}:
+IMPORTANT: Cite papers using Obsidian Wikilinks pointing to the literature database files (e.g., `[[09_Literature_Database/citekey|Paper Title]]` where `citekey` is the filename without `.md`).
+
 ## Methods Found
-- method 1 (paper, parameters used)
-- method 2 (paper, parameters used)
+- Method 1 (citing [[09_Literature_Database/citekey|Paper Title]], parameters/settings used)
+- Method 2 (citing [[09_Literature_Database/citekey|Paper Title]], parameters/settings used)
 
 ## Recommended Approach
-- what to adopt and why
+- What to adopt and why (referencing papers in the database)
 
 ## Pitfalls to Avoid
-- pitfall 1 (how others failed)
+- Pitfall 1 (how others failed, citing [[09_Literature_Database/citekey|Paper Title]])
 
 This summary will be injected into the {node} assemble-context as additional input.
 """
@@ -1277,6 +1350,54 @@ This summary will be injected into the {node} assemble-context as additional inp
     print(prompt)
     print(f"\n[pre-research] output target: {output_file}")
     return 0
+
+
+def _condense_delta(delta_key, data):
+    """Return a token-efficient, condensed copy of the delta data for aggregation."""
+    if not isinstance(data, dict):
+        return data
+    import copy
+    d = copy.deepcopy(data)
+    
+    # 1. Truncate large lists in L0 Linnaeus skills found
+    if delta_key == "L0_linnaeus":
+        if "skills_found" in d and isinstance(d["skills_found"], list) and len(d["skills_found"]) > 10:
+            d["skills_found"] = d["skills_found"][:5] + [f"... ({len(d['skills_found'])} skills found in total)"]
+            
+    # 2. Truncate large lists of steps in L4 Fisher
+    elif delta_key == "L4_fisher":
+        if "strategies" in d and isinstance(d["strategies"], list):
+            for s in d["strategies"]:
+                if isinstance(s, dict) and "steps" in s and isinstance(s["steps"], list) and len(s["steps"]) > 5:
+                    s["steps"] = s["steps"][:3] + [f"... ({len(s['steps'])} steps total)"]
+                    
+    # 3. Truncate large output_files or script results in L7 Turing
+    elif delta_key == "L7_turing":
+        if "scripts_run" in d and isinstance(d["scripts_run"], list):
+            for s in d["scripts_run"]:
+                if isinstance(s, dict) and "output_files" in s and isinstance(s["output_files"], list) and len(s["output_files"]) > 5:
+                    s["output_files"] = s["output_files"][:3] + [f"... ({len(s['output_files'])} output files total)"]
+                    
+    # 4. Truncate evidence verified list in L8 Curie
+    elif delta_key == "L8_curie":
+        if "evidence_verified" in d and isinstance(d["evidence_verified"], list) and len(d["evidence_verified"]) > 10:
+            d["evidence_verified"] = d["evidence_verified"][:5] + [f"... ({len(d['evidence_verified'])} files audited in total)"]
+
+    # 5. Truncate long paper abstracts in L8.5 Research
+    elif delta_key == "L8.5_research":
+        if "papers" in d and isinstance(d["papers"], list):
+            for p in d["papers"]:
+                if isinstance(p, dict) and "abstract" in p and isinstance(p["abstract"], str) and len(p["abstract"]) > 150:
+                    p["abstract"] = p["abstract"][:150] + "... (truncated abstract)"
+                    
+    # 6. Truncate huge gene lists in L9b Darwin module interpretations
+    elif delta_key == "L9b_darwin":
+        if "module_interpretations" in d and isinstance(d["module_interpretations"], list):
+            for m in d["module_interpretations"]:
+                if isinstance(m, dict) and "genes" in m and isinstance(m["genes"], list) and len(m["genes"]) > 5:
+                    m["genes"] = m["genes"][:5] + [f"... ({len(m['genes'])} genes total)"]
+                    
+    return d
 
 
 def cmd_assemble_context(args):
@@ -1322,7 +1443,8 @@ def cmd_assemble_context(args):
                     try:
                         data = json.loads(df.read_text(encoding="utf-8"))
                         lines = [f"=== DELTA: {delta_key} ==="]
-                        lines.append(json.dumps(data, indent=2, ensure_ascii=False))
+                        condensed = _condense_delta(delta_key, data)
+                        lines.append(json.dumps(condensed, indent=2, ensure_ascii=False))
                         sections.append("\n".join(lines))
                         sections.append("")
                         injected.append({"delta_key": delta_key,
@@ -1388,6 +1510,19 @@ def cmd_assemble_context(args):
     sections.append(f"Action: {node_info['action_hint']}")
     sections.append("")
 
+    # v0.4 bilingual: instruct agent to include Chinese translations
+    sections.append("=== BILINGUAL OUTPUT DIRECTIVE ===")
+    sections.append("Your delta JSON must include a \"cn\" key with Chinese")
+    sections.append("translations of all human-readable field values (hypothesis")
+    sections.append("text, rationale, attacks, verdicts, reasons, interpretations,")
+    sections.append("etc.). The top-level English fields remain the canonical")
+    sections.append("machine-readable values; the \"cn\" key provides Chinese for")
+    sections.append("FINAL_REPORT_CN.md generation. Example:")
+    sections.append('  {"hypotheses": [{"id":"H1","text":"...","cn":"..."}],')
+    sections.append('   "primary_hypothesis": "...",')
+    sections.append('   "cn": {"primary_hypothesis": "...", "key_uncertainty": "..."}}')
+    sections.append("")
+
     # Audit (problem 5): write a context_manifest declaring exactly what this
     # node was allowed and shown -- inputs, per-delta sha256, the DECLARED tools
     # / EverOS policy (problems 1/2; the script declares, the orchestrator
@@ -1444,6 +1579,40 @@ def cmd_emit_delta(args):
     # not just hypotheses="str").
     errors = _validate_delta(schema, data)
 
+    # L0 dependency checks
+    if args.node == "L0":
+        dep_errors = []
+        # 1. Check Obsidian Vault
+        vault = os.environ.get("OBSIDIAN_VAULT")
+        if not vault:
+            dep_errors.append("Obsidian Vault path is not set in environment variable $OBSIDIAN_VAULT.")
+        else:
+            expanded_vault = Path(os.path.expandvars(vault)).expanduser()
+            if not expanded_vault.is_dir():
+                dep_errors.append(f"Obsidian Vault directory does not exist: {vault}")
+        # 2. Check Zotero
+        zotero_env = os.environ.get("ZOTERO_API_KEY") or os.environ.get("ZOTERO_USER_ID")
+        zotero_dirs = [
+            os.path.expandvars(r"%PROGRAMFILES%\Zotero\zotero.exe"),
+            os.path.expandvars(r"%PROGRAMFILES(X86)%\Zotero\zotero.exe"),
+            os.path.expanduser(r"~\AppData\Local\Zotero"),
+        ]
+        zotero_found = bool(zotero_env) or any(os.path.exists(d) for d in zotero_dirs)
+        if not zotero_found:
+            dep_errors.append("Zotero is not installed or Zotero API credentials ($ZOTERO_API_KEY / $ZOTERO_USER_ID) are missing.")
+        # 3. Check Academic Research Suite / Skill
+        skills = data.get("skills_found", [])
+        has_academic = any("academic" in s.lower() for s in skills)
+        custom_dirs = [
+            Path(r"C:\Users\hk200\.gemini\config\plugins\custom-skills\skills\academic-research-suite"),
+            Path(r"C:\Users\hk200\.codex\skills\academic-research-suite"),
+            Path(project_dir) / ".agents" / "skills" / "academic-research-suite",
+        ]
+        if not has_academic and not any(d.exists() for d in custom_dirs):
+            dep_errors.append("academic-research-suite skill is not found in skills catalog or plugins directory.")
+        if dep_errors:
+            errors.extend(dep_errors)
+
     # Check for extra keys
     extra = set(data.keys()) - set(schema.keys())
     if extra:
@@ -1453,6 +1622,17 @@ def cmd_emit_delta(args):
         print("DELTA VALIDATION: REJECT", file=sys.stderr)
         for e in errors:
             print(f"  {e}", file=sys.stderr)
+        
+        # Issue 6: Auto-correction instructions
+        schema_keys = list(schema.keys())
+        print("\n=== AI AUTO-CORRECTION INSTRUCTIONS ===", file=sys.stdout)
+        print("Your previous delta JSON validation failed. Please review the errors above and correct the file:\n", file=sys.stdout)
+        for e in errors:
+            print(f"- ERROR: {e}", file=sys.stdout)
+        print(f"\nRequired schema keys for {delta_key}: {schema_keys}", file=sys.stdout)
+        print("Expected JSON structure:", file=sys.stdout)
+        print(json.dumps(schema, indent=2, default=lambda x: x.__name__), file=sys.stdout)
+        print("========================================\n", file=sys.stdout)
         return 1
 
     # Receipt verification (problem 5). Policy A (optional but verified): if a
@@ -1487,9 +1667,13 @@ def cmd_emit_delta(args):
             return 1
 
     # Write to 02_Agent_Notes/<persona>/<node>_<persona>_delta.json
-    out_dir = Path(project_dir) / "02_Agent_Notes" / args.persona
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / f"{delta_key}_delta.json"
+    out_file = _delta_file(project_dir, delta_key)
+    if out_file is None:
+        out_dir = Path(project_dir) / "02_Agent_Notes" / args.persona
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_file = out_dir / f"{delta_key}_delta.json"
+    else:
+        out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(json.dumps(data, indent=2, ensure_ascii=False),
                          encoding="utf-8")
 
@@ -1778,7 +1962,7 @@ def cmd_triage_idea(args):
     if args.decision == "select":
         to, owner = "IDEA_SELECTED", "Fisher"
     else:
-        to, owner = "IDEA_REJECTED", "Oppenheimer"
+        to, owner = "DROP", "Oppenheimer"
     seq = _append_decision(project_dir, args.cand_id, frm, to, args.reason,
                            route_to=owner, agent="Oppenheimer",
                            kind="candidate_triage")
@@ -1788,6 +1972,16 @@ def cmd_triage_idea(args):
                                agent="Oppenheimer", kind="candidate_triage"),
         encoding="utf-8")
     _set_status(project_dir, args.cand_id, to, owner)
+    if to == "DROP":
+        _replace_field(cf, "final_decision", f"DROP: {args.reason}")
+        archive = project_dir / "99_Archive"
+        archive.mkdir(exist_ok=True)
+        target = archive / cf.name
+        if not target.exists():
+            cf.rename(target)
+            print(f"  archived -> {target}")
+        else:
+            print(f"  WARN: archive target exists, left in place: {target}", file=sys.stderr)
     print(f"candidate_triage: {frm} -> {to} (route: {owner})")
     return 0
 
@@ -1805,7 +1999,7 @@ def cmd_triage_method(args):
     if args.decision == "approve":
         to, owner = "METHOD_APPROVED", "Oppenheimer"
     else:
-        to, owner = "METHOD_REJECTED", "Fisher"
+        to, owner = "DROP", "Oppenheimer"
     seq = _append_decision(project_dir, args.cand_id, frm, to, args.reason,
                            route_to=owner, agent="Oppenheimer",
                            kind="analysis_plan")
@@ -1815,6 +2009,16 @@ def cmd_triage_method(args):
                                agent="Oppenheimer", kind="analysis_plan"),
         encoding="utf-8")
     _set_status(project_dir, args.cand_id, to, owner)
+    if to == "DROP":
+        _replace_field(cf, "final_decision", f"DROP: {args.reason}")
+        archive = project_dir / "99_Archive"
+        archive.mkdir(exist_ok=True)
+        target = archive / cf.name
+        if not target.exists():
+            cf.rename(target)
+            print(f"  archived -> {target}")
+        else:
+            print(f"  WARN: archive target exists, left in place: {target}", file=sys.stderr)
     print(f"analysis_plan: {frm} -> {to} (route: {owner})")
     if to == "METHOD_APPROVED":
         print("  approved plan recorded; run `execution-gate` before Turing.")
@@ -2275,7 +2479,23 @@ def _format_delta_body(delta_key, delta, lang="en"):
     if delta is None:
         return "_No delta found._\n"
     if isinstance(delta, dict) and "cn" in delta and lang == "cn":
-        delta = delta["cn"]
+        cn_delta = delta["cn"]
+        # Only use cn sub-dict if it has the same structure as the English delta.
+        # If cn fields have simplified types (e.g. attacks as string instead of list),
+        # fall back to English content to avoid AttributeError in list traversal.
+        _compatible = True
+        for _k in ("attacks", "confounders", "diagnostic_tests",
+                   "hypotheses", "strategies", "scripts_needed",
+                   "qc_checkpoints", "failure_stop_rules",
+                   "scripts_run", "evidence_verified",
+                   "falsification_risks", "module_interpretations",
+                   "publishable_now", "needs_more_work", "next_steps"):
+            if _k in delta and _k in cn_delta:
+                if type(delta[_k]) != type(cn_delta[_k]):
+                    _compatible = False
+                    break
+        if _compatible:
+            delta = cn_delta
     if isinstance(delta, dict) and "_error" in delta:
         return f"_Error reading delta: {delta['_error']}_\n"
 
@@ -2441,6 +2661,8 @@ def cmd_aggregate_report(args):
     cn.append(f"**\u6846\u67b6:** RLR v{__version__}\n")
     cn.append(f"## \u79d1\u5b66\u95ee\u9898\n\n{question}\n")
     cn.append(f"## \u4e3b\u5f20\n\n{claim}\n")
+    cn.append("> \u6ce8\uff1a\u4ee5\u4e0b delta \u5185\u5bb9\u7531\u5404 persona \u751f\u6210\uff0c\u5982\u672a\u5305\u542b `cn` \u5b57\u6bb5\u5219\u4e3a\u82f1\u6587\u539f\u6587\u3002\u4e0b\u4e00\u8f6e v0.4 \u5faa\u73af\u5c06\u8981\u6c42 agent \u540c\u65f6\u8f93\u51fa\u4e2d\u6587\u7248\u672c\u3002\n")
+    cn.append("> \u6ce8\uff1a\u4ee5\u4e0b delta \u5185\u5bb9\u7531\u5404 persona \u751f\u6210\uff0c\u5982\u672a\u5305\u542b `cn` \u5b57\u6bb5\u5219\u4e3a\u82f1\u6587\u539f\u6587\u3002\u4e0b\u4e00\u8f6e v0.4 \u5faa\u73af\u5c06\u8981\u6c42 agent \u540c\u65f6\u8f93\u51fa\u4e2d\u6587\u7248\u672c\u3002\n")
 
     for delta_key in DELTA_DAG_ORDER:
         title_cn = SECTION_TITLES_CN.get(delta_key, delta_key)

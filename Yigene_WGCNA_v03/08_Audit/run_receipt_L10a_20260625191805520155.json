@@ -1,0 +1,12 @@
+{
+  "receipt_id": "20260625191805520155",
+  "candidate_id": "C20260625190747030569",
+  "node": "L10a",
+  "persona": "Jobs",
+  "delta_key": "L10a_jobs",
+  "emitted_at": "2026-06-25T19:18:05",
+  "output_delta_sha256": "6be8cadb5227676dbd68c4222a75d7c69bc47db0cd56968c219384aa3e766619",
+  "context_manifest_id": null,
+  "upstream_verification": "skipped (no receipt)",
+  "mismatches": []
+}

@@ -1,16 +1,16 @@
 {
-  "value_assessment": "Round 2 significantly strengthens the manuscript. GSEA revealed mitochondrial energy metabolism as the key convergent pathway in turquoise - this was completely missed by round 1 ORA. ECM score correlations add a structural dimension. Signed network confirms module integrity.",
-  "headline": "High heart-rate bat and shrew converge on mitochondrial energy metabolism co-expression module",
+  "value_assessment": "Round 4 resolves the round-3 paradox and strengthens the gene-level story but undercuts the round-2 pathway headline. The round-2 turquoise core is shown to BE the within-tissue convergent modules (atrium-blue/ventricle-brown) by overwhelming gene overlap - so the convergence is real at the gene level and the round-3 modules are validated. However the specific 'mitochondrial energy metabolism' label is now unconfirmed (ORA generic, GSEA method invalid). Net: a more honest, better-grounded convergence claim, with pathway identity deferred.",
+  "headline": "A cross-species convergent cardiac gene core exists and is deployed chamber-specifically (up in atrium, down in ventricle); its pathway identity is being re-tested",
   "publishable_now": [
-    "turquoise GSEA mitochondrial enrichment",
-    "ECM score-module correlations",
-    "Signed network validation"
+    "Turquoise core = within-tissue convergent modules (gene overlap p<1e-120)",
+    "Chamber-specific direction flip of a shared convergent core",
+    "Negative/cautionary: pooled-network pathway claims need within-tissue + proper GSEA validation"
   ],
   "needs_more_work": [
-    "KEGG enrichment (rerun with network)",
-    "Signed vs unsigned gene-level overlap",
-    "Permutation-based GSEA p-values",
-    "Hub gene functional validation"
+    "Proper all-gene kME-ranked GSEA on atrium-blue/ventricle-brown (settle mitochondrial vs other)",
+    "Module preservation Zsummary",
+    "Biological model for atrium-up/ventricle-down flip",
+    "Restore or replace the pathway headline based on valid GSEA"
   ],
-  "manuscript_framing": "Frame as convergent molecular evolution: independent lineages (bat + shrew) evolved high heart rates through shared mitochondrial energy metabolism gene networks. ECM remodeling as secondary adaptation."
+  "manuscript_framing": "Convergent gene core, chamber-specific regulation, with a methods cautionary tale: pooled-network 'pathway convergence' must be validated within tissue and with correctly-ranked GSEA. Pathway identity pending round 5."
 }

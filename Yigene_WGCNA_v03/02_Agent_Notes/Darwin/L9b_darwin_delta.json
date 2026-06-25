@@ -1,33 +1,25 @@
 {
   "module_interpretations": [
     {
-      "module": "turquoise",
-      "meaning": "Mitochondrial energy metabolism and respiratory chain",
+      "module": "atrium-blue + ventricle-brown (shared core)",
+      "meaning": "A single cross-species convergent gene CORE exists (the old turquoise genes), deployed chamber-specifically: UP in high-HR atrium (blue), DOWN in high-HR ventricle (brown). Same genes, opposite chamber regulation.",
       "genes": [
-        "Ndufa1",
-        "Ndufb1",
-        "Cox5b",
-        "Atp5f1"
+        "~750 atrium / ~660 ventricle ex-turquoise genes"
       ],
-      "evidence": "GSEA: mitochondrial respiratory chain complex assembly NES=-2.80, mitochondrial translation NES=-2.71"
+      "evidence": "redistribution p=7e-121 (atrium), 3.6e-264 (ventricle)"
     },
     {
-      "module": "green",
-      "meaning": "ECM and cardiac identity",
+      "module": "pathway identity",
+      "meaning": "UNRESOLVED. ORA generic; provisional GSEA hints (atrium-blue: macroautophagy/hippo/rRNA/ion-transport) are NOT the round-2 mitochondrial story and are statistically unreliable.",
       "genes": [],
-      "evidence": "ECM score r=+0.69 strongest correlation; first round GO: cardiac muscle terms"
-    },
-    {
-      "module": "brown",
-      "meaning": "ECM negative regulator / structural remodeling",
-      "genes": [],
-      "evidence": "ECM score r=-0.43; atrium_shared_up overlap from round 1"
+      "evidence": "GSEA invalid (one-sided ranking)"
     }
   ],
-  "convergent_evolution": "Turquoise module enriches mitochondrial energy pathways specifically in high-heart-rate species. This is biologically coherent: high heart rates require high ATP production. ECM remodeling (green positive, brown negative) suggests dual structural adaptation. Signed network confirms turquoise is not an unsigned artifact (persists with 7 modules).",
+  "convergent_evolution": "Refined model: bat and shrew share a convergent cardiac gene CORE (robust at the gene level), but (a) it is regulated in OPPOSITE directions in atrium vs ventricle, and (b) its functional/pathway identity is not yet established - the round-2 'mitochondrial energy metabolism' interpretation is currently unsupported and must be re-tested with proper GSEA.",
   "limitations": [
-    "KEGG pathways unavailable (network error)",
-    "ECM score from GO annotation only",
-    "Signed network gene-level overlap with unsigned not quantified"
+    "Pathway identity unresolved (method-limited).",
+    "Direction-flip biology unexplained.",
+    "Only 2 high-HR lineages.",
+    "No formal module preservation."
   ]
 }

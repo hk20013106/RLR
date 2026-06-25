@@ -1,0 +1,44 @@
+{
+  "manifest_id": "20260625182502505773",
+  "candidate_id": "C20260625181857196255",
+  "node": "L4",
+  "persona": "Fisher",
+  "timestamp": "2026-06-25T18:25:02",
+  "allowed_inputs": [
+    "L1",
+    "L3",
+    "L2"
+  ],
+  "injected_deltas": [
+    {
+      "delta_key": "L1_einstein",
+      "sha256": "78f93574c4decc5f28ef8d60acdac40b2e5ddd07135860000537d9b73e290fa4",
+      "path": "Yigene_WGCNA_v03\\02_Agent_Notes\\Einstein\\L1_einstein_delta.json"
+    },
+    {
+      "delta_key": "L3_oppenheimer",
+      "sha256": "74c55bb5d5974e8fff1770c67bd6b60f9128f0780bab415cdbaced37054cb775",
+      "path": "Yigene_WGCNA_v03\\02_Agent_Notes\\Oppenheimer\\L3_oppenheimer_delta.json"
+    },
+    {
+      "delta_key": "L2_feynman",
+      "sha256": "00c3f0516f9ee5c11eab3cc4ee296d94442ee940ff80191e201aae9e5713e656",
+      "path": "Yigene_WGCNA_v03\\02_Agent_Notes\\Feynman\\L2_feynman_delta.json"
+    }
+  ],
+  "tools_policy": "no-fs",
+  "everos_read_scopes": [
+    "global_methods",
+    "projects/Yigene_WGCNA_v03/public",
+    "projects/Yigene_WGCNA_v03/node_outputs/L1",
+    "projects/Yigene_WGCNA_v03/node_outputs/L3",
+    "projects/Yigene_WGCNA_v03/node_outputs/L2"
+  ],
+  "workspace": null,
+  "pre_research": {
+    "type": "literature_review",
+    "path": "Yigene_WGCNA_v03\\02_Agent_Notes\\_pre_research\\L4_research.md",
+    "sha256": "93d41f77ee918bb8e2c44507bf9c9f61da9aa415869976270ce8937ba2a3ab41",
+    "present": true
+  }
+}

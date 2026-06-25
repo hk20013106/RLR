@@ -1,12 +1,11 @@
 {
-  "decision": "KEEP",
-  "evidence_level": "MODERATE-STRONG",
-  "reason": "Round 2 advanced evidence from MODERATE to MODERATE-STRONG. Three key findings: (1) GSEA revealed mitochondrial respiratory chain and translation enrichment in turquoise (NES=-2.80, -2.71) that ORA completely missed; (2) ECM score correlates with green (r=+0.69) and turquoise (r=+0.41), adding structural adaptation dimension; (3) Signed network confirms turquoise persists (7 modules vs 5), not an unsigned artifact. Caveats: KEGG failed (network), GSEA p.adjust borderline (0.043-0.047), signed-unsigned gene overlap not quantified. Manuscript-ready with mitochondrial energy metabolism as headline.",
+  "decision": "REVISE",
+  "evidence_level": "MODERATE",
+  "reason": "Round 4 delivered a strong, reproducible gene-level result (turquoise core redistributes into the convergent modules, p<1e-120) that validates the round-3 modules and resolves the paradox. But it invalidated the round-2 pathway label: ORA was generic and the GSEA was methodologically broken (one-sided within-module ranking). Pathway identity is the open, conclusion-determining question. One focused, executable fix (proper all-gene kME-ranked GSEA) remains -> REVISE, then likely KEEP.",
   "next_steps": [
-    "Rerun KEGG enrichment with network access",
-    "Quantify signed vs unsigned turquoise gene overlap",
-    "Run permutation-based GSEA p-values (nperm=10000)",
-    "Hub gene STRING network analysis",
-    "Final report and sync to Obsidian"
+    "Round 5: re-run kME-ranked GSEA ranking ALL network genes by kME-to-blue/kME-to-brown (round-2 method), both signs - settle whether the convergent core is mitochondrial/OXPHOS or autophagy/other",
+    "Module preservation (Zsummary) for atrium-blue and ventricle-brown across tissues",
+    "Propose a biological model for the chamber direction-flip (up atrium / down ventricle)",
+    "Once pathway identity is valid, finalize headline and move to KEEP"
   ]
 }

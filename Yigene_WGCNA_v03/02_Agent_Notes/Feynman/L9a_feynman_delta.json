@@ -1,30 +1,30 @@
 {
   "falsification_risks": [
     {
-      "name": "GSEA p.adjust borderline",
-      "severity": "MEDIUM",
+      "name": "GSEA invalid",
+      "severity": "high",
       "resolvable": true,
-      "text": "turquoise mitochondrial terms p.adjust=0.043-0.047, just under 0.05 cutoff. Need permutation-based p-values."
+      "text": "Within-module kME ranking is one-sided; the pathway result cannot be trusted. Resolvable by ranking ALL genes by kME-to-module (round-2 method)."
     },
     {
-      "name": "Signed network changes module structure",
-      "severity": "HIGH",
-      "resolvable": false,
-      "text": "7 modules vs 5 unsigned. Turquoise persists but composition changed. Cannot confirm turquoise is identical between signed/unsigned without gene-level overlap analysis."
+      "name": "redistribution != function",
+      "severity": "medium",
+      "resolvable": true,
+      "text": "High gene overlap shows the modules share membership, but does NOT itself prove a coherent pathway; ORA was generic."
     },
     {
-      "name": "ECM score is literature-derived",
-      "severity": "LOW",
+      "name": "direction flip",
+      "severity": "low",
       "resolvable": true,
-      "text": "ECM gene list from GO annotation, not experimentally validated. Score sensitivity to gene list choice untested."
+      "text": "Up-in-atrium / down-in-ventricle of the same gene core needs a biological model, not just statistics."
     }
   ],
   "survives": [
-    "turquoise convergent signal (persists in signed network)",
-    "ECM-turquoise correlation (r=+0.41, biologically plausible)",
-    "mitochondrial pathway enrichment (novel, GSEA-only)"
+    "Round-2 turquoise core redistributes overwhelmingly into atrium-blue (53%) and ventricle-brown (48%) with astronomically low hypergeometric p - the gene-level convergent core is robust.",
+    "Round-3 convergent modules are validated as the home of the round-2 gene set, not artifacts."
   ],
   "falsified": [
-    "ORA on turquoise core (no improvement over whole-module ORA for BP/MF)"
+    "'The convergent module is mitochondrial energy metabolism' - NOT supported by round-4 ORA/GSEA (and GSEA was invalid). The round-2 pathway headline is downgraded to UNCONFIRMED.",
+    "Hypothesis H2 (turquoise genes disperse) - FALSIFIED: they concentrate, not disperse."
   ]
 }

@@ -1,0 +1,31 @@
+{
+  "manifest_id": "20260625182240158094",
+  "candidate_id": "C20260625181857196255",
+  "node": "L1",
+  "persona": "Einstein",
+  "timestamp": "2026-06-25T18:22:40",
+  "allowed_inputs": [
+    "candidate_frontmatter",
+    "L0"
+  ],
+  "injected_deltas": [
+    {
+      "delta_key": "L0_linnaeus",
+      "sha256": "dce4b7161361d62b8b181ba65532aec2c49702171675c2280426b4a450bcc743",
+      "path": "Yigene_WGCNA_v03\\02_Agent_Notes\\Linnaeus\\L0_linnaeus_delta.json"
+    }
+  ],
+  "tools_policy": "no-fs",
+  "everos_read_scopes": [
+    "global_methods",
+    "projects/Yigene_WGCNA_v03/public",
+    "projects/Yigene_WGCNA_v03/node_outputs/L0"
+  ],
+  "workspace": null,
+  "pre_research": {
+    "type": "deep_research",
+    "path": "Yigene_WGCNA_v03\\02_Agent_Notes\\_pre_research\\L1_research.md",
+    "sha256": "21497a18999de763c64b9925489357616e0898f27e1c35f97222ab4b374451b8",
+    "present": true
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "receipt_id": "20260625183152116524",
+  "candidate_id": "C20260625181857196255",
+  "node": "L10b",
+  "persona": "Oppenheimer",
+  "delta_key": "L10b_oppenheimer",
+  "emitted_at": "2026-06-25T18:31:52",
+  "output_delta_sha256": "74f67b5182eab9b86610cdce1515e50cc0bebbc6fcfe606369f9040cdbb4ae22",
+  "context_manifest_id": null,
+  "upstream_verification": "skipped (no receipt)",
+  "mismatches": []
+}

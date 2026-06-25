@@ -1,0 +1,12 @@
+{
+  "receipt_id": "20260625183105598268",
+  "candidate_id": "C20260625181857196255",
+  "node": "L9a",
+  "persona": "Feynman",
+  "delta_key": "L9a_feynman",
+  "emitted_at": "2026-06-25T18:31:05",
+  "output_delta_sha256": "3ed1d067449d36bbad463b48dcf6374214b571f788833d2dd5659a93f7ec7571",
+  "context_manifest_id": null,
+  "upstream_verification": "skipped (no receipt)",
+  "mismatches": []
+}

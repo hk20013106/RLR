@@ -1,30 +1,32 @@
 {
   "evidence_verified": [
     {
-      "file": "08_turquoise_core_ora.R",
-      "check": "ORA on top-100/200/500 kME",
-      "result": "GO CC 1 term at top-500; BP/MF 0 at all cutoffs"
+      "file": "round4/turquoise_redistribution.csv",
+      "check": "reproducible hypergeometric overlap on shared universe",
+      "result": "PASS - atrium-blue 52.9% p=7e-121; ventricle-brown 48.4% p=3.6e-264 (very strong)"
     },
     {
-      "file": "09_kme_ranked_gsea.R",
-      "check": "kME-ranked GSEA all modules",
-      "result": "turquoise: 2 sig BP terms (mitochondrial respiratory chain NES=-2.80, mitochondrial translation NES=-2.71); blue: 4 sig BP terms"
+      "file": "round4/atrium_blue_GSEA.csv",
+      "check": "FDR<0.05 enrichment",
+      "result": "WEAK - only macroautophagy+hippo pass; not mitochondrial"
     },
     {
-      "file": "10_ecm_score_correlation.R",
-      "check": "ECM score vs ME",
-      "result": "green r=+0.69 p<0.001; turquoise r=+0.41 p<0.001; brown r=-0.43 p<0.001"
+      "file": "round4/ventricle_brown_GSEA.csv",
+      "check": "FDR<0.05",
+      "result": "FAIL - no term q<0.05"
     },
     {
-      "file": "11_signed_network.R",
-      "check": "signed network blockwiseModules",
-      "result": "7 modules (vs 5 unsigned); turquoise persists with different composition"
+      "file": "GSEA method",
+      "check": "valid ranked-list statistics",
+      "result": "INVALID - one-sided within-module kME ranking; 860/1408 NA p-values"
     }
   ],
-  "evidence_level": "MODERATE-STRONG",
+  "evidence_level": "MODERATE",
   "caveats": [
-    "KEGG failed due to SSL error (network)",
-    "Signed network trait correlations not generated (script issue)",
-    "GSEA p.adjust borderline (0.043-0.051)"
+    "STRONG and reproducible: round-2 turquoise core redistributes predominantly into the within-tissue convergent modules (blue/brown) - the gene-level convergence is real and the round-3 modules are not arbitrary re-clustering.",
+    "The round-2 'mitochondrial energy metabolism' PATHWAY label is NOT supported by round-4 enrichment and is currently UNCONFIRMED (ORA generic; GSEA method invalid).",
+    "Chamber-flipped direction (atrium UP, ventricle DOWN) of the shared gene core is a genuine, interesting result needing biological explanation.",
+    "Pathway identity must be re-tested with all-gene kME-ranked GSEA before any mitochondrial claim is restored.",
+    "modulePreservation Zsummary not formally run."
   ]
 }

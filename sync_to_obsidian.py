@@ -46,7 +46,7 @@ PERSONAS = {
 DAG_ORDER = [
     "L0_linnaeus", "L1_einstein", "L2_feynman", "L3_oppenheimer",
     "L4_fisher", "L5_tukey", "L6_oppenheimer", "L7_turing",
-    "L8_curie", "L9a_feynman", "L9b_darwin",
+    "L8_curie", "L8.5_research", "L9a_feynman", "L9b_darwin",
     "L10a_jobs", "L10b_oppenheimer",
 ]
 
@@ -55,7 +55,7 @@ DELTA_PERSONA = {
     "L2_feynman": "Feynman", "L3_oppenheimer": "Oppenheimer",
     "L4_fisher": "Fisher", "L5_tukey": "Tukey",
     "L6_oppenheimer": "Oppenheimer", "L7_turing": "Turing",
-    "L8_curie": "Curie", "L9a_feynman": "Feynman",
+    "L8_curie": "Curie", "L8.5_research": "Curie", "L9a_feynman": "Feynman",
     "L9b_darwin": "Darwin", "L10a_jobs": "Jobs",
     "L10b_oppenheimer": "Oppenheimer",
 }
@@ -70,6 +70,7 @@ LAYER_TITLES_EN = {
     "L6_oppenheimer": "L6 - Method Approval (Oppenheimer)",
     "L7_turing": "L7 - Execution (Turing)",
     "L8_curie": "L8 - Evidence Audit (Curie)",
+    "L8.5_research": "L8.5 - Literature Verification (Curie)",
     "L9a_feynman": "L9a - Result Falsification (Feynman)",
     "L9b_darwin": "L9b - Biology Interpretation (Darwin)",
     "L10a_jobs": "L10a - Value Assessment (Jobs)",
@@ -100,8 +101,19 @@ def fmt_delta_note(delta_key, delta):
     if isinstance(delta, dict) and "_error" in delta:
         return f"_Error: {delta['_error']}_"
 
-    # Use CN field if available
-    d = delta.get("cn", delta) if isinstance(delta, dict) else delta
+    # Use CN field if available AND it has the same structure as the top-level
+    d = delta
+    if isinstance(delta, dict) and "cn" in delta and isinstance(delta["cn"], dict):
+        cn = delta["cn"]
+        # Only use cn if its fields have compatible types (lists stay lists)
+        for k, v in delta.items():
+            if k == "cn":
+                continue
+            if isinstance(v, list) and k in cn and not isinstance(cn[k], list):
+                d = delta  # fallback to English
+                break
+        else:
+            d = cn if cn else delta
     L = []
 
     if delta_key == "L0_linnaeus":
@@ -174,6 +186,16 @@ def fmt_delta_note(delta_key, delta):
         L.append(f"\n**Evidence level:** {d.get('evidence_level','')}")
         if d.get("caveats"):
             L.append(f"**Caveats:** {fmt_list(d.get('caveats'))}")
+
+    elif delta_key == "L8.5_research":
+        L.append(f"**Searched Keywords:** {fmt_list(d.get('searched_keywords'))}")
+        L.append(f"\n**Papers Found:**")
+        for p in d.get("papers", []):
+            L.append(f"- **PMID {p.get('pmid','?')}: {p.get('title','')}**")
+            L.append(f"  - Relevance: {p.get('relevance','')}")
+            L.append(f"  - Comparison: {p.get('comparison','')}")
+            L.append(f"  - Abstract: {p.get('abstract','')}")
+        L.append(f"\n**Summary:** {d.get('summary','')}")
 
     elif delta_key == "L9a_feynman":
         for r in d.get("falsification_risks", []):
@@ -293,19 +315,37 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
         note_path.write_text(body, encoding="utf-8")
         print(f"  note: {persona}/{note_name}")
 
-    # --- 03_Figures: copy PDFs/PNGs from results ---
+    # --- 03_Figures: convert PDFs to PNG, copy PNGs ---
     fig_dir = vault_project / "03_Figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
     fig_count = 0
+    pdftoppm = shutil.which("pdftoppm")
     if results_dir.exists():
-        for ext in ("*.pdf", "*.png", "*.jpg"):
+        for f in results_dir.rglob("*.pdf"):
+            if pdftoppm:
+                png_name = f.stem + ".png"
+                dst_png = fig_dir / png_name
+                import subprocess as _sp
+                _sp.run([pdftoppm, "-png", "-r", "150", "-singlefile", str(f), str(dst_png.with_suffix(""))],
+                        capture_output=True)
+                if dst_png.exists():
+                    fig_count += 1
+                    print(f"  figure (PDF->PNG): {png_name}")
+                else:
+                    shutil.copy2(f, fig_dir / f.name)
+                    fig_count += 1
+                    print(f"  figure (PDF copy): {f.name}")
+            else:
+                shutil.copy2(f, fig_dir / f.name)
+                fig_count += 1
+                print(f"  figure (PDF): {f.name}")
+        for ext in ("*.png", "*.jpg"):
             for f in results_dir.rglob(ext):
-                rel = f.relative_to(results_dir)
-                dst = fig_dir / rel.name
+                dst = fig_dir / f.name
                 shutil.copy2(f, dst)
                 fig_count += 1
-                print(f"  figure: {rel.name}")
-    print(f"  figures copied: {fig_count}")
+                print(f"  figure: {f.name}")
+    print(f"  figures total: {fig_count}")
 
     # --- 05_Decision_Log: ROUND_SUMMARY (human) + final_decision only ---
     log_dir = vault_project / "05_Decision_Log"
@@ -323,6 +363,7 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
         summary_path = log_dir / f"ROUND_SUMMARY_R{c['round']}.md"
         l10b = load_delta(project_dir, "L10b_oppenheimer")
         l8 = load_delta(project_dir, "L8_curie")
+        l8_5 = load_delta(project_dir, "L8.5_research")
         l7 = load_delta(project_dir, "L7_turing")
         lines = [f"# Round {c['round']} Summary\n"]
         lines.append(f"**Candidate:** {c['id']}")
@@ -343,7 +384,7 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
             d = l7.get("cn", l7)
             for k, v in (d.get("key_results") or {}).items():
                 lines.append(f"- **{k}:** {v}")
-        lines.append(f"\n## Evidence Audit\n")
+        lines.append(f"\n## Evidence Audit (L8)\n")
         if l8:
             d = l8.get("cn", l8)
             lines.append(f"**Level:** {d.get('evidence_level','')}")
@@ -351,6 +392,15 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
                 lines.append(f"- {e.get('file','')}: {e.get('check','')} = {e.get('result','')}")
             if d.get("caveats"):
                 lines.append(f"\n**Caveats:** {fmt_list(d.get('caveats'))}")
+        lines.append(f"\n## Literature Verification (L8.5)\n")
+        if l8_5:
+            d = l8_5.get("cn", l8_5)
+            lines.append(f"**Summary:** {d.get('summary','')}")
+            for p in d.get("papers", []):
+                lines.append(f"- **PMID {p.get('pmid','')}:** {p.get('title','')}")
+                lines.append(f"  - *Comparison:* {p.get('comparison','')}")
+        else:
+            lines.append("_No literature verification run in this round._")
         lines.append(f"\n## Figures\n")
         lines.append(f"See [[03_Figures/]] for all plots.")
         summary_path.write_text("\n".join(lines), encoding="utf-8")
@@ -365,14 +415,28 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
             if fname in ("FINAL_REPORT.md", "FINAL_REPORT_CN.md"):
                 fig_dir = vault_project / "03_Figures"
                 if fig_dir.exists():
-                    figs = sorted(fig_dir.glob("*"))
+                    figs = sorted(fig_dir.glob("*.png")) + sorted(fig_dir.glob("*.jpg"))
                     if figs:
                         lines = ["", "## Figures", ""]
                         for fig in figs:
-                            lines.append(f"![{fig.stem}](03_Figures/{fig.name})")
+                            lines.append(f"![[03_Figures/{fig.name}]]")
                         lines.append("")
                         with open(vault_project / fname, "a", encoding="utf-8") as f:
                             f.write("\n".join(lines))
+
+    # --- 09_Literature_Database: copy literature database and index ---
+    lit_db_src = project_dir / "09_Literature_Database"
+    lit_db_dst = vault_project / "09_Literature_Database"
+    if lit_db_src.exists():
+        lit_db_dst.mkdir(parents=True, exist_ok=True)
+        # Clean old files to ensure perfect synchronization
+        for f in lit_db_dst.glob("*"):
+            if f.is_file():
+                f.unlink()
+        for f in lit_db_src.glob("*"):
+            if f.is_file():
+                shutil.copy2(f, lit_db_dst / f.name)
+        print(f"  literature database synced: {lit_db_dst}")
 
     # --- 08_Audit: remove from vault (machine-only) ---
     audit_dir = vault_project / "08_Audit"
@@ -401,6 +465,8 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
     lines.append(f"- [[FINAL_REPORT_CN|最终报告 (中文)]]")
     lines.append(f"\n## Figures\n")
     lines.append(f"- [[03_Figures/|All figures]]")
+    lines.append(f"\n## Literature Database\n")
+    lines.append(f"- [[09_Literature_Database/00_Library_Index|Literature Library Index]]")
     index_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"  index: 00_Index.md")
 

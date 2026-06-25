@@ -1,0 +1,12 @@
+{
+  "receipt_id": "20260625191731915648",
+  "candidate_id": "C20260625190747030569",
+  "node": "L8",
+  "persona": "Curie",
+  "delta_key": "L8_curie",
+  "emitted_at": "2026-06-25T19:17:31",
+  "output_delta_sha256": "7438ed0b155160b2cc3f93507250bc3b2e5b419b5033f07e87dedd3cdc2e43e5",
+  "context_manifest_id": null,
+  "upstream_verification": "skipped (no receipt)",
+  "mismatches": []
+}

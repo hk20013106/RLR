@@ -1,0 +1,12 @@
+{
+  "receipt_id": "20260625191244665964",
+  "candidate_id": "C20260625190747030569",
+  "node": "L5",
+  "persona": "Tukey",
+  "delta_key": "L5_tukey",
+  "emitted_at": "2026-06-25T19:12:44",
+  "output_delta_sha256": "d2aded8c31138201fe5512f759bcaa8fa79e9cbcb0c00460c0631136dbf6c876",
+  "context_manifest_id": null,
+  "upstream_verification": "skipped (no receipt)",
+  "mismatches": []
+}

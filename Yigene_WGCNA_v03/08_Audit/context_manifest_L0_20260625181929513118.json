@@ -1,0 +1,18 @@
+{
+  "manifest_id": "20260625181929513118",
+  "candidate_id": "C20260625181857196255",
+  "node": "L0",
+  "persona": "Linnaeus",
+  "timestamp": "2026-06-25T18:19:29",
+  "allowed_inputs": [
+    "candidate_frontmatter"
+  ],
+  "injected_deltas": [],
+  "tools_policy": "no-fs",
+  "everos_read_scopes": [
+    "global_methods",
+    "projects/Yigene_WGCNA_v03/public"
+  ],
+  "workspace": null,
+  "pre_research": null
+}
