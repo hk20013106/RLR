@@ -38,3 +38,4 @@ _tmp_lines.txt
 # DemoProject generated RUN DATA (the demo is tracked, its outputs are not)
 DemoProject_v03/08_Audit/
 DemoProject_v03/10_Pitfall_Ledger/
+DemoProject_v03/rlr_runner.yaml

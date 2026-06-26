@@ -63,13 +63,20 @@ class LiteratureDB:
                 return fname, fm
         return None, None
 
-    def add_or_update_paper(self, paper_data, round_id=1):
-        """Add new paper or update existing paper's round and properties."""
+    def add_or_update_paper(self, paper_data, round_id=1, allow_unverified=False):
+        """Add new paper or update existing paper's round and properties.
+
+        A NEW paper must carry at least one verifiable identifier (DOI or URL --
+        a PubMed URL covers PMIDs). Citationless entries are rejected (returns
+        None) unless allow_unverified=True; this is what stops junk like
+        'unknown_unknown_*.md' from becoming a first-class citation. Updates to
+        an already-stored paper are never blocked."""
         doi = paper_data.get("doi")
         title = paper_data.get("title")
         authors = paper_data.get("authors")
         year = paper_data.get("year")
-        
+        url = paper_data.get("url")
+
         # Check duplicate
         fname, existing_fm = self.find_duplicate(doi, title)
         
@@ -101,7 +108,14 @@ class LiteratureDB:
             write_yaml_front(self.db_dir / fname, existing_fm, body)
             return fname
         else:
-            # Create new
+            # Create new -- but only if it is actually citable. No DOI and no URL
+            # (and no PMID-derived URL) means there is nothing to verify against,
+            # so we refuse rather than mint a citationless 'unknown_unknown_*'.
+            has_identifier = bool((doi or "").strip() or (url or "").strip())
+            if not has_identifier and not allow_unverified:
+                print(f"[DB] SKIP unverified paper (no DOI/URL/PMID): "
+                      f"{title or '<no title>'!r}", file=sys.stderr)
+                return None
             first_author = "Unknown"
             if isinstance(authors, list) and len(authors) > 0:
                 first_author = authors[0].split(",")[-1].split(" ")[-1].strip()
@@ -141,7 +155,13 @@ class LiteratureDB:
             return new_fname
 
     def sync_index(self):
-        """Regenerate the 00_Library_Index.md master list."""
+        """Regenerate the 00_Library_Index.md master list.
+
+        Always re-derives from the .md files actually on disk (not the in-memory
+        snapshot taken at __init__), so the index can never drift behind papers
+        added by another process / write path. This is the self-healing guard."""
+        self.papers = {}
+        self._load_all()
         index_file = self.db_dir / "00_Library_Index.md"
         lines = [
             "# Literature Database Index\n",
@@ -150,12 +170,18 @@ class LiteratureDB:
             "| :--- | :---: | :--- | :---: | :---: | :--- |"
         ]
         
-        # Sort papers by year (descending), then author
-        sorted_papers = []
-        for fname, fm in self.papers.items():
-            sorted_papers.append((fname, fm))
-        
-        sorted_papers.sort(key=lambda x: (x[1].get("year") or 0, x[0]), reverse=True)
+        # Sort papers by year (descending), then filename. Year may be stored as
+        # int (unquoted YAML seed) or str ('2026' from L8.5), so coerce to int --
+        # mixing the two raw types raised TypeError, which (when swallowed by the
+        # caller) was what left the index stale.
+        def _year_key(fm):
+            try:
+                return int(str(fm.get("year") or "").strip()[:4])
+            except (ValueError, TypeError):
+                return 0
+
+        sorted_papers = list(self.papers.items())
+        sorted_papers.sort(key=lambda x: (_year_key(x[1]), x[0]), reverse=True)
         
         for fname, fm in sorted_papers:
             title = fm.get("title", "Unknown")
@@ -185,6 +211,8 @@ if __name__ == "__main__":
     sp_add.add_argument("project_dir")
     sp_add.add_argument("--json-data", required=True, help="CSL-JSON format or key-values of paper metadata")
     sp_add.add_argument("--round", type=int, default=1)
+    sp_add.add_argument("--allow-unverified", action="store_true",
+                        help="permit a paper with no DOI/URL/PMID (manual seeds only)")
     
     # sync
     sp_sync = sub.add_parser("sync")
@@ -207,7 +235,8 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"ERROR: invalid JSON data: {e}", file=sys.stderr)
             sys.exit(2)
-        db.add_or_update_paper(data, round_id=args.round)
+        db.add_or_update_paper(data, round_id=args.round,
+                               allow_unverified=args.allow_unverified)
         db.sync_index()
         
     elif args.cmd == "sync":

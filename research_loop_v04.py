@@ -99,15 +99,22 @@ DECISION_TRANSITIONS = {
     "ARCHIVED": set(),
 }
 
-# --- DAG topology (14 nodes, L9a/L9b parallel) ------------------------------
-# Each node: (node_id, persona, layer, status_before, status_after_optional,
-#             context_inputs, is_parallel, is_execution, advance_command,
-#             action_hint)
+# --- DAG topology (15 nodes, L9a/L9b parallel) ------------------------------
+# Each node: node_id, persona, status_before, status_after_optional,
+#            context_inputs, is_parallel, is_execution, advance_command,
+#            action_hint
 
 DAG_NODES = [
     {
-        "node": "L0", "persona": "Linnaeus", "layer": 0,
+        "node": "L0", "persona": "Linnaeus",
         "status_before": "NEW", "advance_command": "decision",
+        "must": ["Verify every input from source_input exists and is readable",
+                 "Register each input alias with path/files/format/classification/verified/notes",
+                 "Fill skill_use_plan with real skills, not template placeholders"],
+        "must_not": ["Execute code", "Interpret data", "Change candidate status",
+                     "Leave template placeholders in preflight files"],
+        "stop_conditions": ["Any required dependency missing",
+                            "Any declared input unverified"],
         "advance_status": "IDEA_PROPOSED", "advance_reason": "Preflight complete, route to Einstein",
         "context_inputs": ["candidate_frontmatter"],
         "is_parallel": False, "is_execution": False,
@@ -115,139 +122,181 @@ DAG_NODES = [
         "agent_type": "default",
     },
     {
-        "node": "L1", "persona": "Einstein", "layer": 1,
+        "node": "L1", "persona": "Einstein",
         "status_before": "IDEA_PROPOSED", "advance_command": "decision",
         "advance_status": "IDEA_PROPOSED", "advance_reason": "Einstein hypotheses generated, route to Feynman",
         "context_inputs": ["candidate_frontmatter", "L0"],
         "is_parallel": False, "is_execution": False,
         "pre_research": "deep_research",
         "action_hint": "Generate scientific hypotheses about the research question",
+        "must": ["Generate testable scientific hypotheses from candidate question and pre-research results", "Each hypothesis must have: id, text, testable, rationale, cn"],
+        "must_not": ["Execute code", "Change candidate status", "Design analysis methods"],
+        "stop_conditions": ["No testable hypothesis generated"],
         "agent_type": "default",
     },
     {
-        "node": "L2", "persona": "Feynman", "layer": 2,
+        "node": "L2", "persona": "Feynman",
         "status_before": "IDEA_PROPOSED", "advance_command": "decision",
         "advance_status": "IDEA_PROPOSED", "advance_reason": "Feynman falsification complete, route to Oppenheimer",
         "context_inputs": ["candidate_frontmatter", "L1"],
         "is_parallel": False, "is_execution": False,
         "action_hint": "Blind-review and attack the L1 hypotheses",
+        "must": ["Blind-review every L1 hypothesis", "Identify confounders and diagnostic tests", "Rate each attack by severity"],
+        "must_not": ["Execute code", "Change candidate status", "Soft-pedal criticism"],
+        "stop_conditions": ["No attacks generated"],
         "agent_type": "default",
     },
     {
-        "node": "L3", "persona": "Oppenheimer", "layer": 3,
+        "node": "L3", "persona": "Oppenheimer",
         "status_before": "IDEA_PROPOSED", "advance_command": "triage-idea",
         "advance_status": "IDEA_SELECTED", "advance_reason": "",
         "context_inputs": ["L1", "L2"],
         "is_parallel": False, "is_execution": False,
         "action_hint": "Triage hypotheses: select testable ones, reject weak ones",
+        "must": ["Select testable hypotheses from L1/L2 debate", "Reject weak ones with reason"],
+        "must_not": ["Execute code", "Act on unverified deltas"],
+        "stop_conditions": ["No hypotheses selected"],
         "agent_type": "default",
     },
     {
-        "node": "L4", "persona": "Fisher", "layer": 4,
+        "node": "L4", "persona": "Fisher",
         "status_before": "IDEA_SELECTED", "advance_command": "decision",
         "advance_status": "METHOD_PROPOSED", "advance_reason": "Fisher method design complete, route to Tukey",
         "context_inputs": ["L1", "L3", "L2"],
         "is_parallel": False, "is_execution": False,
         "pre_research": "literature_review",
         "action_hint": "Design experimental/analysis strategies",
+        "must": ["Design experimental strategies for selected hypotheses", "Reuse existing skills and code patterns", "Define scripts_needed list with purpose"],
+        "must_not": ["Execute code", "Change candidate status", "Design without reading L1/L3"],
+        "stop_conditions": ["No strategy defined"],
         "agent_type": "default",
     },
     {
-        "node": "L5", "persona": "Tukey", "layer": 5,
+        "node": "L5", "persona": "Tukey",
         "status_before": "METHOD_PROPOSED", "advance_command": "decision",
         "advance_status": "METHOD_PROPOSED", "advance_reason": "Tukey QC review complete, route to Oppenheimer",
         "context_inputs": ["L4", "L2"],
         "is_parallel": False, "is_execution": False,
         "action_hint": "Critique the method design from EDA/QC perspective",
+        "must": ["Critique L4 method design from EDA/QC perspective", "Define QC checkpoints and failure stop rules"],
+        "must_not": ["Execute code", "Change candidate status"],
+        "stop_conditions": ["No QC checkpoints defined"],
         "agent_type": "default",
     },
     {
-        "node": "L6", "persona": "Oppenheimer", "layer": 6,
+        "node": "L6", "persona": "Oppenheimer",
         "status_before": "METHOD_PROPOSED", "advance_command": "triage-method",
         "advance_status": "METHOD_APPROVED", "advance_reason": "",
         "context_inputs": ["L4", "L5"],
         "is_parallel": False, "is_execution": False,
         "action_hint": "Approve or reject the analysis plan",
+        "must": ["Approve or reject the analysis plan", "Record modifications and reason"],
+        "must_not": ["Execute code", "Approve without reading L4/L5"],
+        "stop_conditions": ["No approved_strategy"],
         "agent_type": "default",
     },
     {
-        "node": "L7", "persona": "Turing", "layer": 7,
+        "node": "L7", "persona": "Turing",
         "status_before": "METHOD_APPROVED", "advance_command": "execution-gate",
         "advance_status": "NEEDS_EXECUTION", "advance_reason": "",
         "context_inputs": ["L6", "L0"],
         "is_parallel": False, "is_execution": True,
         "pre_research": "code_search",
         "action_hint": "Execute approved scripts in controlled workspace",
+        "must": ["Execute ONLY scripts in approved analysis_plan", "Run in prepared Turing workspace ONLY", "Record exit_code and output_files"],
+        "must_not": ["Execute unapproved scripts", "Access files outside workspace", "Change status"],
+        "stop_conditions": ["Any script fails"],
         "agent_type": "worker",
     },
     {
-        "node": "L8", "persona": "Curie", "layer": 8,
+        "node": "L8", "persona": "Curie",
         "status_before": "EXECUTED", "advance_command": "decision",
         "advance_status": "AUDITED", "advance_reason": "Curie evidence audit complete, route to literature verification",
         "context_inputs": ["L7", "L6", "candidate_frontmatter"],
         "is_parallel": False, "is_execution": False,
         "action_hint": "Audit execution results, verify reproducibility, assign evidence level",
+        "must": ["Verify every output file L7 claims", "Assign evidence_level", "Audit reproducibility"],
+        "must_not": ["Execute code", "Change status", "Trust without verification"],
+        "stop_conditions": ["Key output files missing"],
         "agent_type": "default",
     },
     {
-        "node": "L8.5", "persona": "Curie", "layer": 8,
+        "node": "L8.5", "persona": "Curie",
         "status_before": "AUDITED", "advance_command": "decision",
         "advance_status": "UNDER_REVIEW", "advance_reason": "L8.5 literature verification complete, route to review",
         "context_inputs": ["L7", "L8", "candidate_frontmatter"],
         "is_parallel": False, "is_execution": False,
         "action_hint": "Search PubMed/EuropePMC based on L7/L8 actual results to verify findings",
+        "must": ["Search PubMed based on L7/L8 results", "Add verified papers to knowledge base", "Cite real PMIDs/DOIs"],
+        "must_not": ["Fabricate citations", "Change status"],
+        "stop_conditions": ["No real papers found"],
         "agent_type": "default",
     },
     {
-        "node": "L9a", "persona": "Feynman", "layer": 9,
+        "node": "L9a", "persona": "Feynman",
         "status_before": "UNDER_REVIEW", "advance_command": "decision",
         "advance_status": "UNDER_REVIEW", "advance_reason": "L9a falsification complete",
         "context_inputs": ["L1", "L7", "L8", "L8.5"],
         "is_parallel": True, "is_execution": False,
         "action_hint": "Hard falsification of results from statistical/logical completeness",
+        "must": ["Hard-falsify results from statistical/logical completeness", "Identify risks, surviving claims, falsified claims"],
+        "must_not": ["Execute code", "Change status", "Influenced by L9b"],
+        "stop_conditions": ["No falsification analysis"],
         "agent_type": "default",
     },
     {
-        "node": "L9b", "persona": "Darwin", "layer": 9,
+        "node": "L9b", "persona": "Darwin",
         "status_before": "UNDER_REVIEW", "advance_command": None,
         "advance_status": None, "advance_reason": None,
         "context_inputs": ["L1", "L7", "L8", "L8.5"],
         "is_parallel": True, "is_execution": False,
         "action_hint": "Biological interpretation of results",
+        "must": ["Interpret results from biological perspective", "Ground every interpretation in evidence"],
+        "must_not": ["Execute code", "Change status", "Influenced by L9a"],
+        "stop_conditions": ["No interpretations"],
         "agent_type": "default",
     },
     {
-        "node": "L10a", "persona": "Jobs", "layer": 10,
+        "node": "L10a", "persona": "Jobs",
         "status_before": "UNDER_REVIEW", "advance_command": "decision",
         "advance_status": "UNDER_REVIEW", "advance_reason": "Jobs value assessment complete",
         "context_inputs": ["candidate_frontmatter", "L8", "L8.5", "L9a", "L9b"],
         "is_parallel": False, "is_execution": False,
         "action_hint": "Assess value, frame manuscript direction",
+        "must": ["Assess scientific value and manuscript potential", "Frame manuscript direction", "Be honest about limitations"],
+        "must_not": ["Execute code", "Change status", "Overhype weak results"],
+        "stop_conditions": ["No value_assessment"],
         "agent_type": "default",
     },
     {
-        "node": "L10b", "persona": "Oppenheimer", "layer": 10,
+        "node": "L10b", "persona": "Oppenheimer",
         "status_before": "UNDER_REVIEW", "advance_command": "decision",
         "advance_status": "KEEP", "advance_reason": "",
         "context_inputs": ["L10a", "L8", "L8.5", "L9a", "L9b"],
         "is_parallel": False, "is_execution": False,
         "action_hint": "Final decision: KEEP / REVISE / DOWNGRADE / DROP",
+        "must": ["Make final decision: KEEP/REVISE/DOWNGRADE/DROP", "Reason must reference L8/L8.5/L9a/L9b"],
+        "must_not": ["Execute code", "Decide without reading all inputs"],
+        "stop_conditions": ["No final_decision"],
         "agent_type": "default",
     },
     {
-        "node": "L10c", "persona": "Linnaeus", "layer": 10,
+        "node": "L10c", "persona": "Linnaeus",
         "status_before": "KEEP", "advance_command": "aggregate-report",
         "advance_status": None, "advance_reason": None,
         "context_inputs": ["ALL"],
         "is_parallel": False, "is_execution": False,
         "action_hint": "Aggregate all deltas into FINAL_REPORT",
+        "must": ["Aggregate all deltas in DAG order", "Generate FINAL_REPORT.md and FINAL_REPORT_CN.md"],
+        "must_not": ["Execute code", "Change status", "Skip any delta"],
+        "stop_conditions": ["Any delta missing"],
         "agent_type": "default",
     },
 ]
 
 # Map: node_id -> node dict
 PRE_RESEARCH_MAP = {
-    "L1": {"type": "deep_research", "skill": "academic-research-suite",
+    "L1": {"budget": 800, "type": "deep_research", "skill": "academic-research-suite",
            "description": "Search literature for convergent evolution, cardiac co-expression, high heart rate adaptation",
            "queries": [
                "convergent evolution cardiac gene expression high heart rate",
@@ -255,7 +304,7 @@ PRE_RESEARCH_MAP = {
                "molecular convergence bat shrew cardiac adaptation",
                "module eigengene species trait correlation heart rate",
            ]},
-    "L4": {"type": "literature_review", "skill": "academic-research-suite",
+    "L4": {"budget": 300, "type": "literature_review", "skill": "academic-research-suite",
            "description": "Search methodology papers: WGCNA cross-species, module preservation, convergent transcriptomics",
            "queries": [
                "WGCNA module preservation cross-species Zsummary",
@@ -264,7 +313,7 @@ PRE_RESEARCH_MAP = {
                "signed vs unsigned WGCNA network cardiac",
                "module preservation statistics Zsummary medianRank",
            ]},
-    "L7": {"type": "code_search", "skill": "github-search",
+    "L7": {"budget": 0, "type": "code_search", "skill": "github-search",
            "description": "Search GitHub/Bioconductor for WGCNA pipelines, GSEA wrappers, ECM score tools",
            "queries": [
                "WGCNA pipeline R script cross-species module preservation",
@@ -272,14 +321,15 @@ PRE_RESEARCH_MAP = {
                "ECM extracellular matrix score gene set R",
                "WGCNA signed network soft threshold power R",
            ]},
-    "L8.5": {"type": "literature_verification", "skill": "academic-research-suite",
+    "L8.5": {"budget": 0, "type": "literature_verification", "skill": "academic-research-suite",
              "description": "Search PubMed/EuropePMC for papers that CONFIRM or "
                             "CONTRADICT the actual L7/L8 findings (grounded in the "
                             "real results, not just the question)",
              "queries": [
-                 "<gene/module from L7 key_results> cardiac expression",
-                 "<phenotype from candidate> convergent evolution heart",
-                 "<method from L6/L7> validation cross-species",
+                 "cardiac gene expression co-expression module cross-species",
+                 "convergent evolution heart rate adaptation molecular mechanisms",
+                 "WGCNA module preservation validation cross-species transcriptomics",
+                 "bat shrew cardiac transcriptome comparative genomics",
              ]},
 }
 
@@ -379,6 +429,9 @@ DELTA_SCHEMAS = {
         "skills_found": list, "skills_gaps": list, "input_verified": dict,
         "environment": dict, "skill_use_plan": list, "forbidden_shortcuts": list
     },
+    # NOTE: input_verified values should be dicts with keys:
+    #   path, files, format, classification, verified, notes
+    #   (not bare strings like "valid") — enforced by L0 persona/layer templates
     "L1_einstein": {
         "hypotheses": [{"id": str, "text": str, "testable": bool, "rationale": str}],
         "key_uncertainty": str, "primary_hypothesis": str
@@ -678,9 +731,6 @@ def _now():
 def _stamp():
     return _dt.datetime.now().strftime("%Y%m%d%H%M%S%f")
 
-def _date():
-    return _dt.datetime.now().strftime("%Y-%m-%d")
-
 def _slug(s):
     s = s.strip().lower()
     s = re.sub(r"[^a-z0-9]+", "_", s)
@@ -769,26 +819,6 @@ def _load_yaml_front(path):
             out[k.strip()] = v
     return out
 
-def _save_yaml_front(path, frontmatter):
-    """Write a YAML frontmatter block to *path*, replacing any existing one."""
-    lines = ["---"]
-    for k, v in frontmatter.items():
-        lines.append(f"{k}: {_yaml_value(v)}")
-    lines.append("---")
-    lines.append("")
-    fm_text = "\n".join(lines)
-    text = path.read_text(encoding="utf-8") if path.exists() else ""
-    if text.startswith("---"):
-        end = text.find("\n---", 4)
-        if end >= 0:
-            body = text[end + 4:]
-        else:
-            body = ""
-        text = fm_text + body.lstrip("\n")
-    else:
-        text = fm_text + text
-    path.write_text(text, encoding="utf-8")
-
 def _replace_field(path, key, value):
     text = path.read_text(encoding="utf-8")
     # Fail loud if the file has no YAML frontmatter: otherwise neither the regex
@@ -869,7 +899,7 @@ def _mkdirs(project_dir):
     for sub in ["00_Preflight", "01_Candidates", "03_Handoffs",
                 "04_Analysis_Outputs", "05_Decision_Log",
                 "06_Manuscript_Direction", "07_Obsidian_Sync",
-                "08_Audit", "99_Archive"]:
+                "08_Audit", "10_Pitfall_Ledger", "99_Archive"]:
         (p / sub).mkdir(parents=True, exist_ok=True)
     for agent in AGENTS:
         (p / "02_Agent_Notes" / agent).mkdir(parents=True, exist_ok=True)
@@ -1210,13 +1240,13 @@ Do NOT build from scratch where a relevant skill or prior code pattern exists.
 Classify every input as: **primary**, **fallback**, **reference-only**, or
 **forbidden**. Execution may only consume primary/fallback inputs.
 
-| file / path | role | classification | notes |
-|-------------|------|----------------|-------|
-| _e.g. results/length_scaled_counts.csv_ | expression matrix | primary | length-scaled |
+| alias | full path | key files | format | classification | verified | notes |
+|-------|-----------|-----------|--------|----------------|----------|-------|
+_READ EACH input alias from candidate frontmatter. One row per input. Fill ALL columns. Do NOT leave template rows._
 
 ## Required inputs for execution
 
-_List the inputs the approved plan must have before the Execution Gate opens._
+_MUST match the input_verified dict in L0 delta. Every alias must have: path, files, format, classification, verified, notes._
 """
     elif fname == "output_manifest.md":
         body = """
@@ -1247,6 +1277,25 @@ Outputs live in project results dirs; Obsidian links to them (no duplication).
 
 # --- Phase 1 commands: next-step, assemble-context, emit-delta --------------
 
+def _pitfall_warnings_for_node(project_dir, node_id):
+    """Return a list of relevant confirmed pitfall summaries for a DAG node.
+    Injected into next-step output so the orchestrator sees prior pitfalls
+    before assembling context for that node."""
+    try:
+        rules = pl.scan_pitfalls(project_dir, node=node_id)
+    except Exception:
+        return []
+    warnings = []
+    for r in rules:
+        warnings.append({
+            "id": r.get("id", ""),
+            "category": r.get("category", ""),
+            "severity": r.get("severity", "warn"),
+            "error_class": r.get("error_class", "agent"),
+            "prevention_rule": r.get("prevention_rule", ""),
+        })
+    return warnings
+
 def cmd_next_step(args):
     """Output JSON scheduling packet for the next DAG node."""
     project_dir = Path(args.project_dir)
@@ -1268,6 +1317,9 @@ def cmd_next_step(args):
                     "is_execution": False,
                     "context_files": ["ALL"],
                     "action_hint": node_info["action_hint"],
+        "must": ["Aggregate all deltas in DAG order", "Generate FINAL_REPORT.md and FINAL_REPORT_CN.md"],
+        "must_not": ["Execute code", "Change status", "Skip any delta"],
+        "stop_conditions": ["Any delta missing"],
                     "advance_command": "aggregate-report",
                     "template_path": _layer_template_path("L10c"),
                     "persona_template_path": _persona_template_path(node_info["persona"]),
@@ -1275,6 +1327,9 @@ def cmd_next_step(args):
                     "everos_read_scopes": _everos_scopes_for(node_info, project_dir.name),
                     "knowledge_base": node_info.get("knowledge_base"),
                 }
+                _warnings = pl.scan_pitfalls(project_dir, node="L10c")
+                if _warnings:
+                    result["pitfall_warnings"] = _warnings
                 print(json.dumps(result, indent=2))
                 return 0
         print(json.dumps({"terminal": True, "status": status}))
@@ -1338,6 +1393,10 @@ def cmd_next_step(args):
             "is_parallel": True,
             "nodes": nodes,
         }
+        result["pitfall_warnings"] = {
+            "L9a": _pitfall_warnings_for_node(project_dir, "L9a"),
+            "L9b": _pitfall_warnings_for_node(project_dir, "L9b"),
+        }
         print(json.dumps(result, indent=2))
         return 0
 
@@ -1376,6 +1435,7 @@ def cmd_next_step(args):
             if delta_done else
             "Turing: execute approved scripts in the controlled workspace, "
             "emit the L7 delta, then advance to EXECUTED")
+    result["pitfall_warnings"] = _pitfall_warnings_for_node(project_dir, node_id)
     print(json.dumps(result, indent=2))
     return 0
 
@@ -1672,6 +1732,48 @@ def _condense_delta(delta_key, data):
                     
     return d
 
+def _generate_contract(node_info, project_dir):
+    """Generate compact template contract for cognitive nodes."""
+    node_id = node_info["node"]
+    persona = node_info["persona"]
+    title = node_info.get("title", PERSONA_TITLE.get(persona, ""))
+    schema_key = f"{node_id}_{persona.lower()}"
+    schema = DELTA_SCHEMAS.get(schema_key, {})
+    kb = node_info.get("knowledge_base", "none")
+    lines = []
+    lines.append(f"=== CONTRACT: {node_id} | {persona} | {title} ===")
+    if persona == "Oppenheimer":
+        lines.append("AUTHORITY: Can change candidate status (decision/triage).")
+    elif node_info.get("is_execution"):
+        lines.append("AUTHORITY: Can execute code in prepared Turing workspace only.")
+    else:
+        lines.append("AUTHORITY: No status changes, no code execution.")
+    inputs = node_info.get("context_inputs", [])
+    lines.append(f"INPUT SCOPE: {', '.join(inputs)}")
+    if kb == "read-write":
+        lines.append("KB: read-write")
+    elif kb == "read":
+        lines.append("KB: read-only")
+    must = node_info.get("must", [])
+    if must:
+        lines.append("MUST:")
+        for m in must:
+            lines.append(f"  - {m}")
+    must_not = node_info.get("must_not", [])
+    if must_not:
+        lines.append("MUST NOT:")
+        for mn in must_not:
+            lines.append(f"  - {mn}")
+    stop = node_info.get("stop_conditions", [])
+    if stop:
+        lines.append("STOP IF:")
+        for s in stop:
+            lines.append(f"  - {s}")
+    lines.append(f"OUTPUT: {schema_key} -- {list(schema.keys())}")
+    lines.append(f"ACTION: {node_info.get('action_hint', '')}")
+    return lines
+
+
 
 def cmd_assemble_context(args):
     """Path B core: assemble context text for a DAG node."""
@@ -1749,7 +1851,8 @@ def cmd_assemble_context(args):
                         try:
                             data = json.loads(df.read_text(encoding="utf-8"))
                             lines = [f"=== DELTA: {dk} ==="]
-                            lines.append(json.dumps(data, indent=2, ensure_ascii=False))
+                            condensed = _condense_delta(dk, data)
+                            lines.append(json.dumps(condensed, indent=2, ensure_ascii=False))
                             sections.append("\n".join(lines))
                             sections.append("")
                             injected.append({"delta_key": dk,
@@ -1765,20 +1868,116 @@ def cmd_assemble_context(args):
                 sections.append(f"=== DELTA: {inp} (not yet emitted) ===")
                 sections.append("")
 
-    # v0.4: inject the pre-research summary (deep research before L1, method
-    # literature review before L4, code search before L7) if this node has one.
-    # The DAG topology is unchanged; this is extra reference context produced by
-    # the orchestrator via `pre-research` and embedded here as text.
+def _extract_section(text, heading):
+    # Extract a markdown section by heading. Returns section text or empty str.
+    pattern = f"\n## {heading}"
+    idx = text.find(f"## {heading}")
+    if idx == -1:
+        return ""
+    start = idx + len(f"## {heading}")
+    # Find next ## heading after this section
+    rest = text[start:]
+    next_h2 = rest.find("\n## ")
+    if next_h2 == -1:
+        return rest.strip()
+    return rest[:next_h2].strip()
+
+
+def _estimate_tokens(text):
+    # Rough token estimate: 1 token ~= 4 characters.
+    return max(1, len(text) // 4)
+
+
+# --- 2. Pre-research injection mode-aware logic ---
+
+def _inject_pre_research(prf, pr_cfg, args, node_id):
+    # Return (sections_to_append, pre_research_meta_dict).
+    # Modes: digest (default), excerpt, full, none.
+    mode = getattr(args, "pre_research_mode", "digest")
+    budget = getattr(args, "pre_research_token_budget", None)
+    if budget is None:
+        budget = pr_cfg.get("budget", 800)
+    full_text = prf.read_text(encoding="utf-8")
+    est_full = _estimate_tokens(full_text)
+    sections = []
+    injected_text = ""
+    warns = []
+
+    if mode == "none":
+        sections.append(f"=== PRE-RESEARCH ({pr_cfg['type']}): ARCHIVED ONLY ===")
+        injected_text = "(not injected)"
+
+    elif mode == "full":
+        sections.append(f"=== PRE-RESEARCH ({pr_cfg['type']}) [FULL] ===")
+        sections.append(full_text)
+        injected_text = full_text
+
+    elif mode == "excerpt":
+        if est_full <= budget:
+            sections.append(f"=== PRE-RESEARCH ({pr_cfg['type']}) ===")
+            sections.append(full_text)
+            injected_text = full_text
+        else:
+            # Deterministic: keep headers + first lines per section
+            limit = budget * 2  # char budget (rough)
+            truncated = full_text[:limit]
+            if "\n## " in truncated:
+                truncated = truncated[:truncated.rfind("\n## ")]
+            sections.append(f"=== PRE-RESEARCH ({pr_cfg['type']}) [excerpt] ===")
+            sections.append(truncated)
+            sections.append(f"(truncated from ~{est_full} to ~{_estimate_tokens(truncated)} tokens)")
+            injected_text = truncated
+            warns.append("excerpt_may_omit_caveats")
+
+    else:  # digest (default)
+        digest = _extract_section(full_text, "Runtime digest")
+        if digest:
+            est_digest = _estimate_tokens(digest)
+            if est_digest > budget:
+                sections.append(f"=== PRE-RESEARCH ERROR: Runtime digest exceeds token budget ({est_digest} > {budget}) ===")
+                sections.append("Fix: reduce Runtime digest or increase --pre-research-token-budget.")
+                sections.append("")
+                injected_text = "(rejected: over budget)"
+            else:
+                sections.append(f"=== PRE-RESEARCH ({pr_cfg['type']}) [digest] ===")
+                sections.append(digest)
+                injected_text = digest
+        else:
+            if est_full <= budget:
+                sections.append(f"=== PRE-RESEARCH ({pr_cfg['type']}) [fallback: full under budget] ===")
+                sections.append(full_text)
+                injected_text = full_text
+            else:
+                sections.append(f"=== PRE-RESEARCH ERROR: No ## Runtime digest section and full text exceeds budget ({est_full} > {budget}) ===")
+                sections.append("Fix: add '## Runtime digest' section to the pre-research file, or use --pre-research-mode full/excerpt.")
+                sections.append("")
+                injected_text = "(rejected: no digest, over budget)"
+
+    sections.append("")
+
+    meta = {
+        "pre_research_path": str(prf),
+        "pre_research_sha256": _sha256(prf),
+        "pre_research_chars": len(full_text),
+        "estimated_tokens": est_full,
+        "injected_mode": mode,
+        "injected_tokens_est": _estimate_tokens(injected_text) if injected_text and not injected_text.startswith("(") else 0,
+        "full_text_injected": mode == "full" or (mode == "digest" and _extract_section(full_text, "Runtime digest") == "" and est_full <= budget),
+    }
+    if warns:
+        meta["warnings"] = warns
+
+    return sections, meta
+    # v0.4: inject pre-research summary (multi-mode: digest/excerpt/full/none).
+    # Default: digest mode extracts ## Runtime digest section; fail-closed if
+    # absent and over budget. Full text is archived, not blindly injected.
     pre_research_meta = None
     pr_cfg = PRE_RESEARCH_MAP.get(node_id)
     if pr_cfg:
         prf = _pre_research_file(project_dir, node_id)
         if prf.exists():
-            sections.append(f"=== PRE-RESEARCH ({pr_cfg['type']}) ===")
-            sections.append(prf.read_text(encoding="utf-8"))
-            sections.append("")
-            pre_research_meta = {"type": pr_cfg["type"], "path": str(prf),
-                                 "sha256": _sha256(prf), "present": True}
+            pre_secs, pre_research_meta = _inject_pre_research(prf, pr_cfg, args, node_id)
+            sections.extend(pre_secs)
         else:
             sections.append(f"=== PRE-RESEARCH ({pr_cfg['type']}): NOT YET RUN ===")
             sections.append(
@@ -1800,37 +1999,38 @@ def cmd_assemble_context(args):
         pitfall_meta = [{"id": r["id"], "severity": r["severity"],
                          "category": r["category"]} for r in node_pitfalls]
 
-    # Inject persona template (full role definition: personality, responsibilities,
-    # forbidden actions, delta schema)
+    # Template contract (compact, generated in-memory from NODE_MAP + DELTA_SCHEMAS,
+    # not read from disk files -- saves ~1200 tokens per node).
     persona = node_info["persona"]
-    sections.append(f"=== PERSONA: {persona} | {PERSONA_TITLE.get(persona, '')} ===")
-    sections.append(f"Action: {node_info['action_hint']}")
+    contract = _generate_contract(node_info, project_dir)
+    sections.extend(contract)
     sections.append("")
-    _script_dir = Path(__file__).resolve().parent
-    ptpl = _script_dir / _persona_template_path(persona)
-    if ptpl.exists():
-        sections.append(f"--- PERSONA TEMPLATE ({ptpl.name}) ---")
-        sections.append(ptpl.read_text(encoding="utf-8"))
-        sections.append("")
-    # Inject layer template (step-specific execution instructions)
-    ltpl = _script_dir / _layer_template_path(node_id)
-    if ltpl.exists():
-        sections.append(f"--- LAYER TEMPLATE ({ltpl.name}) ---")
-        sections.append(ltpl.read_text(encoding="utf-8"))
+
+    # Refs mode: just template paths + hashes (no body). Full: inject whole files.
+    template_mode = getattr(args, "template_mode", "contract")
+    if template_mode in ("full", "refs"):
+        _sd = Path(__file__).resolve().parent
+        ptpl = _sd / _persona_template_path(persona)
+        ltpl = _sd / _layer_template_path(node_id)
+        if template_mode == "full":
+            if ptpl.exists():
+                sections.append(f"[full] PERSONA ({ptpl.name}): {_sha256(ptpl)}")
+                sections.append(ptpl.read_text(encoding="utf-8"))
+            if ltpl.exists():
+                sections.append(f"[full] LAYER ({ltpl.name}): {_sha256(ltpl)}")
+                sections.append(ltpl.read_text(encoding="utf-8"))
+        else:
+            p_hash = _sha256(ptpl) if ptpl.exists() else "N/A"
+            l_hash = _sha256(ltpl) if ltpl.exists() else "N/A"
+            sections.append(f"[refs] persona: {_persona_template_path(persona)} sha256:{p_hash}")
+            sections.append(f"[refs] layer: {_layer_template_path(node_id)} sha256:{l_hash}")
         sections.append("")
 
-    # v0.4 bilingual: instruct agent to include Chinese translations
-    sections.append("=== BILINGUAL OUTPUT DIRECTIVE ===")
-    sections.append("Your delta JSON must include a \"cn\" key with Chinese")
-    sections.append("translations of all human-readable field values (hypothesis")
-    sections.append("text, rationale, attacks, verdicts, reasons, interpretations,")
-    sections.append("etc.). The top-level English fields remain the canonical")
-    sections.append("machine-readable values; the \"cn\" key provides Chinese for")
-    sections.append("FINAL_REPORT_CN.md generation. Example:")
-    sections.append('  {"hypotheses": [{"id":"H1","text":"...","cn":"..."}],')
-    sections.append('   "primary_hypothesis": "...",')
-    sections.append('   "cn": {"primary_hypothesis": "...", "key_uncertainty": "..."}}')
-    sections.append("")
+    # Bilingual directive: only for L10 human-facing report nodes
+    if node_id in ("L10a", "L10b", "L10c"):
+        sections.append("=== BILINGUAL OUTPUT DIRECTIVE ===")
+        sections.append("Include \"cn\" key with Chinese translations in your delta JSON.")
+        sections.append("")
 
     # Audit (problem 5): write a context_manifest declaring exactly what this
     # node was allowed and shown -- inputs, per-delta sha256, the DECLARED tools
@@ -1844,6 +2044,7 @@ def cmd_assemble_context(args):
         "candidate_id": args.cand_id,
         "node": node_id,
         "persona": persona,
+        "template_mode": getattr(args, "template_mode", "contract"),
         "timestamp": _now(),
         "allowed_inputs": list(inputs),
         "injected_deltas": injected,
@@ -1861,6 +2062,12 @@ def cmd_assemble_context(args):
                      encoding="utf-8")
 
     print("\n".join(sections))
+
+    # Token budget check (estimate: 1 token ~= 4 chars)
+    est = len("\n".join(sections)) // 4
+    if est > 8000:
+        print(f"[token_budget] WARNING: ~{est} tokens (>8k limit)",
+              file=sys.stderr)
     print(f"[audit] context manifest: {mpath}", file=sys.stderr)
     return 0
 
@@ -1893,6 +2100,45 @@ def cmd_emit_delta(args):
     # L0 dependency checks
     if args.node == "L0":
         dep_errors = []
+
+        # L0 input_verified completeness check:
+        # Each entry must be a dict with path/files/format/classification/verified/notes.
+        # Bare strings like "valid" are rejected — Linnaeus must record full info.
+        iv = data.get("input_verified", {})
+        if not isinstance(iv, dict) or not iv:
+            errors.append("L0 input_verified is empty or not a dict. "
+                          "Register every input alias from source_input.")
+        else:
+            required_iv_keys = {"path", "files", "format",
+                                "classification", "verified", "notes"}
+            valid_classes = {"primary", "fallback", "reference-only", "forbidden"}
+            for alias, entry in iv.items():
+                if not isinstance(entry, dict):
+                    errors.append(
+                        f"input_verified['{alias}'] is a bare "
+                        f"{type(entry).__name__} ('{entry}'), not a dict. "
+                        f"Must contain: {required_iv_keys}")
+                    continue
+                missing = required_iv_keys - set(entry.keys())
+                if missing:
+                    errors.append(
+                        f"input_verified['{alias}'] missing keys: {missing}")
+                if not entry.get("verified", True):
+                    errors.append(
+                        f"input_verified['{alias}'].verified is false — "
+                        f"input not confirmed, loop must not proceed")
+                cls = entry.get("classification", "")
+                if cls and cls not in valid_classes:
+                    errors.append(
+                        f"input_verified['{alias}'].classification='{cls}', "
+                        f"must be one of {valid_classes}")
+                if not entry.get("path"):
+                    errors.append(
+                        f"input_verified['{alias}'].path is empty")
+                if not entry.get("files"):
+                    errors.append(
+                        f"input_verified['{alias}'].files is empty — "
+                        f"list at least the key filenames at this path")
         # 1. Check Obsidian Vault
         vault = os.environ.get("OBSIDIAN_VAULT")
         if not vault:
@@ -2026,6 +2272,7 @@ def cmd_new_project(args):
     _mkdirs(project_dir)
     (project_dir / "00_Project_Index.md").write_text(
         _index_template_v03(name, topic), encoding="utf-8")
+    pl.init_ledger(project_dir)
     print(f"Created v0.4 project: {project_dir.resolve()}")
     print("Next: run `preflight` (Linnaeus L0) before any candidate work.")
     return 0
@@ -2595,7 +2842,10 @@ def cmd_obsidian_sync(args):
         return 2
     name = _load_yaml_front(idx).get("project_name", project_dir.name)
 
-    vault_str = getattr(args, "vault", None) or "OBSIDIAN_VAULT env var"
+    vault_str = getattr(args, "vault", None) or os.environ.get("OBSIDIAN_VAULT")
+    if not vault_str:
+        print("ERROR: --vault required or set OBSIDIAN_VAULT env var", file=sys.stderr)
+        return 2
     vault = Path(vault_str)
     if not vault.exists():
         print(f"WARNING: vault not found: {vault} - writing index only", file=sys.stderr)
@@ -2770,6 +3020,7 @@ SECTION_TITLES_EN = {
     "L6_oppenheimer": "L6 - Analysis Plan Approval (Oppenheimer)",
     "L7_turing": "L7 - Execution (Turing)",
     "L8_curie": "L8 - Evidence Audit (Curie)",
+    "L8.5_curie": "L8.5 - Literature Verification (Curie)",
     "L9a_feynman": "L9a - Result Falsification (Feynman)",
     "L9b_darwin": "L9b - Biology Interpretation (Darwin)",
     "L10a_jobs": "L10a - Value Assessment (Jobs)",
@@ -2786,6 +3037,7 @@ SECTION_TITLES_CN = {
     "L6_oppenheimer": "L6 - \u5206\u6790\u8ba1\u5212\u5ba1\u6279 (Oppenheimer)",
     "L7_turing": "L7 - \u6267\u884c (Turing)",
     "L8_curie": "L8 - \u8bc1\u636e\u5ba1\u67e5 (Curie)",
+    "L8.5_curie": "L8.5 - \u6587\u732e\u9a8c\u8bc1 (Curie)",
     "L9a_feynman": "L9a - \u7ed3\u679c\u8bc1\u4f2a (Feynman)",
     "L9b_darwin": "L9b - \u751f\u7269\u5b66\u89e3\u8bfb (Darwin)",
     "L10a_jobs": "L10a - \u4ef7\u503c\u8bc4\u4f30 (Jobs)",
@@ -2837,6 +3089,10 @@ DELTA_LABELS_CN = [
     ("**Decision:**", "**\u51b3\u5b9a\uff1a**"),
     ("**Next steps:**", "**\u540e\u7eed\u6b65\u9aa4\uff1a**"),
     ("**Reason:**", "**\u7406\u7531\uff1a**"),
+    # L8.5 Curie literature verification
+    ("**Verification verdict:**", "**\u9a8c\u8bc1\u88c1\u51b3\uff1a**"),
+    ("**Evidence alignment:**", "**\u8bc1\u636e\u4e00\u81f4\u6027\uff1a**"),
+    ("**Literature gaps:**", "**\u6587\u732e\u7a7a\u767d\uff1a**"),
     # indented bullet sub-labels
     ("- Rationale:", "- \u63a8\u7406\uff1a"),
     ("- Output files:", "- \u8f93\u51fa\u6587\u4ef6\uff1a"),
@@ -2867,7 +3123,9 @@ def _format_delta_body(delta_key, delta, lang="en"):
     """Format a delta dict as markdown content (language-agnostic)."""
     if delta is None:
         return "_No delta found._\n"
-    if isinstance(delta, dict) and "cn" in delta and lang == "cn":
+    if not isinstance(delta, dict):
+        return f"_Unexpected delta type: {type(delta).__name__}_\n"
+    if "cn" in delta and lang == "cn":
         cn_delta = delta["cn"]
         # Only use cn sub-dict if it has the same structure as the English delta.
         # If cn fields have simplified types (e.g. attacks as string instead of list),
@@ -2959,6 +3217,18 @@ def _format_delta_body(delta_key, delta, lang="en"):
         L.append(f"\n**Evidence level:** {delta.get('evidence_level', '')}")
         if delta.get("caveats"):
             L.append(f"**Caveats:** {_fmt_list(delta.get('caveats'))}")
+    elif delta_key == "L8.5_curie":
+        for p in delta.get("papers_found", []):
+            L.append(f"- **{p.get('title', '?')}** ({p.get('journal', '?')}, {p.get('year', '?')})")
+            L.append(f"  - Relevance: {p.get('relevance', '')}")
+            if p.get("supports"):
+                L.append(f"  - Supports: {p.get('supports', '')}")
+            if p.get("contradicts"):
+                L.append(f"  - Contradicts: {p.get('contradicts', '')}")
+        L.append(f"\n**Verification verdict:** {delta.get('verification_verdict', '')}")
+        L.append(f"**Evidence alignment:** {delta.get('evidence_alignment', '')}")
+        if delta.get("gaps"):
+            L.append(f"**Literature gaps:** {_fmt_list(delta.get('gaps'))}")
     elif delta_key == "L9a_feynman":
         for r in delta.get("falsification_risks", []):
             L.append(f"- **[{r.get('severity', '?')}]** {r.get('name', '')} (resolvable={r.get('resolvable', '?')}): {r.get('text', '')}")
@@ -3051,7 +3321,6 @@ def cmd_aggregate_report(args):
     cn.append(f"## \u79d1\u5b66\u95ee\u9898\n\n{question}\n")
     cn.append(f"## \u4e3b\u5f20\n\n{claim}\n")
     cn.append("> \u6ce8\uff1a\u4ee5\u4e0b delta \u5185\u5bb9\u7531\u5404 persona \u751f\u6210\uff0c\u5982\u672a\u5305\u542b `cn` \u5b57\u6bb5\u5219\u4e3a\u82f1\u6587\u539f\u6587\u3002\u4e0b\u4e00\u8f6e v0.4 \u5faa\u73af\u5c06\u8981\u6c42 agent \u540c\u65f6\u8f93\u51fa\u4e2d\u6587\u7248\u672c\u3002\n")
-    cn.append("> \u6ce8\uff1a\u4ee5\u4e0b delta \u5185\u5bb9\u7531\u5404 persona \u751f\u6210\uff0c\u5982\u672a\u5305\u542b `cn` \u5b57\u6bb5\u5219\u4e3a\u82f1\u6587\u539f\u6587\u3002\u4e0b\u4e00\u8f6e v0.4 \u5faa\u73af\u5c06\u8981\u6c42 agent \u540c\u65f6\u8f93\u51fa\u4e2d\u6587\u7248\u672c\u3002\n")
 
     for delta_key in DELTA_DAG_ORDER:
         title_cn = SECTION_TITLES_CN.get(delta_key, delta_key)
@@ -3086,19 +3355,23 @@ def cmd_record_pitfall(args):
             args.project_dir, args.cand_id, args.node, args.category,
             args.symptom, args.root_cause, args.prevention_rule,
             severity=args.severity, evidence=args.evidence or "",
-            provider=args.provider or "unknown", status=args.status)
+            provider=args.provider or "unknown", status=args.status,
+            scope=args.scope, error_class=args.error_class)
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
     print(f"recorded pitfall {pit['id']} "
-          f"(node={pit['node']} category={pit['category']} "
-          f"severity={pit['severity']} status={pit['status']})")
+          f"(scope={pit.get('scope', 'project')} node={pit['node']} "
+          f"category={pit['category']} severity={pit['severity']} "
+          f"status={pit['status']})")
     return 0
 
 
 def cmd_list_pitfalls(args):
+    scope = "global" if getattr(args, "global_", False) else "project"
     rows = pl.list_pitfalls(args.project_dir, status=args.status, node=args.node,
-                            category=args.category, severity=args.severity)
+                            category=args.category, severity=args.severity,
+                            scope=scope)
     if args.json:
         print(json.dumps(rows, indent=2, ensure_ascii=False))
         return 0
@@ -3156,17 +3429,18 @@ def cmd_pitfall_status(args):
 
 
 def cmd_promote_pitfall(args):
-    """Promote a confirmed pitfall into a durable rule."""
+    """Promote a confirmed pitfall into a durable rule (project or global)."""
     try:
-        pl.promote_pitfall(args.project_dir, args.id, args.to)
+        pl.promote_pitfall(args.project_dir, args.id, args.to, scope=args.scope)
     except (ValueError, KeyError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
-    print(f"promoted pitfall {args.id} -> {args.to}")
+    target_dir = (pl.global_ledger_path() if args.scope == "global"
+                  else pl.ledger_path(args.project_dir))
+    print(f"promoted pitfall {args.id} -> {args.to} (scope={args.scope})")
     if args.to == "regression_test":
-        print(f"  regression stub written under "
-              f"{pl.ledger_path(args.project_dir) / pl.TESTS_DIR}")
-    print(f"  rules file: {pl.ledger_path(args.project_dir) / pl.RULES_FILE}")
+        print(f"  regression stub written under {target_dir / pl.TESTS_DIR}")
+    print(f"  rules file: {target_dir / pl.RULES_FILE}")
     return 0
 
 
@@ -3226,6 +3500,14 @@ def build_parser():
     sp.add_argument("project_dir")
     sp.add_argument("cand_id")
     sp.add_argument("--node", required=True, help="DAG node (e.g. L1)")
+    sp.add_argument("--template-mode", choices=["contract", "refs", "full"],
+                    default="contract",
+                    help="contract: compact (default, ~200 tokens); refs: path+hash only; full: entire templates (debug only)")
+    sp.add_argument("--pre-research-mode", choices=["digest", "excerpt", "full", "none"],
+                    default="digest",
+                    help="digest: Runtime digest section only (default); excerpt: truncated; full: entire file; none: manifest only")
+    sp.add_argument("--pre-research-token-budget", type=int, default=None,
+                    help="max tokens for pre-research injection (default: node-specific, e.g. L1=800)")
     sp.set_defaults(func=cmd_assemble_context)
 
     # emit-delta
@@ -3359,6 +3641,11 @@ def build_parser():
     sp.add_argument("--provider", default="unknown")
     sp.add_argument("--status", default="draft", choices=pl.VALID_STATUSES,
                     help="default draft; only L8 Curie confirms")
+    sp.add_argument("--scope", default="project", choices=["project", "global"],
+                    help="project ledger (default) or the shared global ledger")
+    sp.add_argument("--error-class", dest="error_class", default="agent",
+                    choices=pl.VALID_ERROR_CLASSES,
+                    help="agent (model/LLM issue) or system (platform/toolchain)")
     sp.set_defaults(func=cmd_record_pitfall)
 
     sp = sub.add_parser("list-pitfalls", help="list pitfalls (optionally filtered)")
@@ -3367,6 +3654,8 @@ def build_parser():
     sp.add_argument("--node")
     sp.add_argument("--category")
     sp.add_argument("--severity", choices=pl.VALID_SEVERITIES)
+    sp.add_argument("--global", dest="global_", action="store_true",
+                    help="list the shared global ledger instead of this project's")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_list_pitfalls)
 
@@ -3395,6 +3684,8 @@ def build_parser():
     sp.add_argument("project_dir")
     sp.add_argument("id")
     sp.add_argument("--to", required=True, choices=pl.VALID_PROMOTIONS)
+    sp.add_argument("--scope", default="project", choices=["project", "global"],
+                    help="project ledger (default) or global (protects all projects)")
     sp.set_defaults(func=cmd_promote_pitfall)
 
     return p

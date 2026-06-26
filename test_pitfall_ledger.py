@@ -9,12 +9,18 @@ works whether or not pytest is installed. Covers the six mandated cases:
 plus a promotion-artifact check.
 """
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import pitfall_ledger as pl
+
+# Isolate tests from any real ~/.rlr global ledger: point the global layer at an
+# empty temp dir so project-only assertions are deterministic. The two-level test
+# overrides this locally with its own temp global ledger.
+os.environ["RLR_GLOBAL_LEDGER"] = tempfile.mkdtemp(prefix="rlr_gl_empty_")
 
 
 def _jsonl_lines(d):
@@ -35,6 +41,8 @@ def test_jsonl_append():
         for ln in lines:
             json.loads(ln)  # each line is valid JSON
         assert len(pl.list_pitfalls(d)) == 2
+        pitfalls = pl.list_pitfalls(d)
+        assert all(p["error_class"] == "agent" for p in pitfalls)
 
 
 # --- 2. scan by node --------------------------------------------------------
@@ -117,9 +125,16 @@ def test_provider_failure_draft():
                               "headless provider returned non-JSON",
                               "wrapper emitted prose", "",
                               severity="warn", provider="headless",
-                              status="draft")
+                             status="draft")
         assert p["status"] == "draft"
         assert p["provider"] == "headless"
+        assert p["error_class"] == "agent", "error_class should default to agent"
+        # a system-class pitfall is categorized separately
+        psys = pl.record_pitfall(d, "C1", "L1", "provider_failure",
+                                 "system-class issue", "platform bug", "upgrade",
+                                 severity="warn", provider="headless",
+                                 status="draft", error_class="system")
+        assert psys["error_class"] == "system"
         # drafts are invisible to scans/gates until Curie confirms them
         assert pl.scan_pitfalls(d, node="L1") == []
         assert pl.scan_pitfalls(d, node="L1", provider="headless") == []
@@ -157,6 +172,54 @@ def test_promote_regression_test():
         assert len(parsed) == 1
         assert parsed[0]["root_cause"] == 'root cause with "quotes"'
         assert parsed[0]["prevention_rule"] == 'prevention with "quotes"'
+
+
+# --- two-level ledger: global pitfalls inherited by every project ----------
+
+def test_global_inheritance():
+    with tempfile.TemporaryDirectory() as gdir, tempfile.TemporaryDirectory() as proj:
+        old = os.environ.get("RLR_GLOBAL_LEDGER")
+        os.environ["RLR_GLOBAL_LEDGER"] = gdir
+        try:
+            # record + confirm a pitfall in the GLOBAL ledger
+            p = pl.record_pitfall(proj, "C1", "L7", "execution_failure",
+                                  "crash", "global root cause", "global rule",
+                                  severity="hard_stop", scope="global")
+            assert p["scope"] == "global"
+            pl.confirm_pitfall(proj, p["id"], "confirmed")
+            # a COMPLETELY DIFFERENT project inherits it via merged scan
+            with tempfile.TemporaryDirectory() as proj2:
+                hit = pl.scan_pitfalls(proj2, node="L7")
+                assert any(r["id"] == p["id"] and r["source"] == "global"
+                           for r in hit), hit
+                # and the global hard_stop gates that other project
+                passed, blocking = pl.hard_stop_check(proj2, node="L7")
+                assert not passed and blocking, "global hard_stop must gate"
+            # project-scoped scan can opt out of global inheritance
+            with tempfile.TemporaryDirectory() as proj3:
+                assert pl.scan_pitfalls(proj3, node="L7", include_global=False) == []
+            # promote --scope global writes the global promoted_rules + stub
+            pl.promote_pitfall(proj, p["id"], "regression_test", scope="global")
+            assert (Path(gdir) / pl.RULES_FILE).exists()
+            stubs = list((Path(gdir) / pl.TESTS_DIR).glob("test_*.py"))
+            assert stubs, "global regression stub must be written"
+        finally:
+            if old is None:
+                os.environ.pop("RLR_GLOBAL_LEDGER", None)
+            else:
+               os.environ["RLR_GLOBAL_LEDGER"] = old
+
+
+def test_init_ledger():
+    """init_ledger creates 10_Pitfall_Ledger/ with pitfalls.jsonl + README."""
+    with tempfile.TemporaryDirectory() as d:
+        lp = pl.init_ledger(d)
+        assert (lp / pl.JSONL_FILE).exists(), "pitfalls.jsonl must be created"
+        assert (lp / "README.md").exists(), "README.md must be created"
+        assert (lp / pl.TESTS_DIR).exists(), "regression_tests/ must be created"
+        # init_ledger is idempotent (does not overwrite existing files)
+        pl.init_ledger(d)
+        assert (lp / pl.JSONL_FILE).read_text(encoding="utf-8") == ""
 
 
 def _run_as_script():

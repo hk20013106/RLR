@@ -86,7 +86,10 @@ def load_config(path):
     """Load a YAML or JSON config into a dict (PyYAML optional)."""
     text = Path(path).read_text(encoding="utf-8")
     if text.lstrip().startswith("{"):
-        return json.loads(text)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as e:
+            raise ProviderError(f"config is invalid JSON: {e}") from e
     try:
         import yaml  # type: ignore
         return yaml.safe_load(text) or {}
@@ -115,7 +118,6 @@ class ProviderConfig:
         self.timeout = self.data.get("timeout")
         self.review = self.data.get("review", {"enabled": True}) or {"enabled": True}
         self.stop_policy = self.data.get("stop_policy", {}) or {}
-        self.everos = self.data.get("everos", {"enabled": False}) or {"enabled": False}
 
     def for_node(self, node):
         spec = dict(self.default)
@@ -230,7 +232,11 @@ class ManualProvider(AgentProvider):
         if not path:
             raise RuntimeError("ManualProvider aborted by user")
         self.last_delta_file = path
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+        try:
+            return json.loads(Path(path).read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            raise ProviderError(
+                f"cannot read delta JSON from {path}: {e}") from e
 
 
 def _run_command_agent(command, node, persona, context, output_schema,
@@ -248,7 +254,11 @@ def _run_command_agent(command, node, persona, context, output_schema,
     cmd = command.format(prompt_file=str(pf), output_file=str(of), node=node,
                          persona=persona, workspace=workspace or "")
     subprocess.run(cmd, shell=True, check=True, timeout=timeout)
-    return json.loads(of.read_text(encoding="utf-8"))
+    try:
+        return json.loads(of.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        raise ProviderError(
+            f"subprocess wrote invalid JSON to {of}: {e}") from e
 
 
 def run_text_command(command, prompt, run_dir, tag, timeout=None):

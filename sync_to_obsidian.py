@@ -82,7 +82,11 @@ def load_delta(project_dir, delta_key):
     persona = DELTA_PERSONA[delta_key]
     p = Path(project_dir) / "02_Agent_Notes" / persona / f"{delta_key}_delta.json"
     if p.exists():
-        return json.loads(p.read_text(encoding="utf-8"))
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            print(f"WARNING: corrupted delta {p}: {e}", file=sys.stderr)
+            return None
     return None
 
 
@@ -366,20 +370,29 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
         l8_5 = load_delta(project_dir, "L8.5_curie")
         l7 = load_delta(project_dir, "L7_turing")
 
-        # Auto-register papers from L8.5 literature verification into the growable DB
+        # Auto-register papers from L8.5 literature verification into the growable
+        # DB. Only papers with a verifiable identifier (PMID/DOI/URL) are
+        # registered -- citationless entries are skipped so they cannot pollute
+        # the library. (Index regeneration is handled unconditionally below.)
         if l8_5 and isinstance(l8_5, dict) and l8_5.get("papers"):
             try:
                 sys.path.append(str(Path(__file__).parent))
                 from manage_literature_db import LiteratureDB
                 db = LiteratureDB(project_dir)
                 for paper in l8_5.get("papers", []):
+                    pmid = (paper.get("pmid") or "").strip()
+                    doi = (paper.get("doi") or "").strip()
+                    url = (paper.get("url") or "").strip()
+                    if not (pmid or doi or url):
+                        print(f"[Warning] Skipping L8.5 paper with no PMID/DOI/URL: "
+                              f"{paper.get('title', '<untitled>')!r}")
+                        continue
                     tags = paper.get("tags") or []
                     if "l8.5-verification" not in tags:
                         tags.append("l8.5-verification")
                     paper["tags"] = tags
-                    pmid = paper.get("pmid") or ""
                     db_paper = {
-                        "doi": paper.get("doi") or "",
+                        "doi": doi,
                         "title": paper.get("title") or "Unknown Title",
                         "authors": paper.get("authors") or ([f"PMID_{pmid}"] if pmid else ["Unknown"]),
                         "journal": paper.get("journal") or "PubMed Central",
@@ -387,11 +400,10 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
                         "core_arguments": [paper.get("comparison") or ""] if paper.get("comparison") else [],
                         "evidence_level": paper.get("relevance") or "MODERATE",
                         "summary": paper.get("abstract") or "",
-                        "url": paper.get("url") or (f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else ""),
+                        "url": url or (f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else ""),
                         "tags": tags
                     }
                     db.add_or_update_paper(db_paper, round_id=c['round'])
-                db.sync_index()
             except Exception as e:
                 print(f"[Warning] Failed to auto-register L8.5 papers to DB: {e}")
         lines = [f"# Round {c['round']} Summary\n"]
@@ -453,8 +465,21 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
                         with open(vault_project / fname, "a", encoding="utf-8") as f:
                             f.write("\n".join(lines))
 
-    # --- 09_Literature_Database: copy literature database and index ---
+    # Literature index is SELF-HEALING: rebuild from whatever paper files are on
+    # disk at the end of EVERY round (a required step), so it can never lag behind
+    # papers added by any path. This is the structural fix for the drift bug where
+    # pmid_* files were present on disk but 00_Library_Index.md stayed stale.
     lit_db_src = project_dir / "09_Literature_Database"
+    if lit_db_src.exists():
+        try:
+            sys.path.append(str(Path(__file__).parent))
+            from manage_literature_db import LiteratureDB
+            LiteratureDB(project_dir).sync_index()
+            print("  literature index rebuilt from disk")
+        except Exception as e:
+            print(f"[Warning] Failed to rebuild literature index: {e}")
+
+    # --- 09_Literature_Database: copy literature database and index ---
     lit_db_dst = vault_project / "09_Literature_Database"
     if lit_db_src.exists():
         lit_db_dst.mkdir(parents=True, exist_ok=True)
