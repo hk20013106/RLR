@@ -41,6 +41,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import pitfall_ledger as pl  # additive: pitfall ledger (no DAG/schema coupling)
+
 __version__ = "0.4.5"
 
 
@@ -1786,6 +1788,18 @@ def cmd_assemble_context(args):
             pre_research_meta = {"type": pr_cfg["type"], "path": str(prf),
                                  "sha256": None, "present": False}
 
+    # Pitfall ledger: inject ONLY the cards scoped to THIS node (confirmed/
+    # promoted). This is a guardrail layer, not a delta -- it never grants the
+    # node access to another node's delta, and it is node-filtered so the whole
+    # pitfall history can never pollute the context.
+    pitfall_meta = []
+    node_pitfalls = pl.scan_pitfalls(project_dir, node=node_id)
+    if node_pitfalls:
+        sections.append(pl.format_pitfall_cards(project_dir, node=node_id))
+        sections.append("")
+        pitfall_meta = [{"id": r["id"], "severity": r["severity"],
+                         "category": r["category"]} for r in node_pitfalls]
+
     # Inject persona template (full role definition: personality, responsibilities,
     # forbidden actions, delta schema)
     persona = node_info["persona"]
@@ -1839,6 +1853,7 @@ def cmd_assemble_context(args):
         "workspace": (str(workspaces[-1])
                       if (node_info.get("is_execution") and workspaces) else None),
         "pre_research": pre_research_meta,
+        "pitfalls_injected": pitfall_meta,
     }
     mpath = (_audit_dir(project_dir)
              / f"context_manifest_{node_id}_{manifest_id}.json")
@@ -2089,6 +2104,23 @@ def cmd_preflight(args):
             print(f"  {d['name']}: {_dep_fix_hint(d)}", file=sys.stderr)
         return 3
     print("\nPREFLIGHT GATE: PASS -- all required dependencies present.")
+
+    # --- L0 PITFALL GATE (after deps; must never be skipped) ---
+    # A confirmed hard_stop pitfall scoped to L0 (or a promoted preflight gate)
+    # blocks the boot: the loop must not re-enter a known-fatal trap until the
+    # pitfall is resolved (fixed, or retired via pitfall-status).
+    passed, blocking = pl.hard_stop_check(project_dir, node="L0")
+    if not passed:
+        print("\nL0 PITFALL GATE: STOP -- confirmed hard_stop pitfall(s) "
+              "apply at L0:", file=sys.stderr)
+        for r in blocking:
+            print(f"  [{r['id']}] {r['category']}: {r['rule']}", file=sys.stderr)
+            print(f"           root cause: {r['root_cause']}", file=sys.stderr)
+        print("Resolve each, then retire it (`pitfall-status ... --status "
+              "obsolete`) or fix the cause, before re-running preflight.",
+              file=sys.stderr)
+        return 3
+    print("L0 PITFALL GATE: PASS -- no blocking confirmed pitfalls.")
     return 0
 
 
@@ -2107,6 +2139,19 @@ def cmd_check_deps(args):
               "the loop must not proceed.", file=sys.stderr)
         return 3
     print("DEPENDENCY GATE: PASS")
+
+    # L0 pitfall gate (same hard_stop gate as preflight). Only when a project
+    # dir is known -- pitfalls are per-project.
+    if project_dir is not None:
+        passed, blocking = pl.hard_stop_check(project_dir, node="L0")
+        if not passed:
+            print("PITFALL GATE: STOP -- confirmed hard_stop pitfall(s) apply "
+                  "at L0:", file=sys.stderr)
+            for r in blocking:
+                print(f"  [{r['id']}] {r['category']}: {r['rule']}",
+                      file=sys.stderr)
+            return 3
+        print("PITFALL GATE: PASS")
     return 0
 
 
@@ -3031,6 +3076,100 @@ def cmd_aggregate_report(args):
     return 0
 
 
+# --- pitfall ledger commands ------------------------------------------------
+
+def cmd_record_pitfall(args):
+    """Record (or dedup-merge) a pitfall. Defaults to status=draft -- only L8
+    Curie promotes a draft to confirmed (pitfall-status)."""
+    try:
+        pit = pl.record_pitfall(
+            args.project_dir, args.cand_id, args.node, args.category,
+            args.symptom, args.root_cause, args.prevention_rule,
+            severity=args.severity, evidence=args.evidence or "",
+            provider=args.provider or "unknown", status=args.status)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+    print(f"recorded pitfall {pit['id']} "
+          f"(node={pit['node']} category={pit['category']} "
+          f"severity={pit['severity']} status={pit['status']})")
+    return 0
+
+
+def cmd_list_pitfalls(args):
+    rows = pl.list_pitfalls(args.project_dir, status=args.status, node=args.node,
+                            category=args.category, severity=args.severity)
+    if args.json:
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+        return 0
+    if not rows:
+        print("(no pitfalls)")
+        return 0
+    for p in rows:
+        print(f"[{p['id']}] {p['status']:<14} {p['severity']:<9} "
+              f"node={p['node']:<6} {p['category']}")
+        print(f"    symptom: {p['symptom']}")
+        if p.get("prevention_rule"):
+            print(f"    prevent: {p['prevention_rule']}")
+    return 0
+
+
+def cmd_pitfall_scan(args):
+    """Scan confirmed/promoted pitfalls relevant to a node/category/provider.
+    --gate makes it a hard_stop gate (non-zero exit if a hard_stop applies)."""
+    if args.gate:
+        passed, blocking = pl.hard_stop_check(
+            args.project_dir, node=args.node, category=args.category,
+            provider=args.provider)
+        for r in blocking:
+            print(f"BLOCK [{r['id']}] {r['category']}: {r['rule']}",
+                  file=sys.stderr)
+        if not passed:
+            print("PITFALL GATE: STOP", file=sys.stderr)
+            return 3
+        print("PITFALL GATE: PASS")
+        return 0
+    rules = pl.scan_pitfalls(args.project_dir, node=args.node,
+                             category=args.category, provider=args.provider)
+    if args.json:
+        print(json.dumps(rules, indent=2, ensure_ascii=False))
+        return 0
+    if not rules:
+        print("(no relevant pitfalls)")
+        return 0
+    print(pl.format_pitfall_cards(args.project_dir, node=args.node)
+          if args.node else
+          json.dumps(rules, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_pitfall_status(args):
+    """L8 Curie: mark a draft pitfall confirmed / false_positive / obsolete."""
+    try:
+        pl.confirm_pitfall(args.project_dir, args.id, args.status,
+                           confirmed_by=args.by)
+    except (ValueError, KeyError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+    print(f"pitfall {args.id} -> {args.status} (by {args.by})")
+    return 0
+
+
+def cmd_promote_pitfall(args):
+    """Promote a confirmed pitfall into a durable rule."""
+    try:
+        pl.promote_pitfall(args.project_dir, args.id, args.to)
+    except (ValueError, KeyError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+    print(f"promoted pitfall {args.id} -> {args.to}")
+    if args.to == "regression_test":
+        print(f"  regression stub written under "
+              f"{pl.ledger_path(args.project_dir) / pl.TESTS_DIR}")
+    print(f"  rules file: {pl.ledger_path(args.project_dir) / pl.RULES_FILE}")
+    return 0
+
+
 # --- cli --------------------------------------------------------------------
 
 def build_parser():
@@ -3202,6 +3341,61 @@ def build_parser():
     sp.add_argument("project_dir")
     sp.add_argument("cand_id")
     sp.set_defaults(func=cmd_show)
+
+    # --- pitfall ledger ---
+    sp = sub.add_parser("record-pitfall",
+                        help="record (or dedup-merge) a runtime pitfall")
+    sp.add_argument("project_dir")
+    sp.add_argument("cand_id")
+    sp.add_argument("--node", required=True, help="DAG node (e.g. L7) or '*' for global")
+    sp.add_argument("--category", required=True,
+                    help="e.g. provider_failure | emit_delta_failure | execution_failure | method_flaw")
+    sp.add_argument("--symptom", required=True)
+    sp.add_argument("--root-cause", dest="root_cause", default="")
+    sp.add_argument("--prevention-rule", dest="prevention_rule", default="")
+    sp.add_argument("--severity", default="warn",
+                    choices=pl.VALID_SEVERITIES)
+    sp.add_argument("--evidence", default="", help="path to log/trace/file")
+    sp.add_argument("--provider", default="unknown")
+    sp.add_argument("--status", default="draft", choices=pl.VALID_STATUSES,
+                    help="default draft; only L8 Curie confirms")
+    sp.set_defaults(func=cmd_record_pitfall)
+
+    sp = sub.add_parser("list-pitfalls", help="list pitfalls (optionally filtered)")
+    sp.add_argument("project_dir")
+    sp.add_argument("--status", choices=pl.VALID_STATUSES)
+    sp.add_argument("--node")
+    sp.add_argument("--category")
+    sp.add_argument("--severity", choices=pl.VALID_SEVERITIES)
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_list_pitfalls)
+
+    sp = sub.add_parser("pitfall-scan",
+                        help="scan confirmed/promoted pitfalls relevant to a node")
+    sp.add_argument("project_dir")
+    sp.add_argument("--node")
+    sp.add_argument("--category")
+    sp.add_argument("--provider")
+    sp.add_argument("--gate", action="store_true",
+                    help="hard_stop gate: non-zero exit if a hard_stop applies")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_pitfall_scan)
+
+    sp = sub.add_parser("pitfall-status",
+                        help="L8 Curie: confirm / false_positive / obsolete a pitfall")
+    sp.add_argument("project_dir")
+    sp.add_argument("id")
+    sp.add_argument("--status", required=True,
+                    choices=["confirmed", "false_positive", "obsolete"])
+    sp.add_argument("--by", default="Curie")
+    sp.set_defaults(func=cmd_pitfall_status)
+
+    sp = sub.add_parser("promote-pitfall",
+                        help="promote a confirmed pitfall to a durable rule")
+    sp.add_argument("project_dir")
+    sp.add_argument("id")
+    sp.add_argument("--to", required=True, choices=pl.VALID_PROMOTIONS)
+    sp.set_defaults(func=cmd_promote_pitfall)
 
     return p
 

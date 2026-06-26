@@ -32,3 +32,9 @@ scripts_wgcna_loop/
 nul
 _codex_write_probe.txt
 *.bak
+_*_delta.json
+_tmp_lines.txt
+
+# DemoProject generated RUN DATA (the demo is tracked, its outputs are not)
+DemoProject_v03/08_Audit/
+DemoProject_v03/10_Pitfall_Ledger/

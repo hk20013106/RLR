@@ -122,6 +122,26 @@ def _ctl(*args):
                           capture_output=True, text=True)
 
 
+def auto_pitfall(project, cand, node, category, symptom, provider="unknown",
+                 evidence=""):
+    """Auto-record a status=draft pitfall when the loop hits a failure. Drafts
+    are NOT scanned/enforced until L8 Curie confirms them -- this just makes the
+    failure durable so a human can triage it. Never fatal: a ledger write must
+    not take down the run."""
+    try:
+        r = _ctl("record-pitfall", project, cand, "--node", node,
+                 "--category", category, "--symptom", symptom[:500],
+                 "--severity", "warn", "--status", "draft",
+                 "--provider", provider or "unknown",
+                 *(["--evidence", evidence] if evidence else []))
+        if r.returncode == 0:
+            log(f"auto-recorded draft pitfall ({category} @ {node})")
+        else:
+            log(f"auto-pitfall failed (non-fatal): {r.stderr.strip()}")
+    except Exception as e:  # noqa: BLE001 -- ledger must never break the loop
+        log(f"auto-pitfall error (non-fatal): {e}")
+
+
 def next_step(project, cand):
     r = _ctl("next-step", project, cand)
     try:
@@ -266,10 +286,22 @@ def exec_cognitive(project, cand, step, cfg, args, run_dir, round_id,
     node, persona = step["node"], step["persona"]
     ctx, manifest = assemble_context(project, cand, node)
     prov = provider_for(node, cfg, args)
+    pname = getattr(prov, "name", getattr(prov, "type", "unknown"))
     schema = rl.DELTA_SCHEMAS.get(f"{node}_{persona.lower()}")
-    delta = prov.run_agent(node, persona, ctx, output_schema=schema,
-                           tools=step.get("tools_policy"), run_dir=str(run_dir))
+    try:
+        delta = prov.run_agent(node, persona, ctx, output_schema=schema,
+                               tools=step.get("tools_policy"),
+                               run_dir=str(run_dir))
+    except Exception as e:  # provider failure -> durable draft, then propagate
+        auto_pitfall(project, cand, node, "provider_failure",
+                     f"{persona} provider raised: {e}", provider=pname,
+                     evidence=str(run_dir))
+        raise
     ok = emit_delta(project, cand, node, persona, delta, run_dir, receipt=manifest)
+    if not ok:
+        auto_pitfall(project, cand, node, "emit_delta_failure",
+                     f"{persona} delta rejected by emit-delta (schema/validation)",
+                     provider=pname, evidence=str(run_dir))
     write_receipt(run_dir, node, persona, prov, ctx, step, cand, round_id)
     if ok and do_advance:
         advance(project, cand, step)
@@ -289,6 +321,7 @@ def exec_turing(project, cand, step, cfg, args, run_dir, round_id, exec_state):
             workspace = line.split("ready:", 1)[1].strip()
     ctx, manifest = assemble_context(project, cand, "L7")
     prov = provider_for("L7", cfg, args)
+    pname = getattr(prov, "name", getattr(prov, "type", "unknown"))
     schema = rl.DELTA_SCHEMAS.get("L7_turing")
     try:
         delta = prov.run_agent("L7", "Turing", ctx, output_schema=schema,
@@ -298,6 +331,9 @@ def exec_turing(project, cand, step, cfg, args, run_dir, round_id, exec_state):
     except Exception as e:
         exec_state["l7_failures"] += 1
         log(f"L7 provider failed ({e}); failures={exec_state['l7_failures']}")
+        auto_pitfall(project, cand, "L7", "execution_failure",
+                     f"Turing execution provider failed: {e}", provider=pname,
+                     evidence=workspace or str(run_dir))
         return False
     ok = emit_delta(project, cand, "L7", "Turing", delta, run_dir, receipt=manifest)
     write_receipt(run_dir, "L7", "Turing", prov, ctx, step, cand, round_id,
@@ -305,6 +341,9 @@ def exec_turing(project, cand, step, cfg, args, run_dir, round_id, exec_state):
     if not ok:
         exec_state["l7_failures"] += 1
         log(f"L7 emit failed; failures={exec_state['l7_failures']}")
+        auto_pitfall(project, cand, "L7", "emit_delta_failure",
+                     "Turing L7 delta rejected by emit-delta (schema/validation)",
+                     provider=pname, evidence=workspace or str(run_dir))
         return False
     _ctl("decision", project, cand, "--status", "EXECUTED",
          "--reason", "Turing execution complete")

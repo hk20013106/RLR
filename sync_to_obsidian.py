@@ -369,7 +369,6 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
         # Auto-register papers from L8.5 literature verification into the growable DB
         if l8_5 and isinstance(l8_5, dict) and l8_5.get("papers"):
             try:
-                import sys
                 sys.path.append(str(Path(__file__).parent))
                 from manage_literature_db import LiteratureDB
                 db = LiteratureDB(project_dir)
