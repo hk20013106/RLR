@@ -30,6 +30,10 @@ def _resolve_vault(vault_arg):
     v = (vault_arg or os.environ.get("OBSIDIAN_VAULT") or "").strip()
     return v or None
 
+
+def _is_obsidian_vault(path):
+    return (Path(path) / ".obsidian").is_dir()
+
 PERSONAS = {
     "Linnaeus": ("L0", "Catalog Master"),
     "Einstein": ("L1", "Conceptual Explorer"),
@@ -248,10 +252,16 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
               "--vault PATH. Skipping Obsidian sync (nothing written).",
               file=sys.stderr)
         return 1
-    vault_dir = Path(vault).expanduser()
+    vault_dir = Path(os.path.expandvars(vault)).expanduser()
     if not vault_dir.exists():
         print(f"ERROR: Obsidian vault not found: {vault_dir}. Point "
               "$OBSIDIAN_VAULT / --vault at an existing vault. Skipping sync.",
+              file=sys.stderr)
+        return 1
+    if not _is_obsidian_vault(vault_dir):
+        print(f"ERROR: not an Obsidian vault: {vault_dir} "
+              "(missing .obsidian directory). Point $OBSIDIAN_VAULT / --vault "
+              "at the vault root. Skipping sync.",
               file=sys.stderr)
         return 1
     results_dir = Path(results_dir or os.environ.get("RLR_RESULTS_DIR")
@@ -492,10 +502,9 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
                 shutil.copy2(f, lit_db_dst / f.name)
         print(f"  literature database synced: {lit_db_dst}")
 
-    # --- 08_Audit: remove from vault (machine-only) ---
-    audit_dir = vault_project / "08_Audit"
-    if audit_dir.exists():
-        shutil.rmtree(audit_dir)
+    # --- 08_Audit: leave untouched ---
+    # sync_to_obsidian.py is the end-of-round human-readable sync path. It must
+    # not delete audit artifacts that may already exist in the vault.
 
     # --- 00_Index: readable navigation ---
     index_path = vault_project / "00_Index.md"

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Pitfall Ledger — record, scan, confirm, and promote runtime pitfalls.
+"""Pitfall Ledger v0.4.5 — record, scan, confirm, and promote runtime pitfalls.
 
 Standalone module; imported by research_loop_v04.py and testable alone.
 Does NOT modify DAG, delta schema, context isolation, RunReceipt, or StopPolicy.
@@ -134,7 +134,7 @@ def _gen_id():
 def record_pitfall(project_dir, cand_id, node, category, symptom,
                    root_cause, prevention_rule, severity="warn",
                    evidence="", provider="unknown", status="draft",
-                   scope="project", error_class="agent"):
+                   scope="project", error_class="agent", promoted_to=""):
     """Append a pitfall to the chosen ledger (project by default, or global).
     Returns the pitfall dict. Dedup is within that ledger."""
     if severity not in VALID_SEVERITIES:
@@ -145,6 +145,8 @@ def record_pitfall(project_dir, cand_id, node, category, symptom,
         raise ValueError(f"invalid scope: {scope}")
     if error_class not in VALID_ERROR_CLASSES:
         raise ValueError(f"invalid error_class: {error_class}")
+    if promoted_to and promoted_to not in VALID_PROMOTIONS:
+        raise ValueError(f"invalid promoted_to: {promoted_to}")
 
     ldir = global_ledger_path() if scope == "global" else ledger_path(project_dir)
     dk = _dedup_key(node, category, root_cause)
@@ -178,7 +180,7 @@ def record_pitfall(project_dir, cand_id, node, category, symptom,
         "created_at": _now(),
         "confirmed_by": "",
         "confirmed_at": "",
-        "promoted_to": "",
+        "promoted_to": promoted_to,
         "dedup_key": dk,
     }
     _append_dir(ldir, pitfall)
@@ -442,27 +444,5 @@ def format_pitfall_cards(project_dir, node=None):
             lines.append(f"  [{r.get('id','?')}] {r.get('prevention_rule','')[:150]}")
         lines.append("")
 
-    return "\n".join(lines) + "\n"
-    agent_rules = [r for r in rules if r.get("error_class", "agent") == "agent"]
-    system_rules = [r for r in rules if r.get("error_class", "agent") == "system"]
-
-    if agent_rules:
-        lines.append("--- AGENT pitfalls (model/LLM issues you MUST avoid) ---")
-        for r in agent_rules:
-            src = r.get("source", "project").upper()
-            lines.append(f"{r['prefix']} [{r['id']}] ({src}) Node={r['node']} "
-                         f"Category={r['category']}")
-            lines.append(f"  Root cause: {r['root_cause']}")
-            lines.append(f"  Prevention: {r['rule']}")
-            lines.append("")
-    if system_rules:
-        lines.append("--- SYSTEM pitfalls (platform/toolchain constraints) ---")
-        for r in system_rules:
-            src = r.get("source", "project").upper()
-            lines.append(f"{r['prefix']} [{r['id']}] ({src}) Node={r['node']} "
-                         f"Category={r['category']}")
-            lines.append(f"  Root cause: {r['root_cause']}")
-            lines.append(f"  Prevention: {r['rule']}")
-            lines.append("")
     lines.append("=== END PITFALL CARDS ===")
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n"

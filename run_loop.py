@@ -172,6 +172,9 @@ def load_delta(project, delta_key):
 
 def assemble_context(project, cand, node):
     r = _ctl("assemble-context", project, cand, "--node", node)
+    if r.returncode != 0:
+        raise RuntimeError(f"assemble-context {node} failed: "
+                           f"{r.stderr.strip() or r.stdout.strip()}")
     manifest = None
     for line in r.stderr.splitlines():
         if "context manifest:" in line:
@@ -214,16 +217,6 @@ def advance(project, cand, step):
         _ctl("execution-gate", project, cand)
     elif ac == "aggregate-report":
         _ctl("aggregate-report", project, cand)
-    # sync human-readable output to Obsidian
-    sync_script = HERE / "sync_to_obsidian.py"
-    if sync_script.exists():
-        _ctl_sync = subprocess.run([sys.executable, str(sync_script), project, "--cand", cand], capture_output=True, text=True)
-        if _ctl_sync.returncode == 0:
-            log("Obsidian sync complete")
-        else:
-            log(f"Obsidian sync warning: {_ctl_sync.stdout.strip()}")
-    else:
-        log("sync_to_obsidian.py not found; skipping Obsidian sync")
 
 
 def provider_for(node, cfg, args):
@@ -315,6 +308,14 @@ def exec_turing(project, cand, step, cfg, args, run_dir, round_id, exec_state):
             log(f"execution-gate rejected: {r.stdout.strip()}")
             return False
     r = _ctl("prepare-turing-workspace", project, cand, "--clean")
+    if r.returncode != 0:
+        exec_state["l7_failures"] += 1
+        log(f"prepare-turing-workspace rejected: "
+            f"{r.stderr.strip() or r.stdout.strip()}")
+        auto_pitfall(project, cand, "L7", "execution_failure",
+                     "Turing workspace preparation failed",
+                     provider="controller", evidence=str(run_dir))
+        return False
     workspace = None
     for line in r.stdout.splitlines():
         if "Turing workspace ready:" in line:

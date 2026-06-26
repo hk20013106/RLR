@@ -10,12 +10,15 @@ plus a promotion-artifact check.
 """
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import pitfall_ledger as pl
+
+RL = str(Path(__file__).resolve().parent / "research_loop_v04.py")
 
 # Isolate tests from any real ~/.rlr global ledger: point the global layer at an
 # empty temp dir so project-only assertions are deterministic. The two-level test
@@ -144,6 +147,60 @@ def test_provider_failure_draft():
         assert len(hit) == 1 and hit[0]["id"] == p["id"], hit
         # wrong provider filter excludes it
         assert pl.scan_pitfalls(d, node="L1", provider="command") == []
+
+
+def test_l7_failure_creates_l0_preflight_candidate():
+    with tempfile.TemporaryDirectory() as d:
+        cand_dir = Path(d) / "01_Candidates"
+        cand_dir.mkdir()
+        (cand_dir / "C1.md").write_text("""---
+candidate_id: C1
+title: Test Candidate
+question: Does X cause Y?
+claim: X causes Y
+current_status: NEW
+current_owner: Linnaeus
+---
+# C1
+""", encoding="utf-8")
+        delta_file = Path(d) / "l7_delta.json"
+        delta_file.write_text(json.dumps({
+            "scripts_run": [
+                {"name": "analysis.R", "exit_code": 1, "output_files": []}
+            ],
+            "key_results": {},
+            "warnings": [],
+            "failures": ["missing WGCNA package stopped execution"],
+        }), encoding="utf-8")
+
+        r = subprocess.run([
+            sys.executable, RL, "emit-delta", d, "C1",
+            "--node", "L7", "--persona", "Turing",
+            "--file", str(delta_file),
+        ], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        assert r.returncode == 0, f"exit={r.returncode} stderr={r.stderr}"
+
+        pitfalls = pl.list_pitfalls(d)
+        l7 = [p for p in pitfalls if p["node"] == "L7"]
+        l0 = [p for p in pitfalls if p["node"] == "L0"]
+        assert len(l7) == 1, pitfalls
+        assert len(l0) == 1, pitfalls
+        assert l0[0]["status"] == "draft"
+        assert l0[0]["severity"] == "hard_stop"
+        assert l0[0]["error_class"] == "system"
+        assert l0[0]["promoted_to"] == "preflight_gate"
+        assert "missing WGCNA package" in l0[0]["root_cause"]
+
+        r = subprocess.run([
+            sys.executable, RL, "assemble-context", d, "C1", "--node", "L0",
+        ], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        assert r.returncode == 0, f"exit={r.returncode} stderr={r.stderr}"
+        assert "L0 PREFLIGHT GATE CANDIDATES" in r.stdout
+        assert "missing WGCNA package" in r.stdout
+
+        pl.confirm_pitfall(d, l0[0]["id"], "confirmed", confirmed_by="Curie")
+        hit = pl.scan_pitfalls(d, node="L0")
+        assert any(r["id"] == l0[0]["id"] for r in hit), hit
 
 
 # --- bonus: false_positive is dropped + promotion writes an artifact --------

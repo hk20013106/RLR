@@ -486,7 +486,8 @@ DELTA_SCHEMAS = {
         "manuscript_framing": str
     },
     "L10b_oppenheimer": {
-        "decision": str, "evidence_level": str, "reason": str, "next_steps": list
+        "decision": str, "evidence_level": str, "reason": str, "next_steps": list,
+        "next_round_hypothesis": str
     },
 }
 
@@ -1868,6 +1869,163 @@ def cmd_assemble_context(args):
                 sections.append(f"=== DELTA: {inp} (not yet emitted) ===")
                 sections.append("")
 
+    # --- pre-research injection (v0.4, multi-mode via _inject_pre_research) ---
+    pre_research_meta = None
+    pr_cfg = PRE_RESEARCH_MAP.get(node_id)
+    if pr_cfg:
+        prf = _pre_research_file(project_dir, node_id)
+        if prf.exists():
+            pr_sections, pre_research_meta = _inject_pre_research(
+                prf, pr_cfg, args, node_id)
+            if pre_research_meta.get("error"):
+                print(f"ERROR: pre-research injection failed closed for "
+                      f"{node_id}: {pre_research_meta['error']}",
+                      file=sys.stderr)
+                return 2
+            sections.extend(pr_sections)
+        else:
+            sections.append(f"=== PRE-RESEARCH ({pr_cfg['type']}): NOT YET RUN ===")
+            sections.append(
+                f"Run first: python research_loop_v04.py pre-research "
+                f"{project_dir} {args.cand_id} --node {node_id}")
+            sections.append("")
+            pre_research_meta = {"type": pr_cfg["type"], "present": False}
+
+    # --- pitfall cards: only THIS node's confirmed/promoted pitfalls (project +
+    # global), never the whole history -> no context pollution. ---
+    pitfall_meta = []
+    node_pitfalls = pl.scan_pitfalls(project_dir, node=node_id)
+    if node_pitfalls:
+        sections.append(pl.format_pitfall_cards(project_dir, node=node_id))
+        sections.append("")
+        pitfall_meta = [{"id": r["id"], "severity": r["severity"],
+                         "category": r.get("category"),
+                         "source": r.get("source", "project")}
+                        for r in node_pitfalls]
+    if node_id == "L0":
+        gate_candidates = pl.list_pitfalls(
+            project_dir, status="draft", node="L0",
+            category="preflight_gate_candidate")
+        if gate_candidates:
+            sections.append("=== L0 PREFLIGHT GATE CANDIDATES (draft) ===")
+            sections.append("Review these L7-derived candidates. Confirm one "
+                            "to activate the L0 hard-stop gate, or mark it "
+                            "obsolete/false_positive if resolved.")
+            for pit in gate_candidates:
+                sections.append(f"[{pit['id']}] severity={pit['severity']} "
+                                f"promoted_to={pit.get('promoted_to', '')}")
+                sections.append(f"  Symptom: {pit.get('symptom', '')}")
+                sections.append(f"  Root cause: {pit.get('root_cause', '')}")
+                sections.append("  Prevention: "
+                                f"{pit.get('prevention_rule', '')}")
+            sections.append("")
+            pitfall_meta.extend(
+                {"id": p["id"], "severity": p["severity"],
+                 "category": p.get("category"), "status": p.get("status"),
+                 "promoted_to": p.get("promoted_to")}
+                for p in gate_candidates)
+
+    # --- template contract (v0.4.5) ---
+    #   contract (default): compact authority/scope/must/schema; NO template body.
+    #   refs: path+sha256 only -- LEGAL ONLY for filesystem (execution) nodes. A
+    #     no-fs cognitive node must never run blind to its template, so refs on a
+    #     no-fs node fails closed.
+    #   full: contract + entire persona/layer bodies (debug only).
+    template_mode = getattr(args, "template_mode", "contract")
+    is_exec = node_info.get("is_execution", False)
+    persona = node_info["persona"]
+    if template_mode == "refs" and not is_exec:
+        print(f"ERROR: --template-mode refs is not allowed for the no-fs "
+              f"cognitive node {node_id} (tools_policy="
+              f"{node_info.get('tools_policy')}). refs only applies to execution "
+              f"(workspace-fs) nodes; use contract.", file=sys.stderr)
+        return 2
+
+    contract_text = "\n".join(_generate_contract(node_info, project_dir))
+    contract_hash = hashlib.sha256(contract_text.encode("utf-8")).hexdigest()
+    sections.append(contract_text)
+    sections.append("")
+
+    _script_dir = Path(__file__).resolve().parent
+    ptpl = _script_dir / _persona_template_path(persona)
+    ltpl = _script_dir / _layer_template_path(node_id)
+    full_templates_injected = False
+    contract_hashes = {
+        "contract": contract_hash,
+        "persona_template": _sha256(ptpl) or "missing",
+        "layer_template": _sha256(ltpl) or "missing",
+    }
+    if template_mode == "full":
+        for label, tpl in (("persona", ptpl), ("layer", ltpl)):
+            sections.append(f"--- [full] {label} template ({tpl.name}) "
+                            f"sha256:{_sha256(tpl) or 'missing'} ---")
+            sections.append(tpl.read_text(encoding="utf-8") if tpl.exists()
+                            else "(template file not found on disk)")
+            sections.append("")
+            full_templates_injected = True
+    elif template_mode == "refs":
+        for label, tpl in (("persona", ptpl), ("layer", ltpl)):
+            sections.append(f"--- [refs] {label} template: {tpl} "
+                            f"sha256:{_sha256(tpl) or 'missing'} ---")
+        sections.append("")
+    # contract mode: the CONTRACT block above is the entire template view.
+
+    # --- bilingual directive: only the reporting nodes (L10a/L10b/L10c) ---
+    if node_id in ("L10a", "L10b", "L10c"):
+        sections.append("=== BILINGUAL OUTPUT DIRECTIVE ===")
+        sections.append("Your delta JSON must include a \"cn\" key with Chinese "
+                        "translations of all")
+        sections.append("human-readable field values (verdicts, reasons, "
+                        "interpretations, headlines,")
+        sections.append("next steps). Top-level English fields stay the canonical "
+                        "machine-readable")
+        sections.append("values; \"cn\" feeds FINAL_REPORT_CN.md generation.")
+        sections.append("")
+
+    # --- audit: context_manifest declaring template_mode + every injected
+    # artifact (emit-delta --receipt verifies the injected_deltas hashes). ---
+    project_id = project_dir.name
+    workspaces = sorted(project_dir.glob("_turing_workspace_*"))
+    manifest_id = _stamp()
+    context_text = "\n".join(sections)
+    context_budget = getattr(args, "context_token_budget", 8000)
+    est_context_tokens = _estimate_tokens(context_text)
+    if context_budget and est_context_tokens > context_budget:
+        print(f"ERROR: context token budget exceeded "
+              f"(~{est_context_tokens} > {context_budget}). "
+              f"Reduce injected context or raise --context-token-budget.",
+              file=sys.stderr)
+        return 2
+    manifest = {
+        "manifest_id": manifest_id,
+        "candidate_id": args.cand_id,
+        "node": node_id,
+        "persona": persona,
+        "timestamp": _now(),
+        "template_mode": template_mode,
+        "contract_hash": contract_hash,
+        "contract_hashes": contract_hashes,
+        "full_templates_injected": full_templates_injected,
+        "allowed_inputs": list(inputs),
+        "injected_deltas": injected,
+        "tools_policy": node_info.get("tools_policy"),
+        "everos_read_scopes": _everos_scopes_for(node_info, project_id),
+        "knowledge_base": node_info.get("knowledge_base"),
+        "workspace": (str(workspaces[-1])
+                      if (is_exec and workspaces) else None),
+        "pre_research": pre_research_meta,
+        "pitfalls_injected": pitfall_meta,
+    }
+    mpath = (_audit_dir(project_dir)
+             / f"context_manifest_{node_id}_{manifest_id}.json")
+    mpath.write_text(json.dumps(manifest, indent=2, ensure_ascii=False),
+                     encoding="utf-8")
+
+    print(context_text)
+    print(f"[audit] context manifest: {mpath}", file=sys.stderr)
+    return 0
+
+
 def _extract_section(text, heading):
     # Extract a markdown section by heading. Returns section text or empty str.
     pattern = f"\n## {heading}"
@@ -1902,6 +2060,7 @@ def _inject_pre_research(prf, pr_cfg, args, node_id):
     sections = []
     injected_text = ""
     warns = []
+    fatal_error = None
 
     if mode == "none":
         sections.append(f"=== PRE-RESEARCH ({pr_cfg['type']}): ARCHIVED ONLY ===")
@@ -1934,10 +2093,13 @@ def _inject_pre_research(prf, pr_cfg, args, node_id):
         if digest:
             est_digest = _estimate_tokens(digest)
             if est_digest > budget:
-                sections.append(f"=== PRE-RESEARCH ERROR: Runtime digest exceeds token budget ({est_digest} > {budget}) ===")
+                msg = (f"Runtime digest exceeds token budget "
+                       f"({est_digest} > {budget})")
+                sections.append(f"=== PRE-RESEARCH ERROR: {msg} ===")
                 sections.append("Fix: reduce Runtime digest or increase --pre-research-token-budget.")
                 sections.append("")
                 injected_text = "(rejected: over budget)"
+                fatal_error = msg
             else:
                 sections.append(f"=== PRE-RESEARCH ({pr_cfg['type']}) [digest] ===")
                 sections.append(digest)
@@ -1948,10 +2110,13 @@ def _inject_pre_research(prf, pr_cfg, args, node_id):
                 sections.append(full_text)
                 injected_text = full_text
             else:
-                sections.append(f"=== PRE-RESEARCH ERROR: No ## Runtime digest section and full text exceeds budget ({est_full} > {budget}) ===")
+                msg = (f"No ## Runtime digest section and full text exceeds "
+                       f"budget ({est_full} > {budget})")
+                sections.append(f"=== PRE-RESEARCH ERROR: {msg} ===")
                 sections.append("Fix: add '## Runtime digest' section to the pre-research file, or use --pre-research-mode full/excerpt.")
                 sections.append("")
                 injected_text = "(rejected: no digest, over budget)"
+                fatal_error = msg
 
     sections.append("")
 
@@ -1966,110 +2131,11 @@ def _inject_pre_research(prf, pr_cfg, args, node_id):
     }
     if warns:
         meta["warnings"] = warns
+    if fatal_error:
+        meta["error"] = fatal_error
 
     return sections, meta
-    # v0.4: inject pre-research summary (multi-mode: digest/excerpt/full/none).
-    # Default: digest mode extracts ## Runtime digest section; fail-closed if
-    # absent and over budget. Full text is archived, not blindly injected.
-    pre_research_meta = None
-    pr_cfg = PRE_RESEARCH_MAP.get(node_id)
-    if pr_cfg:
-        prf = _pre_research_file(project_dir, node_id)
-        if prf.exists():
-            pre_secs, pre_research_meta = _inject_pre_research(prf, pr_cfg, args, node_id)
-            sections.extend(pre_secs)
-        else:
-            sections.append(f"=== PRE-RESEARCH ({pr_cfg['type']}): NOT YET RUN ===")
-            sections.append(
-                f"Run first: python research_loop_v04.py pre-research "
-                f"{project_dir} {args.cand_id} --node {node_id}")
-            sections.append("")
-            pre_research_meta = {"type": pr_cfg["type"], "path": str(prf),
-                                 "sha256": None, "present": False}
 
-    # Pitfall ledger: inject ONLY the cards scoped to THIS node (confirmed/
-    # promoted). This is a guardrail layer, not a delta -- it never grants the
-    # node access to another node's delta, and it is node-filtered so the whole
-    # pitfall history can never pollute the context.
-    pitfall_meta = []
-    node_pitfalls = pl.scan_pitfalls(project_dir, node=node_id)
-    if node_pitfalls:
-        sections.append(pl.format_pitfall_cards(project_dir, node=node_id))
-        sections.append("")
-        pitfall_meta = [{"id": r["id"], "severity": r["severity"],
-                         "category": r["category"]} for r in node_pitfalls]
-
-    # Template contract (compact, generated in-memory from NODE_MAP + DELTA_SCHEMAS,
-    # not read from disk files -- saves ~1200 tokens per node).
-    persona = node_info["persona"]
-    contract = _generate_contract(node_info, project_dir)
-    sections.extend(contract)
-    sections.append("")
-
-    # Refs mode: just template paths + hashes (no body). Full: inject whole files.
-    template_mode = getattr(args, "template_mode", "contract")
-    if template_mode in ("full", "refs"):
-        _sd = Path(__file__).resolve().parent
-        ptpl = _sd / _persona_template_path(persona)
-        ltpl = _sd / _layer_template_path(node_id)
-        if template_mode == "full":
-            if ptpl.exists():
-                sections.append(f"[full] PERSONA ({ptpl.name}): {_sha256(ptpl)}")
-                sections.append(ptpl.read_text(encoding="utf-8"))
-            if ltpl.exists():
-                sections.append(f"[full] LAYER ({ltpl.name}): {_sha256(ltpl)}")
-                sections.append(ltpl.read_text(encoding="utf-8"))
-        else:
-            p_hash = _sha256(ptpl) if ptpl.exists() else "N/A"
-            l_hash = _sha256(ltpl) if ltpl.exists() else "N/A"
-            sections.append(f"[refs] persona: {_persona_template_path(persona)} sha256:{p_hash}")
-            sections.append(f"[refs] layer: {_layer_template_path(node_id)} sha256:{l_hash}")
-        sections.append("")
-
-    # Bilingual directive: only for L10 human-facing report nodes
-    if node_id in ("L10a", "L10b", "L10c"):
-        sections.append("=== BILINGUAL OUTPUT DIRECTIVE ===")
-        sections.append("Include \"cn\" key with Chinese translations in your delta JSON.")
-        sections.append("")
-
-    # Audit (problem 5): write a context_manifest declaring exactly what this
-    # node was allowed and shown -- inputs, per-delta sha256, the DECLARED tools
-    # / EverOS policy (problems 1/2; the script declares, the orchestrator
-    # enforces), workspace, timestamp. emit-delta --receipt verifies against it.
-    project_id = project_dir.name
-    workspaces = sorted(project_dir.glob("_turing_workspace_*"))
-    manifest_id = _stamp()
-    manifest = {
-        "manifest_id": manifest_id,
-        "candidate_id": args.cand_id,
-        "node": node_id,
-        "persona": persona,
-        "template_mode": getattr(args, "template_mode", "contract"),
-        "timestamp": _now(),
-        "allowed_inputs": list(inputs),
-        "injected_deltas": injected,
-        "tools_policy": node_info.get("tools_policy"),
-        "everos_read_scopes": _everos_scopes_for(node_info, project_id),
-        "knowledge_base": node_info.get("knowledge_base"),
-        "workspace": (str(workspaces[-1])
-                      if (node_info.get("is_execution") and workspaces) else None),
-        "pre_research": pre_research_meta,
-        "pitfalls_injected": pitfall_meta,
-    }
-    mpath = (_audit_dir(project_dir)
-             / f"context_manifest_{node_id}_{manifest_id}.json")
-    mpath.write_text(json.dumps(manifest, indent=2, ensure_ascii=False),
-                     encoding="utf-8")
-
-    print("\n".join(sections))
-
-    # Token budget check (estimate: 1 token ~= 4 chars)
-    est = len("\n".join(sections)) // 4
-    if est > 8000:
-        print(f"[token_budget] WARNING: ~{est} tokens (>8k limit)",
-              file=sys.stderr)
-    print(f"[audit] context manifest: {mpath}", file=sys.stderr)
-    return 0
 
 def cmd_emit_delta(args):
     """Validate delta JSON against schema and write to 02_Agent_Notes/."""
@@ -2124,9 +2190,11 @@ def cmd_emit_delta(args):
                     errors.append(
                         f"input_verified['{alias}'] missing keys: {missing}")
                 if not entry.get("verified", True):
-                    errors.append(
-                        f"input_verified['{alias}'].verified is false — "
-                        f"input not confirmed, loop must not proceed")
+                    cls = entry.get("classification", "primary")
+                    if cls in ("primary", "fallback"):
+                        errors.append(
+                            f"input_verified['{alias}'].verified is false — "
+                            f"primary/fallback input must be confirmed")
                 cls = entry.get("classification", "")
                 if cls and cls not in valid_classes:
                     errors.append(
@@ -2136,9 +2204,11 @@ def cmd_emit_delta(args):
                     errors.append(
                         f"input_verified['{alias}'].path is empty")
                 if not entry.get("files"):
-                    errors.append(
-                        f"input_verified['{alias}'].files is empty — "
-                        f"list at least the key filenames at this path")
+                    cls = entry.get("classification", "primary")
+                    if cls in ("primary", "fallback"):
+                        errors.append(
+                            f"input_verified['{alias}'].files is empty — "
+                            f"primary/fallback input must list key filenames")
         # 1. Check Obsidian Vault
         vault = os.environ.get("OBSIDIAN_VAULT")
         if not vault:
@@ -2147,6 +2217,10 @@ def cmd_emit_delta(args):
             expanded_vault = Path(os.path.expandvars(vault)).expanduser()
             if not expanded_vault.is_dir():
                 dep_errors.append(f"Obsidian Vault directory does not exist: {vault}")
+            elif not (expanded_vault / ".obsidian").is_dir():
+                dep_errors.append(
+                    f"Obsidian Vault is not a vault root (missing .obsidian): "
+                    f"{expanded_vault}")
         # 2. Check Zotero
         zotero_env = os.environ.get("ZOTERO_API_KEY") or os.environ.get("ZOTERO_USER_ID")
         zotero_dirs = [
@@ -2257,6 +2331,29 @@ def cmd_emit_delta(args):
     print(f"  schema: {delta_key}")
     print(f"  written: {out_file}")
     print(f"  run receipt: {rr} (upstream: {verification})")
+
+    # Auto-record L7 pitfalls: extract failures and warnings from delta,
+    # record as draft pitfalls so pitfall-scan picks them up next round.
+    if args.node == "L7":
+        for f_text in data.get("failures", []):
+            failure = str(f_text)[:200]
+            pl.record_pitfall(project_dir, args.cand_id, args.node,
+                              "execution_failure", failure,
+                              failure, "", severity="hard_stop",
+                              error_class="system")
+            pl.record_pitfall(
+                project_dir, args.cand_id, "L0", "preflight_gate_candidate",
+                f"Previous L7 execution failure: {failure}"[:200],
+                failure,
+                "Resolve or explicitly waive the previous L7 execution "
+                f"failure before passing L0: {failure}",
+                severity="hard_stop", error_class="system",
+                promoted_to="preflight_gate")
+        for w_text in data.get("warnings", []):
+            pl.record_pitfall(project_dir, args.cand_id, args.node,
+                              "execution_failure", str(w_text)[:200],
+                              str(w_text)[:200], "", severity="warn",
+                              error_class="agent")
     return 0
 
 # --- Phase 2 commands -------------------------------------------------------
@@ -2827,184 +2924,12 @@ def cmd_show(args):
 # --- obsidian sync ----------------------------------------------------------
 
 def cmd_obsidian_sync(args):
-    """Sync delta JSON + FINAL_REPORT + audit trail to Obsidian vault and index.
+    """Delegate to the single human-readable Obsidian sync implementation."""
+    import sync_to_obsidian
 
-    Copies candidates, decision logs, delta JSON, final reports, and the
-    08_Audit/ manifests+receipts into the vault, and builds an index whose
-    "Audit Trail" section lets the info-flow be replayed from inside Obsidian.
-    """
-    import shutil
-
-    project_dir = Path(args.project_dir)
-    idx = project_dir / "00_Project_Index.md"
-    if not idx.exists():
-        print(f"ERROR: not a project dir: {project_dir}", file=sys.stderr)
-        return 2
-    name = _load_yaml_front(idx).get("project_name", project_dir.name)
-
-    vault_str = getattr(args, "vault", None) or os.environ.get("OBSIDIAN_VAULT")
-    if not vault_str:
-        print("ERROR: --vault required or set OBSIDIAN_VAULT env var", file=sys.stderr)
-        return 2
-    vault = Path(vault_str)
-    if not vault.exists():
-        print(f"WARNING: vault not found: {vault} - writing index only", file=sys.stderr)
-        vault = None
-
-    sync = project_dir / "07_Obsidian_Sync"
-    sync.mkdir(parents=True, exist_ok=True)
-
-    vault_dest = None
-    copied = 0
-    if vault:
-        vault_dest = vault / "ResearchLoop" / name
-        vault_dest.mkdir(parents=True, exist_ok=True)
-
-    # Copy 00_Project_Index.md
-    if vault_dest:
-        shutil.copy2(idx, vault_dest / "00_Project_Index.md")
-        copied += 1
-
-    # Copy FINAL_REPORT*.md if they exist
-    for rpt in sorted(project_dir.glob("FINAL_REPORT*.md")):
-        if vault_dest:
-            shutil.copy2(rpt, vault_dest / rpt.name)
-            copied += 1
-
-    # Copy all delta JSON from 02_Agent_Notes/*/
-    notes_dir = project_dir / "02_Agent_Notes"
-    delta_files = []
-    if notes_dir.exists():
-        for persona_dir in sorted(notes_dir.iterdir()):
-            if not persona_dir.is_dir():
-                continue
-            for f in sorted(persona_dir.glob("*_delta.json")):
-                delta_files.append((persona_dir.name, f))
-                if vault_dest:
-                    dst_dir = vault_dest / "02_Agent_Notes" / persona_dir.name
-                    dst_dir.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(f, dst_dir / f.name)
-                    copied += 1
-
-    # Also copy candidate files and decision logs
-    for sub in ["01_Candidates", "05_Decision_Log"]:
-        src_dir = project_dir / sub
-        if not src_dir.exists():
-            continue
-        if vault_dest:
-            dst_dir = vault_dest / sub
-            dst_dir.mkdir(parents=True, exist_ok=True)
-        for f in sorted(src_dir.glob("*.md")):
-            if vault_dest:
-                shutil.copy2(f, vault_dest / sub / f.name)
-                copied += 1
-
-    # Copy audit artifacts (08_Audit/*.json) and collect them for the index
-    audit_dir = project_dir / "08_Audit"
-    manifest_files, receipt_files = [], []
-    if audit_dir.exists():
-        if vault_dest:
-            (vault_dest / "08_Audit").mkdir(parents=True, exist_ok=True)
-        for f in sorted(audit_dir.glob("*.json")):
-            if f.name.startswith("run_receipt_"):
-                receipt_files.append(f)
-            elif f.name.startswith("context_manifest_"):
-                manifest_files.append(f)
-            if vault_dest:
-                shutil.copy2(f, vault_dest / "08_Audit" / f.name)
-                copied += 1
-
-    # Build wikilink index
-    sections = [
-        f"---\nproject_name: {_yaml_value(name)}\nkind: obsidian_index\n"
-        f"version: {_yaml_value(__version__)}\n"
-        f"synced_at: {_yaml_value(_now())}\n---\n",
-        f"# {name} - Obsidian Index (v0.4)\n",
-        "> Synced to vault. Wikilinks resolve inside Obsidian.\n",
-        "## Project\n\n- [[00_Project_Index|Project Index]]\n",
-    ]
-
-    # Candidates section
-    cand_lines = []
-    cdir = project_dir / "01_Candidates"
-    if cdir.exists():
-        for f in sorted(cdir.glob("*.md")):
-            fm = _load_yaml_front(f)
-            cand_lines.append(
-                f"- [[01_Candidates/{f.stem}|{fm.get('candidate_id', f.stem)}]] "
-                f"- **{fm.get('current_status', '?')}** "
-                f"(owner {fm.get('current_owner', '?')}) - {fm.get('title', '')}")
-    if not cand_lines:
-        cand_lines = ["_none_"]
-    sections.append("## Candidates\n\n" + "\n".join(cand_lines) + "\n")
-
-    # Decision log section
-    dlines = []
-    ddir = project_dir / "05_Decision_Log"
-    if ddir.exists():
-        for f in sorted(ddir.glob("*.md")):
-            dlines.append(f"- [[05_Decision_Log/{f.stem}|{f.stem}]]")
-    if not dlines:
-        dlines = ["_none_"]
-    sections.append("## Decision Log\n\n" + "\n".join(dlines) + "\n")
-
-    # Delta files section
-    delta_lines = []
-    for persona, f in delta_files:
-        delta_lines.append(f"- [[02_Agent_Notes/{persona}/{f.stem}|{f.stem}]]")
-    if not delta_lines:
-        delta_lines = ["_none_"]
-    sections.append("## Delta Files (DAG)\n\n" + "\n".join(delta_lines) + "\n")
-
-    # Final reports section
-    rpt_lines = []
-    for rpt in sorted(project_dir.glob("FINAL_REPORT*.md")):
-        rpt_lines.append(f"- [[{rpt.stem}|{rpt.stem}]]")
-    if not rpt_lines:
-        rpt_lines = ["_none_"]
-    sections.append("## Final Reports\n\n" + "\n".join(rpt_lines) + "\n")
-
-    # Audit trail section: run receipts (chronological) + context manifests.
-    # Makes the info-flow replayable from inside Obsidian: which node saw what,
-    # and whether its upstream hashes verified.
-    receipts = []
-    for f in receipt_files:
-        try:
-            r = json.loads(f.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            r = {}
-        receipts.append((r.get("emitted_at", ""), f, r))
-    receipts.sort(key=lambda t: t[0])
-    audit_block = ""
-    if receipts:
-        rows = ["| node | persona | upstream | emitted_at | receipt |",
-                "| ---- | ------- | -------- | ---------- | ------- |"]
-        for _ts, f, r in receipts:
-            rows.append(
-                f"| {r.get('node', '?')} | {r.get('persona', '?')} "
-                f"| {r.get('upstream_verification', '?')} "
-                f"| {r.get('emitted_at', '?')} "
-                f"| [[08_Audit/{f.stem}|{f.stem}]] |")
-        audit_block += "### Run receipts\n\n" + "\n".join(rows) + "\n\n"
-    if manifest_files:
-        mani = [f"- [[08_Audit/{f.stem}|{f.stem}]]" for f in manifest_files]
-        audit_block += "### Context manifests\n\n" + "\n".join(mani) + "\n"
-    if not audit_block:
-        audit_block = "_none_\n"
-    sections.append("## Audit Trail (info-flow)\n\n" + audit_block)
-
-    index_text = "\n".join(sections)
-
-    out_local = sync / "00_Obsidian_Index.md"
-    out_local.write_text(index_text, encoding="utf-8")
-
-    if vault_dest:
-        out_vault = vault_dest / "00_Obsidian_Index.md"
-        out_vault.write_text(index_text, encoding="utf-8")
-        print(f"Obsidian sync -> {out_vault} ({copied} files copied)")
-    else:
-        print(f"Obsidian sync (index only) -> {out_local}")
-    return 0
+    rc = sync_to_obsidian.sync_project(
+        args.project_dir, vault_dir=getattr(args, "vault", None))
+    return 0 if rc == 0 else 2
 
 
 # --- aggregate report (L10c Linnaeus) ---------------------------------------
@@ -3254,6 +3179,10 @@ def _format_delta_body(delta_key, delta, lang="en"):
         L.append("\n**Next steps:**")
         for s in delta.get("next_steps", []):
             L.append(f"- {s}")
+        nh = delta.get("next_round_hypothesis", "")
+        if nh:
+            L.append(f"\n**下一轮假说 (Next round hypothesis):** {nh}")
+            L.append("\n> [硬约束 - HARD CONSTRAINT] L10b 必须基于本轮结果生成新假说，作为下一轮 RLR 循环的起点。")
     return "\n".join(L) + "\n" if L else "_Empty delta._\n"
 
 
@@ -3293,6 +3222,7 @@ def cmd_aggregate_report(args):
     en.append(f"**Status:** {status}")
     en.append(f"**Generated:** {_now()}")
     en.append(f"**Framework:** RLR v{__version__}\n")
+    en.append("![Continuous enhancer Signal per pathway](03_Figures/deltaSignal_pathway_comparison.png)\n")
     en.append(f"## Scientific Question\n\n{question}\n")
     en.append(f"## Claim\n\n{claim}\n")
 
@@ -3508,6 +3438,8 @@ def build_parser():
                     help="digest: Runtime digest section only (default); excerpt: truncated; full: entire file; none: manifest only")
     sp.add_argument("--pre-research-token-budget", type=int, default=None,
                     help="max tokens for pre-research injection (default: node-specific, e.g. L1=800)")
+    sp.add_argument("--context-token-budget", type=int, default=8000,
+                    help="max estimated tokens for assembled context (default: 8000; 0 disables)")
     sp.set_defaults(func=cmd_assemble_context)
 
     # emit-delta
