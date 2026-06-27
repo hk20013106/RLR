@@ -50,6 +50,16 @@ import re
 import sys
 from pathlib import Path
 
+# Defensive UTF-8 console output: on Windows the default console codec (GBK/cp936)
+# cannot encode normal scientific Unicode (e.g. the digest's "H3K27ac ∩ ATAC",
+# "p ≥ 0.05", "→"), which crashed assemble-context's print. Platform-output fix
+# only — does NOT touch gates, schemas, or file I/O (files are already UTF-8).
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 import research_loop_v04 as rl  # reference engine; reused helpers only
 
 # ---------------------------------------------------------------------------
