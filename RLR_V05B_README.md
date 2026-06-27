@@ -46,6 +46,52 @@ be (and were) generated with zero real literature grounding.
   with research path, sha256, `runtime_digest_found`, `digest_injected`,
   `consumed_by`, injected upstream delta hashes.
 
+## 2b. Using academic-research-skills as the literature engine
+
+RLR v0.5b's preferred external literature engine is **academic-research-skills
+(ARS)** — `Imbad0202/academic-research-skills`. ARS Deep Research / lit-review
+mode is what generates the L1 and L4a literature artifacts; RLR then validates
+those artifacts.
+
+**Install (Claude Code):**
+```text
+/plugin marketplace add Imbad0202/academic-research-skills
+/plugin install academic-research-skills
+```
+Then run ARS Deep Research in literature-review mode for L1, and in
+method-focused literature-review mode for L4a, using the prompt templates:
+- `templates/v05b/L1_ars_pre_research_prompt.md`
+- `templates/v05b/L4a_ars_pre_research_prompt.md`
+
+**Codex CLI:** the sibling distribution `academic-research-skills-codex` exposes
+the same workflow content as `$academic-research-suite`; invoke that instead.
+
+**Division of responsibility (important):**
+- **ARS** *generates* the literature: it reads sources and writes the
+  `L1_research.md` / `L4a_research.md` artifact, ending with the required
+  `## Runtime digest` + `## RLR handoff summary` sections.
+- **RLR v0.5b does NOT prove a live ARS tool/network call occurred** — the skill
+  runs outside the engine's visibility.
+- **RLR v0.5b validates the resulting artifact**, offline: the file exists, has a
+  non-empty `## Runtime digest`, each paper carries a DOI/PMID/URL identifier,
+  citekeys resolve in `09_Literature_Database/` (or inline), and the result is
+  consumed downstream (`literature_used` in L1, `method_literature_digest` in
+  L4a, and L4b/L5 consuming upstream deltas). This is the artifact-based
+  guarantee; it is intentionally not a proof of invocation.
+
+**Licensing — do not vendor ARS:** the ARS repository is **CC BY-NC 4.0**. Do
+**not** copy, vendor, or re-implement ARS into this repo unless license
+compatibility is explicitly accepted. v0.5b only *calls* ARS as an external,
+separately-installed engine and consumes its text output; no ARS code or content
+is bundled here.
+
+**v0.5b stays artifact-based (no hard Python dependency on ARS):** the Python
+engine never imports or shells out to ARS. L0 may *report* ARS availability as
+recommended/attested (e.g. in `skills_found` / `skill_use_plan`), but the L1/L4a
+**hard gates remain based on artifact validity**, never on live skill invocation.
+If ARS is absent, you may produce the `## Runtime digest` artifact by any
+literature method — the gates judge the artifact, not the tool.
+
 ## 3. Run
 
 ```bash
