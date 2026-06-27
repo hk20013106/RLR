@@ -83,8 +83,8 @@ PRE_RESEARCH_V05B = {
 NODE_DELTA_KEY = {
     "L0": "L0_linnaeus", "L1": "L1_einstein",
     "L4a": "L4a_curie", "L4b": "L4b_fisher", "L5": "L5_tukey",
-    "L7": "L7_turing", "L8": "L8_curie", "L8.5": "L8_5_darwin",
-    "L9a": "L9a_darwin", "L9b": "L9b_jobs",
+    "L7": "L7_turing", "L8": "L8_curie", "L8.5": "L8.5_curie",
+    "L9a": "L9a_feynman", "L9b": "L9b_darwin",
     "L10a": "L10a_jobs", "L10b": "L10b_oppenheimer",
 }
 
