@@ -785,18 +785,8 @@ _DOI_PMID_URL_RE = re.compile(
     r"(10\.\d{4,9}/\S+|PMID:?\s*\d+|https?://\S+)", re.IGNORECASE)
 
 
-def _audit_pre_research(project_dir, node_id, pr_cfg):
-    """V0.5 deep-research gate. Returns (ok, reason).
-
-    Fails closed when the pre-research artifact is missing, empty, a NOT YET RUN
-    placeholder, or (for literature nodes) lacks a `## Runtime digest` carrying a
-    DOI/PMID/URL. This is the single enforcement point for the canonical V0.5
-    runtime -- there is no path that treats absent deep research as success.
-    """
-    prf = _pre_research_file(project_dir, node_id)
-    if not prf.exists():
-        return False, f"artifact missing ({prf.as_posix()})"
-    text = prf.read_text(encoding="utf-8", errors="replace")
+def _validate_pre_research_content(text, pr_cfg):
+    """Validate content of a pre-research artifact. Returns (ok, reason)."""
     if "NOT YET RUN" in text:
         return False, "artifact is the NOT YET RUN placeholder"
     if not text.strip():
@@ -821,6 +811,21 @@ def _audit_pre_research(project_dir, node_id, pr_cfg):
         if prov["source_count"] < 1:
             return False, "`## Source count` is < 1 (no sources retrieved)"
     return True, ""
+
+
+def _audit_pre_research(project_dir, node_id, pr_cfg):
+    """V0.5 deep-research gate. Returns (ok, reason).
+
+    Fails closed when the pre-research artifact is missing, empty, a NOT YET RUN
+    placeholder, or (for literature nodes) lacks a `## Runtime digest` carrying a
+    DOI/PMID/URL. This is the single enforcement point for the canonical V0.5
+    runtime -- there is no path that treats absent deep research as success.
+    """
+    prf = _pre_research_file(project_dir, node_id)
+    if not prf.exists():
+        return False, f"artifact missing ({prf.as_posix()})"
+    text = prf.read_text(encoding="utf-8", errors="replace")
+    return _validate_pre_research_content(text, pr_cfg)
 
 
 # V0.6 pre-research provenance ------------------------------------------------
@@ -1886,6 +1891,54 @@ This summary will be injected into the {node} assemble-context as additional inp
 
     print(prompt)
     print(f"\n[pre-research] output target: {output_file}")
+    return 0
+
+
+def cmd_audit_pre_research(args):
+    """Audit existing pre-research artifacts in a project directory."""
+    project_dir = Path(args.project_dir)
+    results = {}
+    for node, pr_cfg in PRE_RESEARCH_MAP.items():
+        is_lit = pr_cfg.get("type") in _LIT_PRE_RESEARCH_TYPES
+        if not is_lit:
+            results[node] = {
+                "status": "NOT_APPLICABLE",
+                "reason": "non-literature node"
+            }
+            continue
+
+        prf = _pre_research_file(project_dir, node)
+        if not prf.exists():
+            results[node] = {
+                "status": "FAIL",
+                "reason": f"artifact missing ({prf.as_posix()})"
+            }
+            continue
+
+        try:
+            text = prf.read_text(encoding="utf-8", errors="replace")
+            ok, reason = _validate_pre_research_content(text, pr_cfg)
+            if ok:
+                results[node] = {
+                    "status": "PASS",
+                    "reason": ""
+                }
+            else:
+                results[node] = {
+                    "status": "FAIL",
+                    "reason": reason
+                }
+        except Exception as e:
+            results[node] = {
+                "status": "FAIL",
+                "reason": f"error reading/parsing: {e}"
+            }
+
+    report = {
+        "project_dir": project_dir.as_posix(),
+        "results": results
+    }
+    print(json.dumps(report, indent=2))
     return 0
 
 
@@ -3769,6 +3822,12 @@ def build_parser():
     pr.add_argument("--write-synthetic", action="store_true",
                     help="[TEST-ONLY] write completed/synthetic valid pre-research artifact to output file")
     pr.set_defaults(func=cmd_pre_research)
+
+    # audit-pre-research
+    sp = sub.add_parser("audit-pre-research",
+                        help="Audit pre-research artifacts in a project directory")
+    sp.add_argument("project_dir")
+    sp.set_defaults(func=cmd_audit_pre_research)
 
     sp = sub.add_parser("obsidian-sync", help="sync deltas + report to Obsidian vault")
     sp.add_argument("project_dir")
