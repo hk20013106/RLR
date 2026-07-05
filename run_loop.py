@@ -168,8 +168,8 @@ def status_of(project, cand):
     return rl._load_yaml_front(cf).get("current_status", "?")
 
 
-def load_delta(project, delta_key):
-    df = rl._delta_file(Path(project), delta_key)
+def load_delta(project, cand, delta_key):
+    df = rl._delta_for_candidate(Path(project), delta_key, cand)
     if df and df.exists():
         try:
             return json.loads(df.read_text(encoding="utf-8"))
@@ -212,12 +212,12 @@ def advance(project, cand, step):
         _ctl("decision", project, cand, "--status", step.get("advance_status"),
              "--reason", step.get("advance_reason") or "auto")
     elif ac == "triage-idea":
-        d = load_delta(project, "L3_oppenheimer") or {}
+        d = load_delta(project, cand, "L3_oppenheimer") or {}
         dec = "select" if d.get("selected") else "reject"
         _ctl("triage-idea", project, cand, "--decision", dec,
              "--reason", d.get("reason") or "auto")
     elif ac == "triage-method":
-        d = load_delta(project, "L6_oppenheimer") or {}
+        d = load_delta(project, cand, "L6_oppenheimer") or {}
         dec = "approve" if d.get("approved_strategy") else "reject"
         _ctl("triage-method", project, cand, "--decision", dec,
              "--reason", d.get("reason") or "auto")
@@ -471,7 +471,7 @@ def run_review_gate(project, cand, cfg, args, run_dir):
     if cn.exists():
         parts += ["=== FINAL_REPORT_CN.md ===", cn.read_text(encoding="utf-8")]
     for dk in ("L8_curie", "L9a_feynman", "L9b_darwin", "L10b_oppenheimer"):
-        d = load_delta(project, dk)
+        d = load_delta(project, cand, dk)
         if d is not None:
             parts += [f"=== {dk} ===", json.dumps(d, indent=2, ensure_ascii=False)]
     context = "\n\n".join(parts)
@@ -590,8 +590,8 @@ class StopPolicy:
 
 
 def evidence_sig(project, cand):
-    l8 = load_delta(project, "L8_curie") or {}
-    l9a = load_delta(project, "L9a_feynman") or {}
+    l8 = load_delta(project, cand, "L8_curie") or {}
+    l9a = load_delta(project, cand, "L9a_feynman") or {}
     basis = json.dumps({"lvl": l8.get("evidence_level"),
                         "ev": l8.get("evidence_verified"),
                         "surv": l9a.get("survives"),
@@ -742,7 +742,7 @@ def cmd_run(args):
             review = run_review_gate(project, cur, cfg, args, run_dir)
 
         st = status_of(project, cur)
-        l10b = load_delta(project, "L10b_oppenheimer")
+        l10b = load_delta(project, cur, "L10b_oppenheimer")
         summaries.append({"round": round_id, "candidate": cur, "status": st,
                           "evidence_sig": evidence_sig(project, cur),
                           "review_verdict": (review or {}).get("review_verdict")})

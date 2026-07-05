@@ -63,23 +63,40 @@ def test_matching_receipt_counts_current_delta_for_candidate():
         assert _next_step(project)["node"] == "L2"
 
 
-def test_emit_delta_embeds_candidate_id():
+def test_emit_delta_uses_candidate_path_without_overwriting_legacy_delta():
     with tempfile.TemporaryDirectory() as d:
         project = Path(d)
         _candidate(project)
-        src = project / "l3.json"
+        legacy = _delta(
+            project, "Einstein", "L1_einstein_delta.json",
+            {"historical": "anonymous"})
+        legacy_before = legacy.read_bytes()
+        src = project / "l1.json"
         src.write_text(json.dumps({
-            "selected": ["H1"], "rejected": [],
-            "reason": "test", "route_to": "Fisher",
+            "hypotheses": [{
+                "id": "H1", "text": "candidate-specific hypothesis",
+                "testable": True, "rationale": "focused regression test",
+            }],
+            "key_uncertainty": "test uncertainty",
+            "primary_hypothesis": "H1",
         }), encoding="utf-8")
         rc = rl.main([
-            "emit-delta", str(project), "CNEW", "--node", "L3",
-            "--persona", "Oppenheimer", "--file", str(src),
+            "emit-delta", str(project), "CNEW", "--node", "L1",
+            "--persona", "Einstein", "--file", str(src),
         ])
         assert rc == 0
-        emitted = json.loads((project / "02_Agent_Notes" / "Oppenheimer" /
-                              "L3_oppenheimer_delta.json").read_text(encoding="utf-8"))
+        assert legacy.read_bytes() == legacy_before
+        candidate_path = (project / "02_Agent_Notes" / "Einstein" /
+                          "CNEW_L1_einstein_delta.json")
+        emitted = json.loads(candidate_path.read_text(encoding="utf-8"))
         assert emitted["candidate_id"] == "CNEW"
+        receipts = list((project / "08_Audit").glob("run_receipt_L1_*.json"))
+        assert len(receipts) == 1
+        receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+        assert Path(receipt["output_delta_path"]) == candidate_path
+        assert receipt["output_delta_sha256"] == hashlib.sha256(
+            candidate_path.read_bytes()).hexdigest()
+        assert _next_step(project)["node"] == "L2"
 
 
 def _run_as_script():

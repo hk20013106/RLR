@@ -755,34 +755,55 @@ def _delta_file(project_dir, delta_key):
     return Path(project_dir) / "02_Agent_Notes" / persona / f"{delta_key}_delta.json"
 
 
-def _delta_belongs_to_candidate(project_dir, delta_key, cand_id):
-    """True only when a delta is unambiguously linked to ``cand_id``."""
-    df = _delta_file(project_dir, delta_key)
-    if not df or not df.exists():
-        return False
-    try:
-        data = json.loads(df.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return False
-    declared = data.get("candidate_id")
-    if declared is not None:
-        return str(declared) == str(cand_id)
+def _candidate_delta_file(project_dir, delta_key, cand_id):
+    """Return the non-overwriting path used for new candidate-owned deltas."""
+    legacy = _delta_file(project_dir, delta_key)
+    if legacy is None:
+        return None
+    return legacy.with_name(f"{cand_id}_{legacy.name}")
 
-    digest = _sha256(df)
+
+def _delta_for_candidate(project_dir, delta_key, cand_id):
+    """Resolve an owned candidate delta, with legacy receipt compatibility."""
+    candidate = _candidate_delta_file(project_dir, delta_key, cand_id)
+    legacy = _delta_file(project_dir, delta_key)
     node = delta_key.split("_", 1)[0]
     audit = Path(project_dir) / "08_Audit"
-    if not audit.is_dir():
-        return False
-    for rp in audit.glob(f"run_receipt_{node}_*.json"):
+    receipts = []
+    for rp in audit.glob(f"run_receipt_{node}_*.json") if audit.is_dir() else []:
         try:
-            receipt = json.loads(rp.read_text(encoding="utf-8"))
+            receipts.append(json.loads(rp.read_text(encoding="utf-8")))
         except (json.JSONDecodeError, OSError):
             continue
-        if (str(receipt.get("candidate_id")) == str(cand_id)
-                and receipt.get("delta_key") == delta_key
-                and receipt.get("output_delta_sha256") == digest):
-            return True
-    return False
+
+    for df in (candidate, legacy):
+        if not df or not df.exists():
+            continue
+        try:
+            data = json.loads(df.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        declared = data.get("candidate_id")
+        if declared is not None:
+            if str(declared) == str(cand_id):
+                return df
+            continue
+        digest = _sha256(df)
+        for receipt in receipts:
+            receipt_path = receipt.get("output_delta_path")
+            path_matches = (Path(receipt_path) == df if receipt_path
+                            else df == legacy)
+            if (str(receipt.get("candidate_id")) == str(cand_id)
+                    and receipt.get("delta_key") == delta_key
+                    and receipt.get("output_delta_sha256") == digest
+                    and path_matches):
+                return df
+    return None
+
+
+def _delta_belongs_to_candidate(project_dir, delta_key, cand_id):
+    """True only when a delta is unambiguously linked to ``cand_id``."""
+    return _delta_for_candidate(project_dir, delta_key, cand_id) is not None
 
 
 def _sha256(path):
@@ -1560,8 +1581,8 @@ def cmd_next_step(args):
     # EXECUTED via `decision`. Without this override next-step would keep
     # returning L7/execution-gate and the walk would dead-end before L8.
     if status == "NEEDS_EXECUTION" and node_id == "L7":
-        l7 = _delta_file(project_dir, "L7_turing")
-        delta_done = bool(l7 and l7.exists())
+        delta_done = _delta_belongs_to_candidate(
+            project_dir, "L7_turing", args.cand_id)
         result["advance_command"] = "decision"
         result["advance_status"] = "EXECUTED"
         result["advance_reason"] = ("Turing execution complete, mark EXECUTED "
@@ -1873,7 +1894,7 @@ This summary will be injected into the {node} assemble-context as additional inp
         # Ground the search in the ACTUAL L7/L8 findings, not just the question,
         # so L8.5 verifies real results against published literature.
         def _ld(key):
-            p = _delta_file(project_dir, key)
+            p = _delta_for_candidate(project_dir, key, args.cand_id)
             if p and p.exists():
                 try:
                     return json.loads(p.read_text(encoding="utf-8"))
@@ -2113,7 +2134,7 @@ def cmd_assemble_context(args):
         elif inp == "ALL":
             # L10c: read all deltas
             for delta_key in DELTA_DAG_ORDER:
-                df = _delta_file(project_dir, delta_key)
+                df = _delta_for_candidate(project_dir, delta_key, args.cand_id)
                 if df and df.exists():
                     try:
                         data = json.loads(df.read_text(encoding="utf-8"))
@@ -2135,7 +2156,7 @@ def cmd_assemble_context(args):
             corrupt = False
             for dk in DELTA_DAG_ORDER:
                 if dk.startswith(inp + "_"):
-                    df = _delta_file(project_dir, dk)
+                    df = _delta_for_candidate(project_dir, dk, args.cand_id)
                     if df and df.exists():
                         try:
                             data = json.loads(df.read_text(encoding="utf-8"))
@@ -2605,7 +2626,8 @@ def cmd_emit_delta(args):
             return 2
         manifest_id = manifest.get("manifest_id")
         for inj in manifest.get("injected_deltas", []):
-            cur = _sha256(_delta_file(project_dir, inj.get("delta_key")))
+            injected_path = inj.get("path")
+            cur = _sha256(injected_path) if injected_path else None
             if cur != inj.get("sha256"):
                 mismatches.append(inj.get("delta_key"))
         verification = "pass" if not mismatches else "FAIL"
@@ -2616,12 +2638,12 @@ def cmd_emit_delta(args):
                   f"{', '.join(str(m) for m in mismatches)}", file=sys.stderr)
             return 1
 
-    # Write to 02_Agent_Notes/<persona>/<node>_<persona>_delta.json
-    out_file = _delta_file(project_dir, delta_key)
+    # New outputs are candidate-owned; canonical legacy files remain untouched.
+    out_file = _candidate_delta_file(project_dir, delta_key, args.cand_id)
     if out_file is None:
         out_dir = Path(project_dir) / "02_Agent_Notes" / args.persona
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_file = out_dir / f"{delta_key}_delta.json"
+        out_file = out_dir / f"{args.cand_id}_{delta_key}_delta.json"
     else:
         out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(json.dumps(data, indent=2, ensure_ascii=False),
@@ -2637,6 +2659,7 @@ def cmd_emit_delta(args):
         "persona": args.persona,
         "delta_key": delta_key,
         "emitted_at": _now(),
+        "output_delta_path": str(out_file),
         "output_delta_sha256": _sha256(out_file),
         "context_manifest_id": manifest_id,
         "upstream_verification": verification,
@@ -3149,7 +3172,7 @@ def cmd_prepare_turing_workspace(args):
 
     # Deltas Turing is allowed to see per the DAG (L6 approved plan, L0 skills).
     for delta_key in ("L0_linnaeus", "L6_oppenheimer"):
-        df = _delta_file(project_dir, delta_key)
+        df = _delta_for_candidate(project_dir, delta_key, args.cand_id)
         if df and df.exists():
             shutil.copy2(df, inputs / df.name)
             copied.append(f"inputs/{df.name}")
@@ -3520,7 +3543,7 @@ def cmd_aggregate_report(args):
     deltas = {}
     for delta_key in DELTA_DAG_ORDER:
         persona = DELTA_PERSONA[delta_key]
-        delta_path = _delta_file(project_dir, delta_key)
+        delta_path = _delta_for_candidate(project_dir, delta_key, args.cand_id)
         if delta_path and delta_path.exists():
             try:
                 deltas[delta_key] = json.loads(delta_path.read_text(encoding="utf-8"))
