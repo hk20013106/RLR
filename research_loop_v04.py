@@ -2332,6 +2332,8 @@ def cmd_assemble_context(args):
     workspaces = sorted(project_dir.glob("_turing_workspace_*"))
     manifest_id = _stamp()
     context_text = "\n".join(sections)
+    context_text, caveman_meta = _caveman_lite(
+        context_text, required_literals=[args.cand_id, node_id, persona])
     context_budget = getattr(args, "context_token_budget", 8000)
     est_context_tokens = _estimate_tokens(context_text)
     if context_budget and est_context_tokens > context_budget:
@@ -2359,6 +2361,7 @@ def cmd_assemble_context(args):
                       if (is_exec and workspaces) else None),
         "pre_research": pre_research_meta,
         "pitfalls_injected": pitfall_meta,
+        **caveman_meta,
     }
     mpath = (_audit_dir(project_dir)
              / f"context_manifest_{node_id}_{manifest_id}.json")
@@ -2390,6 +2393,98 @@ def _estimate_tokens(text):
     return max(1, len(text) // 4)
 
 
+def _caveman_required_literals(text, extra=None):
+    """Collect identifiers that derived lite compression must preserve."""
+    required = list(extra or [])
+    patterns = (
+        r"https?://\S+",
+        r"10\.\d{4,9}/\S+",
+        r"PMID:?\s*\d+",
+        r"\bC\d{8,}\b",
+    )
+    for pattern in patterns:
+        required.extend(re.findall(pattern, text, flags=re.IGNORECASE))
+    for line in text.splitlines():
+        stripped = line.strip()
+        lower = stripped.lower()
+        if ("python " in lower or "fail closed" in lower
+                or "do not fabricate" in lower or stripped.startswith("OUTPUT:")):
+            required.append(stripped)
+    return list(dict.fromkeys(str(x) for x in required if str(x)))
+
+
+def _caveman_lite(text, required_literals=None):
+    """Deterministically pack derived context text without mutating its source."""
+    original_tokens = _estimate_tokens(text)
+    required = _caveman_required_literals(text, required_literals)
+    if any(literal not in text for literal in required):
+        return text, {
+            "caveman_mode": "lite",
+            "original_est_tokens": original_tokens,
+            "compressed_est_tokens": original_tokens,
+            "compression_applied": False,
+            "required_fields_preserved": False,
+        }
+
+    source_lines = text.splitlines()
+    derived_lines = []
+    i = 0
+    while i < len(source_lines):
+        line = source_lines[i]
+        derived_lines.append(line)
+        if line.startswith("=== DELTA:") and i + 1 < len(source_lines):
+            start = i + 1
+            if source_lines[start].strip() == "{":
+                for end in range(start + 1, len(source_lines) + 1):
+                    candidate = "\n".join(source_lines[start:end])
+                    try:
+                        data = json.loads(candidate)
+                    except json.JSONDecodeError:
+                        continue
+                    derived_lines.append(json.dumps(
+                        data, ensure_ascii=False, separators=(", ", ": ")))
+                    i = end - 1
+                    break
+        i += 1
+
+    packed_lines = []
+    previous = None
+    blank = False
+    in_code = False
+    for line in derived_lines:
+        stripped = line.rstrip()
+        if stripped.lstrip().startswith("```"):
+            in_code = not in_code
+        if not in_code and not stripped:
+            if blank:
+                continue
+            blank = True
+        else:
+            blank = False
+        is_prose = bool(stripped) and not stripped.lstrip().startswith(
+            ("#", "-", "*", ">", "{", "}", "[", "]", '"', "```"))
+        if not in_code and is_prose and stripped == previous:
+            continue
+        packed_lines.append(stripped)
+        previous = stripped if stripped else previous
+    packed = "\n".join(packed_lines)
+    if text.endswith("\n"):
+        packed += "\n"
+
+    preserved = all(literal in packed for literal in required)
+    if not preserved:
+        packed = text
+    compressed_tokens = _estimate_tokens(packed)
+    applied = preserved and packed != text and compressed_tokens < original_tokens
+    return packed, {
+        "caveman_mode": "lite",
+        "original_est_tokens": original_tokens,
+        "compressed_est_tokens": compressed_tokens,
+        "compression_applied": applied,
+        "required_fields_preserved": preserved,
+    }
+
+
 # --- 2. Pre-research injection mode-aware logic ---
 
 def _inject_pre_research(prf, pr_cfg, args, node_id):
@@ -2405,8 +2500,21 @@ def _inject_pre_research(prf, pr_cfg, args, node_id):
     injected_text = ""
     warns = []
     fatal_error = None
+    digest = _extract_section(full_text, "Runtime digest")
+    archived_only = False
+    omitted_reason = None
 
-    if mode == "none":
+    if (budget == 0
+            and pr_cfg.get("type") not in _LIT_PRE_RESEARCH_TYPES):
+        archived_only = True
+        omitted_reason = "budget=0 / archived-only"
+        mode = "archived-only"
+        sections.append(
+            f"=== PRE-RESEARCH ({pr_cfg['type']}): ARCHIVED ONLY "
+            "(budget=0; omitted) ===")
+        injected_text = ""
+
+    elif mode == "none":
         sections.append(f"=== PRE-RESEARCH ({pr_cfg['type']}): ARCHIVED ONLY ===")
         injected_text = "(not injected)"
 
@@ -2433,7 +2541,6 @@ def _inject_pre_research(prf, pr_cfg, args, node_id):
             warns.append("excerpt_may_omit_caveats")
 
     else:  # digest (default)
-        digest = _extract_section(full_text, "Runtime digest")
         if digest:
             est_digest = _estimate_tokens(digest)
             if est_digest > budget:
@@ -2471,6 +2578,10 @@ def _inject_pre_research(prf, pr_cfg, args, node_id):
         "injected_mode": mode,
         "injected_tokens_est": _estimate_tokens(injected_text) if injected_text and not injected_text.startswith("(") else 0,
         "full_text_injected": mode == "full" or (mode == "digest" and _extract_section(full_text, "Runtime digest") == "" and est_full <= budget),
+        "archived_only": archived_only,
+        "digest_present": bool(digest),
+        "digest_tokens_est": _estimate_tokens(digest) if digest else 0,
+        "omitted_reason": omitted_reason,
         # V0.6 provenance (parsed + persisted; enforced in PR2)
         "query_log": provenance["query_log"],
         "tool_receipt": provenance["tool_receipt"],
@@ -2628,6 +2739,7 @@ def cmd_emit_delta(args):
     # delta being re-emitted/changed between assemble-context and emit-delta.
     # No receipt -> skip; receipt + mismatch -> reject.
     manifest_id = None
+    manifest = {}
     verification = "skipped (no receipt)"
     mismatches = []
     if args.receipt:
@@ -2680,6 +2792,13 @@ def cmd_emit_delta(args):
         "context_manifest_id": manifest_id,
         "upstream_verification": verification,
         "mismatches": mismatches,
+        "caveman_mode": manifest.get("caveman_mode"),
+        "original_est_tokens": manifest.get("original_est_tokens"),
+        "compressed_est_tokens": manifest.get("compressed_est_tokens"),
+        "compression_applied": manifest.get("compression_applied"),
+        "required_fields_preserved": manifest.get(
+            "required_fields_preserved"),
+        "pre_research": manifest.get("pre_research"),
     }
     rr = _audit_dir(project_dir) / f"run_receipt_{args.node}_{receipt_id}.json"
     rr.write_text(json.dumps(run_receipt, indent=2, ensure_ascii=False),

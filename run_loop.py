@@ -812,7 +812,10 @@ def cmd_print_main_agent_prompt(args):
         max_rounds = cfg.max_rounds or 3
     prompt = MAIN_AGENT_PROMPT_TEMPLATE.format(
         project=project, cand_id=cand, max_rounds=max_rounds)
+    prompt, meta = rl._caveman_lite(
+        prompt, required_literals=[project, cand, "main-agent", "Do NOT"])
     print(prompt)
+    log("caveman-lite: " + json.dumps(meta, sort_keys=True))
     return 0
 
 def build_parser():
