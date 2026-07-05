@@ -754,6 +754,37 @@ def _delta_file(project_dir, delta_key):
         return None
     return Path(project_dir) / "02_Agent_Notes" / persona / f"{delta_key}_delta.json"
 
+
+def _delta_belongs_to_candidate(project_dir, delta_key, cand_id):
+    """True only when a delta is unambiguously linked to ``cand_id``."""
+    df = _delta_file(project_dir, delta_key)
+    if not df or not df.exists():
+        return False
+    try:
+        data = json.loads(df.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    declared = data.get("candidate_id")
+    if declared is not None:
+        return str(declared) == str(cand_id)
+
+    digest = _sha256(df)
+    node = delta_key.split("_", 1)[0]
+    audit = Path(project_dir) / "08_Audit"
+    if not audit.is_dir():
+        return False
+    for rp in audit.glob(f"run_receipt_{node}_*.json"):
+        try:
+            receipt = json.loads(rp.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if (str(receipt.get("candidate_id")) == str(cand_id)
+                and receipt.get("delta_key") == delta_key
+                and receipt.get("output_delta_sha256") == digest):
+            return True
+    return False
+
+
 def _sha256(path):
     """Hex sha256 of a file's bytes, or None if it does not exist."""
     p = Path(path)
@@ -1456,17 +1487,18 @@ def cmd_next_step(args):
     if node_candidates:
         for cand_node in node_candidates:
             if cand_node == "L9_parallel":
-                l9a = _delta_file(project_dir, "L9a_feynman")
-                l9b = _delta_file(project_dir, "L9b_darwin")
-                if l9a and l9a.exists() and l9b and l9b.exists():
+                if (_delta_belongs_to_candidate(
+                        project_dir, "L9a_feynman", args.cand_id)
+                        and _delta_belongs_to_candidate(
+                            project_dir, "L9b_darwin", args.cand_id)):
                     continue
                 node_id = "L9_parallel"
                 break
             ni = NODE_MAP.get(cand_node)
             if ni:
                 delta_key = f"{cand_node}_{ni['persona'].lower()}"
-                df = _delta_file(project_dir, delta_key)
-                if df and df.exists():
+                if _delta_belongs_to_candidate(
+                        project_dir, delta_key, args.cand_id):
                     continue
                 node_id = cand_node
                 break
@@ -2523,8 +2555,16 @@ def cmd_emit_delta(args):
         if dep_errors:
             errors.extend(dep_errors)
 
-    # Check for extra keys
-    extra = set(data.keys()) - set(schema.keys())
+    declared_candidate = data.get("candidate_id")
+    if (declared_candidate is not None
+            and str(declared_candidate) != str(args.cand_id)):
+        errors.append(
+            f"candidate_id mismatch: delta declares '{declared_candidate}', "
+            f"command targets '{args.cand_id}'")
+    data["candidate_id"] = args.cand_id
+
+    # Check for extra keys (candidate_id is universal ownership metadata).
+    extra = set(data.keys()) - set(schema.keys()) - {"candidate_id"}
     if extra:
         print(f"WARNING: extra keys (allowed): {extra}", file=sys.stderr)
 
