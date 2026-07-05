@@ -47,10 +47,20 @@ def _mkproj():
 
 
 def _assemble_l1(d, artifact):
+    return _assemble_node(d, "L1", artifact)
+
+
+def _assemble_node(d, node, artifact):
     pr = Path(d) / "02_Agent_Notes" / "_pre_research"
     pr.mkdir(parents=True, exist_ok=True)
-    (pr / "L1_research.md").write_text(artifact, encoding="utf-8")
-    return _run("assemble-context", d, "C1", "--node", "L1")
+    (pr / f"{node}_research.md").write_text(artifact, encoding="utf-8")
+    return _run("assemble-context", d, "C1", "--node", node)
+
+
+def _digest_with_estimated_tokens(tokens, identifier="doi:10.1000/abc123"):
+    prefix = f"- Smith 2020 {identifier} finding. "
+    body = prefix + ("x" * max(0, tokens * 4 - len(prefix)))
+    return f"## Runtime digest\n{body}\n"
 
 
 def _fail(artifact, needle):
@@ -98,6 +108,33 @@ def test_valid_full_provenance_passes():
 # 8. NOT YET RUN still fails (V0.5 check preserved)
 def test_not_yet_run_still_fails():
     _fail("=== PRE-RESEARCH (deep_research): NOT YET RUN ===\n", "not yet run")
+
+
+def test_l4_digest_near_781_tokens_passes_under_literature_budget():
+    artifact = _art(
+        _digest_with_estimated_tokens(781), _QLOG, _TREC, _SCOUNT)
+    r = _assemble_node(_mkproj(), "L4", artifact)
+    assert r.returncode == 0, f"expected rc=0, got {r.returncode}: {r.stderr}"
+
+
+def test_digest_over_1000_tokens_fails_with_actionable_compression_message():
+    artifact = _art(
+        _digest_with_estimated_tokens(1001), _QLOG, _TREC, _SCOUNT)
+    r = _assemble_node(_mkproj(), "L4", artifact)
+    assert r.returncode == 3, f"expected rc=3, got {r.returncode}: {r.stderr}"
+    message = r.stderr.lower()
+    assert "1001" in message and "1000" in message
+    assert "caveman" in message
+    assert "provenance-preserving" in message
+    for required in ("query log", "tool receipt", "source count", "doi/pmid/url"):
+        assert required in message
+
+
+def test_missing_identifier_still_fails():
+    artifact = _art(
+        _digest_with_estimated_tokens(20, identifier="no identifier"),
+        _QLOG, _TREC, _SCOUNT)
+    _fail(artifact, "doi/pmid/url")
 
 
 def _run_as_script():

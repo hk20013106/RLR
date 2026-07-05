@@ -301,9 +301,13 @@ DAG_NODES = [
     },
 ]
 
+LIT_RUNTIME_DIGEST_TOKEN_BUDGET = 1000
+
+
 # Map: node_id -> node dict
 PRE_RESEARCH_MAP = {
-    "L1": {"budget": 800, "type": "deep_research", "skill": "academic-research-suite",
+    "L1": {"budget": LIT_RUNTIME_DIGEST_TOKEN_BUDGET,
+           "type": "deep_research", "skill": "academic-research-suite",
            "description": "Search literature for convergent evolution, cardiac co-expression, high heart rate adaptation",
            "queries": [
                "convergent evolution cardiac gene expression high heart rate",
@@ -311,7 +315,8 @@ PRE_RESEARCH_MAP = {
                "molecular convergence bat shrew cardiac adaptation",
                "module eigengene species trait correlation heart rate",
            ]},
-    "L4": {"budget": 300, "type": "literature_review", "skill": "academic-research-suite",
+    "L4": {"budget": LIT_RUNTIME_DIGEST_TOKEN_BUDGET,
+           "type": "literature_review", "skill": "academic-research-suite",
            "description": "Search methodology papers: WGCNA cross-species, module preservation, convergent transcriptomics",
            "queries": [
                "WGCNA module preservation cross-species Zsummary",
@@ -837,6 +842,15 @@ _DOI_PMID_URL_RE = re.compile(
     r"(10\.\d{4,9}/\S+|PMID:?\s*\d+|https?://\S+)", re.IGNORECASE)
 
 
+def _runtime_digest_budget_error(estimated_tokens, budget):
+    return (
+        f"Runtime digest estimated at {estimated_tokens} tokens exceeds "
+        f"configured budget {budget}; compress `## Runtime digest` with a "
+        "provenance-preserving compressor such as caveman or host-agent "
+        "compression; preserve Query log, Tool receipt, Source count, and all "
+        "DOI/PMID/URL identifiers.")
+
+
 def _validate_pre_research_content(text, pr_cfg):
     """Validate content of a pre-research artifact. Returns (ok, reason)."""
     if "NOT YET RUN" in text:
@@ -849,6 +863,10 @@ def _validate_pre_research_content(text, pr_cfg):
             return False, "missing required `## Runtime digest` section"
         if not _DOI_PMID_URL_RE.search(digest):
             return False, "Runtime digest carries no DOI/PMID/URL identifier"
+        estimated_tokens = _estimate_tokens(digest)
+        if estimated_tokens > LIT_RUNTIME_DIGEST_TOKEN_BUDGET:
+            return False, _runtime_digest_budget_error(
+                estimated_tokens, LIT_RUNTIME_DIGEST_TOKEN_BUDGET)
         # V0.6 (PR2): reviewable provenance is mandatory for literature nodes.
         prov = _parse_pre_research_provenance(text)
         if not prov["query_log"]:
@@ -2419,10 +2437,8 @@ def _inject_pre_research(prf, pr_cfg, args, node_id):
         if digest:
             est_digest = _estimate_tokens(digest)
             if est_digest > budget:
-                msg = (f"Runtime digest exceeds token budget "
-                       f"({est_digest} > {budget})")
+                msg = _runtime_digest_budget_error(est_digest, budget)
                 sections.append(f"=== PRE-RESEARCH ERROR: {msg} ===")
-                sections.append("Fix: reduce Runtime digest or increase --pre-research-token-budget.")
                 sections.append("")
                 injected_text = "(rejected: over budget)"
                 fatal_error = msg
