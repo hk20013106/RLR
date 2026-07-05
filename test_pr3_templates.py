@@ -124,6 +124,30 @@ def test_l7_pre_research_not_gated():
     assert r_assem.returncode == 0, f"expected rc=0 for L7 assemble-context, got {r_assem.returncode}: {r_assem.stderr}"
 
 
+# 5. Existing pre-research files (even with placeholders) are not overwritten unless requested
+def test_existing_file_not_overwritten():
+    d = _mkproj()
+    pr = Path(d) / "02_Agent_Notes" / "_pre_research"
+    pr.mkdir(parents=True, exist_ok=True)
+    target = pr / "L1_research.md"
+    
+    # Write a custom partial/placeholder text
+    custom_text = "## Runtime digest\nNOT YET RUN\n## Custom legacy section\nmy partial work\n"
+    target.write_text(custom_text, encoding="utf-8")
+    
+    # Run pre-research without --write-placeholder. It should NOT overwrite.
+    r = _run("pre-research", d, "C1", "--node", "L1")
+    assert r.returncode == 0
+    assert target.read_text(encoding="utf-8") == custom_text, "file was overwritten silently"
+    
+    # Run pre-research WITH --write-placeholder. It should overwrite.
+    r2 = _run("pre-research", d, "C1", "--node", "L1", "--write-placeholder")
+    assert r2.returncode == 0
+    new_text = target.read_text(encoding="utf-8")
+    assert new_text != custom_text, "file was not overwritten when requested"
+    assert "## Query log" in new_text
+
+
 def _run_as_script():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

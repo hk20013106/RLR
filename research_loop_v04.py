@@ -1581,18 +1581,13 @@ def cmd_pre_research(args):
     write_placeholder = getattr(args, "write_placeholder", False)
     write_synthetic = getattr(args, "write_synthetic", False)
 
-    # Default to writing placeholder if file doesn't exist or is empty/placeholder
-    should_write_placeholder = write_placeholder
-    if not write_placeholder and not write_synthetic:
+    # Missing file may get a placeholder; existing file should not be overwritten unless --write-placeholder is explicitly passed.
+    should_write_placeholder = False
+    if write_placeholder:
+        should_write_placeholder = True
+    elif not write_synthetic:
         if not output_file.exists():
             should_write_placeholder = True
-        else:
-            try:
-                text = output_file.read_text(encoding="utf-8", errors="replace")
-                if "NOT YET RUN" in text or not text.strip():
-                    should_write_placeholder = True
-            except Exception:
-                should_write_placeholder = True
 
     if should_write_placeholder and research_type in ("deep_research", "literature_review"):
         placeholder_content = f"""# Pre-Research: {research_type.replace('_', ' ').title()} (before {node})
@@ -3772,7 +3767,7 @@ def build_parser():
     pr.add_argument("--write-placeholder", action="store_true",
                     help="write initial placeholder template to output file")
     pr.add_argument("--write-synthetic", action="store_true",
-                    help="write completed/synthetic valid pre-research artifact to output file")
+                    help="[TEST-ONLY] write completed/synthetic valid pre-research artifact to output file")
     pr.set_defaults(func=cmd_pre_research)
 
     sp = sub.add_parser("obsidian-sync", help="sync deltas + report to Obsidian vault")
