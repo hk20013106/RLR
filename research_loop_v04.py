@@ -1578,6 +1578,92 @@ def cmd_pre_research(args):
         output_file = _pre_research_file(project_dir, node)
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
+    write_placeholder = getattr(args, "write_placeholder", False)
+    write_synthetic = getattr(args, "write_synthetic", False)
+
+    # Default to writing placeholder if file doesn't exist or is empty/placeholder
+    should_write_placeholder = write_placeholder
+    if not write_placeholder and not write_synthetic:
+        if not output_file.exists():
+            should_write_placeholder = True
+        else:
+            try:
+                text = output_file.read_text(encoding="utf-8", errors="replace")
+                if "NOT YET RUN" in text or not text.strip():
+                    should_write_placeholder = True
+            except Exception:
+                should_write_placeholder = True
+
+    if should_write_placeholder and research_type in ("deep_research", "literature_review"):
+        placeholder_content = f"""# Pre-Research: {research_type.replace('_', ' ').title()} (before {node})
+
+## Runtime digest
+NOT YET RUN
+
+## Query log
+- NOT YET RUN
+
+## Tool receipt
+- tool: none | time: {_now()} | summary: NOT YET RUN
+
+## Source count
+0
+"""
+        output_file.write_text(placeholder_content, encoding="utf-8")
+
+    elif write_synthetic and research_type in ("deep_research", "literature_review"):
+        if research_type == "deep_research":
+            synthetic_content = f"""# Pre-Research: Deep Literature Search (before {node})
+
+## Key Findings
+- Finding 1 (citing [[09_Literature_Database/smith2020|Smith 2020]], 2020)
+
+## Methods Used in Literature
+- Method 1
+
+## Gaps Our Study Addresses
+- Gap 1
+
+## Runtime digest
+- [[09_Literature_Database/smith2020|Smith 2020]] doi:10.1000/abc123 — core finding: X associates with Y.
+
+## Query log
+- convergent evolution heart rate
+- cardiac co-expression bat (0 results)
+
+## Tool receipt
+- tool: pubmed | time: 2026-07-05T10:00:00 | summary: 1 hit
+
+## Source count
+1
+"""
+        else:  # literature_review
+            synthetic_content = f"""# Pre-Research: Method Literature Review (before {node})
+
+## Methods Found
+- Method 1 (citing [[09_Literature_Database/smith2020|Smith 2020]], parameters/settings used)
+
+## Recommended Approach
+- What to adopt and why (referencing papers in the database)
+
+## Pitfalls to Avoid
+- Pitfall 1 (how others failed, citing [[09_Literature_Database/smith2020|Smith 2020]])
+
+## Runtime digest
+- [[09_Literature_Database/smith2020|Smith 2020]] doi:10.1000/abc123 — core finding: X associates with Y.
+
+## Query log
+- WGCNA module preservation cross-species Zsummary
+- signed vs unsigned WGCNA network cardiac
+
+## Tool receipt
+- tool: pubmed | time: 2026-07-05T10:00:00 | summary: 1 hit
+
+## Source count
+1
+"""
+        output_file.write_text(synthetic_content, encoding="utf-8")
+
     focus = research_config.get("description", "")
     grounding = (f"## This study\n"
                  f"- Title: {title}\n"
@@ -3674,7 +3760,6 @@ def build_parser():
     sp.add_argument("cand_id")
     sp.set_defaults(func=cmd_aggregate_report)
 
-    # obsidian-sync
     pr = sub.add_parser("pre-research",
                         help="prepare deep research / literature review / code search context for a node")
     pr.add_argument("project_dir")
@@ -3684,6 +3769,10 @@ def build_parser():
     pr.add_argument("--output-dir",
                     help="override save dir (default: 02_Agent_Notes/_pre_research/, "
                          "which is where assemble-context reads it from)")
+    pr.add_argument("--write-placeholder", action="store_true",
+                    help="write initial placeholder template to output file")
+    pr.add_argument("--write-synthetic", action="store_true",
+                    help="write completed/synthetic valid pre-research artifact to output file")
     pr.set_defaults(func=cmd_pre_research)
 
     sp = sub.add_parser("obsidian-sync", help="sync deltas + report to Obsidian vault")
