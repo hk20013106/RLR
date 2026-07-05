@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""RLR v0.4 loop runner — half/auto-automated multi-round driver.
+"""RLR V0.5 loop runner — the canonical active runtime entry point.
+
+`python run_loop.py run PROJECT CAND` is the one documented way to drive the
+loop. It drives the V0.5 engine (research_loop_v04.py) whose `assemble-context`
+enforces the V0.5 deep-research gate: L1/L4/L7 fail closed (rc=3) without a
+valid pre-research artifact, and `assemble_context()` here re-raises that as a
+hard stop — the runner never silently continues when deep research is absent.
+
 
 Drives research_loop_v04.py (the controller) around its DAG using a
 provider-neutral orchestrator, and decides whether to open another round with a
@@ -59,6 +66,7 @@ stop_policy:
   keep_requires_review_accept: true
   marginal_gain_stop_threshold: 2
   max_l7_failures: 2
+  max_node_failures: 2   # cognitive-node emit failures before hard-abort (R3)
 
 everos:
   enabled: false
@@ -382,10 +390,20 @@ def ensure_pre_research(project, cand, node, cfg, args, run_dir):
         log(f"pre-research {node}: failed ({e}); continuing without it")
 
 
+def _bump_node_failure(exec_state, node, max_node_failures):
+    """Track repeated cognitive-node emit failures (mirrors l7_failures).
+    Returns True once `node` has hit the bound -- caller must abort, not
+    retry forever."""
+    counts = exec_state.setdefault("node_failures", {})
+    counts[node] = counts.get(node, 0) + 1
+    return counts[node] >= max_node_failures
+
+
 def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
     """Drive one full DAG pass for a candidate. Returns an outcome string."""
     run_dir = Path(project) / "08_Run_Receipts" / cand / f"round_{round_id:02d}"
     max_l7 = int(cfg.stop_policy.get("max_l7_failures", 2))
+    max_node = int(cfg.stop_policy.get("max_node_failures", 2))
     while True:
         step = next_step(project, cand)
         if step.get("terminal"):
@@ -394,8 +412,13 @@ def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
         if step.get("is_parallel"):
             for sub in step["nodes"]:
                 log(f"node {sub['node']} ({sub['persona']}) [parallel]")
-                exec_cognitive(project, cand, sub, cfg, args, run_dir, round_id,
-                               do_advance=False)
+                ok = exec_cognitive(project, cand, sub, cfg, args, run_dir,
+                                    round_id, do_advance=False)
+                if not ok and _bump_node_failure(exec_state, sub["node"], max_node):
+                    log(f"node {sub['node']} failed emit "
+                        f"{exec_state['node_failures'][sub['node']]}x -- "
+                        f"aborting round (no further retries)")
+                    return f"node_failed:{sub['node']}"
             continue
         node = step["node"]
         if args.stop_after_node and node == args.stop_after_node:
@@ -429,7 +452,11 @@ def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
                     return "l7_failed"
             continue
         log(f"node {node} ({step['persona']}) advance={step.get('advance_command')}")
-        exec_cognitive(project, cand, step, cfg, args, run_dir, round_id)
+        ok = exec_cognitive(project, cand, step, cfg, args, run_dir, round_id)
+        if not ok and _bump_node_failure(exec_state, node, max_node):
+            log(f"node {node} failed emit {exec_state['node_failures'][node]}x -- "
+                f"aborting round (no further retries)")
+            return f"node_failed:{node}"
 
 
 # --- review gate ------------------------------------------------------------
@@ -692,12 +719,17 @@ def cmd_run(args):
 
     while round_id <= max_rounds:
         log(f"================ ROUND {round_id} | candidate {cur} ================")
-        exec_state = {"l7_failures": 0}
+        exec_state = {"l7_failures": 0, "node_failures": {}}
         outcome = run_round(project, cur, cfg, args, round_id, max_rounds,
                             exec_state)
         if outcome == "stopped_after_node":
             log("halted per --stop-after-node (no stop decision taken)")
             return 0
+        if isinstance(outcome, str) and outcome.startswith("node_failed:"):
+            log(f"ABORTING RUN: {outcome} -- repeated cognitive-node emit "
+                f"failure (see stop_policy.max_node_failures); not treated "
+                f"as success")
+            return 4
 
         run_dir = Path(project) / "08_Run_Receipts" / cur / f"round_{round_id:02d}"
         review = None
@@ -728,7 +760,7 @@ def cmd_run(args):
     return 0
 
 
-MAIN_AGENT_PROMPT_TEMPLATE = """You are now the RLR v0.4 main-agent orchestrator.
+MAIN_AGENT_PROMPT_TEMPLATE = """You are now the RLR V0.5 main-agent orchestrator.
 
 Project: {project}
 Candidate: {cand_id}
@@ -736,7 +768,9 @@ Candidate: {cand_id}
 Instructions:
 1. Run:  python research_loop_v04.py next-step {project} {cand_id}
 2. Read the JSON output to get the current DAG node, persona, and context_files.
-3. PRE-RESEARCH (v0.4): if the node is L1, L4, or L7, you MUST do its pre-step FIRST:
+3. PRE-RESEARCH (V0.5 gate, MANDATORY): if the node is L1, L4, or L7 you MUST do
+   its pre-step FIRST. assemble-context fails closed (rc=3) without a valid
+   artifact — you cannot proceed by skipping it:
      python research_loop_v04.py pre-research {project} {cand_id} --node NODE
    Follow the printed prompt: L1 = deep literature research (academic-research-suite),
    L4 = method literature review, L7 = code search (GitHub/Bioconductor). Write the
@@ -779,7 +813,8 @@ def cmd_print_main_agent_prompt(args):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="run_loop.py",
-        description="RLR v0.4 loop runner (main-agent / headless / manual).")
+        description="RLR V0.5 loop runner — canonical runtime entry point "
+                    "(main-agent / headless / manual).")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     ma = sub.add_parser("print-main-agent-prompt",

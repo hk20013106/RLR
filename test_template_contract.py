@@ -48,6 +48,15 @@ current_owner: Einstein
 ---
 # C1
 """, encoding="utf-8")
+    # V0.5 gate: L1/L4/L7 assemble-context requires a valid pre-research
+    # artifact. Provide fixtures so template-mode tests exercise templates, not
+    # the gate. (Gate behaviour itself is covered by test_v05_gate.py.)
+    pr = Path(d) / "02_Agent_Notes" / "_pre_research"
+    pr.mkdir(parents=True, exist_ok=True)
+    (pr / "L1_research.md").write_text(
+        "# L1 deep research\n\n## Runtime digest\n"
+        "- [[09_Literature_Database/smith2020|Smith 2020]] doi:10.1000/abc123 "
+        "— core finding: X associates with Y.\n", encoding="utf-8")
     return d
 
 
@@ -150,7 +159,7 @@ def test_context_token_budget_fails_closed():
 def test_pre_research_budget_error_fails_closed():
     d = _make_project()
     pr = Path(d) / "02_Agent_Notes" / "_pre_research"
-    pr.mkdir(parents=True)
+    pr.mkdir(parents=True, exist_ok=True)
     (pr / "L1_research.md").write_text("No digest here.\n" + ("x" * 2000),
                                        encoding="utf-8")
 

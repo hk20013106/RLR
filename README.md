@@ -10,13 +10,27 @@ Three pre-research steps ground the work in real literature (PubMed, EuropePMC) 
 
 > **Core principle:** cognitive agents are isolated by information invisibility (Path B). The execution agent (Turing) is isolated by a controlled workspace + command allowlist (Path A). We do not pretend `spawn_agent` is an OS sandbox.
 
-**Current version: v0.4.5** (2026-06-26)
+**Current version: V0.5** (canonical gated runtime)
+
+**Canonical runtime path:** `python run_loop.py run PROJECT CAND` drives the V0.5
+engine (`research_loop_v04.py`, filename retained for import stability). As of
+V0.5, `assemble-context` **enforces the deep-research gate** on the literature
+deep-research stages **L1 (deep research) and L4 (method literature)**: they
+**fail closed (rc=3)** when the pre-research artifact is missing, empty, a
+`NOT YET RUN` placeholder, or lacks a `## Runtime digest` with a DOI/PMID/URL.
+The runner re-raises this as a hard stop — deep research can no longer be
+silently skipped. (L7 code-search keeps its prior soft pre-step.) The old `rlr_v05b.py` prototype is **LEGACY** (its
+gate was promoted into the canonical engine).
 
 ---
 
 ## Version history
 
-### v0.4.5 — CURRENT (2026-06-26)
+### V0.5 — CURRENT (canonical gated runtime)
+
+- **Promoted the V0.5 deep-research gate into the canonical engine.** `assemble-context` now fails closed (rc=3) for L1/L4/L7/L8.5 without a valid pre-research artifact; there is no path that treats absent deep research as success. `rlr_v05b.py` is retained as a LEGACY prototype only.
+
+### v0.4.5 — superseded by V0.5 (2026-06-26)
 
 - **Added L8.5 literature-verification node.** After results are computed (L7) and audited (L8), Curie runs a second pass that searches PubMed/EuropePMC to verify findings against published literature, before falsification and interpretation begin.
 - **Added L0 dependency gate (hard stop).** `preflight` / `check-deps` verify required dependencies (PyYAML, Academic Research skill, Zotero, Obsidian vault) and STOP the loop if any is missing — fail-closed, never skip.

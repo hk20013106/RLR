@@ -1,4 +1,8 @@
-# Main-Agent Run Protocol (RLR v0.4.5)
+# Main-Agent Run Protocol (RLR V0.5)
+
+> V0.5: `assemble-context` enforces the deep-research gate. Before L1/L4/L7 you
+> MUST produce a valid pre-research artifact; assemble-context fails closed
+> (rc=3) on a missing/empty/`NOT YET RUN` artifact. Skipping is not possible.
 
 ## What this is
 

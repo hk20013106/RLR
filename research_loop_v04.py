@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Research Loop Room v0.4 — DAG-driven subagent architecture.
+"""Research Loop Room V0.5 — canonical gated runtime engine.
 
-v0.4 converts each persona into an independent subagent with physical context
-isolation via DAG topology. Cognitive agents receive context as embedded text
-(Path B); Turing executes in a controlled workspace (Path A).
+This IS the V0.5 runtime. The filename `research_loop_v04.py` is retained only
+for import/CLI stability (run_loop.py and the main-agent protocol import it);
+it is not a legacy engine. As of V0.5, `assemble-context` enforces the
+deep-research gate (`_audit_pre_research`) on the literature deep-research
+stages L1 (deep_research) and L4 (literature_review): it fails closed (rc=3)
+when their pre-research artifact is missing, empty, a NOT YET RUN placeholder,
+or lacks a `## Runtime digest` with a DOI/PMID/URL. There is no path that
+treats absent deep research as success. (L7 code-search / L8.5 keep their prior
+soft, budget-0 archived behaviour.)
 
-Each agent outputs a structured delta JSON. The candidate file stays read-only.
-L10c Linnaeus aggregates all deltas into FINAL_REPORT.
-
-v0.3 is preserved for reference. v0.4 adds pre-research steps before L1/L4/L7.
+Each persona is an independent subagent with physical context isolation via DAG
+topology. Cognitive agents receive context as embedded text (Path B); Turing
+executes in a controlled workspace (Path A). Each agent outputs a structured
+delta JSON; the candidate file stays read-only. L10c Linnaeus aggregates all
+deltas into FINAL_REPORT.
 
 Usage:
     python research_loop_v04.py --help
@@ -43,7 +50,7 @@ from pathlib import Path
 
 import pitfall_ledger as pl  # additive: pitfall ledger (no DAG/schema coupling)
 
-__version__ = "0.4.5"
+__version__ = "0.5.0"
 
 
 class RLRError(Exception):
@@ -760,10 +767,47 @@ def _audit_dir(project_dir):
     return d
 
 def _pre_research_file(project_dir, node):
-    """Canonical path for a node's pre-research summary (v0.4). Written by
+    """Canonical path for a node's pre-research summary. Written by
     `pre-research` (by the orchestrator) and injected by `assemble-context`."""
     return (Path(project_dir) / "02_Agent_Notes" / "_pre_research"
             / f"{node}_research.md")
+
+
+# V0.5 deep-research gate ----------------------------------------------------
+# The mandatory gate covers the literature DEEP-RESEARCH stages: L1
+# (deep_research) and L4 (literature_review). These must carry a structured
+# `## Runtime digest` with at least one resolvable identifier. Code-search (L7)
+# and the budget-0 archived-only verification (L8.5) keep their prior soft
+# behaviour (their pre-research is not inlined, so a hard gate there would break
+# execution-context assembly without adding deep-research safety).
+_LIT_PRE_RESEARCH_TYPES = {"deep_research", "literature_review"}
+_DOI_PMID_URL_RE = re.compile(
+    r"(10\.\d{4,9}/\S+|PMID:?\s*\d+|https?://\S+)", re.IGNORECASE)
+
+
+def _audit_pre_research(project_dir, node_id, pr_cfg):
+    """V0.5 deep-research gate. Returns (ok, reason).
+
+    Fails closed when the pre-research artifact is missing, empty, a NOT YET RUN
+    placeholder, or (for literature nodes) lacks a `## Runtime digest` carrying a
+    DOI/PMID/URL. This is the single enforcement point for the canonical V0.5
+    runtime -- there is no path that treats absent deep research as success.
+    """
+    prf = _pre_research_file(project_dir, node_id)
+    if not prf.exists():
+        return False, f"artifact missing ({prf.as_posix()})"
+    text = prf.read_text(encoding="utf-8", errors="replace")
+    if "NOT YET RUN" in text:
+        return False, "artifact is the NOT YET RUN placeholder"
+    if not text.strip():
+        return False, "artifact is empty"
+    if pr_cfg.get("type") in _LIT_PRE_RESEARCH_TYPES:
+        digest = _extract_section(text, "Runtime digest")
+        if not digest:
+            return False, "missing required `## Runtime digest` section"
+        if not _DOI_PMID_URL_RE.search(digest):
+            return False, "Runtime digest carries no DOI/PMID/URL identifier"
+    return True, ""
 
 def _input_alias(source_input):
     """Path-free alias for a source_input description: directory parts of any
@@ -1869,11 +1913,27 @@ def cmd_assemble_context(args):
                 sections.append(f"=== DELTA: {inp} (not yet emitted) ===")
                 sections.append("")
 
-    # --- pre-research injection (v0.4, multi-mode via _inject_pre_research) ---
+    # --- V0.5 deep-research gate + pre-research injection --------------------
+    # CANONICAL V0.5 RUNTIME: the literature deep-research stages (L1, L4) are
+    # MANDATORY. assemble-context fails closed (rc=3) when their artifact is
+    # missing, empty, a NOT YET RUN placeholder, or lacks a `## Runtime digest`
+    # with a DOI/PMID/URL — it NEVER emits a NOT YET RUN section as a successful
+    # context for them. Non-literature pre-research (L7 code_search) keeps its
+    # prior soft note.
     pre_research_meta = None
     pr_cfg = PRE_RESEARCH_MAP.get(node_id)
     if pr_cfg:
         prf = _pre_research_file(project_dir, node_id)
+        is_lit = pr_cfg.get("type") in _LIT_PRE_RESEARCH_TYPES
+        if is_lit:
+            ok, reason = _audit_pre_research(project_dir, node_id, pr_cfg)
+            if not ok:
+                print(f"ERROR: V0.5 deep-research gate -- {node_id} pre-research "
+                      f"invalid: {reason}", file=sys.stderr)
+                print(f"Run real deep research and write a valid artifact to "
+                      f"{prf.as_posix()} first (no 'NOT YET RUN' placeholder).",
+                      file=sys.stderr)
+                return 3
         if prf.exists():
             pr_sections, pre_research_meta = _inject_pre_research(
                 prf, pr_cfg, args, node_id)
@@ -1884,6 +1944,7 @@ def cmd_assemble_context(args):
                 return 2
             sections.extend(pr_sections)
         else:
+            # Non-literature node (e.g. L7 code_search): soft, not a hard gate.
             sections.append(f"=== PRE-RESEARCH ({pr_cfg['type']}): NOT YET RUN ===")
             sections.append(
                 f"Run first: python research_loop_v04.py pre-research "
@@ -3379,8 +3440,9 @@ def cmd_promote_pitfall(args):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="research_loop_v04.py",
-        description="Research Loop Room v0.4 - DAG-driven subagent architecture "
-                    "(14 nodes, 10 personas, physical context isolation).")
+        description="Research Loop Room V0.5 - canonical gated runtime engine "
+                    "(DAG-driven subagent architecture; assemble-context "
+                    "enforces the V0.5 deep-research gate).")
     p.add_argument("--version", action="version", version=f"v{__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 

@@ -1,7 +1,21 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-RLR v0.5b — literature-gated research-loop branch.
+=============================================================================
+LEGACY (v0.5b prototype) — NOT the active runtime as of V0.5.
+=============================================================================
+The V0.5 deep-research gate this file prototyped has been promoted into the
+canonical engine (`research_loop_v04.py::_audit_pre_research`, enforced by
+`assemble-context`). The active runtime path is:
+
+    python run_loop.py run PROJECT CAND     ->  research_loop_v04.py (V0.5 gate)
+
+This standalone CLI is retained for reference/tests and its own DAG variant
+(L4a/L4b split); it is NOT driven by run_loop and must not be presented as the
+current runtime. Prefer the canonical engine above.
+=============================================================================
+
+RLR v0.5b — literature-gated research-loop branch (legacy prototype).
 
 WHY THIS EXISTS
 ---------------
@@ -509,8 +523,11 @@ def cmd_emit_delta(args):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(prog="rlr_v05b",
-                                description="RLR v0.5b literature-gated branch")
+    p = argparse.ArgumentParser(
+        prog="rlr_v05b",
+        description="[LEGACY v0.5b prototype — NOT the current runtime] "
+                    "superseded by the V0.5 gate in research_loop_v04.py; "
+                    "use `python run_loop.py run` for the canonical runtime.")
     sub = p.add_subparsers(dest="command", required=True)
 
     def add_pc(name):

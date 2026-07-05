@@ -1,4 +1,10 @@
-# RLR v0.4.5 Loop Runner
+# RLR V0.5 Loop Runner
+
+**Canonical runtime entry point:** `python run_loop.py run PROJECT CAND`. It
+drives the V0.5 engine (`research_loop_v04.py`), whose `assemble-context`
+enforces the V0.5 deep-research gate — L1/L4/L7 fail closed (rc=3) without a
+valid pre-research artifact, and the runner re-raises that as a hard stop.
+(`rlr_v05b.py` is a LEGACY prototype, not the runtime.)
 
 Three run modes, in order of recommendation:
 

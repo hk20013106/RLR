@@ -89,6 +89,42 @@ def test_advance_does_not_sync_obsidian():
         run_loop.subprocess.run = old_subprocess_run
 
 
+def test_run_round_aborts_after_repeated_cognitive_emit_failure():
+    """R3: a cognitive node whose emit keeps failing must not loop forever --
+    run_round must bound the retries and abort with a distinct outcome."""
+    old_next_step = run_loop.next_step
+    old_ensure_pre = run_loop.ensure_pre_research
+    old_exec_cog = run_loop.exec_cognitive
+    call_count = {"value": 0}
+
+    step = {"node": "L1", "persona": "Einstein",
+           "advance_command": "decision", "advance_status": "X",
+           "advance_reason": "y"}
+
+    def fake_exec_cognitive(*args, **kwargs):
+        call_count["value"] += 1
+        return False  # emit always rejected
+
+    try:
+        run_loop.next_step = lambda project, cand: step
+        run_loop.ensure_pre_research = lambda *a, **k: None
+        run_loop.exec_cognitive = fake_exec_cognitive
+        cfg = SimpleNamespace(stop_policy={"max_l7_failures": 2,
+                                           "max_node_failures": 2})
+        args = SimpleNamespace(stop_after_node=None)
+        exec_state = {"l7_failures": 0, "node_failures": {}}
+        with tempfile.TemporaryDirectory() as d:
+            outcome = run_loop.run_round(d, "C1", cfg, args, 1, 3, exec_state)
+        assert outcome == "node_failed:L1", outcome
+        assert call_count["value"] == 2, \
+            f"expected exactly max_node_failures=2 attempts, got {call_count['value']}"
+        assert exec_state["node_failures"]["L1"] == 2
+    finally:
+        run_loop.next_step = old_next_step
+        run_loop.ensure_pre_research = old_ensure_pre
+        run_loop.exec_cognitive = old_exec_cog
+
+
 def _run_as_script():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]
