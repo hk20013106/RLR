@@ -3272,6 +3272,75 @@ def cmd_execution_gate(args):
     return 0
 
 
+def _registered_candidate_inputs(project_dir, cand_id):
+    """Resolve only key files registered for this candidate's input aliases."""
+    cf = _candidate_file(project_dir, cand_id)
+    fm = _load_yaml_front(cf)
+    aliases = {x.strip() for x in str(fm.get("input_alias", "")).split(",")
+               if x.strip()}
+    manifest = Path(project_dir) / "00_Preflight" / "input_manifest.md"
+    resolved, missing = [], []
+    if not manifest.exists():
+        return resolved, ["missing required input manifest: 00_Preflight/input_manifest.md"]
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        if not line.strip().startswith("|"):
+            continue
+        columns = [x.strip().strip("`") for x in line.strip().strip("|").split("|")]
+        if len(columns) < 3 or columns[0] not in aliases:
+            continue
+        alias, root, key_files = columns[:3]
+        root_path = Path(root)
+        for raw in key_files.split(";"):
+            relative = raw.strip().strip("`")
+            if not relative:
+                continue
+            src = root_path / Path(relative.replace("/", os.sep))
+            if src.exists() and src.is_file():
+                resolved.append((src, alias, relative))
+            else:
+                missing.append(
+                    f"missing required input: {alias}/{relative} ({src})")
+    found_aliases = {alias for _, alias, _ in resolved}
+    for alias in sorted(aliases - found_aliases):
+        if not any(f"{alias}/" in item for item in missing):
+            missing.append(f"missing required input registration for alias: {alias}")
+    return resolved, missing
+
+
+def _approved_execution_scripts(project_dir, cand_id):
+    """Resolve exact script names from the candidate-owned L6 analysis plan."""
+    delta = _delta_for_candidate(project_dir, "L6_oppenheimer", cand_id)
+    if not delta:
+        return [], ["missing execution script plan: L6_oppenheimer delta"]
+    try:
+        data = json.loads(delta.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return [], ["missing execution script plan: unreadable L6_oppenheimer delta"]
+    names = data.get("analysis_plan", {}).get("scripts", [])
+    roots = [
+        Path(project_dir) / "04_Analysis_Outputs",
+        Path(project_dir) / "scripts_v05b",
+        Path(project_dir) / "02_Agent_Notes" / "Turing",
+    ]
+    resolved, missing = [], []
+    for name in names:
+        script_name = Path(str(name)).name
+        matches = []
+        for root in roots:
+            if root.is_dir():
+                matches.extend(p for p in root.rglob(script_name)
+                               if p.is_file() and "_turing_workspace_" not in str(p))
+        matches = sorted(set(matches))
+        if len(matches) == 1:
+            resolved.append(matches[0])
+        elif not matches:
+            missing.append(f"missing execution script: {script_name}")
+        else:
+            missing.append(
+                f"ambiguous execution script: {script_name} ({len(matches)} matches)")
+    return resolved, missing
+
+
 def cmd_prepare_turing_workspace(args):
     """Path A: build an isolated execution workspace for Turing (L7).
 
@@ -3298,19 +3367,33 @@ def cmd_prepare_turing_workspace(args):
             if old.is_dir():
                 shutil.rmtree(old, ignore_errors=True)
 
-    ws = project_dir / f"_turing_workspace_{_stamp()}"
+    ws = project_dir / f"_turing_workspace_{args.cand_id}_{_stamp()}"
     inputs = ws / "inputs"
     for sub in (inputs, ws / "scripts", ws / "results"):
         sub.mkdir(parents=True, exist_ok=True)
 
-    copied, missing = [], []
+    copied, missing, staged_files = [], [], []
+
+    def stage(src, dest, reason):
+        src = Path(src)
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+        copied.append(str(dest.relative_to(ws)).replace("\\", "/"))
+        staged_files.append({
+            "original_path": str(src.resolve()),
+            "workspace_path": str(dest.resolve()),
+            "sha256": _sha256(dest),
+            "reason": reason,
+            "candidate_id": args.cand_id,
+            "node": "L7",
+        })
 
     # Deltas Turing is allowed to see per the DAG (L6 approved plan, L0 skills).
     for delta_key in ("L0_linnaeus", "L6_oppenheimer"):
         df = _delta_for_candidate(project_dir, delta_key, args.cand_id)
         if df and df.exists():
-            shutil.copy2(df, inputs / df.name)
-            copied.append(f"inputs/{df.name}")
+            stage(df, inputs / df.name, f"DAG-allowed {delta_key} delta")
         else:
             missing.append(f"{delta_key} delta")
 
@@ -3319,19 +3402,46 @@ def cmd_prepare_turing_workspace(args):
     for fname in PREFLIGHT_FILES:
         src = pf / fname
         if src.exists():
-            shutil.copy2(src, inputs / fname)
-            copied.append(f"inputs/{fname}")
+            stage(src, inputs / fname, f"L0 preflight allowlist: {fname}")
         else:
             missing.append(f"00_Preflight/{fname}")
 
-    # Explicitly allowlisted input data files (paths drawn from input_manifest).
+    # Candidate-declared inputs: only registered key files enter the workspace.
+    registered, input_missing = _registered_candidate_inputs(
+        project_dir, args.cand_id)
+    missing.extend(input_missing)
+    for src, alias, relative in registered:
+        dest = inputs / alias / Path(relative.replace("/", os.sep))
+        stage(src, dest, f"registered candidate input: {alias}/{relative}")
+
+    # Explicit CLI files remain a narrow additive allowlist.
     for raw in (args.file or []):
         src = Path(raw)
         if src.exists() and src.is_file():
-            shutil.copy2(src, inputs / src.name)
-            copied.append(f"inputs/{src.name} (<- {src})")
+            stage(src, inputs / "explicit" / src.name,
+                  "explicit --file allowlist")
         else:
             missing.append(f"allowlisted file not found: {raw}")
+
+    # Candidate-owned L6 plan: stage exact existing script names only.
+    approved_scripts, script_missing = _approved_execution_scripts(
+        project_dir, args.cand_id)
+    missing.extend(script_missing)
+    for src in approved_scripts:
+        stage(src, ws / "scripts" / src.name,
+              "exact script approved by candidate L6 analysis_plan")
+
+    json_manifest = {
+        "workspace": str(ws.resolve()),
+        "candidate_id": args.cand_id,
+        "node": "L7",
+        "created_at": _now(),
+        "status_at_creation": status,
+        "staged_files": staged_files,
+        "missing": missing,
+    }
+    (ws / "WORKSPACE_MANIFEST.json").write_text(
+        json.dumps(json_manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
     manifest = [
         "---",
@@ -3365,6 +3475,7 @@ def cmd_prepare_turing_workspace(args):
         print(f"  WARN: {len(missing)} expected item(s) missing:", file=sys.stderr)
         for m in missing:
             print(f"    - {m}", file=sys.stderr)
+        return 1
     return 0
 
 
