@@ -94,12 +94,14 @@ def test_manifest_persists_provenance():
     assert pr["source_count_declared"] is True
 
 
-# 5. gate UNCHANGED: valid digest artifact without new sections still passes
-def test_gate_unchanged_without_new_sections():
+# 5. after PR2, a digest-only artifact (no provenance sections) is REJECTED.
+#    (PR1 parsing is unchanged; the gate that consumes it tightened in PR2.)
+def test_digest_only_rejected_after_pr2():
     d = _mkproj()
     _write_l1(d, "# L1\n\n" + _DIGEST)  # no Query log / Tool receipt / Source count
     r = _run("assemble-context", d, "C1", "--node", "L1")
-    assert r.returncode == 0, f"PR1 must not change gate: rc={r.returncode} {r.stderr}"
+    assert r.returncode == 3, f"expected rc=3, got {r.returncode}: {r.stderr}"
+    assert "query log" in r.stderr.lower(), r.stderr
 
 
 def _run_as_script():

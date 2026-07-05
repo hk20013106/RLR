@@ -807,6 +807,19 @@ def _audit_pre_research(project_dir, node_id, pr_cfg):
             return False, "missing required `## Runtime digest` section"
         if not _DOI_PMID_URL_RE.search(digest):
             return False, "Runtime digest carries no DOI/PMID/URL identifier"
+        # V0.6 (PR2): reviewable provenance is mandatory for literature nodes.
+        prov = _parse_pre_research_provenance(text)
+        if not prov["query_log"]:
+            return False, ("missing or empty `## Query log` -- record the actual "
+                           "queries issued (including 0-result ones)")
+        if not prov["tool_receipt"]:
+            return False, ("missing or empty `## Tool receipt` -- record each "
+                           "tool call (name, timestamp, return summary)")
+        if not prov["source_count_declared"]:
+            return False, ("missing `## Source count` section -- it must be "
+                           "stated explicitly (not inferred)")
+        if prov["source_count"] < 1:
+            return False, "`## Source count` is < 1 (no sources retrieved)"
     return True, ""
 
 

@@ -56,7 +56,10 @@ current_owner: Einstein
     (pr / "L1_research.md").write_text(
         "# L1 deep research\n\n## Runtime digest\n"
         "- [[09_Literature_Database/smith2020|Smith 2020]] doi:10.1000/abc123 "
-        "— core finding: X associates with Y.\n", encoding="utf-8")
+        "— core finding: X associates with Y.\n\n"
+        "## Query log\n- X association Y\n\n"
+        "## Tool receipt\n- tool: pubmed | time: 2026-07-05T10:00:00 | "
+        "summary: 1 hit\n\n## Source count\n1\n", encoding="utf-8")
     return d
 
 

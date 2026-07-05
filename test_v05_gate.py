@@ -21,7 +21,10 @@ import run_loop  # noqa: E402  (default runner -> proves gate consumption)
 
 _VALID_L1 = ("# L1 deep research\n\n## Runtime digest\n"
              "- [[09_Literature_Database/smith2020|Smith 2020]] "
-             "doi:10.1000/abc123 — core finding: X associates with Y.\n")
+             "doi:10.1000/abc123 — core finding: X associates with Y.\n\n"
+             "## Query log\n- X association Y mechanism\n\n"
+             "## Tool receipt\n- tool: pubmed | time: 2026-07-05T10:00:00 | "
+             "summary: 1 hit\n\n## Source count\n1\n")
 
 
 def _run(*args):
