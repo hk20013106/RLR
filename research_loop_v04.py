@@ -809,6 +809,47 @@ def _audit_pre_research(project_dir, node_id, pr_cfg):
             return False, "Runtime digest carries no DOI/PMID/URL identifier"
     return True, ""
 
+
+# V0.6 pre-research provenance ------------------------------------------------
+# Structured evidence-of-search the artifact MUST carry so a deep-research run is
+# reviewable: which queries were issued, which tools ran, and how many sources
+# were found. PR1 only PARSES + PERSISTS these (into the context manifest); the
+# gate that ENFORCES them lands in PR2 -- this function does not judge.
+def _parse_section_bullets(text, heading):
+    """Return the '- '/'* ' bullet items under a `## <heading>` section."""
+    bullets = []
+    for raw in _extract_section(text, heading).splitlines():
+        line = raw.strip()
+        if line.startswith(("- ", "* ")):
+            item = line[2:].strip()
+            if item:
+                bullets.append(item)
+    return bullets
+
+
+def _parse_pre_research_provenance(text):
+    """Extract V0.6 provenance from a pre-research artifact. Never raises.
+
+    Returns {query_log, tool_receipt, source_count, source_count_declared}.
+    Missing sections yield empty/0; if `## Source count` is absent the count
+    falls back to distinct DOI/PMID/URL identifiers in the Runtime digest."""
+    declared = _extract_section(text, "Source count")
+    m = re.search(r"-?\d+", declared)
+    if m:
+        source_count = max(0, int(m.group()))
+        source_count_declared = True
+    else:
+        digest = _extract_section(text, "Runtime digest")
+        source_count = len(set(_DOI_PMID_URL_RE.findall(digest)))
+        source_count_declared = False
+    return {
+        "query_log": _parse_section_bullets(text, "Query log"),
+        "tool_receipt": _parse_section_bullets(text, "Tool receipt"),
+        "source_count": source_count,
+        "source_count_declared": source_count_declared,
+    }
+
+
 def _input_alias(source_input):
     """Path-free alias for a source_input description: directory parts of any
     path-like token are dropped, keeping only file/basename + free text. Lets
@@ -1584,6 +1625,18 @@ IMPORTANT: Cite papers using Obsidian Wikilinks pointing to the literature datab
 - Gap 1
 - Gap 2
 
+## Query log
+The ACTUAL search queries you issued (one bullet per query). Record zero-result
+queries explicitly; do NOT omit them.
+- <query string> (e.g. "0 results" when empty)
+
+## Tool receipt
+One bullet per tool call: tool name, timestamp, one-line return summary.
+- tool: <name> | time: <ISO-8601> | summary: <what it returned>
+
+## Source count
+<integer> — distinct sources actually retrieved (0 is allowed but must be stated).
+
 This summary will be injected into the {node} assemble-context as additional input.
 """
     elif research_type == "literature_review":
@@ -1639,6 +1692,18 @@ IMPORTANT: Cite papers using Obsidian Wikilinks pointing to the literature datab
 
 ## Pitfalls to Avoid
 - Pitfall 1 (how others failed, citing [[09_Literature_Database/citekey|Paper Title]])
+
+## Query log
+The ACTUAL search queries you issued (one bullet per query). Record zero-result
+queries explicitly; do NOT omit them.
+- <query string> (e.g. "0 results" when empty)
+
+## Tool receipt
+One bullet per tool call: tool name, timestamp, one-line return summary.
+- tool: <name> | time: <ISO-8601> | summary: <what it returned>
+
+## Source count
+<integer> — distinct sources actually retrieved (0 is allowed but must be stated).
 
 This summary will be injected into the {node} assemble-context as additional input.
 """
@@ -2181,6 +2246,7 @@ def _inject_pre_research(prf, pr_cfg, args, node_id):
 
     sections.append("")
 
+    provenance = _parse_pre_research_provenance(full_text)
     meta = {
         "pre_research_path": str(prf),
         "pre_research_sha256": _sha256(prf),
@@ -2189,6 +2255,11 @@ def _inject_pre_research(prf, pr_cfg, args, node_id):
         "injected_mode": mode,
         "injected_tokens_est": _estimate_tokens(injected_text) if injected_text and not injected_text.startswith("(") else 0,
         "full_text_injected": mode == "full" or (mode == "digest" and _extract_section(full_text, "Runtime digest") == "" and est_full <= budget),
+        # V0.6 provenance (parsed + persisted; enforced in PR2)
+        "query_log": provenance["query_log"],
+        "tool_receipt": provenance["tool_receipt"],
+        "source_count": provenance["source_count"],
+        "source_count_declared": provenance["source_count_declared"],
     }
     if warns:
         meta["warnings"] = warns

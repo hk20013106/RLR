@@ -63,6 +63,24 @@ For L1:
 - hypotheses not supported by literature:
 - unresolved uncertainties:
 
+## Query log
+
+The ACTUAL search queries you issued (one bullet per query, verbatim). If a
+query returned zero results, record it explicitly — do NOT omit it:
+
+- <query string> (e.g. "0 results" when empty)
+
+## Tool receipt
+
+One bullet per tool invocation: tool name, timestamp, one-line return summary:
+
+- tool: <name> | time: <ISO-8601> | summary: <what it returned>
+
+## Source count
+
+<integer> — number of distinct sources actually retrieved (0 is allowed and
+must be stated, not hidden).
+
 ---
 
 > RLR v0.5b will reject L1 unless this file exists, contains a non-empty
