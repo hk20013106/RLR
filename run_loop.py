@@ -703,6 +703,11 @@ def cmd_run(args):
         log("aborting: no automatic provider configured (see RUNNER.md).")
         return 2
 
+    if cfg.mode == "main_agent" and args.provider in (None, "main_agent"):
+        log("main-agent handoff: host session must execute the protocol below; "
+            "no python provider will be called")
+        return cmd_print_main_agent_prompt(args)
+
     sp = StopPolicy(
         max_rounds=max_rounds,
         marginal_gain_stop_threshold=int(

@@ -2,6 +2,8 @@
 """Regression tests for run_loop controller fail-closed guards."""
 import sys
 import tempfile
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +16,36 @@ class _Result:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+
+
+def test_main_agent_run_emits_handoff_without_python_provider():
+    old_ctl = run_loop._ctl
+    old_run_round = run_loop.run_round
+    try:
+        run_loop._ctl = lambda *args: _Result(0, "", "")
+        run_loop.run_round = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("main-agent mode must not enter python run_round"))
+        with tempfile.TemporaryDirectory() as d:
+            project = Path(d)
+            candidates = project / "01_Candidates"
+            candidates.mkdir()
+            (candidates / "C1.md").write_text(
+                "---\ncandidate_id: C1\ncurrent_status: NEW\n---\n",
+                encoding="utf-8")
+            args = SimpleNamespace(
+                project_dir=str(project), cand_id="C1", config=None,
+                max_rounds=None, dry_run=False, no_review=False,
+                provider=None, resume=False, stop_after_node="L1")
+            output = StringIO()
+            with redirect_stdout(output):
+                rc = run_loop.cmd_run(args)
+        assert rc == 0
+        text = output.getvalue()
+        assert "main-agent handoff" in text
+        assert "python research_loop_v04.py next-step" in text
+    finally:
+        run_loop._ctl = old_ctl
+        run_loop.run_round = old_run_round
 
 
 def test_assemble_context_raises_when_controller_fails():
