@@ -2253,6 +2253,16 @@ def cmd_assemble_context(args):
                       f"{prf.as_posix()} first (no 'NOT YET RUN' placeholder).",
                       file=sys.stderr)
                 return 3
+            # v0.6 divergence + branch-coverage gates (L1, from_memory only)
+            if node_id == "L1":
+                dok, dreason = _audit_divergence(project_dir, node_id, args.cand_id)
+                if not dok:
+                    print(f"ERROR: {dreason}", file=sys.stderr)
+                    return 3
+                bok, breason = _audit_branch_coverage(project_dir, args.cand_id)
+                if not bok:
+                    print(f"ERROR: {breason}", file=sys.stderr)
+                    return 3
         if prf.exists():
             pr_sections, pre_research_meta = _inject_pre_research(
                 prf, pr_cfg, args, node_id)
@@ -2874,6 +2884,19 @@ def cmd_emit_delta(args):
     print(f"  schema: {delta_key}")
     print(f"  written: {out_file}")
     print(f"  run receipt: {rr} (upstream: {verification})")
+
+    # v0.6: after a valid L1 delta, register this round's query families in the
+    # cross-loop cache so a later divergent loop can prove it searched new ground.
+    if args.node == "L1":
+        try:
+            _prf = _pre_research_file(project_dir, "L1")
+            if _prf.exists():
+                _prov = _parse_pre_research_provenance(_prf.read_text(encoding="utf-8"))
+                _fams = {_query_family_key(q) for q in _prov.get("query_log", []) if q.strip()}
+                if _fams:
+                    _merge_query_family_cache(project_dir, _fams)
+        except Exception:
+            pass
 
     # Auto-record L7 pitfalls: extract failures and warnings from delta,
     # record as draft pitfalls so pitfall-scan picks them up next round.
@@ -3870,14 +3893,61 @@ SEED_SCHEMA_KEYS = [
 ]
 
 
-# Empty-default stubs; real bodies land in Task 10 (ledgers) / Task 4 (cards).
-# They are callable now so _build_loop_memory works before those tasks land.
+def _branch_ledger_path(project_dir, cand_id):
+    return Path(project_dir) / "08_Audit" / "branch_ledger" / f"{cand_id}.json"
+
+
 def _read_branch_ledger(project_dir, cand_id):
+    p = _branch_ledger_path(project_dir, cand_id)
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {"branches": []}
     return {"branches": []}
 
 
+def _modality_ledger_path(project_dir, cand_id):
+    return Path(project_dir) / "08_Audit" / "modality_ledger" / f"{cand_id}.json"
+
+
 def _read_modality_ledger(project_dir, cand_id):
+    p = _modality_ledger_path(project_dir, cand_id)
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {"used": [], "available_unused": []}
     return {"used": [], "available_unused": []}
+
+
+def _prior_unexplored_ids(project_dir, cand_id):
+    cf = _candidate_file(project_dir, cand_id)
+    fm = _load_yaml_front(cf) if cf and cf.exists() else {}
+    mf = fm.get("memory_file")
+    if not mf or not Path(mf).exists():
+        return []
+    try:
+        mem = json.loads(Path(mf).read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    return [b.get("id") for b in mem.get("unexplored_branches", []) if b.get("id")]
+
+
+def _audit_branch_coverage(project_dir, cand_id):
+    """Every prior unexplored branch must be statused in this candidate's ledger.
+    Hard-fails only for from_memory + loop_type=divergent."""
+    cf = _candidate_file(project_dir, cand_id)
+    fm = _load_yaml_front(cf) if cf and cf.exists() else {}
+    if not fm.get("from_memory") or fm.get("loop_type") != "divergent":
+        return True, ""
+    prior = set(_prior_unexplored_ids(project_dir, cand_id))
+    have = {b.get("id"): b.get("status")
+            for b in _read_branch_ledger(project_dir, cand_id).get("branches", [])}
+    missing = [b for b in prior if not have.get(b)]
+    if missing:
+        return False, f"branch gate: prior unexplored branches not statused: {sorted(missing)}"
+    return True, ""
 
 
 def _list_card_ids(project_dir, cand_id, sub):
@@ -3925,6 +3995,70 @@ def _build_loop_memory(project_dir, cand_id):
         "method_card_ids": _list_card_ids(project_dir, cand_id, "method_cards"),
         "hashes": {},
     }
+
+
+DIVERGENCE_MIN_NEW_QUERY_FAMILIES = 2
+_QF_STOP = {"the", "a", "an", "of", "in", "and", "or", "vs", "for", "to", "on", "is", "do"}
+
+
+def _query_family_key(q):
+    """Normalize a query string to a family key: lowercased, de-punctuated,
+    stop-words removed, sorted unique tokens."""
+    toks = [t for t in re.sub(r"[^a-z0-9 ]", " ", q.lower()).split()
+            if t and t not in _QF_STOP]
+    return " ".join(sorted(set(toks)))
+
+
+def _load_query_family_cache(project_dir):
+    p = Path(project_dir) / "09_Literature_Database" / "query_families.json"
+    if p.exists():
+        try:
+            return set(json.loads(p.read_text(encoding="utf-8")).get("families", []))
+        except Exception:
+            return set()
+    return set()
+
+
+def _merge_query_family_cache(project_dir, families):
+    p = Path(project_dir) / "09_Literature_Database" / "query_families.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    existing = _load_query_family_cache(project_dir)
+    existing |= {f for f in families if f}
+    p.write_text(json.dumps({"families": sorted(existing)}, indent=2), encoding="utf-8")
+
+
+def _audit_divergence(project_dir, node_id, cand_id):
+    """L1 divergence gate. Hard-fails only for from_memory + loop_type=divergent.
+    Requires >= DIVERGENCE_MIN_NEW_QUERY_FAMILIES query families not already in the
+    cache, and rejects a pre-research artifact that predates candidate creation."""
+    project_dir = Path(project_dir)
+    cf = _candidate_file(project_dir, cand_id)
+    fm = _load_yaml_front(cf) if cf and cf.exists() else {}
+    if not fm.get("from_memory"):
+        return True, ""
+    if fm.get("loop_type") != "divergent":
+        return True, ""  # correction / data-acquisition bypass the family requirement
+    prf = _pre_research_file(project_dir, node_id)
+    if not prf.exists():
+        return False, f"divergence gate: pre-research artifact missing for {node_id}"
+    created = fm.get("created_at", "")
+    try:
+        if created:
+            ct = _dt.datetime.fromisoformat(created).timestamp()
+            if prf.stat().st_mtime < ct:
+                return False, ("divergence gate: pre-research artifact predates candidate "
+                               "creation (stale reuse)")
+    except Exception:
+        pass
+    prov = _parse_pre_research_provenance(prf.read_text(encoding="utf-8"))
+    fams = {_query_family_key(q) for q in prov.get("query_log", []) if q.strip()}
+    cache = {_query_family_key(q) for q in _load_query_family_cache(project_dir)}
+    new = {f for f in fams if f and f not in cache}
+    need = DIVERGENCE_MIN_NEW_QUERY_FAMILIES
+    if len(new) < need:
+        return False, (f"divergence gate: only {len(new)} new query families "
+                       f"(need >= {need}); reused={sorted(fams & cache)}")
+    return True, ""
 
 
 def _audit_l0_memory(project_dir, cand_id, delta):

@@ -23,6 +23,9 @@ def _new_project(tmp_path):
 
 
 def _rl_module():
+    rl_dir = str(Path(RL).resolve().parent)
+    if rl_dir not in sys.path:
+        sys.path.insert(0, rl_dir)
     spec = importlib.util.spec_from_file_location("rl_under_test", RL)
     rl = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rl)
@@ -90,7 +93,7 @@ def _emit_l4(proj, cand, scripts):
            "recommended": "s1", "scripts_needed": scripts, "key_decisions": [], "candidate_id": cand}
     f = proj / f"l4_{cand}.json"
     f.write_text(json.dumps(obj), encoding="utf-8")
-    return _run("emit-delta", str(proj), "--node", "L4", "--persona", "Fisher", "--file", str(f), "--cand-id", cand)
+    return _run("emit-delta", str(proj), cand, "--node", "L4", "--persona", "Fisher", "--file", str(f))
 
 
 def _emit_l6(proj, cand, scripts):
@@ -101,7 +104,7 @@ def _emit_l6(proj, cand, scripts):
            "candidate_id": cand}
     f = proj / f"l6_{cand}.json"
     f.write_text(json.dumps(obj), encoding="utf-8")
-    return _run("emit-delta", str(proj), "--node", "L6", "--persona", "Oppenheimer", "--file", str(f), "--cand-id", cand)
+    return _run("emit-delta", str(proj), cand, "--node", "L6", "--persona", "Oppenheimer", "--file", str(f))
 
 
 def _emit_l6_ok(proj, cand):
@@ -121,7 +124,7 @@ def _emit_l10b(proj, cand, obj):
     obj = {**obj, "candidate_id": cand}
     f = proj / f"l10b_{cand}.json"
     f.write_text(json.dumps(obj), encoding="utf-8")
-    return _run("emit-delta", str(proj), "--node", "L10b", "--persona", "Oppenheimer", "--file", str(f), "--cand-id", cand)
+    return _run("emit-delta", str(proj), cand, "--node", "L10b", "--persona", "Oppenheimer", "--file", str(f))
 
 
 # --- Task 1 -----------------------------------------------------------------
@@ -361,7 +364,7 @@ def test_l7_manifest_gate_requires_branch_and_l6_map(tmp_path):
            "key_results": {}, "warnings": [], "failures": [], "candidate_id": cand}
     f = proj / "l7bad.json"
     f.write_text(json.dumps(bad), encoding="utf-8")
-    r2 = _run("emit-delta", str(proj), "--node", "L7", "--persona", "Turing", "--file", str(f), "--cand-id", cand)
+    r2 = _run("emit-delta", str(proj), cand, "--node", "L7", "--persona", "Turing", "--file", str(f))
     assert r2.returncode != 0 and "branch" in (r2.stderr + r2.stdout).lower()
 
 
@@ -378,7 +381,7 @@ def test_l7_manifest_written_on_valid(tmp_path):
             "key_results": {}, "warnings": [], "failures": [], "candidate_id": cand}
     f = proj / "l7ok.json"
     f.write_text(json.dumps(good), encoding="utf-8")
-    r2 = _run("emit-delta", str(proj), "--node", "L7", "--persona", "Turing", "--file", str(f), "--cand-id", cand)
+    r2 = _run("emit-delta", str(proj), cand, "--node", "L7", "--persona", "Turing", "--file", str(f))
     assert r2.returncode == 0, r2.stderr
     man = proj / "04_Analysis_Outputs" / "_exec_manifest" / f"{cand}_L7.json"
     assert man.exists()
