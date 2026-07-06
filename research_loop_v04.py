@@ -2797,6 +2797,12 @@ def cmd_emit_delta(args):
         if not ok_l7:
             errors.append(l7_reason)
 
+    # v0.6: L10b decision-traceability gate (no-op for legacy candidates)
+    if args.node == "L10b":
+        ok_l10, l10_reason = _audit_l10_traceability(project_dir, args.cand_id, data)
+        if not ok_l10:
+            errors.append(l10_reason)
+
     declared_candidate = data.get("candidate_id")
     if (declared_candidate is not None
             and str(declared_candidate) != str(args.cand_id)):
@@ -4083,6 +4089,24 @@ def _audit_divergence(project_dir, node_id, cand_id):
     if len(new) < need:
         return False, (f"divergence gate: only {len(new)} new query families "
                        f"(need >= {need}); reused={sorted(fams & cache)}")
+    return True, ""
+
+
+def _audit_l10_traceability(project_dir, cand_id, delta):
+    """L10b gate: for from_memory candidates, the decision must state whether
+    literature changed direction and carry a decision_grounding block."""
+    cf = _candidate_file(project_dir, cand_id)
+    fm = _load_yaml_front(cf) if cf and cf.exists() else {}
+    if not fm.get("from_memory"):
+        return True, ""
+    if "literature_changed_direction" not in delta:
+        return False, "L10b must state `literature_changed_direction` (bool) explicitly"
+    if not isinstance(delta.get("literature_changed_direction"), bool):
+        return False, "`literature_changed_direction` must be a boolean"
+    dg = delta.get("decision_grounding") or {}
+    for k in ("paper_card_ids", "method_card_ids", "branch_ids"):
+        if k not in dg:
+            return False, f"decision_grounding missing `{k}`"
     return True, ""
 
 
