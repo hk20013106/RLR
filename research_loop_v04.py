@@ -4264,6 +4264,34 @@ def _loop_memory_to_md(mem):
     return "\n".join(out)
 
 
+def cmd_branch_status(args):
+    """Set a branch's exploration status in this candidate's branch ledger."""
+    p = _branch_ledger_path(args.project_dir, args.cand_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    led = _read_branch_ledger(args.project_dir, args.cand_id)
+    led.setdefault("branches", [])
+    led["branches"] = [b for b in led["branches"] if b.get("id") != args.branch]
+    led["branches"].append({
+        "id": args.branch, "description": args.description or "",
+        "status": args.status, "data_available": bool(args.data_path),
+        "data_path": args.data_path or "", "why_deferred": args.why or ""})
+    p.write_text(json.dumps(led, indent=2, sort_keys=True), encoding="utf-8")
+    print(f"branch {args.branch} -> {args.status}")
+    return 0
+
+
+def cmd_modality_scan(args):
+    """Record used vs available data modalities for this candidate."""
+    p = _modality_ledger_path(args.project_dir, args.cand_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    used = list(dict.fromkeys(args.used or []))
+    avail = list(dict.fromkeys(args.available or []))
+    led = {"used": used, "available_unused": [m for m in avail if m not in used]}
+    p.write_text(json.dumps(led, indent=2, sort_keys=True), encoding="utf-8")
+    print(f"modality ledger: used={used} unused={led['available_unused']}")
+    return 0
+
+
 def cmd_emit_loop_memory(args):
     """L10c: emit the next_loop_memory seed (JSON + MD) from this candidate's deltas."""
     project_dir = Path(args.project_dir)
@@ -4628,6 +4656,27 @@ def build_parser():
     sp.add_argument("project_dir")
     sp.add_argument("cand_id")
     sp.set_defaults(func=cmd_emit_loop_memory)
+
+    # branch-status
+    sp = sub.add_parser("branch-status",
+                        help="set a branch's exploration status in the ledger")
+    sp.add_argument("project_dir")
+    sp.add_argument("cand_id")
+    sp.add_argument("--branch", required=True)
+    sp.add_argument("--description", default="")
+    sp.add_argument("--status", required=True, choices=["explored", "partial", "ignored"])
+    sp.add_argument("--data-path", dest="data_path", default="")
+    sp.add_argument("--why", default="")
+    sp.set_defaults(func=cmd_branch_status)
+
+    # modality-scan
+    sp = sub.add_parser("modality-scan",
+                        help="record used/available data modalities for a candidate")
+    sp.add_argument("project_dir")
+    sp.add_argument("cand_id")
+    sp.add_argument("--used", action="append", default=[])
+    sp.add_argument("--available", action="append", default=[])
+    sp.set_defaults(func=cmd_modality_scan)
 
     # aggregate-report
     sp = sub.add_parser("aggregate-report", help="L10c Linnaeus: generate FINAL_REPORT")
