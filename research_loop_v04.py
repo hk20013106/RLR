@@ -439,7 +439,9 @@ def _persona_template_path(persona):
 DELTA_SCHEMAS = {
     "L0_linnaeus": {
         "skills_found": list, "skills_gaps": list, "input_verified": dict,
-        "environment": dict, "skill_use_plan": list, "forbidden_shortcuts": list
+        "environment": dict, "skill_use_plan": list, "forbidden_shortcuts": list,
+        # v0.6: optional cross-loop memory; required only for from_memory candidates
+        # (enforced by _audit_l0_memory, not by structural schema).
     },
     # NOTE: input_verified values should be dicts with keys:
     #   path, files, format, classification, verified, notes
@@ -2281,6 +2283,31 @@ def cmd_assemble_context(args):
                          "source": r.get("source", "project")}
                         for r in node_pitfalls]
     if node_id == "L0":
+        # v0.6: inject compact prior-loop memory (IDs + directions only, no full text)
+        try:
+            _cf0 = _candidate_file(project_dir, args.cand_id)
+            _fm0 = _load_yaml_front(_cf0) if _cf0 and _cf0.exists() else {}
+            if _fm0.get("from_memory") and _fm0.get("memory_file"):
+                _mp = Path(_fm0["memory_file"])
+                if _mp.exists():
+                    _mem = json.loads(_mp.read_text(encoding="utf-8"))
+                    sections.append("=== PRIOR LOOP MEMORY (divergence contract) ===")
+                    sections.append(f"loop_type: {_fm0.get('loop_type', '')}")
+                    sections.append(f"prior_candidate: {_mem.get('source_candidate_id', '')}")
+                    sections.append(f"previous_hypothesis: {_mem.get('previous_hypothesis', '')}")
+                    sections.append(f"final_decision: {_mem.get('terminal_decision', '')}")
+                    sections.append(f"next_round_hypothesis: {_mem.get('next_round_hypothesis', '')}")
+                    _dirs = _mem.get("required_new_search_directions", []) or []
+                    sections.append("required_new_search_directions: " + "; ".join(str(x) for x in _dirs))
+                    _unexp = [b.get("id") for b in (_mem.get("unexplored_branches", []) or []) if b.get("id")]
+                    sections.append("prior_unexplored_branches (must be statused): " + ", ".join(_unexp))
+                    _unused = _mem.get("data_modalities_available_unused", []) or []
+                    sections.append("data_modalities_available_unused: " + ", ".join(str(x) for x in _unused))
+                    sections.append("Your L0 delta MUST include a `prior_loop_memory` object "
+                                    f"with memory_hash={_fm0.get('memory_hash', '')}.")
+                    sections.append("")
+        except Exception:
+            pass
         gate_candidates = pl.list_pitfalls(
             project_dir, status="draft", node="L0",
             category="preflight_gate_candidate")
@@ -2736,6 +2763,11 @@ def cmd_emit_delta(args):
             dep_errors.append("academic-research-suite skill is not found in skills catalog or plugins directory.")
         if dep_errors:
             errors.extend(dep_errors)
+
+        # v0.6: cross-loop memory gate (no-op for legacy candidates)
+        ok_mem, mem_reason = _audit_l0_memory(project_dir, args.cand_id, data)
+        if not ok_mem:
+            errors.append(f"prior_loop_memory gate: {mem_reason}")
 
     declared_candidate = data.get("candidate_id")
     if (declared_candidate is not None
@@ -3890,6 +3922,26 @@ def _build_loop_memory(project_dir, cand_id):
         "method_card_ids": _list_card_ids(project_dir, cand_id, "method_cards"),
         "hashes": {},
     }
+
+
+def _audit_l0_memory(project_dir, cand_id, delta):
+    """Gate: from_memory candidates must carry a hash-matching prior_loop_memory.
+    No-op for legacy (non-from_memory) candidates."""
+    cf = _candidate_file(project_dir, cand_id)
+    fm = _load_yaml_front(cf) if cf and cf.exists() else {}
+    if not fm.get("from_memory"):
+        return True, ""
+    plm = delta.get("prior_loop_memory")
+    if not plm:
+        return False, "candidate is from_memory but L0 delta lacks `prior_loop_memory`"
+    expected = fm.get("memory_hash", "")
+    if plm.get("memory_hash") != expected:
+        return False, (f"prior_loop_memory.memory_hash mismatch: "
+                       f"delta={plm.get('memory_hash')!r} frontmatter={expected!r}")
+    for req in ("previous_hypothesis", "next_round_hypothesis", "required_new_search_directions"):
+        if not plm.get(req):
+            return False, f"prior_loop_memory missing `{req}`"
+    return True, ""
 
 
 def _loop_memory_to_md(mem):

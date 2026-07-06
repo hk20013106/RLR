@@ -180,20 +180,18 @@ def test_emit_loop_memory_deterministic_and_schema(tmp_path):
 
 # --- Task 3 -----------------------------------------------------------------
 
+# L0 emit-delta CLI is environment-gated (OBSIDIAN_VAULT/Zotero/academic-suite),
+# so the memory gate is tested directly on the gate function.
+
 def test_l0_memory_gate_rejects_missing_prior_memory(tmp_path):
     proj = _new_project(tmp_path)
     seed = _write_seed(proj)
     cand = _new_from_memory(proj, seed)
-    d = proj / "02_Agent_Notes" / "Linnaeus"
-    d.mkdir(parents=True, exist_ok=True)
-    bad = {"skills_found": [], "skills_gaps": [], "input_verified": {}, "environment": {},
-           "skill_use_plan": [], "forbidden_shortcuts": [], "candidate_id": cand}
-    f = tmp_path / "l0.json"
-    f.write_text(json.dumps(bad), encoding="utf-8")
-    r2 = _run("emit-delta", str(proj), "--node", "L0", "--persona", "Linnaeus",
-              "--file", str(f), "--cand-id", cand)
-    assert r2.returncode != 0
-    assert "prior_loop_memory" in (r2.stderr + r2.stdout)
+    delta = {"skills_found": [], "skills_gaps": [], "input_verified": {}, "environment": {},
+             "skill_use_plan": [], "forbidden_shortcuts": [], "candidate_id": cand}
+    ok, reason = _rl_module()._audit_l0_memory(str(proj), cand, delta)
+    assert ok is False
+    assert "prior_loop_memory" in reason
 
 
 def test_l0_memory_gate_accepts_matching_hash(tmp_path):
@@ -201,19 +199,27 @@ def test_l0_memory_gate_accepts_matching_hash(tmp_path):
     seed = _write_seed(proj)
     cand = _new_from_memory(proj, seed)
     h = hashlib.sha256(seed.read_bytes()).hexdigest()
-    good = {"skills_found": [], "skills_gaps": [], "input_verified": {}, "environment": {},
-            "skill_use_plan": [], "forbidden_shortcuts": [],
-            "prior_loop_memory": {"source_candidate_id": "C_prev", "loaded_from": str(seed),
-                "memory_hash": h, "previous_hypothesis": "H_prev", "final_decision": "DOWNGRADE",
-                "next_round_hypothesis": "H_next", "required_new_search_directions": ["dir_a", "dir_b"],
-                "evidence_kept": [], "evidence_dropped": [], "unexplored_branches": [],
-                "data_modalities_available_unused": []},
-            "candidate_id": cand}
-    f = tmp_path / "l0ok.json"
-    f.write_text(json.dumps(good), encoding="utf-8")
-    r2 = _run("emit-delta", str(proj), "--node", "L0", "--persona", "Linnaeus",
-              "--file", str(f), "--cand-id", cand)
-    assert r2.returncode == 0, r2.stderr
+    delta = {"skills_found": [], "skills_gaps": [], "input_verified": {}, "environment": {},
+             "skill_use_plan": [], "forbidden_shortcuts": [],
+             "prior_loop_memory": {"source_candidate_id": "C_prev", "loaded_from": str(seed),
+                 "memory_hash": h, "previous_hypothesis": "H_prev", "final_decision": "DOWNGRADE",
+                 "next_round_hypothesis": "H_next", "required_new_search_directions": ["dir_a", "dir_b"],
+                 "evidence_kept": [], "evidence_dropped": [], "unexplored_branches": [],
+                 "data_modalities_available_unused": []},
+             "candidate_id": cand}
+    ok, reason = _rl_module()._audit_l0_memory(str(proj), cand, delta)
+    assert ok is True, reason
+
+
+def test_l0_memory_gate_rejects_hash_mismatch(tmp_path):
+    proj = _new_project(tmp_path)
+    seed = _write_seed(proj)
+    cand = _new_from_memory(proj, seed)
+    delta = {"prior_loop_memory": {"memory_hash": "deadbeef", "previous_hypothesis": "x",
+             "next_round_hypothesis": "y", "required_new_search_directions": ["z"]},
+             "candidate_id": cand}
+    ok, reason = _rl_module()._audit_l0_memory(str(proj), cand, delta)
+    assert ok is False and "mismatch" in reason
 
 
 # --- Task 4 -----------------------------------------------------------------
@@ -453,11 +459,9 @@ def test_legacy_delta_without_new_fields_still_validates(tmp_path):
     cand = r.stdout.strip().splitlines()[0]
     r2 = _emit_l6(proj, cand, ["s1.py", "s2.py"])
     assert r2.returncode == 0, r2.stderr
-    d0 = proj / "02_Agent_Notes" / "Linnaeus"
-    d0.mkdir(parents=True, exist_ok=True)
+    # legacy (non-from_memory) candidate: memory gate must no-op even with no prior_loop_memory
+    rl = _rl_module()
     l0 = {"skills_found": [], "skills_gaps": [], "input_verified": {}, "environment": {},
           "skill_use_plan": [], "forbidden_shortcuts": [], "candidate_id": cand}
-    f0 = proj / "legacy_l0.json"
-    f0.write_text(json.dumps(l0), encoding="utf-8")
-    r3 = _run("emit-delta", str(proj), "--node", "L0", "--persona", "Linnaeus", "--file", str(f0), "--cand-id", cand)
-    assert r3.returncode == 0, r3.stderr
+    ok, _ = rl._audit_l0_memory(str(proj), cand, l0)
+    assert ok is True
