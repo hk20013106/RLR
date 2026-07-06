@@ -2791,6 +2791,12 @@ def cmd_emit_delta(args):
         if not ok_l6:
             errors.append(l6_reason)
 
+    # v0.6: L7 execution-traceability gate (no-op for legacy candidates)
+    if args.node == "L7":
+        ok_l7, l7_reason = _audit_l7_manifest(project_dir, args.cand_id, data)
+        if not ok_l7:
+            errors.append(l7_reason)
+
     declared_candidate = data.get("candidate_id")
     if (declared_candidate is not None
             and str(declared_candidate) != str(args.cand_id)):
@@ -2896,6 +2902,13 @@ def cmd_emit_delta(args):
     print(f"  schema: {delta_key}")
     print(f"  written: {out_file}")
     print(f"  run receipt: {rr} (upstream: {verification})")
+
+    # v0.6: after a valid L7 delta, write the execution-traceability manifest.
+    if args.node == "L7":
+        try:
+            _write_exec_manifest(project_dir, args.cand_id, data)
+        except Exception:
+            pass
 
     # v0.6: after a valid L1 delta, register this round's query families in the
     # cross-loop cache so a later divergent loop can prove it searched new ground.
@@ -4071,6 +4084,50 @@ def _audit_divergence(project_dir, node_id, cand_id):
         return False, (f"divergence gate: only {len(new)} new query families "
                        f"(need >= {need}); reused={sorted(fams & cache)}")
     return True, ""
+
+
+def _l6_script_branches(project_dir, cand_id):
+    p = _delta_for_candidate(project_dir, "L6_oppenheimer", cand_id)
+    out = {}
+    if p and p.exists():
+        try:
+            for s in (json.loads(p.read_text(encoding="utf-8")).get("analysis_plan") or {}).get("scripts", []):
+                if isinstance(s, dict) and s.get("name"):
+                    out[s["name"]] = s.get("branch_id")
+        except Exception:
+            pass
+    return out
+
+
+def _audit_l7_manifest(project_dir, cand_id, delta):
+    """L7 gate: for from_memory candidates, every executed script must map to an
+    approved L6 script + a branch_id (consistent with L6's branch)."""
+    cf = _candidate_file(project_dir, cand_id)
+    fm = _load_yaml_front(cf) if cf and cf.exists() else {}
+    if not fm.get("from_memory"):
+        return True, ""
+    l6 = _l6_script_branches(project_dir, cand_id)
+    for s in delta.get("scripts_run", []):
+        name = s.get("name")
+        if not s.get("branch_id"):
+            return False, f"L7 script {name!r}: missing branch_id"
+        if name not in l6:
+            return False, f"L7 script {name!r} not found in approved L6 analysis_plan"
+        if l6[name] and s["branch_id"] != l6[name]:
+            return False, f"L7 script {name!r}: branch_id {s['branch_id']!r} != L6 {l6[name]!r}"
+    return True, ""
+
+
+def _write_exec_manifest(project_dir, cand_id, delta):
+    d = Path(project_dir) / "04_Analysis_Outputs" / "_exec_manifest"
+    d.mkdir(parents=True, exist_ok=True)
+    man = {"candidate_id": cand_id, "scripts": [
+        {"name": s.get("name"), "branch_id": s.get("branch_id"),
+         "method_card_ids": s.get("method_card_ids", []), "grounded_by": s.get("grounded_by"),
+         "input_hashes": s.get("input_hashes", []), "output_hashes": s.get("output_hashes", []),
+         "output_files": s.get("output_files", [])}
+        for s in delta.get("scripts_run", [])]}
+    (d / f"{cand_id}_L7.json").write_text(json.dumps(man, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _critique_ref_valid(project_dir, cand_id, ref):
