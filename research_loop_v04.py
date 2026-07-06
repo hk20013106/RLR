@@ -1159,10 +1159,44 @@ def _validate_delta(schema, data, path=""):
 
 # --- templates --------------------------------------------------------------
 
+def _sha256_file(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _load_loop_memory(path):
+    """Load + minimally validate a next_loop_memory.json seed. Raises on error."""
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"loop-memory seed not found: {p}")
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise ValueError(f"invalid loop-memory seed JSON: {e}")
+    required = {"source_candidate_id", "next_round_hypothesis", "required_new_search_directions"}
+    missing = required - set(data)
+    if missing:
+        raise ValueError(f"loop-memory seed missing keys: {sorted(missing)}")
+    return data
+
+
+def _render_extra_front(extra_front):
+    """Render additional frontmatter keys. Booleans emit lowercase true/false."""
+    if not extra_front:
+        return ""
+    lines = []
+    for k, v in extra_front.items():
+        if isinstance(v, bool):
+            lines.append(f"{k}: {'true' if v else 'false'}")
+        else:
+            lines.append(f"{k}: {_yaml_value(v)}")
+    return "\n".join(lines) + "\n"
+
+
 def _candidate_template_v03(cand_id, title, source_input, question, claim,
-                            input_alias=""):
+                            input_alias="", extra_front=None):
     claim_or_question = f"{question} | {claim}"
     alias = input_alias or _input_alias(source_input)
+    extra = _render_extra_front(extra_front)
     return f"""---
 candidate_id: {_yaml_value(cand_id)}
 title: {_yaml_value(title)}
@@ -1180,7 +1214,7 @@ final_decision: ""
 claim_or_question: {_yaml_value(claim_or_question)}
 created_at: {_yaml_value(_now())}
 updated_at: {_yaml_value(_now())}
----
+{extra}---
 
 # {title}
 
@@ -2859,10 +2893,29 @@ def cmd_new_candidate(args):
         print(f"ERROR: not a project dir (no 00_Project_Index.md): {project_dir}",
               file=sys.stderr)
         return 2
+    from_memory = getattr(args, "from_memory", None)
+    loop_type = getattr(args, "loop_type", None) or ""
+    mem_fields = {}
+    if from_memory:
+        if not loop_type:
+            print("ERROR: --from-memory requires --loop-type", file=sys.stderr)
+            return 2
+        try:
+            mem = _load_loop_memory(from_memory)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 2
+        mem_fields = {
+            "from_memory": True, "loop_type": loop_type,
+            "prior_candidate": mem["source_candidate_id"],
+            "memory_file": str(from_memory),
+            "memory_hash": _sha256_file(from_memory),
+        }
     cand_id = "C" + _stamp()
     body = _candidate_template_v03(cand_id, args.title, args.input,
                                    args.question, args.claim,
-                                   input_alias=getattr(args, "input_alias", "") or "")
+                                   input_alias=getattr(args, "input_alias", "") or "",
+                                   extra_front=mem_fields)
     cf = _candidate_file(project_dir, cand_id)
     cf.write_text(body, encoding="utf-8")
     _append_decision(project_dir, cand_id, "-", "NEW", "candidate created",
@@ -4006,6 +4059,11 @@ def build_parser():
     sp.add_argument("--input-alias", dest="input_alias",
                     help="path-free input label for cognitive nodes "
                          "(default: derived from --input)")
+    sp.add_argument("--from-memory", dest="from_memory", default=None,
+                    help="path to a next_loop_memory.json seed (divergence loop)")
+    sp.add_argument("--loop-type", dest="loop_type", default=None,
+                    choices=["divergent", "correction", "data-acquisition"],
+                    help="required with --from-memory")
     sp.set_defaults(func=cmd_new_candidate)
 
     # next-step
