@@ -3827,6 +3827,97 @@ def _format_delta_body(delta_key, delta, lang="en"):
     return "\n".join(L) + "\n" if L else "_Empty delta._\n"
 
 
+# --- v0.6 next-loop memory (divergence contract) ----------------------------
+
+SEED_SCHEMA_KEYS = [
+    "source_candidate_id", "terminal_node", "terminal_decision", "original_question",
+    "previous_hypothesis", "final_reason", "next_round_hypothesis",
+    "required_new_search_directions", "evidence_kept", "evidence_dropped",
+    "explored_branches", "unexplored_branches", "data_modalities_used",
+    "data_modalities_available_unused", "paper_card_ids", "method_card_ids", "hashes",
+]
+
+
+# Empty-default stubs; real bodies land in Task 10 (ledgers) / Task 4 (cards).
+# They are callable now so _build_loop_memory works before those tasks land.
+def _read_branch_ledger(project_dir, cand_id):
+    return {"branches": []}
+
+
+def _read_modality_ledger(project_dir, cand_id):
+    return {"used": [], "available_unused": []}
+
+
+def _list_card_ids(project_dir, cand_id, sub):
+    return []
+
+
+def _build_loop_memory(project_dir, cand_id):
+    project_dir = Path(project_dir)
+    cf = _candidate_file(project_dir, cand_id)
+    fm = _load_yaml_front(cf) if cf and cf.exists() else {}
+
+    def _d(key):
+        p = _delta_for_candidate(project_dir, key, cand_id)
+        if p and p.exists():
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                return {}
+        return {}
+
+    l1 = _d("L1_einstein")
+    l10 = _d("L10b_oppenheimer")
+    branches = l1.get("candidate_branches", []) or []
+    bl = _read_branch_ledger(project_dir, cand_id)
+    ml = _read_modality_ledger(project_dir, cand_id)
+    return {
+        "source_candidate_id": cand_id,
+        "terminal_node": "L10c",
+        "terminal_decision": l10.get("decision", ""),
+        "original_question": fm.get("question", ""),
+        "previous_hypothesis": l1.get("primary_hypothesis", ""),
+        "final_reason": l10.get("reason", ""),
+        "next_round_hypothesis": l10.get("next_round_hypothesis", ""),
+        "required_new_search_directions": l10.get("next_steps", []) or [],
+        "evidence_kept": l10.get("evidence_kept", []) or [],
+        "evidence_dropped": l10.get("evidence_dropped", []) or [],
+        "explored_branches": [b.get("id") for b in branches],
+        "unexplored_branches": [b for b in bl.get("branches", []) if b.get("status") == "ignored"],
+        "data_modalities_used": ml.get("used", []),
+        "data_modalities_available_unused": ml.get("available_unused", []),
+        "paper_card_ids": _list_card_ids(project_dir, cand_id, "paper_cards"),
+        "method_card_ids": _list_card_ids(project_dir, cand_id, "method_cards"),
+        "hashes": {},
+    }
+
+
+def _loop_memory_to_md(mem):
+    out = [f"# Next-Loop Memory -- {mem['source_candidate_id']}", ""]
+    for k in SEED_SCHEMA_KEYS:
+        out.append(f"## {k}")
+        v = mem.get(k)
+        out.append(json.dumps(v, ensure_ascii=False, indent=2) if isinstance(v, (list, dict)) else str(v))
+        out.append("")
+    return "\n".join(out)
+
+
+def cmd_emit_loop_memory(args):
+    """L10c: emit the next_loop_memory seed (JSON + MD) from this candidate's deltas."""
+    project_dir = Path(args.project_dir)
+    mem = _build_loop_memory(project_dir, args.cand_id)
+    out_dir = project_dir / "08_Audit" / "loop_memory"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    jp = out_dir / f"{args.cand_id}_next_loop_memory.json"
+    jp.write_text(json.dumps(mem, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    mp = out_dir / f"{args.cand_id}_next_loop_memory.md"
+    mp.write_text(_loop_memory_to_md(mem), encoding="utf-8")
+    print("loop-memory written:")
+    print(f"  {jp}")
+    print(f"  {mp}")
+    return 0
+
+
 def cmd_aggregate_report(args):
     """L10c Linnaeus: read all delta JSON, generate FINAL_REPORT.md + _CN.md."""
     import json
@@ -4168,6 +4259,13 @@ def build_parser():
     sp.add_argument("--force", action="store_true",
                     help="override the legal-transition guard (manual recovery)")
     sp.set_defaults(func=cmd_decision)
+
+    # emit-loop-memory
+    sp = sub.add_parser("emit-loop-memory",
+                        help="L10c: emit next_loop_memory seed (JSON+MD) for a candidate")
+    sp.add_argument("project_dir")
+    sp.add_argument("cand_id")
+    sp.set_defaults(func=cmd_emit_loop_memory)
 
     # aggregate-report
     sp = sub.add_parser("aggregate-report", help="L10c Linnaeus: generate FINAL_REPORT")
