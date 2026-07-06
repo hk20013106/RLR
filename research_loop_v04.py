@@ -3881,7 +3881,10 @@ def _read_modality_ledger(project_dir, cand_id):
 
 
 def _list_card_ids(project_dir, cand_id, sub):
-    return []
+    d = Path(project_dir) / "09_Literature_Database" / sub
+    if not d.exists():
+        return []
+    return sorted(p.stem for p in d.glob("*.json"))
 
 
 def _build_loop_memory(project_dir, cand_id):
