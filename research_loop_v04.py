@@ -2785,6 +2785,12 @@ def cmd_emit_delta(args):
         if not ok_m:
             errors.append(m_reason)
 
+    # v0.6: L6 script-grounding traceability gate (no-op for legacy candidates)
+    if args.node == "L6":
+        ok_l6, l6_reason = _audit_l6_traceability(project_dir, args.cand_id, data)
+        if not ok_l6:
+            errors.append(l6_reason)
+
     declared_candidate = data.get("candidate_id")
     if (declared_candidate is not None
             and str(declared_candidate) != str(args.cand_id)):
@@ -4064,6 +4070,57 @@ def _audit_divergence(project_dir, node_id, cand_id):
     if len(new) < need:
         return False, (f"divergence gate: only {len(new)} new query families "
                        f"(need >= {need}); reused={sorted(fams & cache)}")
+    return True, ""
+
+
+def _critique_ref_valid(project_dir, cand_id, ref):
+    """ref form 'L2_feynman#<idx>' or 'L5_tukey#<idx>' -> must point at a real attack."""
+    try:
+        key, idx = ref.split("#")
+        idx = int(idx)
+    except Exception:
+        return False
+    p = _delta_for_candidate(project_dir, key, cand_id)
+    if not (p and p.exists()):
+        return False
+    try:
+        obj = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return 0 <= idx < len(obj.get("attacks", []))
+
+
+def _audit_l6_traceability(project_dir, cand_id, delta):
+    """L6 gate: for from_memory candidates, every analysis-plan script must carry a
+    valid grounding (method_card | internal_critique | prior_reuse) and a branch_id."""
+    cf = _candidate_file(project_dir, cand_id)
+    fm = _load_yaml_front(cf) if cf and cf.exists() else {}
+    if not fm.get("from_memory"):
+        return True, ""
+    scripts = (delta.get("analysis_plan") or {}).get("scripts", [])
+    mc_dir = Path(project_dir) / "09_Literature_Database" / "method_cards"
+    for s in scripts:
+        if isinstance(s, str):
+            return False, (f"L6 script {s!r} is a bare string; must be an object with "
+                           f"grounding/branch_id/data_modality")
+        g = s.get("grounding") or {}
+        gtype = g.get("type")
+        if gtype == "method_card":
+            ids = g.get("method_card_ids", []) or []
+            if not ids or not all((mc_dir / f"{i}.json").exists() for i in ids):
+                return False, f"L6 script {s.get('name')!r}: method_card grounding refs missing cards"
+        elif gtype == "internal_critique":
+            ref = g.get("critique_delta_ref", "")
+            if not _critique_ref_valid(project_dir, cand_id, ref):
+                return False, f"L6 script {s.get('name')!r}: critique_delta_ref {ref!r} not found"
+        elif gtype == "prior_reuse":
+            if not g.get("reused_from"):
+                return False, f"L6 script {s.get('name')!r}: prior_reuse missing reused_from"
+        else:
+            return False, (f"L6 script {s.get('name')!r}: grounding.type must be one of "
+                           f"method_card|internal_critique|prior_reuse")
+        if not s.get("branch_id"):
+            return False, f"L6 script {s.get('name')!r}: missing branch_id"
     return True, ""
 
 
