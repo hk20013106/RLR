@@ -228,6 +228,9 @@ def test_l0_memory_gate_rejects_hash_mismatch(tmp_path):
 # --- Task 4 -----------------------------------------------------------------
 
 def _aca():
+    rl_dir = str(Path(RL).resolve().parent)
+    if rl_dir not in sys.path:
+        sys.path.insert(0, rl_dir)
     import ars_card_adapter as aca
     return aca
 

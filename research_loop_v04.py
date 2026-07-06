@@ -2779,6 +2779,12 @@ def cmd_emit_delta(args):
         if not ok_mem:
             errors.append(f"prior_loop_memory gate: {mem_reason}")
 
+    # v0.6: L4 method-card grounding gate (no-op for legacy candidates)
+    if args.node == "L4":
+        ok_m, m_reason = _audit_l4_methods(project_dir, args.cand_id, data)
+        if not ok_m:
+            errors.append(m_reason)
+
     declared_candidate = data.get("candidate_id")
     if (declared_candidate is not None
             and str(declared_candidate) != str(args.cand_id)):
@@ -4058,6 +4064,35 @@ def _audit_divergence(project_dir, node_id, cand_id):
     if len(new) < need:
         return False, (f"divergence gate: only {len(new)} new query families "
                        f"(need >= {need}); reused={sorted(fams & cache)}")
+    return True, ""
+
+
+def _audit_l4_methods(project_dir, cand_id, delta):
+    """L4 method gate: for from_memory candidates, every method-dependent script
+    must cite a full_text method_card, unless marked status=internally_motivated."""
+    cf = _candidate_file(project_dir, cand_id)
+    fm = _load_yaml_front(cf) if cf and cf.exists() else {}
+    if not fm.get("from_memory"):
+        return True, ""
+    mc_dir = Path(project_dir) / "09_Literature_Database" / "method_cards"
+
+    def _is_fulltext(mc_id):
+        p = mc_dir / f"{mc_id}.json"
+        if not p.exists():
+            return False
+        try:
+            return json.loads(p.read_text(encoding="utf-8")).get("extracted_from") == "full_text"
+        except Exception:
+            return False
+
+    for s in delta.get("scripts_needed", []):
+        if s.get("status") == "internally_motivated":
+            continue
+        ids = s.get("grounded_in_method_card_ids", []) or []
+        if not any(_is_fulltext(i) for i in ids):
+            return False, (f"L4 script {s.get('name')!r} is method-dependent but has no "
+                           f"full_text method_card (ids={ids}); add one or mark status "
+                           f"'internally_motivated'")
     return True, ""
 
 
