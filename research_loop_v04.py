@@ -95,7 +95,9 @@ VALID_STATUSES = [
 #            action_hint
 
 
-LIT_RUNTIME_DIGEST_TOKEN_BUDGET = 1000
+from research_loop.preresearch import (  # inward shim (Phase 3a)
+    LIT_RUNTIME_DIGEST_TOKEN_BUDGET, _LIT_PRE_RESEARCH_TYPES, _DOI_PMID_URL_RE, _runtime_digest_budget_error, _extract_section, _estimate_tokens,
+)
 
 
 # Map: node_id -> node dict
@@ -463,18 +465,8 @@ def _slug(s):
 # and the budget-0 archived-only verification (L8.5) keep their prior soft
 # behaviour (their pre-research is not inlined, so a hard gate there would break
 # execution-context assembly without adding deep-research safety).
-_LIT_PRE_RESEARCH_TYPES = {"deep_research", "literature_review"}
-_DOI_PMID_URL_RE = re.compile(
-    r"(10\.\d{4,9}/\S+|PMID:?\s*\d+|https?://\S+)", re.IGNORECASE)
 
 
-def _runtime_digest_budget_error(estimated_tokens, budget):
-    return (
-        f"Runtime digest estimated at {estimated_tokens} tokens exceeds "
-        f"configured budget {budget}; compress `## Runtime digest` with a "
-        "provenance-preserving compressor such as caveman or host-agent "
-        "compression; preserve Query log, Tool receipt, Source count, and all "
-        "DOI/PMID/URL identifiers.")
 
 
 def _validate_pre_research_content(text, pr_cfg):
@@ -590,52 +582,11 @@ def _next_seq(project_dir, prefix):
                 n = max(n, int(m.group(1)))
     return n + 1
 
-def _yaml_value(v):
-    """Render a scalar value as a safe single-line YAML string."""
-    if v is None:
-        v = ""
-    v = str(v).replace("\n", " ").strip()
-    if v == "" or re.search(r"[:#{}\[\],&*!|>'\"%@`]|^-| $", v):
-        return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
-    return v
+from research_loop.yamlio import (  # inward shim (Phase 3a)
+    _yaml_value, _load_yaml_front, _replace_field,
+)
 
-def _load_yaml_front(path):
-    if not path.exists():
-        return {}
-    text = path.read_text(encoding="utf-8")
-    if not text.startswith("---"):
-        return {}
-    end = text.find("\n---", 4)
-    if end < 0:
-        return {}
-    block = text[4:end]
-    out = {}
-    for line in block.splitlines():
-        if ":" in line:
-            k, _, v = line.partition(":")
-            v = v.strip()
-            if len(v) >= 2 and v[0] == chr(34) and v[-1] == chr(34):
-                v = v[1:-1].replace(chr(92)+chr(34), chr(34)).replace(chr(92)*2, chr(92))
-            out[k.strip()] = v
-    return out
 
-def _replace_field(path, key, value):
-    text = path.read_text(encoding="utf-8")
-    # Fail loud if the file has no YAML frontmatter: otherwise neither the regex
-    # nor the "---\n" fallback below matches, and the field update is silently
-    # dropped (the candidate keeps a stale status with no error). A missing
-    # frontmatter means the file is corrupted -- surface it.
-    if not text.startswith("---") or text.find("\n---", 4) < 0:
-        raise RLRError(
-            f"{path}: missing YAML frontmatter delimiters; refusing to update "
-            f"'{key}' (file may be corrupted or truncated)")
-    pat = re.compile(rf"^{re.escape(key)}: .*$", re.M)
-    new = f"{key}: {_yaml_value(value)}"
-    if pat.search(text):
-        text = pat.sub(lambda m: new, text, count=1)
-    else:
-        text = text.replace("---\n", "---\n" + new + "\n", 1)
-    path.write_text(text, encoding="utf-8")
 
 def strip_candidate_to_frontmatter(candidate_path, include_source_path=False):
     """Read a candidate .md, return only frontmatter dict (not body).
@@ -2023,24 +1974,8 @@ def cmd_assemble_context(args):
     return 0
 
 
-def _extract_section(text, heading):
-    # Extract a markdown section by heading. Returns section text or empty str.
-    pattern = f"\n## {heading}"
-    idx = text.find(f"## {heading}")
-    if idx == -1:
-        return ""
-    start = idx + len(f"## {heading}")
-    # Find next ## heading after this section
-    rest = text[start:]
-    next_h2 = rest.find("\n## ")
-    if next_h2 == -1:
-        return rest.strip()
-    return rest[:next_h2].strip()
 
 
-def _estimate_tokens(text):
-    # Rough token estimate: 1 token ~= 4 characters.
-    return max(1, len(text) // 4)
 
 
 def _caveman_required_literals(text, extra=None):
@@ -3503,45 +3438,17 @@ SEED_SCHEMA_KEYS = [
 ]
 
 
-def _branch_ledger_path(project_dir, cand_id):
-    return Path(project_dir) / "08_Audit" / "branch_ledger" / f"{cand_id}.json"
+from research_loop.ledger import (  # inward shim (Phase 3a)
+    _branch_ledger_path, _read_branch_ledger, _modality_ledger_path, _read_modality_ledger, _prior_unexplored_ids,
+)
 
 
-def _read_branch_ledger(project_dir, cand_id):
-    p = _branch_ledger_path(project_dir, cand_id)
-    if p.exists():
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            return {"branches": []}
-    return {"branches": []}
 
 
-def _modality_ledger_path(project_dir, cand_id):
-    return Path(project_dir) / "08_Audit" / "modality_ledger" / f"{cand_id}.json"
 
 
-def _read_modality_ledger(project_dir, cand_id):
-    p = _modality_ledger_path(project_dir, cand_id)
-    if p.exists():
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            return {"used": [], "available_unused": []}
-    return {"used": [], "available_unused": []}
 
 
-def _prior_unexplored_ids(project_dir, cand_id):
-    cf = _candidate_file(project_dir, cand_id)
-    fm = _load_yaml_front(cf) if cf and cf.exists() else {}
-    mf = fm.get("memory_file")
-    if not mf or not Path(mf).exists():
-        return []
-    try:
-        mem = json.loads(Path(mf).read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    return [b.get("id") for b in mem.get("unexplored_branches", []) if b.get("id")]
 
 
 def _audit_branch_coverage(project_dir, cand_id):
