@@ -53,13 +53,14 @@ import pitfall_ledger as pl  # additive: pitfall ledger (no DAG/schema coupling)
 __version__ = "0.5.0"
 
 
-class RLRError(Exception):
-    """Recoverable, user-facing error: printed cleanly by main(), no traceback."""
+from research_loop.errors import RLRError  # inward shim (Phase 1a)
 
 # --- personas ---------------------------------------------------------------
 
-AGENTS = ["Linnaeus", "Einstein", "Feynman", "Oppenheimer", "Fisher",
-          "Tukey", "Turing", "Curie", "Darwin", "Jobs"]
+from research_loop.topology import (  # inward shim (Phase 1a)
+    AGENTS, DECISION_TRANSITIONS, DAG_NODES, NODE_MAP,
+    DAG_SEQUENCE, DELTA_DAG_ORDER,
+)
 
 PERSONA_TITLE = {
     "Linnaeus": "Catalog Master",
@@ -87,219 +88,12 @@ VALID_STATUSES = [
 # ARCHIVED are always allowed; any other transition not listed here requires
 # `decision --force` (so KEEP-from-NEW and similar jumps fail by default while
 # manual recovery stays possible).
-DECISION_TRANSITIONS = {
-    "NEW": {"IDEA_PROPOSED"},
-    "IDEA_PROPOSED": {"IDEA_SELECTED", "IDEA_REJECTED", "DROP"},
-    "IDEA_SELECTED": {"METHOD_PROPOSED"},
-    "IDEA_REJECTED": {"DROP"},
-    "METHOD_PROPOSED": {"METHOD_APPROVED", "METHOD_REJECTED", "DROP"},
-    "METHOD_REJECTED": {"IDEA_SELECTED", "METHOD_PROPOSED", "DROP"},
-    "METHOD_APPROVED": {"NEEDS_EXECUTION"},
-    "NEEDS_EXECUTION": {"EXECUTED"},
-    "EXECUTED": {"AUDITED"},
-    "AUDITED": {"UNDER_REVIEW"},
-    "UNDER_REVIEW": {"KEEP", "REVISE", "DOWNGRADE", "DROP"},
-    "REVISE": {"IDEA_PROPOSED", "METHOD_PROPOSED", "NEEDS_EXECUTION", "UNDER_REVIEW"},
-    "DOWNGRADE": {"DROP"},
-    "KEEP": set(),
-    "DROP": set(),
-    "ARCHIVED": set(),
-}
 
 # --- DAG topology (15 nodes, L9a/L9b parallel) ------------------------------
 # Each node: node_id, persona, status_before, status_after_optional,
 #            context_inputs, is_parallel, is_execution, advance_command,
 #            action_hint
 
-DAG_NODES = [
-    {
-        "node": "L0", "persona": "Linnaeus",
-        "status_before": "NEW", "advance_command": "decision",
-        "must": ["Verify every input from source_input exists and is readable",
-                 "Register each input alias with path/files/format/classification/verified/notes",
-                 "Fill skill_use_plan with real skills, not template placeholders"],
-        "must_not": ["Execute code", "Interpret data", "Change candidate status",
-                     "Leave template placeholders in preflight files"],
-        "stop_conditions": ["Any required dependency missing",
-                            "Any declared input unverified"],
-        "advance_status": "IDEA_PROPOSED", "advance_reason": "Preflight complete, route to Einstein",
-        "context_inputs": ["candidate_frontmatter"],
-        "is_parallel": False, "is_execution": False,
-        "action_hint": "Scan skills inventory, verify input data, create skill_use_plan",
-        "agent_type": "default",
-    },
-    {
-        "node": "L1", "persona": "Einstein",
-        "status_before": "IDEA_PROPOSED", "advance_command": "decision",
-        "advance_status": "IDEA_PROPOSED", "advance_reason": "Einstein hypotheses generated, route to Feynman",
-        "context_inputs": ["candidate_frontmatter", "L0"],
-        "is_parallel": False, "is_execution": False,
-        "pre_research": "deep_research",
-        "action_hint": "Generate scientific hypotheses about the research question",
-        "must": ["Generate testable scientific hypotheses from candidate question and pre-research results", "Each hypothesis must have: id, text, testable, rationale, cn"],
-        "must_not": ["Execute code", "Change candidate status", "Design analysis methods"],
-        "stop_conditions": ["No testable hypothesis generated"],
-        "agent_type": "default",
-    },
-    {
-        "node": "L2", "persona": "Feynman",
-        "status_before": "IDEA_PROPOSED", "advance_command": "decision",
-        "advance_status": "IDEA_PROPOSED", "advance_reason": "Feynman falsification complete, route to Oppenheimer",
-        "context_inputs": ["candidate_frontmatter", "L1"],
-        "is_parallel": False, "is_execution": False,
-        "action_hint": "Blind-review and attack the L1 hypotheses",
-        "must": ["Blind-review every L1 hypothesis", "Identify confounders and diagnostic tests", "Rate each attack by severity"],
-        "must_not": ["Execute code", "Change candidate status", "Soft-pedal criticism"],
-        "stop_conditions": ["No attacks generated"],
-        "agent_type": "default",
-    },
-    {
-        "node": "L3", "persona": "Oppenheimer",
-        "status_before": "IDEA_PROPOSED", "advance_command": "triage-idea",
-        "advance_status": "IDEA_SELECTED", "advance_reason": "",
-        "context_inputs": ["L1", "L2"],
-        "is_parallel": False, "is_execution": False,
-        "action_hint": "Triage hypotheses: select testable ones, reject weak ones",
-        "must": ["Select testable hypotheses from L1/L2 debate", "Reject weak ones with reason"],
-        "must_not": ["Execute code", "Act on unverified deltas"],
-        "stop_conditions": ["No hypotheses selected"],
-        "agent_type": "default",
-    },
-    {
-        "node": "L4", "persona": "Fisher",
-        "status_before": "IDEA_SELECTED", "advance_command": "decision",
-        "advance_status": "METHOD_PROPOSED", "advance_reason": "Fisher method design complete, route to Tukey",
-        "context_inputs": ["L1", "L3", "L2"],
-        "is_parallel": False, "is_execution": False,
-        "pre_research": "literature_review",
-        "action_hint": "Design experimental/analysis strategies",
-        "must": ["Design experimental strategies for selected hypotheses", "Reuse existing skills and code patterns", "Define scripts_needed list with purpose"],
-        "must_not": ["Execute code", "Change candidate status", "Design without reading L1/L3"],
-        "stop_conditions": ["No strategy defined"],
-        "agent_type": "default",
-    },
-    {
-        "node": "L5", "persona": "Tukey",
-        "status_before": "METHOD_PROPOSED", "advance_command": "decision",
-        "advance_status": "METHOD_PROPOSED", "advance_reason": "Tukey QC review complete, route to Oppenheimer",
-        "context_inputs": ["L4", "L2"],
-        "is_parallel": False, "is_execution": False,
-        "action_hint": "Critique the method design from EDA/QC perspective",
-        "must": ["Critique L4 method design from EDA/QC perspective", "Define QC checkpoints and failure stop rules"],
-        "must_not": ["Execute code", "Change candidate status"],
-        "stop_conditions": ["No QC checkpoints defined"],
-        "agent_type": "default",
-    },
-    {
-        "node": "L6", "persona": "Oppenheimer",
-        "status_before": "METHOD_PROPOSED", "advance_command": "triage-method",
-        "advance_status": "METHOD_APPROVED", "advance_reason": "",
-        "context_inputs": ["L4", "L5"],
-        "is_parallel": False, "is_execution": False,
-        "action_hint": "Approve or reject the analysis plan",
-        "must": ["Approve or reject the analysis plan", "Record modifications and reason"],
-        "must_not": ["Execute code", "Approve without reading L4/L5"],
-        "stop_conditions": ["No approved_strategy"],
-        "agent_type": "default",
-    },
-    {
-        "node": "L7", "persona": "Turing",
-        "status_before": "METHOD_APPROVED", "advance_command": "execution-gate",
-        "advance_status": "NEEDS_EXECUTION", "advance_reason": "",
-        "context_inputs": ["L6", "L0"],
-        "is_parallel": False, "is_execution": True,
-        "pre_research": "code_search",
-        "action_hint": "Execute approved scripts in controlled workspace",
-        "must": ["Execute ONLY scripts in approved analysis_plan", "Run in prepared Turing workspace ONLY", "Record exit_code and output_files"],
-        "must_not": ["Execute unapproved scripts", "Access files outside workspace", "Change status"],
-        "stop_conditions": ["Any script fails"],
-        "agent_type": "worker",
-    },
-    {
-        "node": "L8", "persona": "Curie",
-        "status_before": "EXECUTED", "advance_command": "decision",
-        "advance_status": "AUDITED", "advance_reason": "Curie evidence audit complete, route to literature verification",
-        "context_inputs": ["L7", "L6", "candidate_frontmatter"],
-        "is_parallel": False, "is_execution": False,
-        "action_hint": "Audit execution results, verify reproducibility, assign evidence level",
-        "must": ["Verify every output file L7 claims", "Assign evidence_level", "Audit reproducibility"],
-        "must_not": ["Execute code", "Change status", "Trust without verification"],
-        "stop_conditions": ["Key output files missing"],
-        "agent_type": "default",
-    },
-    {
-        "node": "L8.5", "persona": "Curie",
-        "status_before": "AUDITED", "advance_command": "decision",
-        "advance_status": "UNDER_REVIEW", "advance_reason": "L8.5 literature verification complete, route to review",
-        "context_inputs": ["L7", "L8", "candidate_frontmatter"],
-        "is_parallel": False, "is_execution": False,
-        "action_hint": "Search PubMed/EuropePMC based on L7/L8 actual results to verify findings",
-        "must": ["Search PubMed based on L7/L8 results", "Add verified papers to knowledge base", "Cite real PMIDs/DOIs"],
-        "must_not": ["Fabricate citations", "Change status"],
-        "stop_conditions": ["No real papers found"],
-        "agent_type": "default",
-    },
-    {
-        "node": "L9a", "persona": "Feynman",
-        "status_before": "UNDER_REVIEW", "advance_command": "decision",
-        "advance_status": "UNDER_REVIEW", "advance_reason": "L9a falsification complete",
-        "context_inputs": ["L1", "L7", "L8", "L8.5"],
-        "is_parallel": True, "is_execution": False,
-        "action_hint": "Hard falsification of results from statistical/logical completeness",
-        "must": ["Hard-falsify results from statistical/logical completeness", "Identify risks, surviving claims, falsified claims"],
-        "must_not": ["Execute code", "Change status", "Influenced by L9b"],
-        "stop_conditions": ["No falsification analysis"],
-        "agent_type": "default",
-    },
-    {
-        "node": "L9b", "persona": "Darwin",
-        "status_before": "UNDER_REVIEW", "advance_command": None,
-        "advance_status": None, "advance_reason": None,
-        "context_inputs": ["L1", "L7", "L8", "L8.5"],
-        "is_parallel": True, "is_execution": False,
-        "action_hint": "Biological interpretation of results",
-        "must": ["Interpret results from biological perspective", "Ground every interpretation in evidence"],
-        "must_not": ["Execute code", "Change status", "Influenced by L9a"],
-        "stop_conditions": ["No interpretations"],
-        "agent_type": "default",
-    },
-    {
-        "node": "L10a", "persona": "Jobs",
-        "status_before": "UNDER_REVIEW", "advance_command": "decision",
-        "advance_status": "UNDER_REVIEW", "advance_reason": "Jobs value assessment complete",
-        "context_inputs": ["candidate_frontmatter", "L8", "L8.5", "L9a", "L9b"],
-        "is_parallel": False, "is_execution": False,
-        "action_hint": "Assess value, frame manuscript direction",
-        "must": ["Assess scientific value and manuscript potential", "Frame manuscript direction", "Be honest about limitations"],
-        "must_not": ["Execute code", "Change status", "Overhype weak results"],
-        "stop_conditions": ["No value_assessment"],
-        "agent_type": "default",
-    },
-    {
-        "node": "L10b", "persona": "Oppenheimer",
-        "status_before": "UNDER_REVIEW", "advance_command": "decision",
-        "advance_status": "KEEP", "advance_reason": "",
-        "context_inputs": ["L10a", "L8", "L8.5", "L9a", "L9b"],
-        "is_parallel": False, "is_execution": False,
-        "action_hint": "Final decision: KEEP / REVISE / DOWNGRADE / DROP",
-        "must": ["Make final decision: KEEP/REVISE/DOWNGRADE/DROP", "Reason must reference L8/L8.5/L9a/L9b"],
-        "must_not": ["Execute code", "Decide without reading all inputs"],
-        "stop_conditions": ["No final_decision"],
-        "agent_type": "default",
-    },
-    {
-        "node": "L10c", "persona": "Linnaeus",
-        "status_before": "KEEP", "advance_command": "aggregate-report",
-        "advance_status": None, "advance_reason": None,
-        "context_inputs": ["ALL"],
-        "is_parallel": False, "is_execution": False,
-        "action_hint": "Aggregate all deltas into FINAL_REPORT",
-        "must": ["Aggregate all deltas in DAG order", "Generate FINAL_REPORT.md and FINAL_REPORT_CN.md"],
-        "must_not": ["Execute code", "Change status", "Skip any delta"],
-        "stop_conditions": ["Any delta missing"],
-        "agent_type": "default",
-    },
-]
 
 LIT_RUNTIME_DIGEST_TOKEN_BUDGET = 1000
 
@@ -345,7 +139,6 @@ PRE_RESEARCH_MAP = {
              ]},
 }
 
-NODE_MAP = {n["node"]: n for n in DAG_NODES}
 
 # Per-node access to the external KNOWLEDGE BASE (09_Literature_Database/).
 # Declared explicitly (not derivable -- it is a policy choice):
@@ -392,8 +185,6 @@ for _n in DAG_NODES:
 del _n
 
 # Order of single-path nodes (L9a and L9b are parallel, listed together)
-DAG_SEQUENCE = ["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L8.5",
-                "L9_parallel", "L10a", "L10b", "L10c"]
 
 # Map: node_id -> layer template filename on disk. The files are named
 # descriptively (e.g. L7_execution.md), not L7.md, so next-step must map the
@@ -517,12 +308,6 @@ DELTA_PERSONA = {
 }
 
 # DAG order for reading deltas in aggregate-report
-DELTA_DAG_ORDER = [
-    "L0_linnaeus", "L1_einstein", "L2_feynman", "L3_oppenheimer",
-    "L4_fisher", "L5_tukey", "L6_oppenheimer", "L7_turing",
-    "L8_curie", "L8.5_curie", "L9a_feynman", "L9b_darwin",
-    "L10a_jobs", "L10b_oppenheimer",
-]
 
 FINAL_STATUSES = {"KEEP", "REVISE", "DOWNGRADE", "DROP", "ARCHIVED"}
 
