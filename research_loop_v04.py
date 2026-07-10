@@ -62,18 +62,9 @@ from research_loop.topology import (  # inward shim (Phase 1a)
     DAG_SEQUENCE, DELTA_DAG_ORDER,
 )
 
-PERSONA_TITLE = {
-    "Linnaeus": "Catalog Master",
-    "Einstein": "Conceptual Explorer",
-    "Feynman": "Reality Checker",
-    "Oppenheimer": "Cold Director",
-    "Fisher": "Design Architect",
-    "Tukey": "EDA Scout",
-    "Turing": "Execution Engine",
-    "Curie": "Evidence Auditor",
-    "Darwin": "Evolutionary Biologist",
-    "Jobs": "Story Strategist",
-}
+from research_loop.common import (  # inward shim (Phase 2b-1)
+    PERSONA_TITLE, _now, _stamp, _input_alias, _everos_scopes_for,
+)
 
 VALID_STATUSES = [
     "NEW", "IDEA_PROPOSED", "IDEA_REJECTED", "IDEA_SELECTED",
@@ -101,45 +92,7 @@ from research_loop.preresearch import (  # inward shim (Phase 3a)
 
 
 # Map: node_id -> node dict
-PRE_RESEARCH_MAP = {
-    "L1": {"budget": LIT_RUNTIME_DIGEST_TOKEN_BUDGET,
-           "type": "deep_research", "skill": "academic-research-suite",
-           "description": "Search literature for convergent evolution, cardiac co-expression, high heart rate adaptation",
-           "queries": [
-               "convergent evolution cardiac gene expression high heart rate",
-               "co-expression modules WGCNA cross-species heart",
-               "molecular convergence bat shrew cardiac adaptation",
-               "module eigengene species trait correlation heart rate",
-           ]},
-    "L4": {"budget": LIT_RUNTIME_DIGEST_TOKEN_BUDGET,
-           "type": "literature_review", "skill": "academic-research-suite",
-           "description": "Search methodology papers: WGCNA cross-species, module preservation, convergent transcriptomics",
-           "queries": [
-               "WGCNA module preservation cross-species Zsummary",
-               "module trait correlation WGCNA cardiac tissue",
-               "gene set enrichment GSEA ranked kME WGCNA",
-               "signed vs unsigned WGCNA network cardiac",
-               "module preservation statistics Zsummary medianRank",
-           ]},
-    "L7": {"budget": 0, "type": "code_search", "skill": "github-search",
-           "description": "Search GitHub/Bioconductor for WGCNA pipelines, GSEA wrappers, ECM score tools",
-           "queries": [
-               "WGCNA pipeline R script cross-species module preservation",
-               "clusterProfiler GSEA kME ranked gene list R",
-               "ECM extracellular matrix score gene set R",
-               "WGCNA signed network soft threshold power R",
-           ]},
-    "L8.5": {"budget": 0, "type": "literature_verification", "skill": "academic-research-suite",
-             "description": "Search PubMed/EuropePMC for papers that CONFIRM or "
-                            "CONTRADICT the actual L7/L8 findings (grounded in the "
-                            "real results, not just the question)",
-             "queries": [
-                 "cardiac gene expression co-expression module cross-species",
-                 "convergent evolution heart rate adaptation molecular mechanisms",
-                 "WGCNA module preservation validation cross-species transcriptomics",
-                 "bat shrew cardiac transcriptome comparative genomics",
-             ]},
-}
+from research_loop.preresearch import PRE_RESEARCH_MAP  # inward shim (Phase 2b-1)
 
 
 # Per-node access to the external KNOWLEDGE BASE (09_Literature_Database/).
@@ -434,11 +387,7 @@ LAYERS = [
 
 # --- small helpers ----------------------------------------------------------
 
-def _now():
-    return _dt.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
-def _stamp():
-    return _dt.datetime.now().strftime("%Y%m%d%H%M%S%f")
 
 def _slug(s):
     s = s.strip().lower()
@@ -488,21 +437,7 @@ from research_loop.gates import (  # inward shim (Phase 3b)
 
 
 
-def _input_alias(source_input):
-    """Path-free alias for a source_input description: directory parts of any
-    path-like token are dropped, keeping only file/basename + free text. Lets
-    cognitive nodes see *what* the inputs are without the raw filesystem layout.
-    """
-    if not source_input:
-        return ""
-    return re.sub(r"\S*[\\/]\S*",
-                  lambda m: re.split(r"[\\/]", m.group(0).rstrip("\\/"))[-1],
-                  source_input)
 
-def _everos_scopes_for(node_info, project_id):
-    """Concrete EverOS read scopes for a node (declared, not enforced here)."""
-    return [s.replace("<id>", project_id)
-            for s in node_info.get("everos_read_scopes", [])]
 
 def _next_seq(project_dir, prefix):
     d = Path(project_dir) / "05_Decision_Log"

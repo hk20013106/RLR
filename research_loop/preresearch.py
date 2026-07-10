@@ -129,3 +129,44 @@ def _merge_query_family_cache(project_dir, families):
     existing = _load_query_family_cache(project_dir)
     existing |= {f for f in families if f}
     p.write_text(json.dumps({"families": sorted(existing)}, indent=2), encoding="utf-8")
+
+
+PRE_RESEARCH_MAP = {
+    "L1": {"budget": LIT_RUNTIME_DIGEST_TOKEN_BUDGET,
+           "type": "deep_research", "skill": "academic-research-suite",
+           "description": "Search literature for convergent evolution, cardiac co-expression, high heart rate adaptation",
+           "queries": [
+               "convergent evolution cardiac gene expression high heart rate",
+               "co-expression modules WGCNA cross-species heart",
+               "molecular convergence bat shrew cardiac adaptation",
+               "module eigengene species trait correlation heart rate",
+           ]},
+    "L4": {"budget": LIT_RUNTIME_DIGEST_TOKEN_BUDGET,
+           "type": "literature_review", "skill": "academic-research-suite",
+           "description": "Search methodology papers: WGCNA cross-species, module preservation, convergent transcriptomics",
+           "queries": [
+               "WGCNA module preservation cross-species Zsummary",
+               "module trait correlation WGCNA cardiac tissue",
+               "gene set enrichment GSEA ranked kME WGCNA",
+               "signed vs unsigned WGCNA network cardiac",
+               "module preservation statistics Zsummary medianRank",
+           ]},
+    "L7": {"budget": 0, "type": "code_search", "skill": "github-search",
+           "description": "Search GitHub/Bioconductor for WGCNA pipelines, GSEA wrappers, ECM score tools",
+           "queries": [
+               "WGCNA pipeline R script cross-species module preservation",
+               "clusterProfiler GSEA kME ranked gene list R",
+               "ECM extracellular matrix score gene set R",
+               "WGCNA signed network soft threshold power R",
+           ]},
+    "L8.5": {"budget": 0, "type": "literature_verification", "skill": "academic-research-suite",
+             "description": "Search PubMed/EuropePMC for papers that CONFIRM or "
+                            "CONTRADICT the actual L7/L8 findings (grounded in the "
+                            "real results, not just the question)",
+             "queries": [
+                 "cardiac gene expression co-expression module cross-species",
+                 "convergent evolution heart rate adaptation molecular mechanisms",
+                 "WGCNA module preservation validation cross-species transcriptomics",
+                 "bat shrew cardiac transcriptome comparative genomics",
+             ]},
+}
