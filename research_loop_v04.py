@@ -469,51 +469,14 @@ def _slug(s):
 
 
 
-def _validate_pre_research_content(text, pr_cfg):
-    """Validate content of a pre-research artifact. Returns (ok, reason)."""
-    if "NOT YET RUN" in text:
-        return False, "artifact is the NOT YET RUN placeholder"
-    if not text.strip():
-        return False, "artifact is empty"
-    if pr_cfg.get("type") in _LIT_PRE_RESEARCH_TYPES:
-        digest = _extract_section(text, "Runtime digest")
-        if not digest:
-            return False, "missing required `## Runtime digest` section"
-        if not _DOI_PMID_URL_RE.search(digest):
-            return False, "Runtime digest carries no DOI/PMID/URL identifier"
-        estimated_tokens = _estimate_tokens(digest)
-        if estimated_tokens > LIT_RUNTIME_DIGEST_TOKEN_BUDGET:
-            return False, _runtime_digest_budget_error(
-                estimated_tokens, LIT_RUNTIME_DIGEST_TOKEN_BUDGET)
-        # V0.6 (PR2): reviewable provenance is mandatory for literature nodes.
-        prov = _parse_pre_research_provenance(text)
-        if not prov["query_log"]:
-            return False, ("missing or empty `## Query log` -- record the actual "
-                           "queries issued (including 0-result ones)")
-        if not prov["tool_receipt"]:
-            return False, ("missing or empty `## Tool receipt` -- record each "
-                           "tool call (name, timestamp, return summary)")
-        if not prov["source_count_declared"]:
-            return False, ("missing `## Source count` section -- it must be "
-                           "stated explicitly (not inferred)")
-        if prov["source_count"] < 1:
-            return False, "`## Source count` is < 1 (no sources retrieved)"
-    return True, ""
+from research_loop.preresearch import (  # inward shim (Phase 3b)
+    _validate_pre_research_content, _parse_section_bullets, _parse_pre_research_provenance, _QF_STOP, _query_family_key, _load_query_family_cache, _merge_query_family_cache,
+)
 
 
-def _audit_pre_research(project_dir, node_id, pr_cfg):
-    """V0.5 deep-research gate. Returns (ok, reason).
-
-    Fails closed when the pre-research artifact is missing, empty, a NOT YET RUN
-    placeholder, or (for literature nodes) lacks a `## Runtime digest` carrying a
-    DOI/PMID/URL. This is the single enforcement point for the canonical V0.5
-    runtime -- there is no path that treats absent deep research as success.
-    """
-    prf = _pre_research_file(project_dir, node_id)
-    if not prf.exists():
-        return False, f"artifact missing ({prf.as_posix()})"
-    text = prf.read_text(encoding="utf-8", errors="replace")
-    return _validate_pre_research_content(text, pr_cfg)
+from research_loop.gates import (  # inward shim (Phase 3b)
+    _audit_pre_research, _audit_branch_coverage, DIVERGENCE_MIN_NEW_QUERY_FAMILIES, _audit_divergence, _audit_l10_traceability, _l6_script_branches, _audit_l7_manifest, _critique_ref_valid, _audit_l6_traceability, _audit_l4_methods, _audit_l0_memory,
+)
 
 
 # V0.6 pre-research provenance ------------------------------------------------
@@ -521,39 +484,8 @@ def _audit_pre_research(project_dir, node_id, pr_cfg):
 # reviewable: which queries were issued, which tools ran, and how many sources
 # were found. PR1 only PARSES + PERSISTS these (into the context manifest); the
 # gate that ENFORCES them lands in PR2 -- this function does not judge.
-def _parse_section_bullets(text, heading):
-    """Return the '- '/'* ' bullet items under a `## <heading>` section."""
-    bullets = []
-    for raw in _extract_section(text, heading).splitlines():
-        line = raw.strip()
-        if line.startswith(("- ", "* ")):
-            item = line[2:].strip()
-            if item:
-                bullets.append(item)
-    return bullets
 
 
-def _parse_pre_research_provenance(text):
-    """Extract V0.6 provenance from a pre-research artifact. Never raises.
-
-    Returns {query_log, tool_receipt, source_count, source_count_declared}.
-    Missing sections yield empty/0; if `## Source count` is absent the count
-    falls back to distinct DOI/PMID/URL identifiers in the Runtime digest."""
-    declared = _extract_section(text, "Source count")
-    m = re.search(r"-?\d+", declared)
-    if m:
-        source_count = max(0, int(m.group()))
-        source_count_declared = True
-    else:
-        digest = _extract_section(text, "Runtime digest")
-        source_count = len(set(_DOI_PMID_URL_RE.findall(digest)))
-        source_count_declared = False
-    return {
-        "query_log": _parse_section_bullets(text, "Query log"),
-        "tool_receipt": _parse_section_bullets(text, "Tool receipt"),
-        "source_count": source_count,
-        "source_count_declared": source_count_declared,
-    }
 
 
 def _input_alias(source_input):
@@ -3451,20 +3383,6 @@ from research_loop.ledger import (  # inward shim (Phase 3a)
 
 
 
-def _audit_branch_coverage(project_dir, cand_id):
-    """Every prior unexplored branch must be statused in this candidate's ledger.
-    Hard-fails only for from_memory + loop_type=divergent."""
-    cf = _candidate_file(project_dir, cand_id)
-    fm = _load_yaml_front(cf) if cf and cf.exists() else {}
-    if not fm.get("from_memory") or fm.get("loop_type") != "divergent":
-        return True, ""
-    prior = set(_prior_unexplored_ids(project_dir, cand_id))
-    have = {b.get("id"): b.get("status")
-            for b in _read_branch_ledger(project_dir, cand_id).get("branches", [])}
-    missing = [b for b in prior if not have.get(b)]
-    if missing:
-        return False, f"branch gate: prior unexplored branches not statused: {sorted(missing)}"
-    return True, ""
 
 
 def _list_card_ids(project_dir, cand_id, sub):
@@ -3514,118 +3432,20 @@ def _build_loop_memory(project_dir, cand_id):
     }
 
 
-DIVERGENCE_MIN_NEW_QUERY_FAMILIES = 2
-_QF_STOP = {"the", "a", "an", "of", "in", "and", "or", "vs", "for", "to", "on", "is", "do"}
 
 
-def _query_family_key(q):
-    """Normalize a query string to a family key: lowercased, de-punctuated,
-    stop-words removed, sorted unique tokens."""
-    toks = [t for t in re.sub(r"[^a-z0-9 ]", " ", q.lower()).split()
-            if t and t not in _QF_STOP]
-    return " ".join(sorted(set(toks)))
 
 
-def _load_query_family_cache(project_dir):
-    p = Path(project_dir) / "09_Literature_Database" / "query_families.json"
-    if p.exists():
-        try:
-            return set(json.loads(p.read_text(encoding="utf-8")).get("families", []))
-        except Exception:
-            return set()
-    return set()
 
 
-def _merge_query_family_cache(project_dir, families):
-    p = Path(project_dir) / "09_Literature_Database" / "query_families.json"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    existing = _load_query_family_cache(project_dir)
-    existing |= {f for f in families if f}
-    p.write_text(json.dumps({"families": sorted(existing)}, indent=2), encoding="utf-8")
 
 
-def _audit_divergence(project_dir, node_id, cand_id):
-    """L1 divergence gate. Hard-fails only for from_memory + loop_type=divergent.
-    Requires >= DIVERGENCE_MIN_NEW_QUERY_FAMILIES query families not already in the
-    cache, and rejects a pre-research artifact that predates candidate creation."""
-    project_dir = Path(project_dir)
-    cf = _candidate_file(project_dir, cand_id)
-    fm = _load_yaml_front(cf) if cf and cf.exists() else {}
-    if not fm.get("from_memory"):
-        return True, ""
-    if fm.get("loop_type") != "divergent":
-        return True, ""  # correction / data-acquisition bypass the family requirement
-    prf = _pre_research_file(project_dir, node_id)
-    if not prf.exists():
-        return False, f"divergence gate: pre-research artifact missing for {node_id}"
-    created = fm.get("created_at", "")
-    try:
-        if created:
-            ct = _dt.datetime.fromisoformat(created).timestamp()
-            if prf.stat().st_mtime < ct:
-                return False, ("divergence gate: pre-research artifact predates candidate "
-                               "creation (stale reuse)")
-    except Exception:
-        pass
-    prov = _parse_pre_research_provenance(prf.read_text(encoding="utf-8"))
-    fams = {_query_family_key(q) for q in prov.get("query_log", []) if q.strip()}
-    cache = {_query_family_key(q) for q in _load_query_family_cache(project_dir)}
-    new = {f for f in fams if f and f not in cache}
-    need = DIVERGENCE_MIN_NEW_QUERY_FAMILIES
-    if len(new) < need:
-        return False, (f"divergence gate: only {len(new)} new query families "
-                       f"(need >= {need}); reused={sorted(fams & cache)}")
-    return True, ""
 
 
-def _audit_l10_traceability(project_dir, cand_id, delta):
-    """L10b gate: for from_memory candidates, the decision must state whether
-    literature changed direction and carry a decision_grounding block."""
-    cf = _candidate_file(project_dir, cand_id)
-    fm = _load_yaml_front(cf) if cf and cf.exists() else {}
-    if not fm.get("from_memory"):
-        return True, ""
-    if "literature_changed_direction" not in delta:
-        return False, "L10b must state `literature_changed_direction` (bool) explicitly"
-    if not isinstance(delta.get("literature_changed_direction"), bool):
-        return False, "`literature_changed_direction` must be a boolean"
-    dg = delta.get("decision_grounding") or {}
-    for k in ("paper_card_ids", "method_card_ids", "branch_ids"):
-        if k not in dg:
-            return False, f"decision_grounding missing `{k}`"
-    return True, ""
 
 
-def _l6_script_branches(project_dir, cand_id):
-    p = _delta_for_candidate(project_dir, "L6_oppenheimer", cand_id)
-    out = {}
-    if p and p.exists():
-        try:
-            for s in (json.loads(p.read_text(encoding="utf-8")).get("analysis_plan") or {}).get("scripts", []):
-                if isinstance(s, dict) and s.get("name"):
-                    out[s["name"]] = s.get("branch_id")
-        except Exception:
-            pass
-    return out
 
 
-def _audit_l7_manifest(project_dir, cand_id, delta):
-    """L7 gate: for from_memory candidates, every executed script must map to an
-    approved L6 script + a branch_id (consistent with L6's branch)."""
-    cf = _candidate_file(project_dir, cand_id)
-    fm = _load_yaml_front(cf) if cf and cf.exists() else {}
-    if not fm.get("from_memory"):
-        return True, ""
-    l6 = _l6_script_branches(project_dir, cand_id)
-    for s in delta.get("scripts_run", []):
-        name = s.get("name")
-        if not s.get("branch_id"):
-            return False, f"L7 script {name!r}: missing branch_id"
-        if name not in l6:
-            return False, f"L7 script {name!r} not found in approved L6 analysis_plan"
-        if l6[name] and s["branch_id"] != l6[name]:
-            return False, f"L7 script {name!r}: branch_id {s['branch_id']!r} != L6 {l6[name]!r}"
-    return True, ""
 
 
 def _write_exec_manifest(project_dir, cand_id, delta):
@@ -3640,104 +3460,12 @@ def _write_exec_manifest(project_dir, cand_id, delta):
     (d / f"{cand_id}_L7.json").write_text(json.dumps(man, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _critique_ref_valid(project_dir, cand_id, ref):
-    """ref form 'L2_feynman#<idx>' or 'L5_tukey#<idx>' -> must point at a real attack."""
-    try:
-        key, idx = ref.split("#")
-        idx = int(idx)
-    except Exception:
-        return False
-    p = _delta_for_candidate(project_dir, key, cand_id)
-    if not (p and p.exists()):
-        return False
-    try:
-        obj = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    return 0 <= idx < len(obj.get("attacks", []))
 
 
-def _audit_l6_traceability(project_dir, cand_id, delta):
-    """L6 gate: for from_memory candidates, every analysis-plan script must carry a
-    valid grounding (method_card | internal_critique | prior_reuse) and a branch_id."""
-    cf = _candidate_file(project_dir, cand_id)
-    fm = _load_yaml_front(cf) if cf and cf.exists() else {}
-    if not fm.get("from_memory"):
-        return True, ""
-    scripts = (delta.get("analysis_plan") or {}).get("scripts", [])
-    mc_dir = Path(project_dir) / "09_Literature_Database" / "method_cards"
-    for s in scripts:
-        if isinstance(s, str):
-            return False, (f"L6 script {s!r} is a bare string; must be an object with "
-                           f"grounding/branch_id/data_modality")
-        g = s.get("grounding") or {}
-        gtype = g.get("type")
-        if gtype == "method_card":
-            ids = g.get("method_card_ids", []) or []
-            if not ids or not all((mc_dir / f"{i}.json").exists() for i in ids):
-                return False, f"L6 script {s.get('name')!r}: method_card grounding refs missing cards"
-        elif gtype == "internal_critique":
-            ref = g.get("critique_delta_ref", "")
-            if not _critique_ref_valid(project_dir, cand_id, ref):
-                return False, f"L6 script {s.get('name')!r}: critique_delta_ref {ref!r} not found"
-        elif gtype == "prior_reuse":
-            if not g.get("reused_from"):
-                return False, f"L6 script {s.get('name')!r}: prior_reuse missing reused_from"
-        else:
-            return False, (f"L6 script {s.get('name')!r}: grounding.type must be one of "
-                           f"method_card|internal_critique|prior_reuse")
-        if not s.get("branch_id"):
-            return False, f"L6 script {s.get('name')!r}: missing branch_id"
-    return True, ""
 
 
-def _audit_l4_methods(project_dir, cand_id, delta):
-    """L4 method gate: for from_memory candidates, every method-dependent script
-    must cite a full_text method_card, unless marked status=internally_motivated."""
-    cf = _candidate_file(project_dir, cand_id)
-    fm = _load_yaml_front(cf) if cf and cf.exists() else {}
-    if not fm.get("from_memory"):
-        return True, ""
-    mc_dir = Path(project_dir) / "09_Literature_Database" / "method_cards"
-
-    def _is_fulltext(mc_id):
-        p = mc_dir / f"{mc_id}.json"
-        if not p.exists():
-            return False
-        try:
-            return json.loads(p.read_text(encoding="utf-8")).get("extracted_from") == "full_text"
-        except Exception:
-            return False
-
-    for s in delta.get("scripts_needed", []):
-        if s.get("status") == "internally_motivated":
-            continue
-        ids = s.get("grounded_in_method_card_ids", []) or []
-        if not any(_is_fulltext(i) for i in ids):
-            return False, (f"L4 script {s.get('name')!r} is method-dependent but has no "
-                           f"full_text method_card (ids={ids}); add one or mark status "
-                           f"'internally_motivated'")
-    return True, ""
 
 
-def _audit_l0_memory(project_dir, cand_id, delta):
-    """Gate: from_memory candidates must carry a hash-matching prior_loop_memory.
-    No-op for legacy (non-from_memory) candidates."""
-    cf = _candidate_file(project_dir, cand_id)
-    fm = _load_yaml_front(cf) if cf and cf.exists() else {}
-    if not fm.get("from_memory"):
-        return True, ""
-    plm = delta.get("prior_loop_memory")
-    if not plm:
-        return False, "candidate is from_memory but L0 delta lacks `prior_loop_memory`"
-    expected = fm.get("memory_hash", "")
-    if plm.get("memory_hash") != expected:
-        return False, (f"prior_loop_memory.memory_hash mismatch: "
-                       f"delta={plm.get('memory_hash')!r} frontmatter={expected!r}")
-    for req in ("previous_hypothesis", "next_round_hypothesis", "required_new_search_directions"):
-        if not plm.get(req):
-            return False, f"prior_loop_memory missing `{req}`"
-    return True, ""
 
 
 def _loop_memory_to_md(mem):
