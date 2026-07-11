@@ -45,6 +45,7 @@ import hashlib
 import json
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -427,6 +428,7 @@ from research_loop.gates import (  # inward shim (Phase 3b)
     _audit_pre_research, _audit_branch_coverage, DIVERGENCE_MIN_NEW_QUERY_FAMILIES, _audit_divergence, _audit_l10_traceability, _l6_script_branches, _audit_l7_manifest, _critique_ref_valid, _audit_l6_traceability, _audit_l4_methods, _audit_l0_memory, _audit_l0_contract,
 )
 from research_loop import l0_contract
+from research_loop import l0_intake
 
 
 # V0.6 pre-research provenance ------------------------------------------------
@@ -1900,6 +1902,110 @@ def cmd_new_candidate(args):
     return 0
 
 
+def _print_intake_failure(result):
+    print("Cannot create L0 contract.", file=sys.stderr)
+    if result["missing_fields"]:
+        print("Missing required fields:", file=sys.stderr)
+        for field in result["missing_fields"]:
+            print(f"- {field}", file=sys.stderr)
+    if result["errors"]:
+        print("Validation errors:", file=sys.stderr)
+        for error in result["errors"]:
+            print(f"- {error}", file=sys.stderr)
+
+
+def cmd_normalize_l0_input(args):
+    """Normalize a labelled natural-language request into a strict L0 artifact."""
+    project_dir = Path(args.project)
+    if not (project_dir / "00_Project_Index.md").exists():
+        print(f"ERROR: not a project dir (no 00_Project_Index.md): {project_dir}",
+              file=sys.stderr)
+        return 2
+    request_path = Path(args.input)
+    try:
+        request_text = request_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"ERROR: cannot read request file {request_path}: {exc}", file=sys.stderr)
+        return 2
+
+    memory, memory_hash = None, ""
+    if args.from_memory:
+        if not args.loop_type:
+            print("ERROR: --from-memory requires --loop-type", file=sys.stderr)
+            return 2
+        try:
+            memory = _load_loop_memory(args.from_memory)
+            memory_hash = _sha256_file(args.from_memory)
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+
+    cand_id = "C" + _stamp()
+    if _candidate_file(project_dir, cand_id).exists():
+        print(f"ERROR: candidate id collision: {cand_id}", file=sys.stderr)
+        return 2
+    result = l0_intake.normalize_request(
+        request_path, request_text, cand_id, data=args.data, dataset=args.dataset,
+        memory=memory, memory_hash=memory_hash)
+    if result["missing_fields"] or result["errors"]:
+        _print_intake_failure(result)
+        return 2
+
+    contract = result["contract"]
+    round_type = contract["round_type"]
+    mem_fields = {
+        "schema_version": l0_contract.L0_CONTRACT_SCHEMA_VERSION,
+        "round_type": round_type,
+        "round_id": contract["round_id"],
+        "parent_round_id": contract.get("parent_round_id") or "",
+        "previous_candidate_id": contract.get("previous_candidate_id") or "",
+    }
+    if memory:
+        mem_fields.update({
+            "from_memory": True, "loop_type": args.loop_type,
+            "prior_candidate": memory.get("source_candidate_id", ""),
+            "memory_file": str(args.from_memory), "memory_hash": memory_hash,
+        })
+    raw_contract = l0_contract.serialize_contract(contract)
+    mem_fields["input_contract_path"] = (
+        f"01_Candidates/{cand_id}.l0_input.yaml")
+    mem_fields["input_contract_hash"] = hashlib.sha256(raw_contract).hexdigest()
+    errors = l0_contract.validate_l0_input_contract(
+        contract, mem_fields, project_dir, cand_id,
+        artifact_path=project_dir / mem_fields["input_contract_path"],
+        raw_bytes=raw_contract)
+    if errors:
+        _print_intake_failure({"missing_fields": [], "errors": errors})
+        return 2
+
+    source = contract["source_input"]
+    print(f"Round type: {round_type}")
+    print(f"Scientific question: {contract['scientific_question']}")
+    print(f"Source data: {source.get('location')} [{len(source.get('files', []))} files]")
+    if round_type == "continuation":
+        print(f"Previous decision: {contract['previous_round']['final_decision']}")
+    print(f"Current hypothesis: {contract['current_round']['hypothesis']}")
+    print("Contract valid: yes")
+    if args.dry_run:
+        print(l0_contract.serialize_contract(contract).decode("utf-8"), end="")
+        return 0
+
+    body = _candidate_template_v03(
+        cand_id, contract["scientific_question"], source["description"],
+        contract["scientific_question"], contract["current_round"]["hypothesis"],
+        extra_front=mem_fields)
+    _candidate_file(project_dir, cand_id).write_text(body, encoding="utf-8")
+    artifact_path, _ = l0_contract.write_contract(project_dir, cand_id, contract)
+    _append_decision(project_dir, cand_id, "-", "NEW", "candidate created",
+                     agent="Oppenheimer", kind="seed")
+    print(f"Written to: 01_Candidates/{artifact_path.name}")
+    if args.run_l0:
+        runner = Path(__file__).resolve().parents[1] / "run_loop.py"
+        return subprocess.run([sys.executable, str(runner), "run", str(project_dir),
+                               cand_id, "--stop-after-node", "L0"]).returncode
+    return 0
+
+
 def cmd_preflight(args):
     project_dir = Path(args.project_dir)
     idx = project_dir / "00_Project_Index.md"
@@ -3265,6 +3371,20 @@ def build_parser():
     sp.add_argument("--input-format", dest="input_format", default=None,
                     help="source_input.format (e.g. csv, fastq)")
     sp.set_defaults(func=cmd_new_candidate)
+
+    sp = sub.add_parser("normalize-l0-input",
+                        help="normalize a labelled request into a strict L0 contract")
+    sp.add_argument("--project", required=True, help="existing RLR project directory")
+    sp.add_argument("--input", required=True, help="UTF-8 natural-language request file")
+    source = sp.add_mutually_exclusive_group(required=True)
+    source.add_argument("--data", help="local data file or directory")
+    source.add_argument("--dataset", help="stable remote dataset locator")
+    sp.add_argument("--from-memory", help="verified next_loop_memory.json for continuation")
+    sp.add_argument("--loop-type", choices=["divergent", "correction", "data-acquisition"],
+                    help="required with --from-memory")
+    sp.add_argument("--dry-run", action="store_true", help="validate and print without writing")
+    sp.add_argument("--run-l0", action="store_true", help="start the canonical runner through L0 only")
+    sp.set_defaults(func=cmd_normalize_l0_input)
 
     # next-step
     sp = sub.add_parser("next-step", help="get next DAG node for a candidate")

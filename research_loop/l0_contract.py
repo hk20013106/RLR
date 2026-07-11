@@ -88,10 +88,14 @@ def write_contract(project_dir, cand_id, contract):
     """Serialize the contract to its sidecar artifact; return (path, sha256)."""
     p = _l0_input_file(project_dir, cand_id)
     p.parent.mkdir(parents=True, exist_ok=True)
-    text = yaml.safe_dump(contract, allow_unicode=True, sort_keys=True)
-    b = text.encode("utf-8")
+    b = serialize_contract(contract)
     p.write_bytes(b)
     return p, _sha256_bytes(b)
+
+
+def serialize_contract(contract):
+    """Return the canonical UTF-8 bytes used for a contract artifact."""
+    return yaml.safe_dump(contract, allow_unicode=True, sort_keys=True).encode("utf-8")
 
 
 # --- builders (used by new-candidate) ---------------------------------------
@@ -192,6 +196,9 @@ def validate_l0_input_contract(contract, fm, project_dir, cand_id,
 
     rlabel = rt or "unknown"
 
+    if _is_placeholder(contract.get("round_id")):
+        err(f"[round={rlabel}] round_id missing/placeholder; provide the explicit round identity")
+
     # 2. frontmatter <-> artifact pointer consistency (hash + ids)
     if raw_bytes is not None and fm.get("input_contract_hash"):
         actual = _sha256_bytes(raw_bytes)
@@ -289,6 +296,22 @@ def validate_l0_input_contract(contract, fm, project_dir, cand_id,
         err(f"[round={rlabel}] current_round.hypothesis (new_hypothesis) "
             f"missing/placeholder; state this round's hypothesis")
 
+    # Intake provenance is optional for existing callers, but when it is
+    # present it has one controlled shape owned by this module.
+    provenance = contract.get("provenance")
+    if provenance is not None:
+        if not isinstance(provenance, dict):
+            err(f"[round={rlabel}] provenance must be a mapping when present")
+        else:
+            for field in ("request_path", "request_sha256", "parser_mode",
+                          "normalization_version"):
+                if _is_placeholder(provenance.get(field)):
+                    err(f"[round={rlabel}] provenance.{field} required for intake provenance")
+            if not isinstance(provenance.get("data_inventory", []), list):
+                err(f"[round={rlabel}] provenance.data_inventory must be a list")
+            if provenance.get("llm_used") is not False:
+                err(f"[round={rlabel}] provenance.llm_used must be false for rules intake")
+
     # 6. round-type-specific state consistency
     if rt == "initial":
         if fm.get("from_memory") or contract.get("previous_round") not in (None, {}):
@@ -326,8 +349,16 @@ def validate_l0_input_contract(contract, fm, project_dir, cand_id,
             if _is_placeholder(pcid):
                 err("[round=continuation] previous_candidate_id missing; must name "
                     "the source candidate")
+            elif pr.get("candidate_id") and str(pr.get("candidate_id")) != str(pcid):
+                err("[round=continuation] previous_round.candidate_id must match "
+                    "previous_candidate_id")
+            if _is_placeholder(contract.get("parent_round_id")):
+                err("[round=continuation] parent_round_id missing; link the source round")
             mh = pr.get("memory_hash")
-            if mh and fm.get("memory_hash") and str(mh) != str(fm.get("memory_hash")):
+            if _is_placeholder(mh):
+                err("[round=continuation] previous_round.memory_hash missing; "
+                    "read it from the prior loop-memory seed")
+            elif fm.get("memory_hash") and str(mh) != str(fm.get("memory_hash")):
                 err(f"[round=continuation] previous_round.memory_hash {mh!r} != "
                     f"frontmatter memory_hash {fm.get('memory_hash')!r}")
 
