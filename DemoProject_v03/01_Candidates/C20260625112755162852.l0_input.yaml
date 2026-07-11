@@ -1,0 +1,20 @@
+candidate_id: C20260625112755162852
+current_round:
+  hypothesis: A WGCNA module eigengene correlates with the high-heart-rate species
+    contrast (Sk/Sm vs Rn) independent of chamber.
+previous_candidate_id: null
+previous_round: null
+round_id: '1'
+round_type: initial
+schema_version: '1.0'
+scientific_question: Is there a co-expression module whose eigengene tracks the high-heart-rate
+  species contrast?
+source_input:
+  description: RNA-seq length-scaled counts + checked sample metadata
+  files:
+  - length_scaled_counts.csv
+  - sample_metadata_checked.csv
+  format: csv
+  input_type: files
+  location: null
+  verified: false

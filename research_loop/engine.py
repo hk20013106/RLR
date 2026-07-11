@@ -424,8 +424,9 @@ from research_loop.preresearch import (  # inward shim (Phase 3b)
 
 
 from research_loop.gates import (  # inward shim (Phase 3b)
-    _audit_pre_research, _audit_branch_coverage, DIVERGENCE_MIN_NEW_QUERY_FAMILIES, _audit_divergence, _audit_l10_traceability, _l6_script_branches, _audit_l7_manifest, _critique_ref_valid, _audit_l6_traceability, _audit_l4_methods, _audit_l0_memory,
+    _audit_pre_research, _audit_branch_coverage, DIVERGENCE_MIN_NEW_QUERY_FAMILIES, _audit_divergence, _audit_l10_traceability, _l6_script_branches, _audit_l7_manifest, _critique_ref_valid, _audit_l6_traceability, _audit_l4_methods, _audit_l0_memory, _audit_l0_contract,
 )
+from research_loop import l0_contract
 
 
 # V0.6 pre-research provenance ------------------------------------------------
@@ -1557,6 +1558,13 @@ def cmd_emit_delta(args):
         if not ok_mem:
             errors.append(f"prior_loop_memory gate: {mem_reason}")
 
+        # strict L0 input-contract gate: the SAME validator as assemble-context
+        # L0 (no receipt/echo). A malformed/absent contract rejects the delta
+        # (rc=1) at persist time too.
+        ok_c, c_reason = _audit_l0_contract(project_dir, args.cand_id)
+        if not ok_c:
+            errors.append(f"L0 input-contract gate: {c_reason}")
+
     # v0.6: L4 method-card grounding gate (no-op for legacy candidates)
     if args.node == "L4":
         ok_m, m_reason = _audit_l4_methods(project_dir, args.cand_id, data)
@@ -1759,7 +1767,22 @@ def cmd_new_candidate(args):
         return 2
     from_memory = getattr(args, "from_memory", None)
     loop_type = getattr(args, "loop_type", None) or ""
+    explicit_rt = getattr(args, "round_type", None)
+    # Round type is explicit (never inferred from file existence). If not given,
+    # derive from --from-memory, but a conflicting explicit value is an error.
+    if explicit_rt == "initial" and from_memory:
+        print("ERROR: --round-type initial conflicts with --from-memory "
+              "(a from-memory candidate is a continuation)", file=sys.stderr)
+        return 2
+    if explicit_rt == "continuation" and not from_memory:
+        print("ERROR: --round-type continuation requires --from-memory "
+              "(a continuation must link to a prior loop-memory seed)",
+              file=sys.stderr)
+        return 2
+    round_type = explicit_rt or ("continuation" if from_memory else "initial")
+
     mem_fields = {}
+    mem = {}
     if from_memory:
         if not loop_type:
             print("ERROR: --from-memory requires --loop-type", file=sys.stderr)
@@ -1775,7 +1798,93 @@ def cmd_new_candidate(args):
             "memory_file": str(from_memory),
             "memory_hash": _sha256_file(from_memory),
         }
+
     cand_id = "C" + _stamp()
+
+    # --- structured source_input (from --source-input-file, or flags, or the
+    # legacy single --input description as an inline input) -------------------
+    si_override = getattr(args, "source_input_file", None)
+    if si_override:
+        try:
+            _txt = Path(si_override).read_text(encoding="utf-8")
+            if str(si_override).lower().endswith(".json"):
+                _sid = json.loads(_txt)
+            else:
+                import yaml as _yaml
+                _sid = _yaml.safe_load(_txt)
+        except Exception as e:
+            print(f"ERROR: cannot read --source-input-file {si_override}: {e}",
+                  file=sys.stderr)
+            return 2
+        if not isinstance(_sid, dict):
+            print(f"ERROR: --source-input-file must contain a mapping",
+                  file=sys.stderr)
+            return 2
+        source_input = l0_contract.build_source_input(
+            input_type=_sid.get("input_type"),
+            files=_sid.get("files"), location=_sid.get("location"),
+            description=_sid.get("description", args.input),
+            fmt=_sid.get("format", ""), verified=_sid.get("verified"))
+    elif getattr(args, "input_type", None) or getattr(args, "input_files", None):
+        source_input = l0_contract.build_source_input(
+            input_type=getattr(args, "input_type", None),
+            files=[f for f in (getattr(args, "input_files", None) or [])],
+            location=getattr(args, "input_location", None),
+            description=args.input,
+            fmt=getattr(args, "input_format", "") or "")
+    else:
+        # legacy single-flag caller: the free-text --input becomes an inline
+        # source_input (no files -> no existence check -> back-compat).
+        source_input = l0_contract.build_source_input(
+            input_type="inline", description=args.input, fmt="unspecified")
+
+    # --- build + persist the structured input contract artifact -------------
+    if round_type == "continuation":
+        prev_decision = (mem.get("previous_final_decision")
+                         or mem.get("terminal_decision") or "")
+        prev_conclusion = (mem.get("previous_conclusion")
+                           or mem.get("final_reason") or "")
+        new_hyp = (mem.get("new_hypothesis")
+                   or mem.get("next_round_hypothesis") or args.claim)
+        parent_rid = mem.get("parent_round_id")
+        round_id = str(mem.get("round_id")
+                       or (int(parent_rid) + 1 if str(parent_rid or "").isdigit()
+                           else 2))
+        contract = l0_contract.build_continuation_contract(
+            cand_id, round_id, parent_rid, mem.get("source_candidate_id"),
+            args.question, source_input,
+            previous_round={
+                "hypothesis": mem.get("previous_hypothesis", ""),
+                "final_decision": prev_decision,
+                "conclusion": prev_conclusion,
+                "memory_hash": mem_fields.get("memory_hash", ""),
+            },
+            new_hypothesis=new_hyp)
+    else:
+        round_id = "1"
+        parent_rid = None
+        contract = l0_contract.build_initial_contract(
+            cand_id, round_id, args.question, source_input,
+            new_hypothesis=args.claim)
+
+    ic_path, ic_hash = l0_contract.write_contract(project_dir, cand_id, contract)
+    try:
+        ic_rel = ic_path.relative_to(project_dir).as_posix()
+    except ValueError:
+        ic_rel = ic_path.as_posix()
+
+    # Frontmatter carries ONLY pointers to the artifact (flat scalar keys).
+    mem_fields.update({
+        "input_contract_path": ic_rel,
+        "input_contract_hash": ic_hash,
+        "schema_version": l0_contract.L0_CONTRACT_SCHEMA_VERSION,
+        "round_type": round_type,
+        "round_id": round_id,
+        "parent_round_id": (parent_rid if parent_rid is not None else ""),
+        "previous_candidate_id": (mem.get("source_candidate_id", "")
+                                  if round_type == "continuation" else ""),
+    })
+
     body = _candidate_template_v03(cand_id, args.title, args.input,
                                    args.question, args.claim,
                                    input_alias=getattr(args, "input_alias", "") or "",
@@ -2696,6 +2805,8 @@ def _format_delta_body(delta_key, delta, lang="en"):
 SEED_SCHEMA_KEYS = [
     "source_candidate_id", "terminal_node", "terminal_decision", "original_question",
     "previous_hypothesis", "final_reason", "next_round_hypothesis",
+    "previous_final_decision", "previous_conclusion", "new_hypothesis",
+    "round_id", "parent_round_id",
     "required_new_search_directions", "evidence_kept", "evidence_dropped",
     "explored_branches", "unexplored_branches", "data_modalities_used",
     "data_modalities_available_unused", "paper_card_ids", "method_card_ids", "hashes",
@@ -2743,6 +2854,10 @@ def _build_loop_memory(project_dir, cand_id):
     branches = l1.get("candidate_branches", []) or []
     bl = _read_branch_ledger(project_dir, cand_id)
     ml = _read_modality_ledger(project_dir, cand_id)
+    # Round lineage: the source candidate's round_id (legacy candidates predate
+    # it -> default "1"); the next round is +1.
+    _src_rid = str(fm.get("round_id") or "1")
+    _next_rid = str(int(_src_rid) + 1) if _src_rid.isdigit() else _src_rid
     return {
         "source_candidate_id": cand_id,
         "terminal_node": "L10c",
@@ -2751,6 +2866,15 @@ def _build_loop_memory(project_dir, cand_id):
         "previous_hypothesis": l1.get("primary_hypothesis", ""),
         "final_reason": l10.get("reason", ""),
         "next_round_hypothesis": l10.get("next_round_hypothesis", ""),
+        # v1.0 input-contract seed fields: decision and conclusion are kept as
+        # SEPARATE clean fields (no "DROP: reason" munge). new_hypothesis is
+        # stored distinct from previous_hypothesis. round_id/parent_round_id link
+        # the continuation's contract to this round.
+        "previous_final_decision": l10.get("decision", ""),
+        "previous_conclusion": l10.get("reason", ""),
+        "new_hypothesis": l10.get("next_round_hypothesis", ""),
+        "round_id": _next_rid,
+        "parent_round_id": _src_rid,
         "required_new_search_directions": l10.get("next_steps", []) or [],
         "evidence_kept": l10.get("evidence_kept", []) or [],
         "evidence_dropped": l10.get("evidence_dropped", []) or [],
@@ -3122,6 +3246,22 @@ def build_parser():
     sp.add_argument("--loop-type", dest="loop_type", default=None,
                     choices=["divergent", "correction", "data-acquisition"],
                     help="required with --from-memory")
+    sp.add_argument("--round-type", dest="round_type", default=None,
+                    choices=["initial", "continuation"],
+                    help="explicit round type (default: continuation if "
+                         "--from-memory else initial)")
+    sp.add_argument("--source-input-file", dest="source_input_file", default=None,
+                    help="path to a json/yaml file carrying the source_input "
+                         "struct {input_type,files,location,description,format}")
+    sp.add_argument("--input-type", dest="input_type", default=None,
+                    choices=["files", "directory", "dataset", "inline", "other"],
+                    help="source_input.input_type")
+    sp.add_argument("--input-files", dest="input_files", action="append",
+                    default=None, help="source_input file (repeatable)")
+    sp.add_argument("--input-location", dest="input_location", default=None,
+                    help="source_input.location (path or dataset id)")
+    sp.add_argument("--input-format", dest="input_format", default=None,
+                    help="source_input.format (e.g. csv, fastq)")
     sp.set_defaults(func=cmd_new_candidate)
 
     # next-step

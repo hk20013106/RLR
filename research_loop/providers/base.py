@@ -38,6 +38,14 @@ def _compose_auto_prompt(node, persona, context, output_schema=None,
                          workspace=None, tools=None):
     """Prompt for an automatic (non-interactive) provider: instruct the agent to
     return ONLY the JSON delta, include the schema, then the scoped context."""
+    # Fail closed: L0's prompt must carry the canonical structured input
+    # contract. assemble-context already gates this (rc=3, empty stdout) so a
+    # valid context always contains the block; this assertion guarantees an
+    # invalid L0 input can reach neither a prompt file nor a manual provider.
+    if node == "L0" and "=== L0 INPUT CONTRACT ===" not in (context or ""):
+        raise ProviderError(
+            "L0 context missing canonical '=== L0 INPUT CONTRACT ==='; "
+            "prompt not written (input-contract gate not satisfied)")
     lines = [
         f"# RLR auto agent task — node={node} persona={persona}",
         "# Return ONLY a single JSON object (the delta) and nothing else.",

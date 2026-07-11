@@ -29,7 +29,9 @@ from research_loop.preresearch import (
 )
 from research_loop.gates import (
     _audit_pre_research, _audit_divergence, _audit_branch_coverage,
+    _audit_l0_contract,
 )
+from research_loop import l0_contract
 
 
 def strip_candidate_to_frontmatter(candidate_path, include_source_path=False):
@@ -159,6 +161,22 @@ def cmd_assemble_context(args):
     node_info = NODE_MAP[node_id]
     inputs = node_info["context_inputs"]
 
+    # --- L0 structured input-contract gate (strict-on-reaching-L0) -----------
+    # Fail closed BEFORE any context is rendered/printed: an invalid L0 input
+    # contract yields rc=3 and empty stdout (never a partial prompt). This is
+    # the assemble-side call of the ONE validator (gates._audit_l0_contract);
+    # emit-delta L0 calls the same validator.
+    l0_contract_obj = None
+    if node_id == "L0":
+        ok, reason = _audit_l0_contract(project_dir, args.cand_id)
+        if not ok:
+            print(f"ERROR: L0 input-contract gate -- {reason}", file=sys.stderr)
+            print("Fix the candidate's l0_input.yaml (see "
+                  ".claude/plan/l0-input-contract.md §10).", file=sys.stderr)
+            return 3
+        l0_contract_obj, _ap, _raw = l0_contract.load_contract(
+            project_dir, args.cand_id)
+
     kb = node_info.get("knowledge_base", "none")
     sections = []
     directive = ("ISOLATION DIRECTIVE: Your entire input is below. Work only with "
@@ -189,6 +207,13 @@ def cmd_assemble_context(args):
                 lines.append(f"  {k}: {v}")
             sections.append("\n".join(lines))
             sections.append("")
+            # L0 (and only L0) physically receives the structured input contract
+            # in its rendered context -> it flows into the provider prompt. The
+            # scientific_question / source_input / previous_round fields are
+            # L0-only, exactly like the source_input path exception above.
+            if node_id == "L0" and l0_contract_obj is not None:
+                sections.append(l0_contract.render_contract_block(l0_contract_obj))
+                sections.append("")
         elif inp == "ALL":
             # L10c: read all deltas
             for delta_key in DELTA_DAG_ORDER:
