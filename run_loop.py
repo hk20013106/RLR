@@ -36,6 +36,12 @@ sys.path.insert(0, str(HERE))
 
 import research_loop_v04 as rl       # noqa: E402  (controller: DAG metadata + helpers)
 import orchestrator as orch          # noqa: E402
+from research_loop.api import EngineAPI  # noqa: E402  (in-process controller facade)
+
+# In-process engine facade — replaces the subprocess `_ctl()` transport (Phase 5).
+# Byte-for-byte equivalent to spawning `python research_loop_v04.py <cmd>`, but
+# without the per-call interpreter cost; see research_loop/api.py.
+ENGINE = EngineAPI()
 
 
 DEFAULT_CONFIG = """\
@@ -126,8 +132,10 @@ def log(msg):
 # --- controller plumbing ----------------------------------------------------
 
 def _ctl(*args):
-    return subprocess.run([sys.executable, str(CONTROLLER), *args],
-                          capture_output=True, text=True)
+    # In-process call into the engine (was: subprocess to research_loop_v04.py).
+    # Returns a CtlResult with the same .returncode/.stdout/.stderr surface, so
+    # every callsite below reads it exactly as it read CompletedProcess before.
+    return ENGINE.run_cli(*args)
 
 
 def auto_pitfall(project, cand, node, category, symptom, provider="unknown",
@@ -151,12 +159,7 @@ def auto_pitfall(project, cand, node, category, symptom, provider="unknown",
 
 
 def next_step(project, cand):
-    r = _ctl("next-step", project, cand)
-    try:
-        return json.loads(r.stdout)
-    except json.JSONDecodeError:
-        raise RuntimeError(f"next-step did not return JSON: "
-                           f"{r.stdout!r} {r.stderr!r}")
+    return ENGINE.next_step(project, cand)
 
 
 def status_of(project, cand):
@@ -179,15 +182,7 @@ def load_delta(project, cand, delta_key):
 
 
 def assemble_context(project, cand, node):
-    r = _ctl("assemble-context", project, cand, "--node", node)
-    if r.returncode != 0:
-        raise RuntimeError(f"assemble-context {node} failed: "
-                           f"{r.stderr.strip() or r.stdout.strip()}")
-    manifest = None
-    for line in r.stderr.splitlines():
-        if "context manifest:" in line:
-            manifest = line.split("context manifest:", 1)[1].strip()
-    return r.stdout, manifest
+    return ENGINE.assemble_context(project, cand, node)
 
 
 def emit_delta(project, cand, node, persona, delta, run_dir, receipt=None):
@@ -196,11 +191,7 @@ def emit_delta(project, cand, node, persona, delta, run_dir, receipt=None):
     tmp = run_dir / f"{node}_{persona}_emit.json"
     tmp.write_text(json.dumps(delta, indent=2, ensure_ascii=False),
                    encoding="utf-8")
-    args = ["emit-delta", project, cand, "--node", node, "--persona", persona,
-            "--file", str(tmp)]
-    if receipt:
-        args += ["--receipt", receipt]
-    r = _ctl(*args)
+    r = ENGINE.emit_delta(project, cand, node, persona, tmp, receipt=receipt)
     if r.returncode != 0:
         log(f"emit-delta {node} failed: {r.stdout.strip()} {r.stderr.strip()}")
     return r.returncode == 0
