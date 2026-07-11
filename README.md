@@ -22,6 +22,11 @@ The runner re-raises this as a hard stop — deep research can no longer be
 silently skipped. (L7 code-search keeps its prior soft pre-step.) The old `rlr_v05b.py` prototype is **LEGACY** (its
 gate was promoted into the canonical engine).
 
+**Current additions:** L0 now accepts a strict, auditable normalized input
+contract, and the optional Hypothesis Ranking Reliability Layer produces a
+separate advisory ranking artifact. Neither addition changes an existing
+formal gate or decision.
+
 ---
 
 ## Version history
@@ -29,6 +34,8 @@ gate was promoted into the canonical engine).
 ### V0.5 — CURRENT (canonical gated runtime)
 
 - **Promoted the V0.5 deep-research gate into the canonical engine.** `assemble-context` now fails closed (rc=3) for L1/L4/L7/L8.5 without a valid pre-research artifact; there is no path that treats absent deep research as success. `rlr_v05b.py` is retained as a LEGACY prototype only.
+- **Added strict L0 intake.** `normalize-l0-input` builds a validated, auditable contract from a request file and explicit data location without guessing paths, IDs, decisions, or conclusions.
+- **Added the Hypothesis Ranking Reliability Layer (shadow mode).** It uses paired fair judgments, deterministic scheduling, checkpoints, evidence events, and disagreement reporting under `08_Audit/ranking/`; it never changes formal RLR decisions or gates.
 
 ### v0.4.5 — superseded by V0.5 (2026-06-26)
 
@@ -162,6 +169,7 @@ Schemas are hardcoded in `research_loop_v04.py` — no external JSON Schema libr
 | `new-project` | Create a project folder |
 | `new-candidate` | Create a candidate with split frontmatter |
 | `preflight` | L0 boot gate + dependency gate (STOPS if deps missing) |
+| `normalize-l0-input` | Normalize an explicit request and data location into the strict L0 contract |
 | `check-deps` | Standalone dependency check |
 | `next-step` | Get next DAG node (JSON) |
 | `pre-research` | Print pre-research prompt for L1/L4/L7 |
@@ -174,7 +182,49 @@ Schemas are hardcoded in `research_loop_v04.py` — no external JSON Schema libr
 | `decision` | Oppenheimer status change |
 | `aggregate-report` | L10c: generate FINAL_REPORT (EN + CN) |
 | `obsidian-sync` | Sync to Obsidian vault |
+| `ranking-shadow` | Run an isolated, advisory fair ranking for explicit candidates |
+| `ranking-benchmark` | Run the free synthetic fair-vs-naive ranking benchmark |
+| `ranking-report` | Render a shadow-ranking artifact as JSON or Markdown |
 | `list` / `show` | List candidates / show a candidate |
+
+---
+
+## Strict L0 intake and advisory hypothesis ranking
+
+`normalize-l0-input` converts a request file plus an explicit local path (or a
+stable remote dataset locator) into a validated L0 contract. It does not infer
+paths, IDs, decisions, or conclusions from prose. `--dry-run` writes nothing;
+`--run-l0` stops the canonical runner at L0.
+
+```bash
+python research_loop_v04.py normalize-l0-input \
+  --project MyProject --input request.md --data data_directory --dry-run
+```
+
+The **Hypothesis Ranking Reliability Layer** is shadow-only: it ranks an
+explicit candidate set with paired A/B and B/A judgments, marks reversals as
+`UNCERTAIN`, and writes versioned artifacts, checkpoints, reports, evidence
+events, and formal-decision disagreement signals under
+`08_Audit/ranking/`. It uses deterministic fake judges by default; a configured
+RLR provider is opt-in. Its output never changes candidate selection, status,
+or gate pass/fail.
+
+```bash
+# Run an isolated L3 or L10b shadow ranking.
+python research_loop_v04.py ranking-shadow MyProject --stage L3 \
+  --candidate C001 --candidate C002 --seed 7 --match-budget 10
+
+# Exercise the free synthetic benchmark and render a saved artifact.
+python research_loop_v04.py ranking-benchmark --gold gold.json --seeds 1,2,3 --match-budget 10
+python research_loop_v04.py ranking-report MyProject --run <RUN_ID> --format markdown
+
+# Opt in during a canonical run. L3/L10b only; L6 is deliberately excluded.
+python run_loop.py run MyProject C001 --shadow-ranking \
+  --shadow-candidate C002 --shadow-seed 7 --shadow-match-budget 10
+```
+
+Shadow failures, partial artifacts, and timeouts are audit-recorded and
+fail-soft: the existing RLR decision path continues unchanged.
 
 ---
 
