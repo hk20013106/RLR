@@ -1824,7 +1824,9 @@ def cmd_new_candidate(args):
             input_type=_sid.get("input_type"),
             files=_sid.get("files"), location=_sid.get("location"),
             description=_sid.get("description", args.input),
-            fmt=_sid.get("format", ""), verified=_sid.get("verified"))
+            fmt=_sid.get("format", ""),
+            verification_status=_sid.get("verification_status"),
+            reason=_sid.get("reason"))
     elif getattr(args, "input_type", None) or getattr(args, "input_files", None):
         source_input = l0_contract.build_source_input(
             input_type=getattr(args, "input_type", None),

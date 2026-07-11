@@ -277,6 +277,18 @@ def exec_cognitive(project, cand, step, cfg, args, run_dir, round_id,
                    do_advance=True):
     node, persona = step["node"], step["persona"]
     ctx, manifest = assemble_context(project, cand, node)
+    # Fail-closed re-gate at the dispatch boundary: for L0, run the SAME unified
+    # validator (l0_contract.validate_l0_input_contract, via _audit_l0_contract)
+    # immediately before the provider writes its prompt. assemble_context above
+    # already gates (rc=3 -> RuntimeError), so this closes the residual window:
+    # a stale/tampered artifact between assemble and dispatch, or any future path
+    # that reaches dispatch without the assemble gate, still cannot emit an L0
+    # prompt from invalid input. (The provider block-assertion is a last-resort
+    # backstop only; this is the authoritative pre-write validator call.)
+    if node == "L0":
+        ok_c, c_reason = rl._audit_l0_contract(Path(project), cand)
+        if not ok_c:
+            raise RuntimeError(f"L0 input-contract gate (pre-dispatch): {c_reason}")
     prov = provider_for(node, cfg, args)
     pname = getattr(prov, "name", getattr(prov, "type", "unknown"))
     schema = rl.DELTA_SCHEMAS.get(f"{node}_{persona.lower()}")

@@ -153,13 +153,28 @@ def test_l7_failure_creates_l0_preflight_candidate():
     with tempfile.TemporaryDirectory() as d:
         cand_dir = Path(d) / "01_Candidates"
         cand_dir.mkdir()
-        (cand_dir / "C1.md").write_text("""---
+        # strict-on-reaching-L0: give C1 a valid input contract so the L0
+        # preflight-gate-candidate path (what this test exercises) still runs.
+        from research_loop import l0_contract
+        _c = l0_contract.build_initial_contract(
+            "C1", "1", "Does X cause Y?",
+            l0_contract.build_source_input(input_type="inline",
+                                           description="inline test data",
+                                           fmt="text"),
+            new_hypothesis="X causes Y")
+        _p, _h = l0_contract.write_contract(Path(d), "C1", _c)
+        (cand_dir / "C1.md").write_text(f"""---
 candidate_id: C1
 title: Test Candidate
 question: Does X cause Y?
 claim: X causes Y
 current_status: NEW
 current_owner: Linnaeus
+input_contract_path: 01_Candidates/C1.l0_input.yaml
+input_contract_hash: {_h}
+schema_version: "1.0"
+round_type: initial
+round_id: "1"
 ---
 # C1
 """, encoding="utf-8")

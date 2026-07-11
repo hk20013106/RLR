@@ -114,16 +114,86 @@ def test_source_input_files_not_found_hard_fail(tmp_path):
     c = _valid_initial(tmp_path)
     c["source_input"] = l0_contract.build_source_input(
         input_type="files", files=["nope_missing.csv"],
-        description="d", fmt="csv")  # no verified:false marker
+        description="d", fmt="csv")
     errs = _v(c, project_dir=str(tmp_path))
-    assert any("not found and not marked verified:false" in e for e in errs), errs
+    assert any("not found on disk" in e for e in errs), errs
 
 
-def test_source_input_files_unverifiable_marker_passes(tmp_path):
+def test_no_verified_false_bypass_for_missing_files(tmp_path):
+    """A missing local file MUST hard-fail; a stray verified:false (or any
+    truthy/falsey marker) must NOT let missing data into L0."""
+    c = _valid_initial(tmp_path)
+    si = l0_contract.build_source_input(
+        input_type="files", files=["nope_missing.csv"], description="d",
+        fmt="csv")
+    si["verified"] = False  # smuggled legacy escape -> must be ignored
+    c["source_input"] = si
+    errs = _v(c, project_dir=str(tmp_path))
+    assert any("not found on disk" in e for e in errs), errs
+
+
+def test_no_bypass_directory_missing(tmp_path):
     c = _valid_initial(tmp_path)
     c["source_input"] = l0_contract.build_source_input(
-        input_type="files", files=["nope_missing.csv"],
-        description="d", fmt="csv", verified=False)
+        input_type="directory", location="no_such_dir/",
+        description="d", fmt="csv")
+    errs = _v(c, project_dir=str(tmp_path))
+    assert any("not found on disk" in e for e in errs), errs
+
+
+def test_no_bypass_missing_files_under_inline_type(tmp_path):
+    """Cannot smuggle a missing file by declaring input_type=inline/other."""
+    c = _valid_initial(tmp_path)
+    si = l0_contract.build_source_input(
+        input_type="inline", description="d", fmt="csv")
+    si["files"] = ["nope_missing.csv"]
+    c["source_input"] = si
+    errs = _v(c, project_dir=str(tmp_path))
+    assert any("do not exist under input_type" in e for e in errs), errs
+
+
+def test_files_present_pass(tmp_path):
+    (tmp_path / "real.csv").write_text("x", encoding="utf-8")
+    c = _valid_initial(tmp_path)
+    c["source_input"] = l0_contract.build_source_input(
+        input_type="files", files=["real.csv"], description="d", fmt="csv")
+    assert _v(c, project_dir=str(tmp_path)) == []
+
+
+def test_dataset_requires_locator(tmp_path):
+    c = _valid_initial(tmp_path)
+    c["source_input"] = l0_contract.build_source_input(
+        input_type="dataset", location="", description="remote set", fmt="h5",
+        verification_status="unverifiable", reason="remote store")
+    errs = _v(c, project_dir=str(tmp_path))
+    assert any("source_input.location required" in e for e in errs), errs
+
+
+def test_dataset_requires_valid_verification_status(tmp_path):
+    c = _valid_initial(tmp_path)
+    c["source_input"] = l0_contract.build_source_input(
+        input_type="dataset", location="GEO:GSE12345", description="d",
+        fmt="h5", verification_status="bogus", reason="r")
+    errs = _v(c, project_dir=str(tmp_path))
+    assert any("verification_status illegal" in e for e in errs), errs
+
+
+def test_dataset_unverifiable_requires_reason(tmp_path):
+    c = _valid_initial(tmp_path)
+    c["source_input"] = l0_contract.build_source_input(
+        input_type="dataset", location="GEO:GSE12345", description="d",
+        fmt="h5", verification_status="unverifiable", reason="")
+    errs = _v(c, project_dir=str(tmp_path))
+    assert any("source_input.reason required" in e for e in errs), errs
+
+
+def test_dataset_valid_passes(tmp_path):
+    c = _valid_initial(tmp_path)
+    c["source_input"] = l0_contract.build_source_input(
+        input_type="dataset", location="GEO:GSE12345",
+        description="public expression dataset", fmt="h5",
+        verification_status="unverifiable",
+        reason="hosted remotely; not fetched into the workspace")
     assert _v(c, project_dir=str(tmp_path)) == []
 
 
@@ -404,6 +474,34 @@ def test_continuation_illegal_decision_rc3(tmp_path):
     rc, ctx, err = _assemble(proj, cand, "L0")
     assert rc == 3, (rc, err)
     assert "final_decision" in err and "illegal" in err
+
+
+def test_provider_backstop_rejects_l0_context_without_block(tmp_path):
+    """Direct provider call: an L0 context lacking the canonical block is
+    refused (ProviderError) before any prompt file is written (backstop)."""
+    from research_loop.providers.base import ProviderError, _compose_auto_prompt
+    with pytest.raises(ProviderError):
+        _compose_auto_prompt("L0", "Linnaeus", "some context without the block")
+
+
+def test_forged_block_cannot_bypass_dispatch_gate(tmp_path):
+    """A forged '=== L0 INPUT CONTRACT ===' string would satisfy the provider's
+    block-assertion, but the AUTHORITATIVE pre-dispatch gate (the same call
+    run_loop.exec_cognitive makes: rl._audit_l0_contract) re-validates the
+    on-disk artifact, so a tampered/absent contract still cannot dispatch."""
+    import research_loop_v04 as rl
+    from research_loop.providers.base import _compose_auto_prompt
+    proj = _new_project(tmp_path)
+    cand = _new_initial(proj)
+    # tamper the artifact so its hash no longer matches the frontmatter pointer
+    art = proj / "01_Candidates" / f"{cand}.l0_input.yaml"
+    art.write_bytes(art.read_bytes() + b"\n# forged edit\n")
+    # a forged context string alone WOULD pass the provider block-assert:
+    forged = "=== L0 INPUT CONTRACT ===\n(forged)\n"
+    assert _compose_auto_prompt("L0", "Linnaeus", forged)  # no raise
+    # but the dispatch-boundary validator (real artifact) rejects it:
+    ok, reason = rl._audit_l0_contract(proj, cand)
+    assert ok is False and "input_contract_hash mismatch" in reason
 
 
 def test_build_loop_memory_emits_clean_fields(tmp_path):

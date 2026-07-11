@@ -31,6 +31,10 @@ L0_CONTRACT_SCHEMA_VERSION = "1.0"
 SUPPORTED_SCHEMA_VERSIONS = ("1.0",)
 ROUND_TYPES = ("initial", "continuation")
 SOURCE_INPUT_TYPES = ("files", "directory", "dataset", "inline", "other")
+# Remote/non-local datasets cannot be filesystem-checked; they must instead
+# carry an explicit verification status + reason. There is NO verified:false
+# escape for local file/directory inputs (those hard-fail when missing).
+DATASET_VERIFICATION_STATUS = ("verified", "unverifiable", "pending")
 
 # Reuse the repo's terminal decision enum (do NOT invent one). The L10b final
 # decision is exactly the set of terminal transitions out of UNDER_REVIEW.
@@ -93,7 +97,8 @@ def write_contract(project_dir, cand_id, contract):
 # --- builders (used by new-candidate) ---------------------------------------
 
 def build_source_input(input_type=None, files=None, location=None,
-                       description="", fmt="", verified=None):
+                       description="", fmt="", verification_status=None,
+                       reason=None):
     si = {
         "input_type": input_type or "inline",
         "files": list(files or []),
@@ -101,8 +106,11 @@ def build_source_input(input_type=None, files=None, location=None,
         "description": description or "",
         "format": fmt or "",
     }
-    if verified is not None:
-        si["verified"] = bool(verified)
+    # dataset-only fields (no verified:false escape for local files)
+    if verification_status is not None:
+        si["verification_status"] = verification_status
+    if reason is not None:
+        si["reason"] = reason
     return si
 
 
@@ -222,6 +230,11 @@ def validate_l0_input_contract(contract, fm, project_dir, cand_id,
         if not str(si.get("format") or "").strip():
             err(f"[round={rlabel}] source_input.format required "
                 f"(e.g. 'csv', 'fastq', 'h5ad')")
+        def _missing(paths):
+            return [f for f in paths
+                    if not (Path(project_dir) / str(f)).exists()
+                    and not Path(str(f)).exists()]
+
         if it in ("files", "directory"):
             files = list(si.get("files") or [])
             if not files and si.get("location"):
@@ -230,16 +243,45 @@ def validate_l0_input_contract(contract, fm, project_dir, cand_id,
                 err(f"[round={rlabel}] source_input.files|location required for "
                     f"input_type={it!r}")
             else:
-                missing = [f for f in files
-                           if not (Path(project_dir) / str(f)).exists()
-                           and not Path(str(f)).exists()]
-                # file-type input must be verified OR explicitly marked
-                # unverifiable (verified:false); never a silent pass.
-                if missing and si.get("verified") is not False:
-                    err(f"[round={rlabel}] source_input files not found and not "
-                        f"marked verified:false: {missing}; either fix the paths "
-                        f"or set source_input.verified: false to declare them "
-                        f"unverifiable")
+                missing = _missing(files)
+                # NO bypass: a local file/directory input whose paths do not
+                # exist is a HARD FAIL. There is no verified:false escape.
+                # Data that cannot be verified locally MUST be declared as
+                # input_type=dataset (location + verification_status + reason).
+                if missing:
+                    err(f"[round={rlabel}] source_input files/directory not found "
+                        f"on disk: {missing}; a local file/directory input must "
+                        f"exist. For data that cannot be verified locally, use "
+                        f"input_type=dataset with a stable location + "
+                        f"verification_status + reason (not missing local files).")
+        elif it == "dataset":
+            # Remote / non-local dataset: cannot be filesystem-checked, so it
+            # must carry a stable locator/ID and an explicit verification status
+            # (+ reason unless already verified).
+            if _is_placeholder(si.get("location")):
+                err(f"[round={rlabel}] source_input.location required for "
+                    f"input_type=dataset: give a stable locator/ID "
+                    f"(accession, URI, DOI, dataset name)")
+            vs = si.get("verification_status")
+            if vs not in DATASET_VERIFICATION_STATUS:
+                err(f"[round={rlabel}] source_input.verification_status illegal "
+                    f"{vs!r}; one of {list(DATASET_VERIFICATION_STATUS)}")
+            if vs != "verified" and _is_placeholder(si.get("reason")):
+                err(f"[round={rlabel}] source_input.reason required when "
+                    f"verification_status != 'verified' (explain why the dataset "
+                    f"cannot be verified locally)")
+            # a dataset may ALSO list local files; if it does, they must exist.
+            dmiss = _missing(list(si.get("files") or []))
+            if dmiss:
+                err(f"[round={rlabel}] source_input.files listed but not found: "
+                    f"{dmiss}")
+        else:  # inline / other -- not file-backed, but any listed files must
+               # exist (prevents smuggling missing files under a non-file type).
+            imiss = _missing(list(si.get("files") or []))
+            if imiss:
+                err(f"[round={rlabel}] source_input declares files that do not "
+                    f"exist under input_type={it!r}: {imiss}; use input_type="
+                    f"files with existing paths, or dataset for remote data")
 
     # 5. current_round.hypothesis (the new hypothesis; required non-empty)
     cur = contract.get("current_round")
@@ -313,8 +355,10 @@ def render_contract_block(contract):
         f"  description: {si.get('description', '')}",
         f"  format: {si.get('format', '')}",
     ]
-    if "verified" in si:
-        lines.append(f"  verified: {si.get('verified')}")
+    if "verification_status" in si:
+        lines.append(f"  verification_status: {si.get('verification_status')}")
+    if "reason" in si:
+        lines.append(f"  reason: {si.get('reason')}")
     pr = contract.get("previous_round")
     if isinstance(pr, dict) and pr:
         lines += [

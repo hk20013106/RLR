@@ -11,10 +11,9 @@ scientific_question: Is there a co-expression module whose eigengene tracks the 
   species contrast?
 source_input:
   description: RNA-seq length-scaled counts + checked sample metadata
-  files:
-  - length_scaled_counts.csv
-  - sample_metadata_checked.csv
+  files: []
   format: csv
-  input_type: files
-  location: null
-  verified: false
+  input_type: dataset
+  location: DemoProject_v03/length_scaled_counts.csv+sample_metadata_checked.csv
+  reason: 'demo fixture: raw CSVs are not committed to the repository'
+  verification_status: unverifiable
