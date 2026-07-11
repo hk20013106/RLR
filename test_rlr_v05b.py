@@ -11,7 +11,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-import rlr_v05b as v
+import legacy.rlr_v05b as v   # legacy prototype (moved to legacy/ in Phase 6)
 import research_loop_v04 as rl
 
 PASS, FAIL = [], []

@@ -60,8 +60,8 @@ class EngineAPI:
 
     def _main(self):
         if self._engine_main is None:
-            import research_loop_v04
-            self._engine_main = research_loop_v04.main
+            from research_loop.engine import main  # inward dep (Phase 6)
+            self._engine_main = main
         return self._engine_main
 
     # --- transport core ------------------------------------------------------
