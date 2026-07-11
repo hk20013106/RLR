@@ -28,6 +28,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -271,6 +272,180 @@ def write_receipt(run_dir, node, persona, prov, context, step, cand, round_id,
     rec.write(Path(run_dir) / f"{node}_{persona}_receipt.json")
 
 
+def _shadow_run_id(node, cand, round_id, candidates, seed, match_budget):
+    """Return a stable safe advisory-run identity for retry de-duplication."""
+    identity = json.dumps({"stage": node, "candidate": cand, "round": round_id,
+                           "candidates": sorted(candidates), "seed": seed,
+                           "match_budget": match_budget}, sort_keys=True)
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return f"shadow-{node.lower()}-r{round_id}-{digest}"
+
+
+def _write_shadow_failure_audit(project, run_id, node, cand, error, command,
+                                seed, match_budget, outcome="failed"):
+    """Best-effort shadow-only audit. It must never disturb the formal loop."""
+    try:
+        audit_dir = Path(project) / "08_Audit" / "ranking"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": "shadow-ranking-failure-v1",
+            "run_id": run_id,
+            "stage": node,
+            "candidate_id": cand,
+            "outcome": outcome,
+            "error": str(error),
+            "provenance": {
+                "shadow_mode": "fail-soft",
+                "command": command,
+                "seed": seed,
+                "match_budget": match_budget,
+            },
+        }
+        serialized = json.dumps(payload, indent=2, ensure_ascii=False)
+        for attempt in range(1, 1000):
+            suffix = "" if attempt == 1 else f".{attempt}"
+            target = audit_dir / f"{run_id}.{outcome}{suffix}.json"
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                        mode="w", encoding="utf-8", dir=audit_dir,
+                        prefix=f".{target.name}.", suffix=".tmp", delete=False) as handle:
+                    temp_path = Path(handle.name)
+                    handle.write(serialized)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.link(temp_path, target)
+                temp_path.unlink()
+                return
+            except FileExistsError:
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
+                continue
+            except Exception:
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
+                raise
+        raise RuntimeError("unable to allocate a shadow ranking audit filename")
+    except Exception as exc:  # noqa: BLE001 -- advisory audit must stay advisory
+        log(f"shadow ranking failure audit skipped: {exc}")
+
+
+def _shadow_artifact_status(project, run_id, stage, candidates, seed, match_budget):
+    """Trust only the engine's hash-verified completion marker for deduplication."""
+    base = Path(project) / "08_Audit" / "ranking"
+    paths = {
+        "artifact": base / f"{run_id}.json",
+        "checkpoint": base / f"{run_id}.checkpoint.json",
+        "report": base / f"{run_id}.md",
+        "marker": base / f"{run_id}.complete.json",
+    }
+    present = {name: path.exists() for name, path in paths.items()}
+    if not any(present.values()):
+        return "absent", paths, "no prior ranking outputs"
+    if not present["marker"]:
+        return "partial", paths, "ranking outputs exist without a completion marker"
+    if not all(present.values()):
+        missing = [name for name, exists in present.items() if not exists]
+        return "partial", paths, f"missing outputs: {', '.join(missing)}"
+    try:
+        marker = json.loads(paths["marker"].read_text(encoding="utf-8"))
+        if not isinstance(marker, dict):
+            raise ValueError("completion marker is not a JSON object")
+        if marker.get("run_id") != run_id:
+            raise ValueError(f"completion marker run_id does not match {run_id}")
+        if marker.get("stage") != stage:
+            raise ValueError(f"completion marker stage does not match {stage}")
+        optional_values = {
+            "candidate_ids": sorted(candidates), "candidates": sorted(candidates),
+            "candidate_set": sorted(candidates),
+            "seed": seed, "match_budget": match_budget,
+        }
+        for key, expected in optional_values.items():
+            if key in marker and marker[key] != expected:
+                raise ValueError(f"completion marker {key} does not match this run")
+        if isinstance(marker.get("budget"), dict) and "matches" in marker["budget"] \
+                and marker["budget"]["matches"] != match_budget:
+            raise ValueError("completion marker budget does not match this run")
+        hashes = marker.get("sha256")
+        if not isinstance(hashes, dict):
+            raise ValueError("completion marker has no sha256 mapping")
+        for name in ("artifact", "checkpoint", "report"):
+            actual = hashlib.sha256(paths[name].read_bytes()).hexdigest()
+            if hashes.get(name) != actual:
+                raise ValueError(f"completion marker hash mismatch for {name}")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        return "partial", paths, f"invalid outputs: {exc}"
+    return "complete", paths, "validated completion marker and output hashes"
+
+
+def run_shadow_ranking(project, cand, node, args, round_id):
+    """Launch an isolated advisory ranking after L3/L10b emission, never fatal."""
+    if not getattr(args, "shadow_ranking", False) or node not in ("L3", "L10b"):
+        return
+    candidates = []
+    for candidate_id in [cand, *(getattr(args, "shadow_candidate", None) or [])]:
+        if candidate_id and candidate_id not in candidates:
+            candidates.append(candidate_id)
+    seed = getattr(args, "shadow_seed", 0)
+    match_budget = getattr(args, "shadow_match_budget", 10)
+    requested_timeout = getattr(args, "shadow_timeout", 60)
+    try:
+        timeout = min(max(int(requested_timeout), 1), 600)
+    except (TypeError, ValueError):
+        timeout = 60
+    run_id = _shadow_run_id(node, cand, round_id, candidates, seed, match_budget)
+    if len(candidates) < 2:
+        error = "shadow ranking requires at least two distinct candidates"
+        log(f"shadow ranking skipped (non-fatal): {error}")
+        _write_shadow_failure_audit(project, run_id, node, cand, error, None,
+                                    seed, match_budget, outcome="skipped")
+        return
+    artifact_status, artifact_paths, artifact_reason = _shadow_artifact_status(
+        project, run_id, node, candidates, seed, match_budget)
+    if artifact_status == "complete":
+        log(f"shadow ranking already complete: {run_id}")
+        return
+    if artifact_status == "partial":
+        path_text = ", ".join(f"{name}={path}" for name, path in artifact_paths.items())
+        error = (f"partial shadow ranking outputs for {run_id}: {artifact_reason}; "
+                 f"paths={{{path_text}}}")
+        log(f"shadow ranking skipped (non-fatal): {error}")
+        _write_shadow_failure_audit(project, run_id, node, cand, error, None,
+                                    seed, match_budget, outcome="partial")
+        return
+    command = [sys.executable, str(CONTROLLER), "ranking-shadow", str(project),
+               "--stage", node]
+    for candidate_id in candidates:
+        command.extend(["--candidate", candidate_id])
+    command.extend(["--seed", str(seed), "--match-budget", str(match_budget),
+                    "--run-id", run_id])
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        if result.returncode == 0:
+            post_status, post_paths, post_reason = _shadow_artifact_status(
+                project, run_id, node, candidates, seed, match_budget)
+            if post_status == "complete":
+                log(f"shadow ranking complete: {run_id}")
+                return
+            path_text = ", ".join(f"{name}={path}" for name, path in post_paths.items())
+            error = (f"ranking-shadow exited successfully without a valid completion marker "
+                     f"for {run_id}: status={post_status}; reason={post_reason}; "
+                     f"paths={{{path_text}}}")
+            log(f"shadow ranking partial (non-fatal): {error}")
+            _write_shadow_failure_audit(project, run_id, node, cand, error, command,
+                                        seed, match_budget, outcome="partial")
+            return
+        error = result.stderr.strip() or result.stdout.strip() or \
+            f"ranking-shadow exited {result.returncode}"
+    except subprocess.TimeoutExpired:
+        error = f"ranking-shadow timed out after {timeout}s"
+    except Exception as exc:  # noqa: BLE001 -- shadow execution is always fail-soft
+        error = f"ranking-shadow launch failed: {exc}"
+    log(f"shadow ranking failed (non-fatal): {error}")
+    _write_shadow_failure_audit(project, run_id, node, cand, error, command,
+                                seed, match_budget)
+
+
 # --- node execution ---------------------------------------------------------
 
 def exec_cognitive(project, cand, step, cfg, args, run_dir, round_id,
@@ -308,6 +483,7 @@ def exec_cognitive(project, cand, step, cfg, args, run_dir, round_id,
                      provider=pname, evidence=str(run_dir))
     write_receipt(run_dir, node, persona, prov, ctx, step, cand, round_id)
     if ok and do_advance:
+        run_shadow_ranking(project, cand, node, args, round_id)
         advance(project, cand, step)
     return ok
 
@@ -852,6 +1028,16 @@ def build_parser():
                     help="skip the Review gate")
     sp.add_argument("--resume", action="store_true",
                     help="resume from the candidate's recorded round_id")
+    sp.add_argument("--shadow-ranking", action="store_true",
+                    help="after L3/L10b, run advisory ranking without changing gates")
+    sp.add_argument("--shadow-candidate", action="append", default=[],
+                    help="peer candidate ID for advisory ranking (repeatable)")
+    sp.add_argument("--shadow-seed", type=int, default=0,
+                    help="deterministic seed passed to advisory ranking")
+    sp.add_argument("--shadow-match-budget", type=int, default=10,
+                    help="match budget passed to advisory ranking")
+    sp.add_argument("--shadow-timeout", type=int, default=60,
+                    help="per-run advisory ranking timeout in seconds (1-600)")
     sp.set_defaults(func=cmd_run)
     return p
 
