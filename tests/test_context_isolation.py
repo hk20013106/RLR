@@ -75,3 +75,41 @@ def test_injected_deltas_subset_of_allowed():
         injected = manifest.get("injected_deltas", []) or []
         stray = [d for d in injected if not any(str(d).startswith(a) for a in allowed)]
         assert not stray, f"{node}: injected {stray} outside allowed_inputs {allowed}"
+
+
+# --- Phase 7 (C4): the two structural exceptions to node-level isolation ------
+# `ALL` (unrestricted read) and `candidate_frontmatter`-only are the only two
+# ways a node escapes the normal DAG-parent visibility. Lock both so a future
+# ContextAssembler change cannot silently hand another node the wildcard or
+# widen L0 past its source_input-only view.
+
+def test_l10c_is_the_all_reader():
+    """L10c (Linnaeus aggregation) is the ONE node allowed to read everything."""
+    rc, manifest = _assemble("L10c")
+    assert rc == 0 and manifest is not None
+    assert manifest["allowed_inputs"] == ["ALL"]
+
+
+# Every context-assembling node except L10c -- L1 is a literature gate (rc=3,
+# writes no manifest) so it is not assemble-only and is excluded here.
+_NON_ALL_NODES = ["L0", "L2", "L5", "L8.5", "L9a", "L9b", "L10b"]
+
+
+@pytest.mark.parametrize("node", _NON_ALL_NODES)
+def test_all_wildcard_is_l10c_only(node):
+    """No node other than L10c may carry the `ALL` read wildcard."""
+    rc, manifest = _assemble(node)
+    assert rc == 0 and manifest is not None
+    assert "ALL" not in manifest["allowed_inputs"], (
+        f"ISOLATION VIOLATION: {node} must not be an ALL-reader; "
+        f"allowed_inputs={manifest['allowed_inputs']}"
+    )
+
+
+def test_l0_source_input_exception_preserved():
+    """L0 (Linnaeus preflight) sees ONLY candidate frontmatter -- no upstream
+    deltas exist yet, and it must never be widened to read any Lx delta."""
+    rc, manifest = _assemble("L0")
+    assert rc == 0 and manifest is not None
+    allowed = manifest["allowed_inputs"]
+    assert allowed == ["candidate_frontmatter"], allowed
