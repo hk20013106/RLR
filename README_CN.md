@@ -12,13 +12,13 @@ RLR 是一个**科学研究的自动化审查框架**。它把一个研究问题
 
 一句话：**用多角色对抗 + 文献锚定 + 执行门禁，把"AI 做研究"从自由发挥变成有约束的审查流程。**
 
-**当前版本：V0.5**（canonical gated runtime）
+**当前版本：V0.7**（canonical gated runtime）
 
 ---
 
 ## 版本历史
 
-### V0.5 — 当前（canonical gated runtime）
+### V0.7 — 当前（canonical gated runtime）
 - **L0 严格输入契约**：`normalize-l0-input` 将请求文件和显式数据位置规范化为可验证、可审计的 L0 contract；不从自然语言猜测路径、ID、决策或结论。
 - **假说排序可靠性层（shadow mode）**：对显式候选集合执行 A/B 与 B/A 的公平 pairwise 判断；顺序翻转标记为 `UNCERTAIN`，并将排序、checkpoint、evidence event、正式决策分歧和失败审计隔离写入 `08_Audit/ranking/`。它绝不改变正式 gate、候选选择或 decision。
 
