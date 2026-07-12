@@ -573,8 +573,8 @@ def _render_extra_front(extra_front):
     return "\n".join(lines) + "\n"
 
 
-def _candidate_template_v03(cand_id, title, source_input, question, claim,
-                            input_alias="", extra_front=None):
+def _candidate_template(cand_id, title, source_input, question, claim,
+                        input_alias="", extra_front=None):
     claim_or_question = f"{question} | {claim}"
     alias = input_alias or _input_alias(source_input)
     extra = _render_extra_front(extra_front)
@@ -652,7 +652,7 @@ _updated on each route_
 _filled only when a terminal status is reached_
 """
 
-def _index_template_v03(name, topic):
+def _index_template(name, topic):
     layers = "\n".join(f"- **{lid} {ltitle}** - {owner}"
                        for lid, ltitle, owner in LAYERS)
     personas = ", ".join(f"{p} | {PERSONA_TITLE[p]}" for p in AGENTS)
@@ -660,11 +660,11 @@ def _index_template_v03(name, topic):
 project_name: {_yaml_value(name)}
 topic: {_yaml_value(topic)}
 version: {_yaml_value(__version__)}
-framework: gated-multi-loop-council-v03
+framework: gated-multi-loop-council-v07
 created_at: {_yaml_value(_now())}
 ---
 
-# {name} - Research Loop Room v0.4 Index
+# {name} - Research Loop Room V0.7 Index
 
 Topic: {topic}
 
@@ -672,7 +672,7 @@ Topic: {topic}
 
 {personas}
 
-## DAG Topology (14 nodes L0-L10c)
+## DAG Topology (15 nodes L0-L10c)
 
 {layers}
 
@@ -686,7 +686,7 @@ Topic: {topic}
 - Only **Turing** executes code, and only after the Execution Gate passes.
 - Execution Gate requires: `00_Preflight/skill_use_plan.md`,
   `00_Preflight/input_manifest.md`, and an approved plan (status METHOD_APPROVED).
-- Each persona runs as an isolated subagent (v0.4).
+- Each persona runs as an isolated subagent under the V0.7 topology.
 - State flows between subagents via delta JSON files only.
 
 ## DAG Node Flow
@@ -1850,9 +1850,9 @@ def cmd_new_project(args):
         return 2
     _mkdirs(project_dir)
     (project_dir / "00_Project_Index.md").write_text(
-        _index_template_v03(name, topic), encoding="utf-8")
+        _index_template(name, topic), encoding="utf-8")
     pl.init_ledger(project_dir)
-    print(f"Created v0.4 project: {project_dir.resolve()}")
+    print(f"Created V0.7 project: {project_dir.resolve()}")
     print("Next: run `preflight` (Linnaeus L0) before any candidate work.")
     return 0
 
@@ -1986,7 +1986,7 @@ def cmd_new_candidate(args):
                                   if round_type == "continuation" else ""),
     })
 
-    body = _candidate_template_v03(cand_id, args.title, args.input,
+    body = _candidate_template(cand_id, args.title, args.input,
                                    args.question, args.claim,
                                    input_alias=getattr(args, "input_alias", "") or "",
                                    extra_front=mem_fields)
@@ -2087,7 +2087,7 @@ def cmd_normalize_l0_input(args):
         print(l0_contract.serialize_contract(contract).decode("utf-8"), end="")
         return 0
 
-    body = _candidate_template_v03(
+    body = _candidate_template(
         cand_id, contract["scientific_question"], source["description"],
         contract["scientific_question"], contract["current_round"]["hypothesis"],
         extra_front=mem_fields)
@@ -2273,7 +2273,7 @@ def cmd_demo(args):
     _mkdirs(pd)
     name = "DemoProject_v03"
     (pd / "00_Project_Index.md").write_text(
-        _index_template_v03(name, "RLR v0.4 DAG demo"), encoding="utf-8")
+        _index_template(name, "RLR V0.7 DAG demo"), encoding="utf-8")
 
     pf = pd / "00_Preflight"
     for fname in PREFLIGHT_FILES:
@@ -2281,7 +2281,7 @@ def cmd_demo(args):
 
     c1 = "C" + _stamp()
     (pd / "01_Candidates" / f"{c1}.md").write_text(
-        _candidate_template_v03(
+        _candidate_template(
             c1,
             "High-rate co-expression module tracks Sk/Sm vs Rn",
             "length_scaled_counts.csv (primary); sample_metadata_checked.csv (primary)",

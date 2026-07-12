@@ -37,37 +37,8 @@ formal gate or decision.
 - **Added strict L0 intake.** `normalize-l0-input` builds a validated, auditable contract from a request file and explicit data location without guessing paths, IDs, decisions, or conclusions.
 - **Added the Hypothesis Ranking Reliability Layer (shadow mode).** It uses paired fair judgments, deterministic scheduling, checkpoints, evidence events, and disagreement reporting under `08_Audit/ranking/`; it never changes formal RLR decisions or gates.
 
-### v0.4.5 — superseded by V0.7 (2026-06-26)
-
-- **Added L8.5 literature-verification node.** After results are computed (L7) and audited (L8), Curie runs a second pass that searches PubMed/EuropePMC to verify findings against published literature, before falsification and interpretation begin.
-- **Added L0 dependency gate (hard stop).** `preflight` / `check-deps` verify required dependencies (PyYAML, Academic Research skill, Zotero, Obsidian vault) and STOP the loop if any is missing — fail-closed, never skip.
-- **Added growable literature database** (`manage_literature_db.py`). Papers found during pre-research and L8.5 are stored, deduplicated, and reused across rounds via Obsidian wikilinks.
-- **Fixed** UTF-8 stdout so `assemble-context` never crashes on non-GBK characters.
-
-### v0.4 — 2026-06-25
-
-- **Added three pre-research steps** (no new DAG nodes): deep literature search before L1, method literature review before L4, code search before L7.
-- **Fixed** pre-research injection — the initial build wrote summaries but never embedded them in `assemble-context` (the feature was inert). Pre-research is now grounded in the candidate's own question/claim.
-- **Fixed** `sync_to_obsidian` — no longer creates junk directories when `$OBSIDIAN_VAULT` is unset (fails loud) and no longer hard-codes local paths.
-- **Added** end-of-round Obsidian sync as an explicit, required loop step.
-
-### v0.3 — SUPERSEDED (2026-06-24)
-
-- **Did:** turned every persona into an isolated subagent over a 14-node DAG (L0–L10c; L9a/L9b parallel).
-- **Fixed vs v0.2:** eliminated single-shared-context contamination. Each node now sees only its DAG-allowed inputs.
-- **Added:** `next-step` / `assemble-context` / `emit-delta` / `prepare-turing-workspace` commands; structured delta JSON with recursive schema validation; audit trail (context manifests + run receipts with hashes); loop runner (`run_loop.py`) with main-agent / headless / manual modes and hybrid StopPolicy; bilingual FINAL_REPORT.
-- Preserved for reference: `research_loop_v03.py`, [DAG_TOPOLOGY.md](DAG_TOPOLOGY.md).
-
-### v0.2 — DEPRECATED (2026-06-23)
-
-- **Did:** reworked the loop into a gated 10-persona council with a decision log and Obsidian sync.
-- **Fixed vs v0.1:** added gates — L0 skill/preflight gate, candidate triage, method triage, execution gate (only Turing runs code, only after the gate).
-- **Still wrong:** all 10 personas shared one context window, so reasoning cross-contaminated.
-
-### v0.1 — DELETED (2026-06-22)
-
-- **Did:** a 7-agent linear loop with 9 statuses, all agents sharing one context.
-- **Why removed:** no skill gate, no method triage, no execution safety, no context isolation. Architecture was judged unsound and deleted.
+Earlier releases are available through Git history. They are not supported
+runtime paths or active template specifications.
 
 ---
 

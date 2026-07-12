@@ -37,7 +37,7 @@ max_rounds: 3
 
 Before **L1 / L4 / L8.5** the runner invokes Academic Research Skills and embeds
 the validated evidence result
-into that node's `assemble-context` (the 14-node DAG is unchanged):
+into that node's `assemble-context` (the 15-node DAG is unchanged):
 
 - **L1** Results/Discussion/Conclusion → **L4** Methods/review evidence →
   **L8.5** result verification evidence. L7 remains a separate code search.
@@ -89,4 +89,4 @@ After L10c, the loop evaluates whether to stop or continue:
 | `orchestrator.py` | Provider abstraction (HeadlessProvider, CommandProvider, ManualProvider) |
 | `MAIN_AGENT_RUN.md` | Main-agent execution protocol |
 | `MAIN_AGENT_PROMPT.md` | Copy-paste startup prompt for host agents |
-| `research_loop_v04.py` | Core DAG controller (v0.4.5; called via CLI) |
+| `research_loop_v04.py` | Compatibility CLI/import entry point for the current V0.7 controller |

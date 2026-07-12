@@ -1,48 +1,49 @@
-# DAG Topology - Research Loop Room v0.3
+# DAG Topology — RLR V0.7
 
-This document is the canonical reference for the v0.3 subagent DAG. There are
-14 nodes (L0-L10c). L9a/L9b run in parallel; L7 is the only execution node.
+`research_loop/topology.py` is the executable source of truth for node order,
+allowed inputs, personas, state transitions, and delta schemas. This document
+is a reader-facing overview; it does not define commands or schemas.
 
-Each node is executed by a separate subagent with physical context isolation
-(Path B for cognitive agents; Path A workspace isolation for Turing). A
-subagent sees ONLY the delta files listed in its "Input Files" column. Anything
-not listed is physically absent from its context.
-
-## Topology table
-
-| Node | Persona | Input Files | Isolated From | Output |
-| ---- | ------- | ----------- | ------------- | ------ |
-| L0 | Linnaeus | AGENTS.md, skills_inventory, data paths | all exec notes | L0_linnaeus_delta.json |
-| L1 | Einstein | candidate_frontmatter, L0 delta | L2+ | L1_einstein_delta.json |
-| L2 | Feynman | candidate_frontmatter, L1 delta | L3+ | L2_feynman_delta.json |
-| L3 | Oppenheimer | L1 delta, L2 delta | L4+ | L3_oppenheimer_delta.json |
-| L4 | Fisher | L1 delta, L3 delta, L2 delta | L5+ | L4_fisher_delta.json |
-| L5 | Tukey | L4 delta, L2 delta (ref) | L6+ | L5_tukey_delta.json |
-| L6 | Oppenheimer | L4 delta, L5 delta | L7+ | L6_oppenheimer_delta.json |
-| L7 | Turing | L6 delta, L0 delta, skill_plan (Path A) | L1-L5 history | L7_turing_delta.json |
-| L8 | Curie | L7 delta, L6 delta, candidate_frontmatter | L9+ | L8_curie_delta.json |
-| L9a | Feynman (2nd) | L1 delta, L7 delta, L8 delta | L9b, L10 | L9a_feynman_delta.json |
-| L9b | Darwin (2nd) | L1 delta, L7 delta, L8 delta | L9a, L10 | L9b_darwin_delta.json |
-| L10a | Jobs | candidate_frontmatter, L8, L9a, L9b deltas | L10b+ | L10a_jobs_delta.json |
-| L10b | Oppenheimer (3rd) | L10a, L8, L9a, L9b deltas | - | L10b_oppenheimer_delta.json |
-| L10c | Linnaeus (2nd) | ALL delta files | - | FINAL_REPORT.md + FINAL_REPORT_CN.md |
-
-## DAG order
+RLR has 15 nodes. L9a and L9b run in parallel; L7 is the only execution node.
+The current sequence is:
 
 ```
-L0 -> L1 -> L2 -> L3 -> L4 -> L5 -> L6 -> L7 -> L8
-     -> { L9a || L9b } -> L10a -> L10b -> L10c
+L0 -> L1 -> L2 -> L3 -> L4 -> L5 -> L6 -> L7 -> L8 -> L8.5
+   -> { L9a || L9b } -> L10a -> L10b -> L10c
 ```
 
-## Notes
+| Node | Persona | Responsibility | Formal effect |
+| --- | --- | --- | --- |
+| L0 | Linnaeus | Verify normalized input, dependencies, and capabilities | Stops on missing required inputs or dependencies |
+| L1 | Einstein | Generate testable hypotheses from verified evidence | Hypothesis delta |
+| L2 | Feynman | Falsify hypotheses and identify confounders | Critique delta |
+| L3 | Oppenheimer | Triage candidate hypotheses | `triage-idea`; optional advisory ranking afterward |
+| L4 | Fisher | Propose evidence-grounded methods | Method delta |
+| L5 | Tukey | Falsify method assumptions and QC plan | Method critique |
+| L6 | Oppenheimer | Approve, revise, or reject the analysis plan | `triage-method` |
+| L7 | Turing | Execute only the approved plan in an isolated workspace | Execution artifact |
+| L8 | Curie | Audit execution evidence and reproducibility | Evidence audit |
+| L8.5 | Curie | Verify audited results against located literature evidence | Literature verification |
+| L9a | Feynman | Falsify result-level claims | Parallel result critique |
+| L9b | Darwin | Produce bounded biological interpretation | Parallel interpretation |
+| L10a | Jobs | Assess scientific and practical value | Value assessment |
+| L10b | Oppenheimer | Make the final formal decision | `KEEP` / `REVISE` / `DOWNGRADE` / `DROP`; optional advisory ranking afterward |
+| L10c | Linnaeus | Aggregate the audit trail into final reports | Aggregate report |
 
-- "candidate_frontmatter" = stripped YAML metadata (candidate_id, title,
-  question, claim). The candidate body is never passed to subagents.
-- L2 Feynman and L9a Feynman are DIFFERENT subagent instances. Same persona,
-  independent context. L9a does not see L2's note.
-- L3/L6/L10b Oppenheimer are also separate instances.
-- L7 Turing is the only node using Path A (workspace + command allowlist). All
-  others use Path B (context embedded as text; no filesystem access).
-- Delta files live at `02_Agent_Notes/<persona>/<node>_<persona>_delta.json`.
-- Terminal status reached after L10c (report generated). Statuses KEEP/DROP/
-  ARCHIVED end the loop earlier if set by L10b.
+## Evidence and isolation
+
+- Before L1, L4, and L8.5, the Deep Research adapter obtains and validates a
+  source-located evidence pack. L1 requires Results/Discussion/Conclusion;
+  L4 requires primary-study Methods plus a review-search receipt; L8.5 checks
+  result consistency with literature.
+- Cognitive nodes receive only the context assembled for their allowed inputs.
+  L7 alone receives a controlled execution workspace.
+- L3 and L10b can emit ranking shadow artifacts after their own deltas are
+  written. Ranking is advisory and never changes a formal transition.
+
+## Template behavior
+
+The default `contract` template mode injects the generated node contract. The
+optional `full` mode additionally injects the node and persona templates from
+`templates/layers/` and `templates/personas/`; these templates supplement the
+contract and never replace its dynamic schema or runtime instructions.

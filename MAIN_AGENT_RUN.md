@@ -34,7 +34,7 @@ L1, do not skip. Install the missing dependency, re-run preflight, then continue
 ## Deep Research evidence (V0.7)
 
 Deep Research runs automatically *before* L1, L4, and L8.5 — it does **not**
-change the 14-node DAG topology; their results are embedded into the node's
+change the 15-node DAG topology; their results are embedded into the node's
 `assemble-context` as extra reference context:
 
 | Before | Step | What you do |

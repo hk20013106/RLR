@@ -29,6 +29,7 @@ import os  # noqa: E402
 import subprocess  # noqa: E402
 
 from research_loop.providers.command import CommandProvider  # noqa: E402
+from research_loop import deep_research as dr  # noqa: E402
 
 RL = str(HERE / "research_loop_v04.py")
 
@@ -39,9 +40,9 @@ RL = str(HERE / "research_loop_v04.py")
 _ENV = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
 
 FORBID = "ZZZSENTINEL_L9B_FORBIDDEN_PAYLOAD"  # planted only in the L9b delta
-# body-only line from templates/v03_personas/02_Einstein.md (NOT in NODE_MAP,
+# body-only line from templates/personas/02_Einstein.md (NOT in NODE_MAP,
 # so it can ONLY appear if the persona template file itself is injected):
-EINSTEIN_BODY = "No inventing references or DOIs"
+EINSTEIN_BODY = "Imaginative but disciplined."
 
 
 def _run(*args):
@@ -87,13 +88,30 @@ def _seed_forbidden_l9b(proj, cand):
           {"module_interpretations": [{"module": FORBID, "genes": ["g"]}]}, cand)
 
 
-def _write_l1_preresearch(proj):
-    d = proj / "02_Agent_Notes" / "_pre_research"
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "L1_research.md").write_text(
-        "# L1 research\n\n## Runtime digest\nfindings PMID: 111\n\n"
-        "## Query log\n- q1\n\n## Tool receipt\n- pubmed 2020 ok\n\n"
-        "## Source count\n2\n", encoding="utf-8")
+def _write_l1_preresearch(proj, cand):
+    """Create the verified evidence artifact now required before L1."""
+    payload = {
+        "schema_version": dr.SCHEMA_VERSION,
+        "queries": ["test hypothesis"],
+        "papers": [{
+            "doi": "10.1000/persona-test", "pmid": "123456", "url": "https://example.org/paper",
+            "title": "Persona context fixture", "source_database": "Europe PMC",
+            "metadata": {"year": 2026}, "source_metadata_response": {"id": "123456"},
+            "open_access": False,
+            "extracts": [
+                {"section": "Results", "text": "Observed result.", "locator": "Results 1"},
+                {"section": "Discussion", "text": "Discussed result.", "locator": "Discussion 1"},
+                {"section": "Conclusion", "text": "Concluded result.", "locator": "Conclusion 1"},
+            ],
+        }],
+    }
+    artifact = dr.persist_run(
+        proj, cand, "L1", payload,
+        dr.skill_receipt("codex", ["codex", "exec"], "fixture", "test"),
+    )
+    target = proj / "02_Agent_Notes" / "_pre_research" / "L1_research.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(dr.render_pre_research_markdown(artifact), encoding="utf-8")
 
 
 def _prompt_via_provider(node, persona, ctx, run_dir):
@@ -120,7 +138,7 @@ def test_persona_identity_in_rendered_context_and_provider_prompt(tmp_path):
     proj = _new_project(tmp_path)
     cand = _new_candidate(proj)
     _seed_l0(proj, cand)
-    _write_l1_preresearch(proj)
+    _write_l1_preresearch(proj, cand)
 
     rc, ctx, err = _assemble(proj, cand, "L1")
     assert rc == 0, err
@@ -141,7 +159,7 @@ def test_full_mode_injects_persona_template_body(tmp_path):
     proj = _new_project(tmp_path)
     cand = _new_candidate(proj)
     _seed_l0(proj, cand)
-    _write_l1_preresearch(proj)
+    _write_l1_preresearch(proj, cand)
 
     rc, ctx, err = _assemble(proj, cand, "L1", "--template-mode", "full")
     assert rc == 0, err
@@ -155,7 +173,7 @@ def test_forbidden_downstream_delta_absent_from_context_and_prompt(tmp_path):
     proj = _new_project(tmp_path)
     cand = _new_candidate(proj)
     _seed_l0(proj, cand)
-    _write_l1_preresearch(proj)
+    _write_l1_preresearch(proj, cand)
     _seed_forbidden_l9b(proj, cand)  # L1 must never see L9b
 
     rc, ctx, err = _assemble(proj, cand, "L1")

@@ -23,31 +23,7 @@ RLR 是一个**科学研究的自动化审查框架**。它把一个研究问题
 - **L0 严格输入契约**：`normalize-l0-input` 将请求文件和显式数据位置规范化为可验证、可审计的 L0 contract；不从自然语言猜测路径、ID、决策或结论。
 - **假说排序可靠性层（shadow mode）**：对显式候选集合执行 A/B 与 B/A 的公平 pairwise 判断；顺序翻转标记为 `UNCERTAIN`，并将排序、checkpoint、evidence event、正式决策分歧和失败审计隔离写入 `08_Audit/ranking/`。它绝不改变正式 gate、候选选择或 decision。
 
-### v0.4.5 — 已被 V0.7 取代（2026-06-26）
-- **新增 L8.5 文献验证节点**：居里 的第二实例。L7/L8 出结果后，L8.5 基于**实际结果**检索 PubMed/EuropePMC，验证结论是否与已发表文献一致。同时引入可增长的文献数据库（`manage_literature_db.py`），跨轮复用。
-- **新增 L0 依赖门禁**（硬停止）：`preflight` / `check-deps` 在 L0 检查所有必需依赖（PyYAML、Academic Research skill、Zotero、Obsidian vault），任一缺失就**退出码非零，循环停止**——不允许跳过。
-- **修复**：`sync_to_obsidian` 的 UTF-8 编码问题；`assemble-context` 在 Windows 控制台打印非 GBK 字符时崩溃的问题。
-
-### v0.4.x — 超级版本（保留参考）
-- **新增三个预研步骤**（不改 DAG 节点数）：L1 前做深度文献检索，L4 前做方法论文综述，L7 前做代码库搜索。预研结果嵌入对应节点的 `assemble-context`，并记录在 context manifest 中。
-- **修复**：预研结果之前写了但没嵌入上下文（功能是死的）；预研查询之前硬编码了一个项目的查询，现在改为基于 candidate 自己的 question/claim 动态生成。`sync_to_obsidian` 在无 `$OBSIDIAN_VAULT` 时不再创建垃圾目录（改为报错退出）。
-- **文件**：`research_loop_v04.py`
-
-### v0.3 — 超级版本（保留参考）
-- **做了什么**：把每个角色变成**隔离的 subagent**，跑一个 **14 节点 DAG**（L0–L10c；L9a/L9b 并行）。
-- **修复了 v0.2 的问题**：单上下文污染。每个节点现在只能看到 DAG 允许的输入（路径 B = 上下文不可见）；执行隔离到 workspace（路径 A）。自由格式笔记被**结构化 delta JSON** 取代，带递归 schema 验证。
-- **新增**：`next-step` / `assemble-context` / `emit-delta` / `prepare-turing-workspace` 控制器命令；审计追踪（context manifest + run receipt + 哈希）；循环运行器（`run_loop.py` + `orchestrator.py`），支持 main-agent / headless / manual 三种模式，混合 StopPolicy，子 candidate 轮次；中英文 FINAL_REPORT；Obsidian 人类可读同步。
-- **文件**：`research_loop_v03.py`、[DAG_TOPOLOGY.md](DAG_TOPOLOGY.md)
-
-### v0.2 — 废弃（保留，仍可运行）
-- **做了什么**：重构为**门控的 10 人格委员会**（林奈 … 乔布斯），单一共享上下文，带决策日志和 Obsidian 同步。
-- **修复了 v0.1 的问题**：补上了缺失的**门禁**——L0 技能/预检门禁、candidate 裁决、方法裁决、执行门禁（只有 图灵 跑代码，且只在门禁通过后）。7→10 人格，9→15 状态。
-- **仍有的问题**：10 个人格共享**一个上下文窗口**，推理会交叉污染（比如假设的提出者看到了对自己假设的批判）。
-- **文件**：`research_loop_v02.py`（保留不动）
-
-### v0.1 — 已删除
-- **做了什么**：7 agent 的**线性**循环（Idea → Value → Evidence → Falsification → Biology → Decision → Execution），9 个状态，所有 agent 共享一个上下文。
-- **为什么删除**：没有技能门禁、没有方法裁决、没有执行安全、没有上下文隔离。架构不合理，已删除（未保留）。
+更早版本可通过 Git 历史查看；它们不是受支持的运行路径或活动模板规范。
 
 ---
 
@@ -299,7 +275,6 @@ research_loop/
 │   ├── paths.py / yamlio.py      # 安全路径和 YAML/frontmatter I/O
 │   ├── ledger.py / presearch.py  # pitfall/evidence ledger 与预研
 │   └── errors.py                 # 类型化运行时错误
-├── research_loop_v03.py          # 保留参考
 ├── run_loop.py                   # 循环运行器
 ├── orchestrator.py               # Provider 抽象
 ├── manage_literature_db.py       # 文献数据库
@@ -308,8 +283,8 @@ research_loop/
 ├── MAIN_AGENT_PROMPT.md          # 主 agent 启动提示词
 ├── RUNNER.md                     # 运行模式 + StopPolicy
 ├── DAG_TOPOLOGY.md               # DAG 依赖表
-├── templates/v03_layers/         # 15 个 layer 模板
-├── templates/v03_personas/       # 10 个人格模板
+├── templates/layers/             # 15 个 layer 模板
+├── templates/personas/           # 10 个人格模板
 └── DemoProject_v03/              # 跟踪的示例项目
 ```
 

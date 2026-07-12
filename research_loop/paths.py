@@ -33,12 +33,12 @@ PERSONA_TEMPLATE_FILE = {p: f"{i + 1:02d}_{p}.md" for i, p in enumerate(AGENTS)}
 def _layer_template_path(node_id):
     """Relative path to a node's layer template (real on-disk filename)."""
     fname = LAYER_TEMPLATE_FILE.get(node_id, f"{node_id}.md")
-    return f"templates/v03_layers/{fname}"
+    return f"templates/layers/{fname}"
 
 def _persona_template_path(persona):
     """Relative path to a persona's template (real on-disk filename)."""
     fname = PERSONA_TEMPLATE_FILE.get(persona, f"{persona}.md")
-    return f"templates/v03_personas/{fname}"
+    return f"templates/personas/{fname}"
 
 def _candidate_file(project_dir, cand_id):
     return Path(project_dir) / "01_Candidates" / f"{cand_id}.md"
