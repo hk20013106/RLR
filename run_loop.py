@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""RLR V0.5 loop runner — the canonical active runtime entry point.
+"""RLR V0.7 loop runner — the canonical active runtime entry point.
 
 `python run_loop.py run PROJECT CAND` is the one documented way to drive the
-loop. It drives the V0.5 engine (research_loop_v04.py) whose `assemble-context`
-enforces the V0.5 deep-research gate: L1/L4/L7 fail closed (rc=3) without a
+loop. It drives the V0.7 engine (research_loop_v04.py) whose `assemble-context`
+enforces the V0.7 deep-research gate: L1/L4/L7 fail closed (rc=3) without a
 valid pre-research artifact, and `assemble_context()` here re-raises that as a
 hard stop — the runner never silently continues when deep research is absent.
 
@@ -944,7 +944,7 @@ def cmd_run(args):
     return 0
 
 
-MAIN_AGENT_PROMPT_TEMPLATE = """You are now the RLR V0.5 main-agent orchestrator.
+MAIN_AGENT_PROMPT_TEMPLATE = """You are now the RLR V0.7 main-agent orchestrator.
 
 Project: {project}
 Candidate: {cand_id}
@@ -952,7 +952,7 @@ Candidate: {cand_id}
 Instructions:
 1. Run:  python research_loop_v04.py next-step {project} {cand_id}
 2. Read the JSON output to get the current DAG node, persona, and context_files.
-3. PRE-RESEARCH (V0.5 gate, MANDATORY): if the node is L1, L4, or L7 you MUST do
+3. PRE-RESEARCH (V0.7 gate, MANDATORY): if the node is L1, L4, or L7 you MUST do
    its pre-step FIRST. assemble-context fails closed (rc=3) without a valid
    artifact — you cannot proceed by skipping it:
      python research_loop_v04.py pre-research {project} {cand_id} --node NODE
@@ -1000,7 +1000,7 @@ def cmd_print_main_agent_prompt(args):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="run_loop.py",
-        description="RLR V0.5 loop runner — canonical runtime entry point "
+        description="RLR V0.7 loop runner — canonical runtime entry point "
                     "(main-agent / headless / manual).")
     sub = p.add_subparsers(dest="cmd", required=True)
 

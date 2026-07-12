@@ -261,8 +261,8 @@ def cmd_assemble_context(args):
                 sections.append(f"=== DELTA: {inp} (not yet emitted) ===")
                 sections.append("")
 
-    # --- V0.5 deep-research gate + pre-research injection --------------------
-    # CANONICAL V0.5 RUNTIME: the literature deep-research stages (L1, L4) are
+    # --- V0.7 deep-research gate + pre-research injection --------------------
+    # CANONICAL V0.7 RUNTIME: the literature deep-research stages (L1, L4) are
     # MANDATORY. assemble-context fails closed (rc=3) when their artifact is
     # missing, empty, a NOT YET RUN placeholder, or lacks a `## Runtime digest`
     # with a DOI/PMID/URL — it NEVER emits a NOT YET RUN section as a successful
@@ -276,7 +276,7 @@ def cmd_assemble_context(args):
         if is_lit:
             ok, reason = _audit_pre_research(project_dir, node_id, pr_cfg)
             if not ok:
-                print(f"ERROR: V0.5 deep-research gate -- {node_id} pre-research "
+                print(f"ERROR: V0.7 deep-research gate -- {node_id} pre-research "
                       f"invalid: {reason}", file=sys.stderr)
                 print(f"Run real deep research and write a valid artifact to "
                       f"{prf.as_posix()} first (no 'NOT YET RUN' placeholder).",
@@ -369,7 +369,7 @@ def cmd_assemble_context(args):
                  "promoted_to": p.get("promoted_to")}
                 for p in gate_candidates)
 
-    # --- template contract (v0.4.5) ---
+    # --- template contract (V0.7) ---
     #   contract (default): compact authority/scope/must/schema; NO template body.
     #   refs: path+sha256 only -- LEGAL ONLY for filesystem (execution) nodes. A
     #     no-fs cognitive node must never run blind to its template, so refs on a

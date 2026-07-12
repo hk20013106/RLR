@@ -17,11 +17,11 @@ from research_loop.preresearch import (
 
 
 def _audit_pre_research(project_dir, node_id, pr_cfg):
-    """V0.5 deep-research gate. Returns (ok, reason).
+    """V0.7 deep-research gate. Returns (ok, reason).
 
     Fails closed when the pre-research artifact is missing, empty, a NOT YET RUN
     placeholder, or (for literature nodes) lacks a `## Runtime digest` carrying a
-    DOI/PMID/URL. This is the single enforcement point for the canonical V0.5
+    DOI/PMID/URL. This is the single enforcement point for the canonical V0.7
     runtime -- there is no path that treats absent deep research as success.
     """
     prf = _pre_research_file(project_dir, node_id)

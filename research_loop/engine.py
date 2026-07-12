@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Research Loop Room V0.5 — canonical gated runtime engine.
+"""Research Loop Room V0.7 — canonical gated runtime engine.
 
-This IS the V0.5 runtime. The filename `research_loop_v04.py` is retained only
+This IS the V0.7 runtime. The filename `research_loop_v04.py` is retained only
 for import/CLI stability (run_loop.py and the main-agent protocol import it);
-it is not a legacy engine. As of V0.5, `assemble-context` enforces the
+it is not a legacy engine. As of V0.7, `assemble-context` enforces the
 deep-research gate (`_audit_pre_research`) on the literature deep-research
 stages L1 (deep_research) and L4 (literature_review): it fails closed (rc=3)
 when their pre-research artifact is missing, empty, a NOT YET RUN placeholder,
@@ -52,7 +52,7 @@ from pathlib import Path
 
 import pitfall_ledger as pl  # additive: pitfall ledger (no DAG/schema coupling)
 
-__version__ = "0.5.0"
+__version__ = "0.7.0"
 
 
 from research_loop.errors import RLRError  # inward shim (Phase 1a)
@@ -411,7 +411,7 @@ def _slug(s):
 
 
 
-# V0.5 deep-research gate ----------------------------------------------------
+# V0.7 deep-research gate ----------------------------------------------------
 # The mandatory gate covers the literature DEEP-RESEARCH stages: L1
 # (deep_research) and L4 (literature_review). These must carry a structured
 # `## Runtime digest` with at least one resolvable identifier. Code-search (L7)
@@ -3763,9 +3763,9 @@ def cmd_ranking_report(args):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="research_loop_v04.py",
-        description="Research Loop Room V0.5 - canonical gated runtime engine "
+        description="Research Loop Room V0.7 - canonical gated runtime engine "
                     "(DAG-driven subagent architecture; assemble-context "
-                    "enforces the V0.5 deep-research gate).")
+                    "enforces the V0.7 deep-research gate).")
     p.add_argument("--version", action="version", version=f"v{__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 

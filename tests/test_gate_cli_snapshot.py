@@ -11,7 +11,7 @@ substring instead.
 Grounded via CLI probe on v0.7-migration baseline (DemoProject_v03 /
 C20260625112755162852):
   assemble-context --node L1 (pre-research artifact absent)
-    -> rc=3, stderr contains "V0.5 deep-research gate", stdout empty
+    -> rc=3, stderr contains "V0.7 deep-research gate", stdout empty
   assemble-context --node L5  -> rc=0, non-empty stdout
 These are the fail-closed and pass baselines the registry must not change.
 """
@@ -36,7 +36,7 @@ def test_l1_pre_research_gate_fails_closed_rc3():
     """L1 literature pre-research missing -> hard fail-closed rc=3, no context on stdout."""
     rc, out, err = _cli("assemble-context", PROJECT, CAND, "--node", "L1")
     assert rc == 3, f"L1 pre-research gate must fail closed with rc=3, got {rc}"
-    assert "V0.5 deep-research gate" in err, f"expected gate message in stderr, got: {err[:200]}"
+    assert "V0.7 deep-research gate" in err, f"expected gate message in stderr, got: {err[:200]}"
     assert out.strip() == "", "fail-closed gate must not emit usable context on stdout"
 
 
