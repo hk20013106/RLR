@@ -14,6 +14,7 @@ import sys
 import subprocess
 import tempfile
 from pathlib import Path
+from research_loop import deep_research as dr
 
 RL = str(Path(__file__).resolve().parent / "research_loop_v04.py")
 
@@ -60,6 +61,14 @@ current_owner: Einstein
         "## Query log\n- X association Y\n\n"
         "## Tool receipt\n- tool: pubmed | time: 2026-07-05T10:00:00 | "
         "summary: 1 hit\n\n## Source count\n1\n", encoding="utf-8")
+    dr.persist_run(d, "C1", "L1", {
+        "schema_version": dr.SCHEMA_VERSION, "queries": ["X association Y"],
+        "papers": [{"doi": "10.1000/abc123", "title": "Smith 2020", "source_database": "PubMed",
+                    "metadata": {}, "source_metadata_response": {"id": "abc123"}, "open_access": False,
+                    "extracts": [{"section": "Results", "text": "result", "locator": "Results"},
+                                 {"section": "Discussion", "text": "discussion", "locator": "Discussion"},
+                                 {"section": "Conclusion", "text": "conclusion", "locator": "Conclusion"}]}],
+    }, dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"))
     return d
 
 

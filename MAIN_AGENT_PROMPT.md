@@ -13,12 +13,10 @@ You do everything yourself.
 Loop:
 1. Run `python research_loop_v04.py next-step PROJECT_DIR CAND_ID` to get the
    current DAG node.
-2. PRE-RESEARCH (v0.4): if the node is L1, L4, or L7, do its pre-step FIRST:
-   `python research_loop_v04.py pre-research PROJECT_DIR CAND_ID --node NODE`.
-   Follow the printed prompt (it is grounded in this candidate's question/claim):
-   L1 = deep literature research, L4 = method literature review, L7 = code search.
-   Write the structured summary to 02_Agent_Notes/_pre_research/NODE_research.md.
-   assemble-context then embeds it automatically. Skip for all other nodes.
+2. DEEP RESEARCH (V0.7): if the node is L1, L4, or L8.5, run
+   `python research_loop_v04.py deep-research-run PROJECT_DIR CAND_ID --node NODE`.
+   This explicitly invokes configured Codex ARS or Claude ARS, and persists
+   source-located evidence. L7 remains a separate code-search pre-step.
 3. Run `python research_loop_v04.py assemble-context PROJECT_DIR CAND_ID --node NODE`
    to get the isolated context for that node (it now includes the pre-research
    summary when present).
@@ -36,8 +34,8 @@ Loop:
 
 Key rules:
 - ONLY use assemble-context output as your input. Do NOT read other delta files.
-- Pre-research runs BEFORE L1/L4/L7 and is embedded via assemble-context; it does
-  NOT change the 14-node DAG topology.
+- Deep Research runs BEFORE L1/L4/L8.5 and is embedded via assemble-context;
+  it does NOT change the 15-node DAG topology.
 - L7 Turing: use prepare-turing-workspace. Run scripts only in that workspace.
 - L9a/L9b: generate both deltas before advancing. Keep them independent.
 - After L10c: if KEEP + review accept, stop. If REVISE + executable next_steps,

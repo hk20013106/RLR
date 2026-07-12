@@ -10,6 +10,7 @@ import sys
 import subprocess
 import tempfile
 from pathlib import Path
+from research_loop import deep_research as dr
 
 HERE = Path(__file__).resolve().parent
 RL = str(HERE / "research_loop_v04.py")
@@ -54,6 +55,18 @@ def _assemble_node(d, node, artifact):
     pr = Path(d) / "02_Agent_Notes" / "_pre_research"
     pr.mkdir(parents=True, exist_ok=True)
     (pr / f"{node}_research.md").write_text(artifact, encoding="utf-8")
+    extracts = [{"section": "Results", "text": "result", "locator": "Results"},
+                {"section": "Discussion", "text": "discussion", "locator": "Discussion"},
+                {"section": "Conclusion", "text": "conclusion", "locator": "Conclusion"},
+                {"section": "Methods", "text": "method", "locator": "Methods"}]
+    payload = {"schema_version": dr.SCHEMA_VERSION, "queries": ["q"],
+               "papers": [{"doi": "10.1000/abc123", "title": "Paper", "source_database": "PubMed",
+                           "metadata": {}, "source_metadata_response": {"id": "abc123"},
+                           "open_access": False, "extracts": extracts}]}
+    if node == "L4":
+        payload["review_search"] = {"query": "review q", "status": "none_found", "receipt": "PubMed 0"}
+    dr.persist_run(d, "C1", node, payload,
+                   dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"))
     return _run("assemble-context", d, "C1", "--node", node)
 
 

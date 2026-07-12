@@ -139,7 +139,7 @@ def test_run_round_aborts_after_repeated_cognitive_emit_failure():
 
     try:
         run_loop.next_step = lambda project, cand: step
-        run_loop.ensure_pre_research = lambda *a, **k: None
+        run_loop.ensure_pre_research = lambda *a, **k: True
         run_loop.exec_cognitive = fake_exec_cognitive
         cfg = SimpleNamespace(stop_policy={"max_l7_failures": 2,
                                            "max_node_failures": 2})

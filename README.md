@@ -6,7 +6,7 @@
 
 You give it a scientific question. RLR walks it through a 15-step pipeline (L0 → L10c) where 10 expert personas — each acting as an isolated subagent — generate hypotheses, critique them, design methods, execute code, audit evidence, verify against literature, and reach a final KEEP / REVISE / DROP decision. No single agent sees the full picture; each sees only what the DAG allows. This prevents bias contamination (e.g., the agent proposing a hypothesis never sees the critique of its own idea until a decision is made).
 
-Three pre-research steps ground the work in real literature (PubMed, EuropePMC) and real code (GitHub, Bioconductor) before the agents run. A dependency gate at L0 stops the loop if required tools are missing.
+L1, L4, and L8.5 run a verifiable Academic Research Skills (ARS) pass before their node; L7 separately searches reusable code. Each literature run stores a versioned evidence pack rather than trusting a prose summary.
 
 > **Core principle:** cognitive agents are isolated by information invisibility (Path B). The execution agent (Turing) is isolated by a controlled workspace + command allowlist (Path A). We do not pretend `spawn_agent` is an OS sandbox.
 
@@ -15,11 +15,11 @@ Three pre-research steps ground the work in real literature (PubMed, EuropePMC) 
 **Canonical runtime path:** `python run_loop.py run PROJECT CAND` drives the V0.7
 engine (`research_loop_v04.py`, filename retained for import stability). As of
 V0.7, `assemble-context` **enforces the deep-research gate** on the literature
-deep-research stages **L1 (deep research) and L4 (method literature)**: they
-**fail closed (rc=3)** when the pre-research artifact is missing, empty, a
-`NOT YET RUN` placeholder, or lacks a `## Runtime digest` with a DOI/PMID/URL.
-The runner re-raises this as a hard stop — deep research can no longer be
-silently skipped. (L7 code-search keeps its prior soft pre-step.) The old `rlr_v05b.py` prototype is **LEGACY** (its
+deep-research stages **L1, L4, and L8.5**: they **fail closed (rc=3)** unless a
+successful ARS CLI receipt, source-database metadata record, and required
+located evidence sections are persisted under `09_Literature_Database/evidence_packs/`.
+The runner re-raises this as a hard stop; it never treats a handwritten
+pre-research note or an environment-variable attestation as proof. The old `rlr_v05b.py` prototype is **LEGACY** (its
 gate was promoted into the canonical engine).
 
 **Current additions:** L0 now accepts a strict, auditable normalized input
@@ -33,7 +33,7 @@ formal gate or decision.
 
 ### V0.7 — CURRENT (canonical gated runtime)
 
-- **Promoted the V0.7 deep-research gate into the canonical engine.** `assemble-context` now fails closed (rc=3) for L1/L4/L7/L8.5 without a valid pre-research artifact; there is no path that treats absent deep research as success. `rlr_v05b.py` is retained as a LEGACY prototype only.
+- **Added verifiable Deep Research evidence packs.** Codex explicitly invokes `$academic-research-suite`; Claude invokes the configured `academic-research-skills` plugin. L1 requires Results/Discussion/Conclusion, L4 requires Methods plus a review-search receipt, and L8.5 requires paper-based result verification. L10 receives located extracts and L10b cites evidence IDs.
 - **Added strict L0 intake.** `normalize-l0-input` builds a validated, auditable contract from a request file and explicit data location without guessing paths, IDs, decisions, or conclusions.
 - **Added the Hypothesis Ranking Reliability Layer (shadow mode).** It uses paired fair judgments, deterministic scheduling, checkpoints, evidence events, and disagreement reporting under `08_Audit/ranking/`; it never changes formal RLR decisions or gates.
 
@@ -78,8 +78,7 @@ formal gate or decision.
 ```
                     ┌─────────────────────────────────────────────────────┐
                     │              PRE-RESEARCH (before node)                │
-                    │  L1: deep literature search    (Academic Research)     │
-                    │  L4: method literature review (Academic Research)     │
+                    │  L1/L4/L8.5: ARS evidence packs (Codex or Claude)      │
                     │  L7: code search              (GitHub/Bioconductor)  │
                     └─────────────────────────────────────────────────────┘
 
@@ -112,7 +111,7 @@ fail-closed: one missing item stops the loop before L1.
 | Dependency | Detection / attestation | Used for |
 |------------|-------------------------|----------|
 | PyYAML | Python import `yaml` | Contract, frontmatter, and literature-database I/O |
-| Academic Research skill | `RLR_SKILL_ACADEMIC_RESEARCH=1` | L1/L4 pre-research and L8.5 literature verification |
+| Academic Research runtime | `00_Preflight/deep_research_runtime.json`: configured CLI + Codex skill manifest or Claude plugin manifest | L1/L4/L8.5 evidence acquisition |
 | Zotero connector | `127.0.0.1:23119` or `RLR_ZOTERO` | Reference-manager and citation source |
 | Obsidian vault | Existing `$OBSIDIAN_VAULT` path or `RLR_OBSIDIAN` | End-of-round human-readable sync |
 
@@ -157,19 +156,19 @@ The key insight: **Path B isolates by making information invisible; Path A isola
 | Node | Reads | Produces | Formal effect |
 |------|-------|----------|---------------|
 | L0 Linnaeus | Candidate frontmatter + strict L0 contract | Input verification, skill plan, dependency/preflight audit | Stops on missing dependency or unverified input; advances to `IDEA_PROPOSED` |
-| L1 Einstein | Candidate frontmatter + L0 | Testable hypotheses and primary hypothesis | Generates the hypothesis delta |
+| L1 Einstein | Candidate frontmatter + L0 + Results/Discussion/Conclusion evidence | Testable hypotheses and primary hypothesis | Generates the hypothesis delta |
 | L2 Feynman | Candidate frontmatter + L1 | Blind attacks, confounders, diagnostic tests | No status change |
 | L3 Oppenheimer | L1 + L2 | Selected/rejected hypotheses and rationale | `triage-idea`; optional shadow ranking runs after delta write only |
-| L4 Fisher | L1 + L2 + L3 + method pre-research | Strategies, scripts, parameters, outputs | Proposes the analysis plan |
+| L4 Fisher | L1 + L2 + L3 + Methods/review evidence | Strategies, scripts, parameters, outputs | Proposes the analysis plan |
 | L5 Tukey | L4 + L2 | QC checkpoints, failure rules, method attacks | No status change |
 | L6 Oppenheimer | L4 + L5 | Approved/rejected method plan and modifications | `triage-method`; not a ranking hook |
 | L7 Turing | L6 + L0 + prepared allowlisted workspace | Script exit codes, output files, key results | Only node allowed to execute code; `execution-gate` precedes it |
 | L8 Curie | L7 + L6 + frontmatter | Evidence audit, reproducibility checks, evidence level | Advances to `AUDITED` |
-| L8.5 Curie | L7 + L8 + literature pre-research | PubMed/EuropePMC verification and literature records | Advances to review |
+| L8.5 Curie | L7 + L8 + paper-based verification evidence | Confirmation/contradiction audit and literature records | Advances to review |
 | L9a Feynman | L1 + L7 + L8 + L8.5 | Statistical/logical falsification | Parallel; cannot read L9b |
 | L9b Darwin | L1 + L7 + L8 + L8.5 | Biological interpretation and limitations | Parallel; cannot read L9a |
-| L10a Jobs | Frontmatter + L8/L8.5/L9a/L9b | Value assessment and manuscript framing | No status change |
-| L10b Oppenheimer | L10a + L8/L8.5/L9a/L9b | Final decision, evidence level, reason, next hypothesis | `KEEP/REVISE/DOWNGRADE/DROP`; optional shadow ranking runs after delta write |
+| L10a Jobs | Frontmatter + L8/L8.5/L9a/L9b + located L1/L8.5 evidence | Value assessment and manuscript framing | No status change |
+| L10b Oppenheimer | L10a + L8/L8.5/L9a/L9b + located evidence | Final decision and cited evidence IDs | `KEEP/REVISE/DOWNGRADE/DROP`; optional shadow ranking runs after delta write |
 | L10c Linnaeus | All permitted deltas | English/Chinese FINAL_REPORT and sync inputs | Aggregates; does not execute code or choose a new winner |
 
 The ranking layer is an advisory signal attached after successful L3/L10b delta
@@ -190,7 +189,8 @@ emission. It does not participate in `triage-idea`, `triage-method`, or
    headless, or manual execution; `api.py` exposes the same operations in
    process; `run_loop.py` drives rounds and StopPolicy.
 6. **Specialized layers:** `l0_contract.py`/`l0_intake.py` own strict L0
-   normalization; `ranking.py` owns advisory ranking artifacts and never writes
+   normalization; `deep_research.py` owns ARS receipts and immutable paper evidence;
+   `ranking.py` owns advisory ranking artifacts and never writes
    formal decision state.
 
 ### State transfer: delta JSON
@@ -230,7 +230,9 @@ the historical shim only re-exports the same surface.
 | `normalize-l0-input` | Normalize an explicit request and data location into the strict L0 contract |
 | `check-deps` | Standalone dependency check |
 | `next-step` | Get next DAG node (JSON) |
-| `pre-research` | Print pre-research prompt for L1/L4/L7 |
+| `pre-research` | Print the legacy research prompt / L7 code-search prompt (literature stages use `deep-research-run`) |
+| `deep-research-run` | Invoke configured Codex/Claude ARS and persist a verified evidence pack |
+| `audit-literature-evidence` / `literature-report` | Fail-closed evidence audit / source-located report |
 | `assemble-context` | Build isolated context for a node (Path B) |
 | `emit-delta` | Validate and save a delta JSON |
 | `triage-idea` | L3: select/reject hypotheses |
@@ -322,6 +324,7 @@ research_loop/
 │   ├── delta.py                  # Delta schemas and candidate-owned resolution
 │   ├── l0_contract.py            # L0 schema, validator, serializer, renderer
 │   ├── l0_intake.py              # Rule-based request/data normalizer
+│   ├── deep_research.py           # ARS runtime receipts, paper records, evidence packs
 │   ├── providers/                # main-agent, command, headless, manual providers
 │   ├── ranking.py                # Shadow fair judge, Elo, checkpoint, evidence
 │   ├── paths.py / yamlio.py      # Safe paths and YAML/frontmatter I/O

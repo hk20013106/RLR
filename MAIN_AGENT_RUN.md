@@ -1,8 +1,8 @@
-# Main-Agent Run Protocol (RLR V0.5)
+# Main-Agent Run Protocol (RLR V0.7)
 
-> V0.5: `assemble-context` enforces the deep-research gate. Before L1/L4/L7 you
-> MUST produce a valid pre-research artifact; assemble-context fails closed
-> (rc=3) on a missing/empty/`NOT YET RUN` artifact. Skipping is not possible.
+> V0.7: before L1/L4/L8.5, run `deep-research-run`. It invokes the configured
+> Academic Research Skills runtime and persists a validated evidence pack;
+> `assemble-context` fails closed without its receipt and located paper evidence.
 
 ## What this is
 
@@ -31,36 +31,32 @@ is **MISSING, the command exits non-zero and you MUST HALT** — do not proceed 
 L1, do not skip. Install the missing dependency, re-run preflight, then continue.
 `run_loop.py` enforces this automatically before round 1.
 
-## Pre-research (v0.4)
+## Deep Research evidence (V0.7)
 
-Three pre-research steps run automatically *before* their node — they do **not**
+Deep Research runs automatically *before* L1, L4, and L8.5 — it does **not**
 change the 14-node DAG topology; their results are embedded into the node's
 `assemble-context` as extra reference context:
 
 | Before | Step | What you do |
 |--------|------|-------------|
-| **L1** (hypotheses) | deep research | Use academic-research skills to search the literature for the candidate's question; summarize key findings, methods, gaps. |
-| **L4** (method design) | method literature review | Search how others did similar analyses; summarize methods, recommended approach, pitfalls. |
+| **L1** (hypotheses) | deep research | Persist Results/Discussion/Conclusion extracts from retrieved research papers. |
+| **L4** (method design) | method literature review | Persist Methods from research papers and review Results/Conclusion or a zero-result review receipt. |
+| **L8.5** (verification) | post-result verification | Persist paper-based support/contradiction evidence for the actual L7/L8 results. |
 | **L7** (execution) | code search | Search GitHub / Bioconductor / CRAN for existing pipelines; summarize reusable tools and the gap you must write yourself. |
 
-Run `pre-research PROJECT CAND --node L1|L4|L7`; it prints a prompt **grounded in
-this candidate's question/claim** (with seed queries to adapt). Write the summary
-to `02_Agent_Notes/_pre_research/<node>_research.md`. The next `assemble-context
---node <node>` embeds it under a `=== PRE-RESEARCH (...) ===` section and records
-it in the context manifest (`pre_research` field). If you skip it, the context
-shows a `NOT YET RUN` note.
+Run `deep-research-run PROJECT CAND --node L1|L4|L8.5`. It uses Codex
+`$academic-research-suite` or the configured Claude ARS plugin and writes CLI
+receipt, source metadata, permitted OA payload, and located extracts below
+`09_Literature_Database/evidence_packs/`; it also renders the compatible note.
 
 ## Step-by-step protocol
 
 ```
 while not terminal:
     1. step = python research_loop_v04.py next-step PROJECT CAND
-    1b. # v0.4 PRE-RESEARCH: before L1/L4/L7, do the pre-step FIRST
-        if step.node in (L1, L4, L7):
-            python research_loop_v04.py pre-research PROJECT CAND --node step.node
-            # follow the printed prompt; write the structured summary to
-            # 02_Agent_Notes/_pre_research/<node>_research.md
-            # assemble-context will then embed it automatically.
+    1b. # V0.7 DEEP RESEARCH: before L1/L4/L8.5, acquire evidence FIRST
+        if step.node in (L1, L4, L8.5):
+            python research_loop_v04.py deep-research-run PROJECT CAND --node step.node
     2. if step.is_parallel:  # L9a + L9b
          for sub in step.nodes:
              ctx = python research_loop_v04.py assemble-context PROJECT CAND --node sub.node

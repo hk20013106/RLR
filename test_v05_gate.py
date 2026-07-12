@@ -18,6 +18,7 @@ HERE = Path(__file__).resolve().parent
 RL = str(HERE / "research_loop_v04.py")
 sys.path.insert(0, str(HERE))
 import run_loop  # noqa: E402  (default runner -> proves gate consumption)
+from research_loop import deep_research as dr  # noqa: E402
 
 _VALID_L1 = ("# L1 deep research\n\n## Runtime digest\n"
              "- [[09_Literature_Database/smith2020|Smith 2020]] "
@@ -53,6 +54,17 @@ def _write_l1(d, text):
     (pr / "L1_research.md").write_text(text, encoding="utf-8")
 
 
+def _write_l1_evidence(d):
+    dr.persist_run(d, "C1", "L1", {
+        "schema_version": dr.SCHEMA_VERSION, "queries": ["X association Y mechanism"],
+        "papers": [{"doi": "10.1000/abc123", "title": "Smith 2020", "source_database": "PubMed",
+                    "metadata": {}, "source_metadata_response": {"id": "abc123"}, "open_access": False,
+                    "extracts": [{"section": "Results", "text": "result", "locator": "Results"},
+                                 {"section": "Discussion", "text": "discussion", "locator": "Discussion"},
+                                 {"section": "Conclusion", "text": "conclusion", "locator": "Conclusion"}]}],
+    }, dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"))
+
+
 def test_missing_l1_pre_research_blocks():
     d = _mkproj()
     r = _run("assemble-context", d, "C1", "--node", "L1")
@@ -70,6 +82,7 @@ def test_placeholder_l1_pre_research_blocks():
 
 def test_valid_l1_pre_research_allows():
     d = _mkproj()
+    _write_l1_evidence(d)
     _write_l1(d, _VALID_L1)
     r = _run("assemble-context", d, "C1", "--node", "L1")
     assert r.returncode == 0, f"expected rc=0, got {r.returncode}: {r.stderr}"

@@ -1,9 +1,9 @@
-# RLR V0.5 Loop Runner
+# RLR V0.7 Loop Runner
 
 **Canonical runtime entry point:** `python run_loop.py run PROJECT CAND`. It
-drives the V0.5 engine (`research_loop_v04.py`), whose `assemble-context`
-enforces the V0.5 deep-research gate — L1/L4/L7 fail closed (rc=3) without a
-valid pre-research artifact, and the runner re-raises that as a hard stop.
+drives the V0.7 engine (`research_loop_v04.py`), whose `assemble-context`
+enforces the Deep Research gate — L1/L4/L8.5 fail closed (rc=3) without a
+successful ARS receipt and a valid source-located evidence pack.
 (`rlr_v05b.py` is a LEGACY prototype, not the runtime.)
 
 Three run modes, in order of recommendation:
@@ -33,17 +33,18 @@ mode: main_agent
 max_rounds: 3
 ```
 
-### Pre-research (v0.4)
+### Deep Research evidence (V0.7)
 
-Before **L1 / L4 / L7** the orchestrator runs a pre-step and embeds the result
+Before **L1 / L4 / L8.5** the runner invokes Academic Research Skills and embeds
+the validated evidence result
 into that node's `assemble-context` (the 14-node DAG is unchanged):
 
-- **L1** deep research → **L4** method literature review → **L7** code search.
-- Main-agent mode: the host agent runs `pre-research PROJECT CAND --node Lx`,
-  follows the printed (question-grounded) prompt, and writes
-  `02_Agent_Notes/_pre_research/Lx_research.md`.
-- Headless mode: `run_loop.py` auto-produces it via the configured `headless`
-  command (skipped, not fatal, if no command is set).
+- **L1** Results/Discussion/Conclusion → **L4** Methods/review evidence →
+  **L8.5** result verification evidence. L7 remains a separate code search.
+- Configure `deep_research_runtime.json`; the runner calls
+  `deep-research-run PROJECT CAND --node Lx` using Codex `$academic-research-suite`
+  or Claude's configured ARS plugin. Missing configuration or invalid evidence
+  is fatal for the literature node; there is no generic-headless fallback.
 
 ## 2. Headless command mode (UNATTENDED)
 

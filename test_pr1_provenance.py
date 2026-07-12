@@ -19,6 +19,7 @@ HERE = Path(__file__).resolve().parent
 RL = str(HERE / "research_loop_v04.py")
 sys.path.insert(0, str(HERE))
 import research_loop_v04 as rl  # noqa: E402
+from research_loop import deep_research as dr  # noqa: E402
 
 _DIGEST = ("## Runtime digest\n"
            "- [[09_Literature_Database/smith2020|Smith 2020]] doi:10.1000/abc123 "
@@ -57,6 +58,20 @@ def _write_l1(d, text):
     (pr / "L1_research.md").write_text(text, encoding="utf-8")
 
 
+def _write_l1_evidence(d):
+    payload = {
+        "schema_version": dr.SCHEMA_VERSION, "queries": ["convergent evolution heart rate"],
+        "papers": [{"doi": "10.1000/abc123", "pmid": "12345678", "url": "https://example.org/paper",
+                    "title": "Smith 2020", "source_database": "PubMed", "metadata": {},
+                    "source_metadata_response": {"pmid": "12345678"}, "open_access": False,
+                    "extracts": [{"section": "Results", "text": "result", "locator": "Results"},
+                                 {"section": "Discussion", "text": "discussion", "locator": "Discussion"},
+                                 {"section": "Conclusion", "text": "conclusion", "locator": "Conclusion"}]}],
+    }
+    dr.persist_run(d, "C1", "L1", payload,
+                   dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"))
+
+
 # 1. full provenance parses
 def test_parse_full_provenance():
     p = rl._parse_pre_research_provenance("# L1\n\n" + _DIGEST + "\n" + _PROV)
@@ -83,6 +98,7 @@ def test_empty_provenance_no_crash():
 # 4. assemble-context persists provenance into the manifest
 def test_manifest_persists_provenance():
     d = _mkproj()
+    _write_l1_evidence(d)
     _write_l1(d, "# L1\n\n" + _DIGEST + "\n" + _PROV)
     r = _run("assemble-context", d, "C1", "--node", "L1")
     assert r.returncode == 0, f"rc={r.returncode} {r.stderr}"
