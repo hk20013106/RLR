@@ -14,9 +14,10 @@ from research_loop.preresearch import (
     _validate_pre_research_content, _parse_pre_research_provenance,
     _query_family_key, _load_query_family_cache,
 )
+from research_loop import deep_research
 
 
-def _audit_pre_research(project_dir, node_id, pr_cfg):
+def _audit_pre_research(project_dir, node_id, pr_cfg, cand_id=None):
     """V0.7 deep-research gate. Returns (ok, reason).
 
     Fails closed when the pre-research artifact is missing, empty, a NOT YET RUN
@@ -28,7 +29,12 @@ def _audit_pre_research(project_dir, node_id, pr_cfg):
     if not prf.exists():
         return False, f"artifact missing ({prf.as_posix()})"
     text = prf.read_text(encoding="utf-8", errors="replace")
-    return _validate_pre_research_content(text, pr_cfg)
+    ok, reason = _validate_pre_research_content(text, pr_cfg)
+    if not ok:
+        return ok, reason
+    if pr_cfg.get("type") in {"deep_research", "literature_review", "literature_verification"} and cand_id:
+        return deep_research.audit_evidence_pack(project_dir, cand_id, node_id)
+    return True, ""
 
 def _audit_branch_coverage(project_dir, cand_id):
     """Every prior unexplored branch must be statused in this candidate's ledger.
@@ -95,6 +101,20 @@ def _audit_l10_traceability(project_dir, cand_id, delta):
     for k in ("paper_card_ids", "method_card_ids", "branch_ids"):
         if k not in dg:
             return False, f"decision_grounding missing `{k}`"
+    return True, ""
+
+
+def _audit_l10_evidence(project_dir, cand_id, delta):
+    """When the candidate has Deep Research, a literature reason must cite it."""
+    allowed = set(deep_research.evidence_ids(project_dir, cand_id, ["L1", "L8.5"]))
+    if not allowed:
+        return True, ""  # legacy candidate without any new evidence pack
+    cited = delta.get("literature_evidence_ids")
+    if not isinstance(cited, list) or not cited:
+        return False, "L10b must include non-empty literature_evidence_ids"
+    unknown = [str(item) for item in cited if str(item) not in allowed]
+    if unknown:
+        return False, f"L10b references unknown evidence IDs: {unknown}"
     return True, ""
 
 def _l6_script_branches(project_dir, cand_id):

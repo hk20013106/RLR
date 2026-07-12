@@ -3,9 +3,9 @@
 
 `python run_loop.py run PROJECT CAND` is the one documented way to drive the
 loop. It drives the V0.7 engine (research_loop_v04.py) whose `assemble-context`
-enforces the V0.7 deep-research gate: L1/L4/L7 fail closed (rc=3) without a
-valid pre-research artifact, and `assemble_context()` here re-raises that as a
-hard stop — the runner never silently continues when deep research is absent.
+enforces the V0.7 Deep Research gate: L1/L4/L8.5 fail closed (rc=3) without a
+successful ARS receipt and a valid evidence pack; `assemble_context()` here
+re-raises that as a hard stop.
 
 
 Drives research_loop_v04.py (the controller) around its DAG using a
@@ -60,6 +60,14 @@ provider:
 headless:
   enabled: false
   command: ""
+
+deep_research:
+  backend: codex
+  executable: codex
+  skill_path: ""
+  plugin_dir: ""
+  skill_version: unknown
+  timeout: 900
 
 manual:
   enabled: false
@@ -538,19 +546,45 @@ def exec_turing(project, cand, step, cfg, args, run_dir, round_id, exec_state):
     return True
 
 
+def _deep_research_config(cfg):
+    data = getattr(cfg, "data", {}) or {}
+    value = data.get("deep_research", {}) if isinstance(data, dict) else {}
+    return value if isinstance(value, dict) else {}
+
+
 def ensure_pre_research(project, cand, node, cfg, args, run_dir):
-    """v0.4 trigger: before L1/L4/L7, make sure the node's pre-research summary
-    exists (deep research / method literature review / code search). If already
-    present, do nothing. In headless mode, produce it via the configured
-    headless command; in main-agent mode the host agent does this per the
-    protocol (here we just note it -- assemble-context will flag if missing)."""
+    """Ensure Deep Research stages have an evidence-backed ARS artifact."""
     if node not in rl.PRE_RESEARCH_MAP:
-        return
+        return True
     target = (Path(project) / "02_Agent_Notes" / "_pre_research"
               / f"{node}_research.md")
+    if node in ("L1", "L4", "L8.5"):
+        existing = _ctl("audit-literature-evidence", project, cand, "--node", node)
+        if target.exists() and existing.returncode == 0:
+            log(f"Deep Research {node}: valid evidence pack already present")
+            return True
+        dr_cfg = _deep_research_config(cfg)
+        backend = str(dr_cfg.get("backend", "")).strip()
+        if backend not in {"codex", "claude"}:
+            log(f"ERROR: Deep Research {node} requires deep_research.backend=codex|claude")
+            return False
+        command = ["deep-research-run", project, cand, "--node", node, "--backend", backend]
+        for option, key in (("--executable", "executable"), ("--plugin-dir", "plugin_dir"),
+                            ("--skill-path", "skill_path"), ("--skill-version", "skill_version"),
+                            ("--model", "model"), ("--timeout", "timeout")):
+            value = dr_cfg.get(key)
+            if value not in (None, ""):
+                command.extend([option, str(value)])
+        result = _ctl(*command)
+        if result.returncode != 0:
+            log(f"ERROR: Deep Research {node} failed closed: "
+                f"{(result.stderr or result.stdout).strip()}")
+            return False
+        log(f"Deep Research {node}: persisted verified evidence pack")
+        return True
     if target.exists():
         log(f"pre-research {node}: already present")
-        return
+        return True
     prompt = _ctl("pre-research", project, cand, "--node", node).stdout
     hl = getattr(cfg, "headless", {}) or {}
     cmd = (hl.get("command") if isinstance(hl, dict) else None) \
@@ -558,7 +592,7 @@ def ensure_pre_research(project, cand, node, cfg, args, run_dir):
     if not cmd:
         log(f"pre-research {node}: no headless command -- the orchestrator must run "
             f"`pre-research {project} {cand} --node {node}` (main-agent mode)")
-        return
+        return True
     try:
         timeout = hl.get("timeout") if isinstance(hl, dict) else None
         md = orch.run_text_command(cmd, prompt, run_dir, f"prefetch_{node}", timeout)
@@ -567,6 +601,7 @@ def ensure_pre_research(project, cand, node, cfg, args, run_dir):
         log(f"pre-research {node}: produced {target}")
     except Exception as e:
         log(f"pre-research {node}: failed ({e}); continuing without it")
+    return True
 
 
 def _bump_node_failure(exec_state, node, max_node_failures):
@@ -603,7 +638,8 @@ def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
         if args.stop_after_node and node == args.stop_after_node:
             log(f"--stop-after-node {node}: halting round")
             return "stopped_after_node"
-        ensure_pre_research(project, cand, node, cfg, args, run_dir)
+        if not ensure_pre_research(project, cand, node, cfg, args, run_dir):
+            return f"node_failed:{node}"
         if node == "L10c":
             _ctl("aggregate-report", project, cand)
             # sync human-readable output to Obsidian
@@ -952,14 +988,13 @@ Candidate: {cand_id}
 Instructions:
 1. Run:  python research_loop_v04.py next-step {project} {cand_id}
 2. Read the JSON output to get the current DAG node, persona, and context_files.
-3. PRE-RESEARCH (V0.7 gate, MANDATORY): if the node is L1, L4, or L7 you MUST do
-   its pre-step FIRST. assemble-context fails closed (rc=3) without a valid
-   artifact — you cannot proceed by skipping it:
-     python research_loop_v04.py pre-research {project} {cand_id} --node NODE
-   Follow the printed prompt: L1 = deep literature research (academic-research-suite),
-   L4 = method literature review, L7 = code search (GitHub/Bioconductor). Write the
-   structured summary to 02_Agent_Notes/_pre_research/NODE_research.md. assemble-context
-   will then embed it automatically. Skip this for all other nodes.
+3. DEEP RESEARCH (mandatory): before L1, L4, or L8.5, run the configured
+   Academic Research runtime; it invokes `$academic-research-suite` for Codex
+   or the installed ARS plugin for Claude and persists located paper evidence:
+     python research_loop_v04.py deep-research-run {project} {cand_id} --node NODE
+   L1 requires Results/Discussion/Conclusion evidence; L4 requires Methods plus
+   a review-search receipt; L8.5 requires paper-based result verification. Do
+   not hand-write a pre-research note. L7 remains the separate code-search step.
 4. Run:  python research_loop_v04.py assemble-context {project} {cand_id} --node NODE
 5. The assemble-context output is your ONLY input for this node (it now includes the
    pre-research summary when present). Do NOT read other delta files.
@@ -974,8 +1009,8 @@ Instructions:
 
 Key rules:
 - Do NOT read DAG-disallowed delta files. Only use assemble-context output.
-- Pre-research runs BEFORE L1/L4/L7 and is embedded via assemble-context; it does NOT
-  change the 14-node DAG topology.
+- Deep Research runs BEFORE L1/L4/L8.5 and is embedded via assemble-context; it does NOT
+  change the 15-node DAG topology.
 - L7 Turing: use prepare-turing-workspace, run scripts only in that workspace.
 - L9a/L9b: run both before advancing. They must be independent.
 - If emit-delta fails validation, fix the JSON and retry. Do NOT skip.

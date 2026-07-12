@@ -4,12 +4,10 @@
 This IS the V0.7 runtime. The filename `research_loop_v04.py` is retained only
 for import/CLI stability (run_loop.py and the main-agent protocol import it);
 it is not a legacy engine. As of V0.7, `assemble-context` enforces the
-deep-research gate (`_audit_pre_research`) on the literature deep-research
-stages L1 (deep_research) and L4 (literature_review): it fails closed (rc=3)
-when their pre-research artifact is missing, empty, a NOT YET RUN placeholder,
-or lacks a `## Runtime digest` with a DOI/PMID/URL. There is no path that
-treats absent deep research as success. (L7 code-search / L8.5 keep their prior
-soft, budget-0 archived behaviour.)
+Deep Research gate (`_audit_pre_research`) on L1, L4, and L8.5: it fails closed
+(rc=3) unless a successful Academic Research Skills receipt and source-located
+evidence pack are persisted. A handwritten prose digest or an environment
+variable attestation is not proof of retrieval.
 
 Each persona is an independent subagent with physical context isolation via DAG
 topology. Cognitive agents receive context as embedded text (Path B); Turing
@@ -190,9 +188,6 @@ PREFLIGHT_FILES = [
 REQUIRED_DEPENDENCIES = [
     {"kind": "python", "name": "yaml", "label": "PyYAML", "pip": "PyYAML",
      "needed_for": "manage_literature_db.py (growable literature DB; L1/L4/L8.5)"},
-    {"kind": "skill", "name": "academic-research-suite", "label": "Academic Research skill",
-     "attest_env": "RLR_SKILL_ACADEMIC_RESEARCH",
-     "needed_for": "real literature search in pre-research (L1/L4) + L8.5 verification"},
     {"kind": "port", "name": "zotero", "label": "Zotero", "addr": "127.0.0.1:23119",
      "attest_env": "RLR_ZOTERO",
      "needed_for": "reference manager / citation source for the literature DB"},
@@ -368,8 +363,11 @@ checked). Example for R at L7:_  `- command: Rscript`
 
 - R packages (WGCNA, clusterProfiler, ...) are verified by the R scripts at L7
   (.libPaths + requireNamespace), not by L0.
-- Attestation env vars: RLR_SKILL_ACADEMIC_RESEARCH, RLR_ZOTERO, RLR_OBSIDIAN
-  (set to 1 to attest), and OBSIDIAN_VAULT (path to your vault).
+- Academic Research is verified from `deep_research_runtime.json` by checking
+  the configured CLI plus its Codex skill or Claude plugin manifest; it has no
+  environment-variable attestation path.
+- Attestation env vars: RLR_ZOTERO, RLR_OBSIDIAN (set to 1 to attest), and
+  OBSIDIAN_VAULT (path to your vault).
 """
 
 LAYERS = [
@@ -412,12 +410,8 @@ def _slug(s):
 
 
 # V0.7 deep-research gate ----------------------------------------------------
-# The mandatory gate covers the literature DEEP-RESEARCH stages: L1
-# (deep_research) and L4 (literature_review). These must carry a structured
-# `## Runtime digest` with at least one resolvable identifier. Code-search (L7)
-# and the budget-0 archived-only verification (L8.5) keep their prior soft
-# behaviour (their pre-research is not inlined, so a hard gate there would break
-# execution-context assembly without adding deep-research safety).
+# The mandatory gate covers L1 (deep research), L4 (method literature), and
+# L8.5 (post-result literature verification). L7 code search remains separate.
 
 
 
@@ -428,10 +422,11 @@ from research_loop.preresearch import (  # inward shim (Phase 3b)
 
 
 from research_loop.gates import (  # inward shim (Phase 3b)
-    _audit_pre_research, _audit_branch_coverage, DIVERGENCE_MIN_NEW_QUERY_FAMILIES, _audit_divergence, _audit_l10_traceability, _l6_script_branches, _audit_l7_manifest, _critique_ref_valid, _audit_l6_traceability, _audit_l4_methods, _audit_l0_memory, _audit_l0_contract,
+    _audit_pre_research, _audit_branch_coverage, DIVERGENCE_MIN_NEW_QUERY_FAMILIES, _audit_divergence, _audit_l10_traceability, _audit_l10_evidence, _l6_script_branches, _audit_l7_manifest, _critique_ref_valid, _audit_l6_traceability, _audit_l4_methods, _audit_l0_memory, _audit_l0_contract,
 )
 from research_loop import l0_contract
 from research_loop import l0_intake
+from research_loop import deep_research
 
 
 # V0.6 pre-research provenance ------------------------------------------------
@@ -1154,6 +1149,27 @@ NOT YET RUN
 1
 """
         output_file.write_text(synthetic_content, encoding="utf-8")
+        synthetic_extracts = [
+            {"section": "Results", "text": "Synthetic result.", "locator": "Results"},
+            {"section": "Discussion", "text": "Synthetic discussion.", "locator": "Discussion"},
+            {"section": "Conclusion", "text": "Synthetic conclusion.", "locator": "Conclusion"},
+            {"section": "Methods", "text": "Synthetic method.", "locator": "Methods"},
+        ]
+        synthetic_payload = {
+            "schema_version": deep_research.SCHEMA_VERSION, "queries": list(queries),
+            "papers": [{"doi": "10.1000/abc123", "title": "Synthetic Smith 2020",
+                        "source_database": "synthetic-test", "metadata": {},
+                        "source_metadata_response": {"fixture": "write-synthetic"},
+                        "open_access": False, "extracts": synthetic_extracts}],
+        }
+        if research_type == "literature_review":
+            synthetic_payload["review_search"] = {
+                "query": "synthetic review query", "status": "none_found",
+                "receipt": "synthetic-test 0"}
+        deep_research.persist_run(
+            project_dir, args.cand_id, node, synthetic_payload,
+            deep_research.skill_receipt("codex", ["synthetic-test"],
+                                         "synthetic-test", "test-only"))
 
     focus = research_config.get("description", "")
     grounding = (f"## This study\n"
@@ -1433,6 +1449,81 @@ def cmd_audit_pre_research(args):
     return 0
 
 
+def _deep_research_spec_from_args(args):
+    overrides = {
+        "backend": args.backend, "executable": args.executable,
+        "plugin_dir": args.plugin_dir, "model": args.model,
+        "timeout": args.timeout, "skill_path": args.skill_path,
+        "skill_version": args.skill_version,
+    }
+    return deep_research.load_runtime_spec(args.project_dir, overrides)
+
+
+def cmd_deep_research_run(args):
+    """Execute an explicit Academic Research Skills CLI run and persist evidence."""
+    project_dir = Path(args.project_dir)
+    cf = _candidate_file(project_dir, args.cand_id)
+    if not cf.exists():
+        print(f"ERROR: candidate not found: {args.cand_id}", file=sys.stderr)
+        return 2
+    try:
+        spec, skill_version = _deep_research_spec_from_args(args)
+    except deep_research.DeepResearchError as exc:
+        print(f"ERROR: Deep Research runtime is not configured: {exc}", file=sys.stderr)
+        return 3
+    ready, reason = deep_research.runtime_ready(spec)
+    if not ready:
+        print(f"ERROR: Deep Research runtime is not ready: {reason}", file=sys.stderr)
+        return 3
+    fm = _load_yaml_front(cf)
+    run_dir = project_dir / "08_Audit" / "deep_research_runtime" / args.cand_id / args.node.replace(".", "_")
+    result_context = ""
+    if args.node == "L8.5":
+        def _result_delta(key):
+            path = _delta_for_candidate(project_dir, key, args.cand_id)
+            if not path or not path.exists():
+                return {}
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return {}
+        result_context = json.dumps({
+            "L7_key_results": _result_delta("L7_turing").get("key_results", {}),
+            "L8_evidence_verified": _result_delta("L8_curie").get("evidence_verified", []),
+            "L8_evidence_level": _result_delta("L8_curie").get("evidence_level", ""),
+        }, ensure_ascii=False, sort_keys=True)
+    try:
+        artifact = deep_research.run_and_persist(
+            project_dir, args.cand_id, args.node, fm.get("question", ""), fm.get("claim", ""),
+            spec, run_dir, skill_version, result_context)
+        ok, reason = deep_research.audit_evidence_pack(project_dir, args.cand_id, args.node)
+    except deep_research.DeepResearchError as exc:
+        print(f"ERROR: Deep Research failed: {exc}", file=sys.stderr)
+        return 3
+    if not ok:
+        print(f"ERROR: Deep Research evidence gate failed: {reason}", file=sys.stderr)
+        return 3
+    print(json.dumps(artifact, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_audit_literature_evidence(args):
+    ok, reason = deep_research.audit_evidence_pack(args.project_dir, args.cand_id, args.node)
+    print(json.dumps({"candidate_id": args.cand_id, "node": args.node,
+                      "status": "PASS" if ok else "FAIL", "reason": reason}, indent=2))
+    return 0 if ok else 3
+
+
+def cmd_literature_report(args):
+    nodes = args.node or ["L1", "L4", "L8.5"]
+    text = deep_research.render_evidence_digest(args.project_dir, args.cand_id, nodes)
+    if args.format == "json":
+        print(json.dumps({"candidate_id": args.cand_id, "nodes": nodes, "digest": text}, ensure_ascii=False))
+    else:
+        print(text, end="")
+    return 0
+
+
 
 
 
@@ -1593,6 +1684,9 @@ def cmd_emit_delta(args):
         ok_l10, l10_reason = _audit_l10_traceability(project_dir, args.cand_id, data)
         if not ok_l10:
             errors.append(l10_reason)
+        ok_evidence, evidence_reason = _audit_l10_evidence(project_dir, args.cand_id, data)
+        if not ok_evidence:
+            errors.append(evidence_reason)
 
     declared_candidate = data.get("candidate_id")
     if (declared_candidate is not None
@@ -2020,6 +2114,13 @@ def cmd_preflight(args):
     pf = project_dir / "00_Preflight"
     pf.mkdir(parents=True, exist_ok=True)
     created, skipped = [], []
+    runtime_file = deep_research.runtime_config_path(project_dir)
+    if not runtime_file.exists() or args.force:
+        runtime_file.write_text(json.dumps(deep_research.default_runtime_config(), indent=2),
+                                encoding="utf-8")
+        created.append(runtime_file.name)
+    else:
+        skipped.append(runtime_file.name)
     for fname in PREFLIGHT_FILES:
         target = pf / fname
         if target.exists() and not args.force:
@@ -2047,13 +2148,23 @@ def cmd_preflight(args):
 
     # --- L0 DEPENDENCY GATE (hard stop; must never be skipped) ---
     ok, missing = _check_dependencies(project_dir)
+    try:
+        runtime_spec, _runtime_version = deep_research.load_runtime_spec(project_dir)
+        runtime_ok, runtime_reason = deep_research.runtime_ready(runtime_spec)
+    except deep_research.DeepResearchError as exc:
+        runtime_ok, runtime_reason = False, str(exc)
     print("\nL0 dependency gate:")
     for d in ok:
         print(f"  OK       {d['kind']}:{d['name']}")
     for d in missing:
         print(f"  MISSING  {d['kind']}:{d['name']} ({d.get('label', d['name'])})"
               f"  -- {d['needed_for']}", file=sys.stderr)
-    if missing:
+    if runtime_ok:
+        print("  OK       deep_research:Academic Research runtime")
+    else:
+        print(f"  MISSING  deep_research:Academic Research runtime -- {runtime_reason}",
+              file=sys.stderr)
+    if missing or not runtime_ok:
         print("\nPREFLIGHT GATE: STOP -- required dependencies missing.",
               file=sys.stderr)
         print("The loop must NOT proceed past L0. Satisfy each, then re-run "
@@ -2092,7 +2203,19 @@ def cmd_check_deps(args):
         print(f"MISSING  {d['kind']}:{d['name']} ({d.get('label', d['name'])})"
               f"  -- {d['needed_for']}\n         satisfy: {_dep_fix_hint(d)}",
               file=sys.stderr)
-    if missing:
+    runtime_ok, runtime_reason = True, ""
+    if project_dir is not None:
+        try:
+            runtime_spec, _runtime_version = deep_research.load_runtime_spec(project_dir)
+            runtime_ok, runtime_reason = deep_research.runtime_ready(runtime_spec)
+        except deep_research.DeepResearchError as exc:
+            runtime_ok, runtime_reason = False, str(exc)
+        if runtime_ok:
+            print("OK       deep_research:Academic Research runtime")
+        else:
+            print(f"MISSING  deep_research:Academic Research runtime -- {runtime_reason}",
+                  file=sys.stderr)
+    if missing or not runtime_ok:
         print("DEPENDENCY GATE: STOP -- satisfy the missing dependencies above; "
               "the loop must not proceed.", file=sys.stderr)
         return 3
@@ -4026,6 +4149,34 @@ def build_parser():
     pr.add_argument("--write-synthetic", action="store_true",
                     help="[TEST-ONLY] write completed/synthetic valid pre-research artifact to output file")
     pr.set_defaults(func=cmd_pre_research)
+
+    sp = sub.add_parser("deep-research-run",
+                        help="invoke Academic Research Skills and persist verified paper evidence")
+    sp.add_argument("project_dir")
+    sp.add_argument("cand_id")
+    sp.add_argument("--node", required=True, choices=["L1", "L4", "L8.5"])
+    sp.add_argument("--backend", choices=["codex", "claude"], help="override configured backend")
+    sp.add_argument("--executable", help="override configured CLI executable")
+    sp.add_argument("--plugin-dir", help="required Academic Research Skills plugin path for Claude")
+    sp.add_argument("--skill-path", help="Codex academic-research-suite installation path")
+    sp.add_argument("--skill-version", help="override configured ARS package version")
+    sp.add_argument("--model")
+    sp.add_argument("--timeout", type=int)
+    sp.set_defaults(func=cmd_deep_research_run)
+
+    sp = sub.add_parser("audit-literature-evidence",
+                        help="fail closed unless a node has a valid Academic Research evidence pack")
+    sp.add_argument("project_dir")
+    sp.add_argument("cand_id")
+    sp.add_argument("--node", required=True, choices=["L1", "L4", "L8.5"])
+    sp.set_defaults(func=cmd_audit_literature_evidence)
+
+    sp = sub.add_parser("literature-report", help="render source-located evidence for a candidate")
+    sp.add_argument("project_dir")
+    sp.add_argument("cand_id")
+    sp.add_argument("--node", action="append", choices=["L1", "L4", "L8.5"])
+    sp.add_argument("--format", choices=["markdown", "json"], default="markdown")
+    sp.set_defaults(func=cmd_literature_report)
 
     # audit-pre-research
     sp = sub.add_parser("audit-pre-research",

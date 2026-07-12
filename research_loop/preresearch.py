@@ -9,7 +9,7 @@ from pathlib import Path
 
 LIT_RUNTIME_DIGEST_TOKEN_BUDGET = 1000
 
-_LIT_PRE_RESEARCH_TYPES = {"deep_research", "literature_review"}
+_LIT_PRE_RESEARCH_TYPES = {"deep_research", "literature_review", "literature_verification"}
 
 _DOI_PMID_URL_RE = re.compile(
     r"(10\.\d{4,9}/\S+|PMID:?\s*\d+|https?://\S+)", re.IGNORECASE)

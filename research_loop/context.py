@@ -32,6 +32,7 @@ from research_loop.gates import (
     _audit_l0_contract,
 )
 from research_loop import l0_contract
+from research_loop import deep_research
 
 
 def strip_candidate_to_frontmatter(candidate_path, include_source_path=False):
@@ -261,20 +262,30 @@ def cmd_assemble_context(args):
                 sections.append(f"=== DELTA: {inp} (not yet emitted) ===")
                 sections.append("")
 
+    # L10 receives immutable source-located extracts rather than a database path.
+    evidence_meta = []
+    if node_id in {"L10a", "L10b"}:
+        evidence_nodes = ["L1", "L8.5"]
+        evidence_text = deep_research.render_evidence_digest(
+            project_dir, args.cand_id, evidence_nodes)
+        if evidence_text.strip() != "=== DEEP RESEARCH EVIDENCE ===":
+            sections.append(evidence_text.rstrip())
+            sections.append("")
+            evidence_meta = {"nodes": evidence_nodes,
+                             "evidence_ids": deep_research.evidence_ids(
+                                 project_dir, args.cand_id, evidence_nodes)}
+
     # --- V0.7 deep-research gate + pre-research injection --------------------
-    # CANONICAL V0.7 RUNTIME: the literature deep-research stages (L1, L4) are
-    # MANDATORY. assemble-context fails closed (rc=3) when their artifact is
-    # missing, empty, a NOT YET RUN placeholder, or lacks a `## Runtime digest`
-    # with a DOI/PMID/URL — it NEVER emits a NOT YET RUN section as a successful
-    # context for them. Non-literature pre-research (L7 code_search) keeps its
-    # prior soft note.
+    # L1/L4/L8.5 are mandatory Deep Research stages. assemble-context fails
+    # closed unless their note and persisted evidence pack validate; L7 stays
+    # a separate soft code-search pre-step.
     pre_research_meta = None
     pr_cfg = PRE_RESEARCH_MAP.get(node_id)
     if pr_cfg:
         prf = _pre_research_file(project_dir, node_id)
         is_lit = pr_cfg.get("type") in _LIT_PRE_RESEARCH_TYPES
         if is_lit:
-            ok, reason = _audit_pre_research(project_dir, node_id, pr_cfg)
+            ok, reason = _audit_pre_research(project_dir, node_id, pr_cfg, args.cand_id)
             if not ok:
                 print(f"ERROR: V0.7 deep-research gate -- {node_id} pre-research "
                       f"invalid: {reason}", file=sys.stderr)
@@ -460,6 +471,7 @@ def cmd_assemble_context(args):
         "workspace": (str(workspaces[-1])
                       if (is_exec and workspaces) else None),
         "pre_research": pre_research_meta,
+        "deep_research_evidence": evidence_meta,
         "pitfalls_injected": pitfall_meta,
         **caveman_meta,
     }
