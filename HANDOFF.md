@@ -19,9 +19,11 @@
 ### Current documentation state
 
 - `README.md` and `README_CN.md` document strict L0 intake and the advisory
-  ranking interface, including the L3/L10b-only, fail-soft boundary. The
-  documentation commit follows this handoff record on
-  `ranking-reliability-shadow`.
+  ranking interface, including the L3/L10b-only, fail-soft boundary. They now
+  also document the V0.7 node-by-node contract, runtime module layers, four
+  framework-level L0 dependencies, and the historical `research_loop_v04.py`
+  compatibility shim. The documentation correction follows this handoff record
+  on `ranking-reliability-shadow`.
 - Do not stage or modify the pre-existing untracked local files shown by
   `git status` (for example `.claude/`, `.omm/`, `docs/CODEMAPS/`, and the
   Benchmate research note).

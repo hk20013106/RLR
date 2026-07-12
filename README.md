@@ -104,6 +104,22 @@ formal gate or decision.
 - **L9a and L9b** run in parallel and cannot see each other.
 - **L10c** aggregates everything into a final report.
 
+### L0 dependency contract (V0.7)
+
+L0 currently has **four framework-level required dependencies**. The gate is
+fail-closed: one missing item stops the loop before L1.
+
+| Dependency | Detection / attestation | Used for |
+|------------|-------------------------|----------|
+| PyYAML | Python import `yaml` | Contract, frontmatter, and literature-database I/O |
+| Academic Research skill | `RLR_SKILL_ACADEMIC_RESEARCH=1` | L1/L4 pre-research and L8.5 literature verification |
+| Zotero connector | `127.0.0.1:23119` or `RLR_ZOTERO` | Reference-manager and citation source |
+| Obsidian vault | Existing `$OBSIDIAN_VAULT` path or `RLR_OBSIDIAN` | End-of-round human-readable sync |
+
+Projects may add more required entries in
+`00_Preflight/dependencies.md` using `- python:`, `- command:`, or `- env:`;
+those entries are additive, not replacements for the four framework checks.
+
 ### What is isolation and why does it matter?
 
 In a normal AI conversation, one agent sees everything — the hypothesis, the critique, the method, the results. This causes bias: if you wrote the hypothesis, you're predisposed to defend it when you see the critique.
@@ -136,6 +152,47 @@ The key insight: **Path B isolates by making information invisible; Path A isola
 | L10b | Oppenheimer | Final decision: KEEP / REVISE / DOWNGRADE / DROP | Path B |
 | L10c | Linnaeus | Aggregate all deltas into FINAL_REPORT | Reads all deltas |
 
+### V0.7 node-by-node contract
+
+| Node | Reads | Produces | Formal effect |
+|------|-------|----------|---------------|
+| L0 Linnaeus | Candidate frontmatter + strict L0 contract | Input verification, skill plan, dependency/preflight audit | Stops on missing dependency or unverified input; advances to `IDEA_PROPOSED` |
+| L1 Einstein | Candidate frontmatter + L0 | Testable hypotheses and primary hypothesis | Generates the hypothesis delta |
+| L2 Feynman | Candidate frontmatter + L1 | Blind attacks, confounders, diagnostic tests | No status change |
+| L3 Oppenheimer | L1 + L2 | Selected/rejected hypotheses and rationale | `triage-idea`; optional shadow ranking runs after delta write only |
+| L4 Fisher | L1 + L2 + L3 + method pre-research | Strategies, scripts, parameters, outputs | Proposes the analysis plan |
+| L5 Tukey | L4 + L2 | QC checkpoints, failure rules, method attacks | No status change |
+| L6 Oppenheimer | L4 + L5 | Approved/rejected method plan and modifications | `triage-method`; not a ranking hook |
+| L7 Turing | L6 + L0 + prepared allowlisted workspace | Script exit codes, output files, key results | Only node allowed to execute code; `execution-gate` precedes it |
+| L8 Curie | L7 + L6 + frontmatter | Evidence audit, reproducibility checks, evidence level | Advances to `AUDITED` |
+| L8.5 Curie | L7 + L8 + literature pre-research | PubMed/EuropePMC verification and literature records | Advances to review |
+| L9a Feynman | L1 + L7 + L8 + L8.5 | Statistical/logical falsification | Parallel; cannot read L9b |
+| L9b Darwin | L1 + L7 + L8 + L8.5 | Biological interpretation and limitations | Parallel; cannot read L9a |
+| L10a Jobs | Frontmatter + L8/L8.5/L9a/L9b | Value assessment and manuscript framing | No status change |
+| L10b Oppenheimer | L10a + L8/L8.5/L9a/L9b | Final decision, evidence level, reason, next hypothesis | `KEEP/REVISE/DOWNGRADE/DROP`; optional shadow ranking runs after delta write |
+| L10c Linnaeus | All permitted deltas | English/Chinese FINAL_REPORT and sync inputs | Aggregates; does not execute code or choose a new winner |
+
+The ranking layer is an advisory signal attached after successful L3/L10b delta
+emission. It does not participate in `triage-idea`, `triage-method`, or
+`decision` transition validation.
+
+### V0.7 runtime layers
+
+1. **Compatibility/dispatch:** `research_loop_v04.py` preserves the historical
+   command/import path; `research_loop/cli.py` dispatches to the engine.
+2. **DAG contract:** `topology.py` defines nodes, allowed inputs, statuses, and
+   transitions; `delta.py` defines structured output schemas.
+3. **Context and gates:** `context.py` builds Path B manifests; `gates.py`
+   enforces L0 input, pre-research, execution, and traceability checks.
+4. **Persistence:** `paths.py`, `yamlio.py`, `ledger.py`, and candidate-owned
+   delta files provide isolated, hashable project artifacts.
+5. **Execution/providers:** `providers/` selects main-agent, command,
+   headless, or manual execution; `api.py` exposes the same operations in
+   process; `run_loop.py` drives rounds and StopPolicy.
+6. **Specialized layers:** `l0_contract.py`/`l0_intake.py` own strict L0
+   normalization; `ranking.py` owns advisory ranking artifacts and never writes
+   formal decision state.
+
 ### State transfer: delta JSON
 
 Agents don't share a context window or filesystem. The only way state moves between them is through structured delta JSON files. The candidate file stays read-only throughout.
@@ -150,7 +207,8 @@ Each agent outputs a delta with a strict schema (validated by `emit-delta` befor
 }
 ```
 
-Schemas are hardcoded in `research_loop_v04.py` — no external JSON Schema library needed.
+Delta schemas live in `research_loop/delta.py` and are validated by the engine;
+the historical shim only re-exports the same surface.
 
 ### Memory layers
 
@@ -253,9 +311,23 @@ See [MAIN_AGENT_RUN.md](MAIN_AGENT_RUN.md) and [MAIN_AGENT_PROMPT.md](MAIN_AGENT
 
 ```
 research_loop/
-├── research_loop_v04.py          # Main controller (v0.4.5)
-├── run_loop.py                   # Loop runner (main-agent / headless / manual)
-├── orchestrator.py               # Provider abstraction
+├── research_loop_v04.py          # Historical CLI/import compatibility shim
+├── research_loop/
+│   ├── cli.py                    # Stable CLI dispatch surface
+│   ├── engine.py                 # Command handlers and orchestration operations
+│   ├── api.py                    # In-process EngineAPI facade
+│   ├── topology.py               # DAG nodes, transitions, visibility inputs
+│   ├── context.py                # Path B context assembly and manifests
+│   ├── gates.py                  # L0/L1/L7/L10 traceability and status gates
+│   ├── delta.py                  # Delta schemas and candidate-owned resolution
+│   ├── l0_contract.py            # L0 schema, validator, serializer, renderer
+│   ├── l0_intake.py              # Rule-based request/data normalizer
+│   ├── providers/                # main-agent, command, headless, manual providers
+│   ├── ranking.py                # Shadow fair judge, Elo, checkpoint, evidence
+│   ├── paths.py / yamlio.py      # Safe paths and YAML/frontmatter I/O
+│   ├── ledger.py / presearch.py  # Pitfall/evidence ledgers and pre-research
+│   └── errors.py                 # Typed runtime errors
+├── run_loop.py                   # Canonical multi-round runner and StopPolicy
 ├── manage_literature_db.py       # Growable literature database
 ├── sync_to_obsidian.py           # End-of-round Obsidian sync
 ├── templates/                    # Layer + persona templates
@@ -265,6 +337,11 @@ research_loop/
 ├── DAG_TOPOLOGY.md               # Full DAG dependency table
 └── DemoProject_v03/              # Tracked example (one full walk)
 ```
+
+`research_loop_v04.py` remains in the repository because tests and external
+automation use its historical path. It delegates to `research_loop.cli` and
+does not contain the current engine body; new code should import
+`research_loop.engine`, `research_loop.cli`, or `research_loop.api` directly.
 
 Live research projects are gitignored (generated output, not source).
 
