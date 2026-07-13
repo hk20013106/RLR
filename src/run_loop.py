@@ -1,0 +1,1087 @@
+#!/usr/bin/env python3
+"""RLR V0.7 loop runner — the canonical active runtime entry point.
+
+`python run_loop.py run PROJECT CAND` is the one documented way to drive the
+loop. It drives the V0.7 engine (research_loop_v04.py) whose `assemble-context`
+enforces the V0.7 Deep Research gate: L1/L4/L8.5 fail closed (rc=3) without a
+successful ARS receipt and a valid evidence pack; `assemble_context()` here
+re-raises that as a hard stop.
+
+
+Drives research_loop_v04.py (the controller) around its DAG using a
+provider-neutral orchestrator, and decides whether to open another round with a
+hybrid StopPolicy (hard cap + L10b decision + optional Review gate + marginal
+gain). It does NOT replace the controller and does NOT touch the core DAG/state
+machine -- it only calls the controller's CLI and reads its outputs.
+
+    python run_loop.py run PROJECT_DIR CAND_ID --config rlr_runner.yaml
+    python run_loop.py run ../demos/other_examples/DemoProject_v03 C... --dry-run
+
+Stop rule (the whole point — do not let the loop spin on "polish / new angle"):
+the question is NOT "are there issues" but "would another round plausibly change
+the conclusion". See StopPolicy.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+CONTROLLER = HERE / "research_loop_v04.py"
+sys.path.insert(0, str(HERE))
+
+import research_loop_v04 as rl       # noqa: E402  (controller: DAG metadata + helpers)
+import orchestrator as orch          # noqa: E402
+from research_loop.api import EngineAPI  # noqa: E402  (in-process controller facade)
+
+# In-process engine facade — replaces the subprocess `_ctl()` transport (Phase 5).
+# Byte-for-byte equivalent to spawning `python research_loop_v04.py <cmd>`, but
+# without the per-call interpreter cost; see research_loop/api.py.
+ENGINE = EngineAPI()
+
+
+DEFAULT_CONFIG = """\
+mode: main_agent
+max_rounds: 3
+
+main_agent:
+  enabled: true
+  description: "The current Claude Code/Codex/AntiGravity/Hermes session acts as the orchestrator. No per-node copy-paste."
+
+provider:
+  default:
+    type: none
+
+headless:
+  enabled: false
+  command: ""
+
+deep_research:
+  backend: codex
+  executable: codex
+  skill_path: ""
+  plugin_dir: ""
+  skill_version: unknown
+  timeout: 900
+
+manual:
+  enabled: false
+  debug_only: true
+
+review:
+  enabled: true
+  academy_research_skill: optional
+
+stop_policy:
+  keep_requires_review_accept: true
+  marginal_gain_stop_threshold: 2
+  max_l7_failures: 2
+  max_node_failures: 2   # cognitive-node emit failures before hard-abort (R3)
+
+everos:
+  enabled: false
+  scope: project_only
+
+# ---------------------------------------------------------------------------
+# Automatic provider templates (tool-agnostic; commented placeholders).
+#
+# CONTRACT (host & command): the command MUST write the delta JSON to
+# {output_file}. Placeholders: {prompt_file} {output_file} {node} {persona}
+# {workspace}. Each node = one fresh subprocess (a fresh session). Raw chat CLIs
+# emit prose -> wrap them so the wrapper writes pure JSON (the generic wrapper is
+# the safest path). Adjust flags to your CLI -- these are SHAPES, not verified.
+#
+# A) HostAgentProvider via env (no config edit needed):
+#      export RLR_HOST_AGENT_CMD='python my_agent.py --prompt {prompt_file} --out {output_file} --node {node} --persona {persona}'
+#    (or 'claude -p < {prompt_file} > {output_file}', etc.)
+#
+# B) Pin a command provider in config:
+#   provider:
+#     default:
+#       type: command
+#       command: "python my_agent.py --prompt {prompt_file} --out {output_file} --node {node} --persona {persona}"
+#       timeout: 600
+#
+#   Codex CLI (placeholder flags):
+#       command: "codex exec --input {prompt_file} --output {output_file}"
+#   Claude CLI (headless; shell redirection works):
+#       command: "claude -p < {prompt_file} > {output_file}"   # wrap if not pure JSON
+#
+# Manual mode is DEBUG-ONLY (run with: --provider manual). Do NOT set
+# type: manual as a default -- the runner will fail loud if you do.
+# ---------------------------------------------------------------------------
+"""
+
+REVIEW_SCHEMA = {
+    "review_verdict": "accept | weak_accept | major_revision | reject",
+    "evidence_score": int,
+    "method_validity_score": int,
+    "novelty_score": int,
+    "falsification_risk_score": int,
+    "marginal_gain_score": int,
+    "required_revisions": list,
+    "executable_next_actions": list,
+    "reason": str,
+}
+
+_POLISH_KW = ("literature", "文献", "rephrase", "reword", "wording", "说法",
+              "figure", "figures", "图", "plot", "polish", "格式", "format",
+              "typo", "再查", "再画", "措辞")
+
+
+def log(msg):
+    print(f"[run_loop] {msg}")
+
+
+# --- controller plumbing ----------------------------------------------------
+
+def _ctl(*args):
+    # In-process call into the engine (was: subprocess to research_loop_v04.py).
+    # Returns a CtlResult with the same .returncode/.stdout/.stderr surface, so
+    # every callsite below reads it exactly as it read CompletedProcess before.
+    return ENGINE.run_cli(*args)
+
+
+def auto_pitfall(project, cand, node, category, symptom, provider="unknown",
+                 evidence=""):
+    """Auto-record a status=draft pitfall when the loop hits a failure. Drafts
+    are NOT scanned/enforced until L8 Curie confirms them -- this just makes the
+    failure durable so a human can triage it. Never fatal: a ledger write must
+    not take down the run."""
+    try:
+        r = _ctl("record-pitfall", project, cand, "--node", node,
+                 "--category", category, "--symptom", symptom[:500],
+                 "--severity", "warn", "--status", "draft",
+                 "--provider", provider or "unknown",
+                 *(["--evidence", evidence] if evidence else []))
+        if r.returncode == 0:
+            log(f"auto-recorded draft pitfall ({category} @ {node})")
+        else:
+            log(f"auto-pitfall failed (non-fatal): {r.stderr.strip()}")
+    except Exception as e:  # noqa: BLE001 -- ledger must never break the loop
+        log(f"auto-pitfall error (non-fatal): {e}")
+
+
+def next_step(project, cand):
+    return ENGINE.next_step(project, cand)
+
+
+def status_of(project, cand):
+    cf = rl._candidate_file(Path(project), cand)
+    if not cf.exists():
+        cf = Path(project) / "99_Archive" / f"{cand}.md"
+    if not cf.exists():
+        return "?"
+    return rl._load_yaml_front(cf).get("current_status", "?")
+
+
+def load_delta(project, cand, delta_key):
+    df = rl._delta_for_candidate(Path(project), delta_key, cand)
+    if df and df.exists():
+        try:
+            return json.loads(df.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def assemble_context(project, cand, node):
+    return ENGINE.assemble_context(project, cand, node)
+
+
+def emit_delta(project, cand, node, persona, delta, run_dir, receipt=None):
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    tmp = run_dir / f"{node}_{persona}_emit.json"
+    tmp.write_text(json.dumps(delta, indent=2, ensure_ascii=False),
+                   encoding="utf-8")
+    r = ENGINE.emit_delta(project, cand, node, persona, tmp, receipt=receipt)
+    if r.returncode != 0:
+        log(f"emit-delta {node} failed: {r.stdout.strip()} {r.stderr.strip()}")
+    return r.returncode == 0
+
+
+def advance(project, cand, step):
+    ac = step.get("advance_command")
+    if ac == "decision":
+        _ctl("decision", project, cand, "--status", step.get("advance_status"),
+             "--reason", step.get("advance_reason") or "auto")
+    elif ac == "triage-idea":
+        d = load_delta(project, cand, "L3_oppenheimer") or {}
+        dec = "select" if d.get("selected") else "reject"
+        _ctl("triage-idea", project, cand, "--decision", dec,
+             "--reason", d.get("reason") or "auto")
+    elif ac == "triage-method":
+        d = load_delta(project, cand, "L6_oppenheimer") or {}
+        dec = "approve" if d.get("approved_strategy") else "reject"
+        _ctl("triage-method", project, cand, "--decision", dec,
+             "--reason", d.get("reason") or "auto")
+    elif ac == "execution-gate":
+        _ctl("execution-gate", project, cand)
+    elif ac == "aggregate-report":
+        _ctl("aggregate-report", project, cand)
+
+
+def provider_for(node, cfg, args):
+    return orch.make_provider(cfg.for_node(node), override_type=args.provider)
+
+
+def preflight_providers(cfg, args):
+    """Fail loud unless an AUTOMATIC provider is configured and constructible.
+    Manual is debug-only: allowed only via `--provider manual`, never as a
+    default and never as a silent fallback. Returns True if good to run."""
+    if cfg.mode == "main_agent":
+        log("mode: main_agent (host session orchestrates; no python provider needed)")
+        return True
+    if args.provider == "manual":
+        log("provider: MANUAL (debug mode, explicitly requested via --provider manual)")
+        return True
+    specs = [("provider.default", cfg.default)]
+    specs += [(f"provider.nodes.{n}", s) for n, s in cfg.nodes.items()]
+    for label, spec in specs:
+        t = args.provider or (spec or {}).get("type")
+        if t == "manual":
+            log(f"ERROR: {label}.type = 'manual', but manual is DEBUG-ONLY.")
+            log("       Configure an automatic provider (type: host | command),")
+            log("       e.g. set $RLR_HOST_AGENT_CMD, or run with --provider manual "
+                "to force debug mode.")
+            return False
+        try:
+            orch.make_provider(spec, override_type=args.provider)
+        except orch.ProviderError as e:
+            log(f"ERROR: {label} is not runnable automatically:")
+            for ln in str(e).splitlines():
+                log(f"       {ln}")
+            return False
+    log(f"provider: AUTOMATIC ({args.provider or cfg.default.get('type')})")
+    return True
+
+
+def write_receipt(run_dir, node, persona, prov, context, step, cand, round_id,
+                  workspace=None):
+    rec = orch.RunReceipt(
+        node=node, persona=persona,
+        provider=getattr(prov, "name", getattr(prov, "type", "?")),
+        timestamp=orch.now(),
+        context_hash=hashlib.sha256(context.encode("utf-8")).hexdigest(),
+        prompt_file=getattr(prov, "last_prompt_file", None),
+        delta_file=getattr(prov, "last_delta_file", None),
+        workspace=workspace,
+        allowed_tools=([step.get("tools_policy")] if step.get("tools_policy")
+                       else None),
+        everos_scope=step.get("everos_read_scopes"),
+        fresh_session=getattr(prov, "last_fresh_session", None),
+        candidate_id=cand, round_id=round_id)
+    rec.write(Path(run_dir) / f"{node}_{persona}_receipt.json")
+
+
+def _shadow_run_id(node, cand, round_id, candidates, seed, match_budget):
+    """Return a stable safe advisory-run identity for retry de-duplication."""
+    identity = json.dumps({"stage": node, "candidate": cand, "round": round_id,
+                           "candidates": sorted(candidates), "seed": seed,
+                           "match_budget": match_budget}, sort_keys=True)
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return f"shadow-{node.lower()}-r{round_id}-{digest}"
+
+
+def _write_shadow_failure_audit(project, run_id, node, cand, error, command,
+                                seed, match_budget, outcome="failed"):
+    """Best-effort shadow-only audit. It must never disturb the formal loop."""
+    try:
+        audit_dir = Path(project) / "08_Audit" / "ranking"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": "shadow-ranking-failure-v1",
+            "run_id": run_id,
+            "stage": node,
+            "candidate_id": cand,
+            "outcome": outcome,
+            "error": str(error),
+            "provenance": {
+                "shadow_mode": "fail-soft",
+                "command": command,
+                "seed": seed,
+                "match_budget": match_budget,
+            },
+        }
+        serialized = json.dumps(payload, indent=2, ensure_ascii=False)
+        for attempt in range(1, 1000):
+            suffix = "" if attempt == 1 else f".{attempt}"
+            target = audit_dir / f"{run_id}.{outcome}{suffix}.json"
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                        mode="w", encoding="utf-8", dir=audit_dir,
+                        prefix=f".{target.name}.", suffix=".tmp", delete=False) as handle:
+                    temp_path = Path(handle.name)
+                    handle.write(serialized)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.link(temp_path, target)
+                temp_path.unlink()
+                return
+            except FileExistsError:
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
+                continue
+            except Exception:
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
+                raise
+        raise RuntimeError("unable to allocate a shadow ranking audit filename")
+    except Exception as exc:  # noqa: BLE001 -- advisory audit must stay advisory
+        log(f"shadow ranking failure audit skipped: {exc}")
+
+
+def _shadow_artifact_status(project, run_id, stage, candidates, seed, match_budget):
+    """Trust only the engine's hash-verified completion marker for deduplication."""
+    base = Path(project) / "08_Audit" / "ranking"
+    paths = {
+        "artifact": base / f"{run_id}.json",
+        "checkpoint": base / f"{run_id}.checkpoint.json",
+        "report": base / f"{run_id}.md",
+        "marker": base / f"{run_id}.complete.json",
+    }
+    present = {name: path.exists() for name, path in paths.items()}
+    if not any(present.values()):
+        return "absent", paths, "no prior ranking outputs"
+    if not present["marker"]:
+        return "partial", paths, "ranking outputs exist without a completion marker"
+    if not all(present.values()):
+        missing = [name for name, exists in present.items() if not exists]
+        return "partial", paths, f"missing outputs: {', '.join(missing)}"
+    try:
+        marker = json.loads(paths["marker"].read_text(encoding="utf-8"))
+        if not isinstance(marker, dict):
+            raise ValueError("completion marker is not a JSON object")
+        if marker.get("run_id") != run_id:
+            raise ValueError(f"completion marker run_id does not match {run_id}")
+        if marker.get("stage") != stage:
+            raise ValueError(f"completion marker stage does not match {stage}")
+        optional_values = {
+            "candidate_ids": sorted(candidates), "candidates": sorted(candidates),
+            "candidate_set": sorted(candidates),
+            "seed": seed, "match_budget": match_budget,
+        }
+        for key, expected in optional_values.items():
+            if key in marker and marker[key] != expected:
+                raise ValueError(f"completion marker {key} does not match this run")
+        if isinstance(marker.get("budget"), dict) and "matches" in marker["budget"] \
+                and marker["budget"]["matches"] != match_budget:
+            raise ValueError("completion marker budget does not match this run")
+        hashes = marker.get("sha256")
+        if not isinstance(hashes, dict):
+            raise ValueError("completion marker has no sha256 mapping")
+        for name in ("artifact", "checkpoint", "report"):
+            actual = hashlib.sha256(paths[name].read_bytes()).hexdigest()
+            if hashes.get(name) != actual:
+                raise ValueError(f"completion marker hash mismatch for {name}")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        return "partial", paths, f"invalid outputs: {exc}"
+    return "complete", paths, "validated completion marker and output hashes"
+
+
+def run_shadow_ranking(project, cand, node, args, round_id):
+    """Launch an isolated advisory ranking after L3/L10b emission, never fatal."""
+    if not getattr(args, "shadow_ranking", False) or node not in ("L3", "L10b"):
+        return
+    candidates = []
+    for candidate_id in [cand, *(getattr(args, "shadow_candidate", None) or [])]:
+        if candidate_id and candidate_id not in candidates:
+            candidates.append(candidate_id)
+    seed = getattr(args, "shadow_seed", 0)
+    match_budget = getattr(args, "shadow_match_budget", 10)
+    requested_timeout = getattr(args, "shadow_timeout", 60)
+    try:
+        timeout = min(max(int(requested_timeout), 1), 600)
+    except (TypeError, ValueError):
+        timeout = 60
+    run_id = _shadow_run_id(node, cand, round_id, candidates, seed, match_budget)
+    if len(candidates) < 2:
+        error = "shadow ranking requires at least two distinct candidates"
+        log(f"shadow ranking skipped (non-fatal): {error}")
+        _write_shadow_failure_audit(project, run_id, node, cand, error, None,
+                                    seed, match_budget, outcome="skipped")
+        return
+    artifact_status, artifact_paths, artifact_reason = _shadow_artifact_status(
+        project, run_id, node, candidates, seed, match_budget)
+    if artifact_status == "complete":
+        log(f"shadow ranking already complete: {run_id}")
+        return
+    if artifact_status == "partial":
+        path_text = ", ".join(f"{name}={path}" for name, path in artifact_paths.items())
+        error = (f"partial shadow ranking outputs for {run_id}: {artifact_reason}; "
+                 f"paths={{{path_text}}}")
+        log(f"shadow ranking skipped (non-fatal): {error}")
+        _write_shadow_failure_audit(project, run_id, node, cand, error, None,
+                                    seed, match_budget, outcome="partial")
+        return
+    command = [sys.executable, str(CONTROLLER), "ranking-shadow", str(project),
+               "--stage", node]
+    for candidate_id in candidates:
+        command.extend(["--candidate", candidate_id])
+    command.extend(["--seed", str(seed), "--match-budget", str(match_budget),
+                    "--run-id", run_id])
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        if result.returncode == 0:
+            post_status, post_paths, post_reason = _shadow_artifact_status(
+                project, run_id, node, candidates, seed, match_budget)
+            if post_status == "complete":
+                log(f"shadow ranking complete: {run_id}")
+                return
+            path_text = ", ".join(f"{name}={path}" for name, path in post_paths.items())
+            error = (f"ranking-shadow exited successfully without a valid completion marker "
+                     f"for {run_id}: status={post_status}; reason={post_reason}; "
+                     f"paths={{{path_text}}}")
+            log(f"shadow ranking partial (non-fatal): {error}")
+            _write_shadow_failure_audit(project, run_id, node, cand, error, command,
+                                        seed, match_budget, outcome="partial")
+            return
+        error = result.stderr.strip() or result.stdout.strip() or \
+            f"ranking-shadow exited {result.returncode}"
+    except subprocess.TimeoutExpired:
+        error = f"ranking-shadow timed out after {timeout}s"
+    except Exception as exc:  # noqa: BLE001 -- shadow execution is always fail-soft
+        error = f"ranking-shadow launch failed: {exc}"
+    log(f"shadow ranking failed (non-fatal): {error}")
+    _write_shadow_failure_audit(project, run_id, node, cand, error, command,
+                                seed, match_budget)
+
+
+# --- node execution ---------------------------------------------------------
+
+def exec_cognitive(project, cand, step, cfg, args, run_dir, round_id,
+                   do_advance=True):
+    node, persona = step["node"], step["persona"]
+    ctx, manifest = assemble_context(project, cand, node)
+    # Fail-closed re-gate at the dispatch boundary: for L0, run the SAME unified
+    # validator (l0_contract.validate_l0_input_contract, via _audit_l0_contract)
+    # immediately before the provider writes its prompt. assemble_context above
+    # already gates (rc=3 -> RuntimeError), so this closes the residual window:
+    # a stale/tampered artifact between assemble and dispatch, or any future path
+    # that reaches dispatch without the assemble gate, still cannot emit an L0
+    # prompt from invalid input. (The provider block-assertion is a last-resort
+    # backstop only; this is the authoritative pre-write validator call.)
+    if node == "L0":
+        ok_c, c_reason = rl._audit_l0_contract(Path(project), cand)
+        if not ok_c:
+            raise RuntimeError(f"L0 input-contract gate (pre-dispatch): {c_reason}")
+    prov = provider_for(node, cfg, args)
+    pname = getattr(prov, "name", getattr(prov, "type", "unknown"))
+    schema = rl.DELTA_SCHEMAS.get(f"{node}_{persona.lower()}")
+    try:
+        delta = prov.run_agent(node, persona, ctx, output_schema=schema,
+                               tools=step.get("tools_policy"),
+                               run_dir=str(run_dir))
+    except Exception as e:  # provider failure -> durable draft, then propagate
+        auto_pitfall(project, cand, node, "provider_failure",
+                     f"{persona} provider raised: {e}", provider=pname,
+                     evidence=str(run_dir))
+        raise
+    ok = emit_delta(project, cand, node, persona, delta, run_dir, receipt=manifest)
+    if not ok:
+        auto_pitfall(project, cand, node, "emit_delta_failure",
+                     f"{persona} delta rejected by emit-delta (schema/validation)",
+                     provider=pname, evidence=str(run_dir))
+    write_receipt(run_dir, node, persona, prov, ctx, step, cand, round_id)
+    if ok and do_advance:
+        run_shadow_ranking(project, cand, node, args, round_id)
+        advance(project, cand, step)
+    return ok
+
+
+def exec_turing(project, cand, step, cfg, args, run_dir, round_id, exec_state):
+    if status_of(project, cand) == "METHOD_APPROVED":
+        r = _ctl("execution-gate", project, cand)
+        if r.returncode != 0:
+            log(f"execution-gate rejected: {r.stdout.strip()}")
+            return False
+    r = _ctl("prepare-turing-workspace", project, cand, "--clean")
+    if r.returncode != 0:
+        exec_state["l7_failures"] += 1
+        log(f"prepare-turing-workspace rejected: "
+            f"{r.stderr.strip() or r.stdout.strip()}")
+        auto_pitfall(project, cand, "L7", "execution_failure",
+                     "Turing workspace preparation failed",
+                     provider="controller", evidence=str(run_dir))
+        return False
+    workspace = None
+    for line in r.stdout.splitlines():
+        if "Turing workspace ready:" in line:
+            workspace = line.split("ready:", 1)[1].strip()
+    ctx, manifest = assemble_context(project, cand, "L7")
+    prov = provider_for("L7", cfg, args)
+    pname = getattr(prov, "name", getattr(prov, "type", "unknown"))
+    schema = rl.DELTA_SCHEMAS.get("L7_turing")
+    try:
+        delta = prov.run_agent("L7", "Turing", ctx, output_schema=schema,
+                               workspace=workspace,
+                               tools=step.get("tools_policy") or "workspace-fs",
+                               run_dir=str(run_dir))
+    except Exception as e:
+        exec_state["l7_failures"] += 1
+        log(f"L7 provider failed ({e}); failures={exec_state['l7_failures']}")
+        auto_pitfall(project, cand, "L7", "execution_failure",
+                     f"Turing execution provider failed: {e}", provider=pname,
+                     evidence=workspace or str(run_dir))
+        return False
+    ok = emit_delta(project, cand, "L7", "Turing", delta, run_dir, receipt=manifest)
+    write_receipt(run_dir, "L7", "Turing", prov, ctx, step, cand, round_id,
+                  workspace=workspace)
+    if not ok:
+        exec_state["l7_failures"] += 1
+        log(f"L7 emit failed; failures={exec_state['l7_failures']}")
+        auto_pitfall(project, cand, "L7", "emit_delta_failure",
+                     "Turing L7 delta rejected by emit-delta (schema/validation)",
+                     provider=pname, evidence=workspace or str(run_dir))
+        return False
+    _ctl("decision", project, cand, "--status", "EXECUTED",
+         "--reason", "Turing execution complete")
+    return True
+
+
+def _deep_research_config(cfg):
+    data = getattr(cfg, "data", {}) or {}
+    value = data.get("deep_research", {}) if isinstance(data, dict) else {}
+    return value if isinstance(value, dict) else {}
+
+
+def ensure_pre_research(project, cand, node, cfg, args, run_dir):
+    """Ensure Deep Research stages have an evidence-backed ARS artifact."""
+    if node not in rl.PRE_RESEARCH_MAP:
+        return True
+    target = (Path(project) / "02_Agent_Notes" / "_pre_research"
+              / f"{node}_research.md")
+    if node in ("L1", "L4", "L8.5"):
+        existing = _ctl("audit-literature-evidence", project, cand, "--node", node)
+        if target.exists() and existing.returncode == 0:
+            log(f"Deep Research {node}: valid evidence pack already present")
+            return True
+        dr_cfg = _deep_research_config(cfg)
+        backend = str(dr_cfg.get("backend", "")).strip()
+        if backend not in {"codex", "claude"}:
+            log(f"ERROR: Deep Research {node} requires deep_research.backend=codex|claude")
+            return False
+        command = ["deep-research-run", project, cand, "--node", node, "--backend", backend]
+        for option, key in (("--executable", "executable"), ("--plugin-dir", "plugin_dir"),
+                            ("--skill-path", "skill_path"), ("--skill-version", "skill_version"),
+                            ("--model", "model"), ("--timeout", "timeout")):
+            value = dr_cfg.get(key)
+            if value not in (None, ""):
+                command.extend([option, str(value)])
+        result = _ctl(*command)
+        if result.returncode != 0:
+            log(f"ERROR: Deep Research {node} failed closed: "
+                f"{(result.stderr or result.stdout).strip()}")
+            return False
+        log(f"Deep Research {node}: persisted verified evidence pack")
+        return True
+    if target.exists():
+        log(f"pre-research {node}: already present")
+        return True
+    prompt = _ctl("pre-research", project, cand, "--node", node).stdout
+    hl = getattr(cfg, "headless", {}) or {}
+    cmd = (hl.get("command") if isinstance(hl, dict) else None) \
+        or os.environ.get("RLR_HEADLESS_CMD") or os.environ.get("RLR_HOST_AGENT_CMD")
+    if not cmd:
+        log(f"pre-research {node}: no headless command -- the orchestrator must run "
+            f"`pre-research {project} {cand} --node {node}` (main-agent mode)")
+        return True
+    try:
+        timeout = hl.get("timeout") if isinstance(hl, dict) else None
+        md = orch.run_text_command(cmd, prompt, run_dir, f"prefetch_{node}", timeout)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(md, encoding="utf-8")
+        log(f"pre-research {node}: produced {target}")
+    except Exception as e:
+        log(f"pre-research {node}: failed ({e}); continuing without it")
+    return True
+
+
+def _bump_node_failure(exec_state, node, max_node_failures):
+    """Track repeated cognitive-node emit failures (mirrors l7_failures).
+    Returns True once `node` has hit the bound -- caller must abort, not
+    retry forever."""
+    counts = exec_state.setdefault("node_failures", {})
+    counts[node] = counts.get(node, 0) + 1
+    return counts[node] >= max_node_failures
+
+
+def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
+    """Drive one full DAG pass for a candidate. Returns an outcome string."""
+    run_dir = Path(project) / "08_Run_Receipts" / cand / f"round_{round_id:02d}"
+    max_l7 = int(cfg.stop_policy.get("max_l7_failures", 2))
+    max_node = int(cfg.stop_policy.get("max_node_failures", 2))
+    while True:
+        step = next_step(project, cand)
+        if step.get("terminal"):
+            log(f"terminal status: {step.get('status')}")
+            return "terminal"
+        if step.get("is_parallel"):
+            for sub in step["nodes"]:
+                log(f"node {sub['node']} ({sub['persona']}) [parallel]")
+                ok = exec_cognitive(project, cand, sub, cfg, args, run_dir,
+                                    round_id, do_advance=False)
+                if not ok and _bump_node_failure(exec_state, sub["node"], max_node):
+                    log(f"node {sub['node']} failed emit "
+                        f"{exec_state['node_failures'][sub['node']]}x -- "
+                        f"aborting round (no further retries)")
+                    return f"node_failed:{sub['node']}"
+            continue
+        node = step["node"]
+        if args.stop_after_node and node == args.stop_after_node:
+            log(f"--stop-after-node {node}: halting round")
+            return "stopped_after_node"
+        if not ensure_pre_research(project, cand, node, cfg, args, run_dir):
+            return f"node_failed:{node}"
+        if node == "L10c":
+            _ctl("aggregate-report", project, cand)
+            # sync human-readable output to Obsidian
+            sync_script = HERE / "sync_to_obsidian.py"
+            if sync_script.exists():
+                _ctl_sync = subprocess.run(
+                    [sys.executable, str(sync_script), project, "--cand", cand],
+                    capture_output=True, text=True)
+                if _ctl_sync.returncode == 0:
+                    log("Obsidian sync complete (end-of-round)")
+                else:
+                    warn = (_ctl_sync.stderr.strip() or _ctl_sync.stdout.strip()
+                            or "unknown error")
+                    log(f"Obsidian sync skipped: {warn}")
+            else:
+                log("sync_to_obsidian.py not found; skipping Obsidian sync")
+            log("L10c: aggregate-report generated FINAL_REPORT")
+            return "completed"
+        if node == "L7":
+            log("node L7 (Turing) [execution / Path A]")
+            if not exec_turing(project, cand, step, cfg, args, run_dir,
+                               round_id, exec_state):
+                if exec_state["l7_failures"] >= max_l7:
+                    log(f"L7 failed {exec_state['l7_failures']}x — aborting round")
+                    return "l7_failed"
+            continue
+        log(f"node {node} ({step['persona']}) advance={step.get('advance_command')}")
+        ok = exec_cognitive(project, cand, step, cfg, args, run_dir, round_id)
+        if not ok and _bump_node_failure(exec_state, node, max_node):
+            log(f"node {node} failed emit {exec_state['node_failures'][node]}x -- "
+                f"aborting round (no further retries)")
+            return f"node_failed:{node}"
+
+
+# --- review gate ------------------------------------------------------------
+
+def run_review_gate(project, cand, cfg, args, run_dir):
+    rep = Path(project) / "FINAL_REPORT.md"
+    if not rep.exists():
+        log("review gate skipped (no FINAL_REPORT.md)")
+        return None
+    parts = ["=== FINAL_REPORT.md ===", rep.read_text(encoding="utf-8")]
+    cn = Path(project) / "FINAL_REPORT_CN.md"
+    if cn.exists():
+        parts += ["=== FINAL_REPORT_CN.md ===", cn.read_text(encoding="utf-8")]
+    for dk in ("L8_curie", "L9a_feynman", "L9b_darwin", "L10b_oppenheimer"):
+        d = load_delta(project, cand, dk)
+        if d is not None:
+            parts += [f"=== {dk} ===", json.dumps(d, indent=2, ensure_ascii=False)]
+    context = "\n\n".join(parts)
+    spec = cfg.review.get("provider") or cfg.default
+    try:
+        prov = orch.make_provider(spec, override_type=args.provider)
+        out = prov.run_agent("REVIEW", "Reviewer", context,
+                             output_schema=REVIEW_SCHEMA, run_dir=str(run_dir))
+        log(f"review verdict: {out.get('review_verdict')}")
+        return out
+    except Exception as e:
+        log(f"review gate skipped ({e})")
+        return None
+
+
+# --- stop policy ------------------------------------------------------------
+
+class StopPolicy:
+    """Hybrid stop rule. The driving question is not 'are there issues' but
+    'would another round plausibly change the conclusion'."""
+
+    def __init__(self, max_rounds=3, marginal_gain_stop_threshold=2,
+                 keep_requires_review_accept=True, max_l7_failures=2):
+        self.max_rounds = max_rounds
+        self.mg_threshold = marginal_gain_stop_threshold
+        self.keep_requires_review_accept = keep_requires_review_accept
+        self.max_l7_failures = max_l7_failures
+
+    @staticmethod
+    def _marginal_gain(l10b, review):
+        for src in (review, l10b):
+            v = (src or {}).get("marginal_gain_score")
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return v
+        return None
+
+    @staticmethod
+    def _executable(next_steps, review):
+        if review and review.get("executable_next_actions"):
+            return bool(review["executable_next_actions"])
+        if not next_steps:
+            return False
+        def trivial(s):
+            s = str(s).lower()
+            return any(k in s for k in _POLISH_KW)
+        return any(not trivial(s) for s in next_steps)
+
+    @staticmethod
+    def _no_new_evidence_two_rounds(prev_summaries):
+        sigs = [s.get("evidence_sig") for s in prev_summaries
+                if s.get("evidence_sig")]
+        return len(sigs) >= 2 and sigs[-1] == sigs[-2]
+
+    def _stop(self, reason):
+        return {"stop": True, "reason": reason, "next_round_required": False,
+                "new_candidate_title": None, "new_candidate_question": None,
+                "new_candidate_claim": None}
+
+    def _continue(self, l10b, review, parent_fm):
+        next_steps = (l10b or {}).get("next_steps") or []
+        focus = ((review or {}).get("executable_next_actions")
+                 or next_steps or ["address reviewer revisions"])
+        focus_txt = "; ".join(str(x) for x in focus[:3])
+        pfm = parent_fm or {}
+        title = (pfm.get("title", "candidate")) + " (revised round)"
+        return {"stop": False,
+                "reason": "REVISE with executable next actions likely to move "
+                          "evidence/falsification scores",
+                "next_round_required": True,
+                "new_candidate_title": title,
+                "new_candidate_question": pfm.get("question", ""),
+                "new_candidate_claim": f"Revised focus: {focus_txt}"}
+
+    def decide(self, *, status, l10b, review, round_id, prev_summaries,
+               l7_failures, parent_fm=None):
+        l10b = l10b or {}
+        decision = str(l10b.get("decision", "")).upper()
+        review_verdict = (review or {}).get("review_verdict")
+        next_steps = l10b.get("next_steps") or []
+
+        # ---- STOP conditions (take precedence) ----
+        if status in ("DROP", "DOWNGRADE", "ARCHIVED"):
+            return self._stop(f"terminal status {status}")
+        if l7_failures >= self.max_l7_failures:
+            return self._stop(f"L7 execution failed {l7_failures}x")
+        if review_verdict == "reject":
+            return self._stop("review verdict = reject (human should re-scope)")
+        if status == "KEEP" and review_verdict in ("accept", "weak_accept"):
+            return self._stop(f"KEEP and review={review_verdict}")
+        if status == "KEEP" and not self.keep_requires_review_accept:
+            return self._stop("KEEP (review not required by policy)")
+        if round_id >= self.max_rounds:
+            return self._stop(f"max_rounds ({self.max_rounds}) reached")
+        mg = self._marginal_gain(l10b, review)
+        if mg is not None and mg <= self.mg_threshold:
+            return self._stop(f"marginal_gain_score {mg} <= {self.mg_threshold} "
+                              "(another round unlikely to change the conclusion)")
+        if decision == "REVISE" and not self._executable(next_steps, review):
+            return self._stop("REVISE but next_steps are empty / non-executable "
+                              "(polish-only, not conclusion-changing)")
+        if self._no_new_evidence_two_rounds(prev_summaries):
+            return self._stop("two consecutive rounds added no new key evidence")
+
+        # ---- CONTINUE conditions ----
+        executable = self._executable(next_steps, review)
+        cont = (decision == "REVISE"
+                or review_verdict == "major_revision"
+                or executable)
+        if cont and round_id < self.max_rounds:
+            return self._continue(l10b, review, parent_fm)
+
+        # ---- conservative default: stop ----
+        if status == "KEEP":
+            return self._stop("KEEP (no review verdict; nothing to continue on)")
+        return self._stop("no continue condition met (default stop)")
+
+
+def evidence_sig(project, cand):
+    l8 = load_delta(project, cand, "L8_curie") or {}
+    l9a = load_delta(project, cand, "L9a_feynman") or {}
+    basis = json.dumps({"lvl": l8.get("evidence_level"),
+                        "ev": l8.get("evidence_verified"),
+                        "surv": l9a.get("survives"),
+                        "fals": l9a.get("falsified")},
+                       sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()
+
+
+# --- next-round child candidate ---------------------------------------------
+
+def create_child(project, parent_cand, decision, new_round):
+    parent_fm = rl._load_yaml_front(rl._candidate_file(Path(project), parent_cand))
+    src = (f"Round {new_round - 1} FINAL_REPORT.md + key deltas "
+           f"(L8/L9a/L9b/L10b) of {parent_cand}")
+    r = _ctl("new-candidate", project,
+             "--title", decision["new_candidate_title"] or "revised candidate",
+             "--question", decision["new_candidate_question"]
+             or parent_fm.get("question", ""),
+             "--claim", decision["new_candidate_claim"] or "revised claim",
+             "--input", src)
+    child = r.stdout.split()[0] if r.stdout.strip() else None
+    if not child:
+        raise RuntimeError(f"new-candidate failed: {r.stdout} {r.stderr}")
+    cf = rl._candidate_file(Path(project), child)
+    rl._replace_field(cf, "parent_candidate_id", parent_cand)
+    rl._replace_field(cf, "round_id", str(new_round))
+    return child
+
+
+# --- dry run ----------------------------------------------------------------
+
+def _plan_line(nid, cfg, is_l10c=False):
+    ni = rl.NODE_MAP[nid]
+    if is_l10c:
+        return (f"  {nid:5} {ni['persona']:11} provider=-          "
+                f"advance=aggregate-report (controller -- no agent call)")
+    spec = cfg.for_node(nid)
+    return (f"  {nid:5} {ni['persona']:11} provider={spec.get('type','manual'):8} "
+            f"tools={ni.get('tools_policy'):11} advance={ni.get('advance_command')}"
+            f"  inputs={ni['context_inputs']}")
+
+
+def dry_run_plan(project, cand, cfg, max_rounds, review_on):
+    log("DRY RUN -- no external model calls, no state changes")
+    log(f"project={project} candidate={cand} max_rounds={max_rounds} "
+        f"review={'on' if review_on else 'off'}")
+    step = next_step(project, cand)
+    if step.get("terminal"):
+        log(f"candidate is terminal ({step.get('status')}); nothing to plan")
+        return 0
+    start = step["nodes"][0]["node"] if step.get("is_parallel") else step["node"]
+    key = "L9_parallel" if start in ("L9a", "L9b") else start
+    seq = rl.DAG_SEQUENCE
+    i = seq.index(key) if key in seq else 0
+    log(f"current status={status_of(project, cand)}  next node={start}")
+    print("planned nodes this round:")
+    for nid in seq[i:]:
+        if nid == "L9_parallel":
+            for sub in ("L9a", "L9b"):
+                print(_plan_line(sub, cfg))
+        elif nid == "L10c":
+            print(_plan_line(nid, cfg, is_l10c=True))
+        else:
+            print(_plan_line(nid, cfg))
+    print()
+    tail = "review gate -> " if review_on else ""
+    log(f"after L10c: {tail}StopPolicy(max_rounds={max_rounds}) decides stop/continue")
+    # show whether the default automatic provider is actually runnable now
+    try:
+        orch.make_provider(cfg.default, override_type=None)
+        log(f"default provider '{cfg.default.get('type')}' resolves OK (automatic)")
+    except orch.ProviderError as e:
+        log(f"NOTE: default provider not runnable yet -- {str(e).splitlines()[0]}")
+    log("dry-run complete (one round planned; loop is bounded by max_rounds)")
+    return 0
+
+
+# --- main run ---------------------------------------------------------------
+
+def cmd_run(args):
+    project, cand = args.project_dir, args.cand_id
+    if not rl._candidate_file(Path(project), cand).exists() \
+            and not (Path(project) / "99_Archive" / f"{cand}.md").exists():
+        log(f"ERROR: no candidate {cand} in {project}")
+        return 2
+
+    # L0 dependency gate (hard stop; must never be skipped). The controller
+    # check-deps returns non-zero if a required dependency is missing.
+    dep = _ctl("check-deps", project)
+    if dep.returncode != 0:
+        log("L0 DEPENDENCY GATE FAILED -- halting (not skipping):")
+        for ln in (dep.stderr or dep.stdout).strip().splitlines():
+            log(f"  {ln}")
+        return 3
+
+    cfg_path = args.config or str(Path(project) / "rlr_runner.yaml")
+    if not Path(cfg_path).exists():
+        Path(cfg_path).write_text(DEFAULT_CONFIG, encoding="utf-8")
+        log(f"wrote default config: {cfg_path}")
+    cfg = orch.ProviderConfig.load(cfg_path)
+    max_rounds = args.max_rounds or cfg.max_rounds or 3
+
+    if args.dry_run:
+        return dry_run_plan(project, cand, cfg, max_rounds,
+                            review_on=(not args.no_review
+                                       and cfg.review.get("enabled", True)))
+
+    if not preflight_providers(cfg, args):
+        log("aborting: no automatic provider configured (see RUNNER.md).")
+        return 2
+
+    if cfg.mode == "main_agent" and args.provider in (None, "main_agent"):
+        log("main-agent handoff: host session must execute the protocol below; "
+            "no python provider will be called")
+        return cmd_print_main_agent_prompt(args)
+
+    sp = StopPolicy(
+        max_rounds=max_rounds,
+        marginal_gain_stop_threshold=int(
+            cfg.stop_policy.get("marginal_gain_stop_threshold", 2)),
+        keep_requires_review_accept=bool(
+            cfg.stop_policy.get("keep_requires_review_accept", True)),
+        max_l7_failures=int(cfg.stop_policy.get("max_l7_failures", 2)))
+
+    summaries = []
+    cur = cand
+    round_id = int(rl._load_yaml_front(
+        rl._candidate_file(Path(project), cur)).get("round_id", 1) or 1) \
+        if args.resume else 1
+
+    while round_id <= max_rounds:
+        log(f"================ ROUND {round_id} | candidate {cur} ================")
+        exec_state = {"l7_failures": 0, "node_failures": {}}
+        outcome = run_round(project, cur, cfg, args, round_id, max_rounds,
+                            exec_state)
+        if outcome == "stopped_after_node":
+            log("halted per --stop-after-node (no stop decision taken)")
+            return 0
+        if isinstance(outcome, str) and outcome.startswith("node_failed:"):
+            log(f"ABORTING RUN: {outcome} -- repeated cognitive-node emit "
+                f"failure (see stop_policy.max_node_failures); not treated "
+                f"as success")
+            return 4
+
+        run_dir = Path(project) / "08_Run_Receipts" / cur / f"round_{round_id:02d}"
+        review = None
+        if not args.no_review and cfg.review.get("enabled", True):
+            review = run_review_gate(project, cur, cfg, args, run_dir)
+
+        st = status_of(project, cur)
+        l10b = load_delta(project, cur, "L10b_oppenheimer")
+        summaries.append({"round": round_id, "candidate": cur, "status": st,
+                          "evidence_sig": evidence_sig(project, cur),
+                          "review_verdict": (review or {}).get("review_verdict")})
+        parent_fm = rl._load_yaml_front(rl._candidate_file(Path(project), cur))
+        decision = sp.decide(status=st, l10b=l10b, review=review,
+                             round_id=round_id, prev_summaries=summaries,
+                             l7_failures=exec_state["l7_failures"],
+                             parent_fm=parent_fm)
+        (run_dir).mkdir(parents=True, exist_ok=True)
+        (run_dir / "stop_decision.json").write_text(
+            json.dumps(decision, indent=2, ensure_ascii=False), encoding="utf-8")
+        log(f"STOP DECISION: stop={decision['stop']} — {decision['reason']}")
+        if decision["stop"]:
+            break
+        cur = create_child(project, cur, decision, round_id + 1)
+        log(f"opening next round on child candidate: {cur}")
+        round_id += 1
+
+    log("loop finished")
+    return 0
+
+
+MAIN_AGENT_PROMPT_TEMPLATE = """You are now the RLR V0.7 main-agent orchestrator.
+
+Project: {project}
+Candidate: {cand_id}
+
+Instructions:
+1. Run:  python research_loop_v04.py next-step {project} {cand_id}
+2. Read the JSON output to get the current DAG node, persona, and context_files.
+3. DEEP RESEARCH (mandatory): before L1, L4, or L8.5, run the configured
+   Academic Research runtime; it invokes `$academic-research-suite` for Codex
+   or the installed ARS plugin for Claude and persists located paper evidence:
+     python research_loop_v04.py deep-research-run {project} {cand_id} --node NODE
+   L1 requires Results/Discussion/Conclusion evidence; L4 requires Methods plus
+   a review-search receipt; L8.5 requires paper-based result verification. Do
+   not hand-write a pre-research note. L7 remains the separate code-search step.
+4. Run:  python research_loop_v04.py assemble-context {project} {cand_id} --node NODE
+5. The assemble-context output is your ONLY input for this node (it now includes the
+   pre-research summary when present). Do NOT read other delta files.
+6. Act as the specified persona. Generate a strict JSON delta matching the schema.
+7. Write the delta to a temp file, then run:
+   python research_loop_v04.py emit-delta {project} {cand_id} --node NODE --persona PERSONA --file TEMP_DELTA.json
+8. If emit-delta says VALIDATION: PASS, run the advance_command.
+9. Repeat from step 1 until next-step returns L10c (aggregate-report).
+10. After L10c, evaluate StopPolicy: if KEEP + review accept, stop. If REVISE with
+    executable next_steps, create child candidate.
+11. Maximum rounds: {max_rounds}.
+
+Key rules:
+- Do NOT read DAG-disallowed delta files. Only use assemble-context output.
+- Deep Research runs BEFORE L1/L4/L8.5 and is embedded via assemble-context; it does NOT
+  change the 15-node DAG topology.
+- L7 Turing: use prepare-turing-workspace, run scripts only in that workspace.
+- L9a/L9b: run both before advancing. They must be independent.
+- If emit-delta fails validation, fix the JSON and retry. Do NOT skip.
+- You are the orchestrator. Do not ask the user to copy-paste between nodes.
+"""
+
+def cmd_print_main_agent_prompt(args):
+    project, cand = args.project_dir, args.cand_id
+    cfg_path = args.config or str(Path(project) / "rlr_runner.yaml")
+    max_rounds = 3
+    if Path(cfg_path).exists():
+        cfg = orch.ProviderConfig.load(cfg_path)
+        max_rounds = cfg.max_rounds or 3
+    prompt = MAIN_AGENT_PROMPT_TEMPLATE.format(
+        project=project, cand_id=cand, max_rounds=max_rounds)
+    prompt, meta = rl._caveman_lite(
+        prompt, required_literals=[project, cand, "main-agent", "Do NOT"])
+    print(prompt)
+    log("caveman-lite: " + json.dumps(meta, sort_keys=True))
+    return 0
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="run_loop.py",
+        description="RLR V0.7 loop runner — canonical runtime entry point "
+                    "(main-agent / headless / manual).")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    ma = sub.add_parser("print-main-agent-prompt",
+                        help="print the main-agent orchestration protocol")
+    ma.add_argument("project_dir")
+    ma.add_argument("cand_id")
+    ma.add_argument("--config")
+    ma.set_defaults(func=cmd_print_main_agent_prompt)
+
+    sp = sub.add_parser("run", help="run the loop for a candidate")
+    sp.add_argument("project_dir")
+    sp.add_argument("cand_id")
+    sp.add_argument("--config", help="runner config (default: PROJECT_DIR/rlr_runner.yaml)")
+    sp.add_argument("--max-rounds", dest="max_rounds", type=int, default=None)
+    sp.add_argument("--provider", choices=["main_agent", "host", "command", "manual"],
+                    default=None,
+                    help="force a provider type for all nodes "
+                         "(manual is debug-only)")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="print the plan; no model calls, no state changes")
+    sp.add_argument("--stop-after-node", dest="stop_after_node",
+                    help="halt the round after this node (e.g. L3)")
+    sp.add_argument("--no-review", action="store_true",
+                    help="skip the Review gate")
+    sp.add_argument("--resume", action="store_true",
+                    help="resume from the candidate's recorded round_id")
+    sp.add_argument("--shadow-ranking", action="store_true",
+                    help="after L3/L10b, run advisory ranking without changing gates")
+    sp.add_argument("--shadow-candidate", action="append", default=[],
+                    help="peer candidate ID for advisory ranking (repeatable)")
+    sp.add_argument("--shadow-seed", type=int, default=0,
+                    help="deterministic seed passed to advisory ranking")
+    sp.add_argument("--shadow-match-budget", type=int, default=10,
+                    help="match budget passed to advisory ranking")
+    sp.add_argument("--shadow-timeout", type=int, default=60,
+                    help="per-run advisory ranking timeout in seconds (1-600)")
+    sp.set_defaults(func=cmd_run)
+    return p
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+

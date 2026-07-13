@@ -24,6 +24,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from deep_research_fixtures import persist_synthetic_evidence
+
 RL = str(Path(__file__).resolve().parent.parent / "research_loop_v04.py")
 
 
@@ -158,14 +160,8 @@ def test_l0_gate_rejects_hash_that_does_not_match_threaded_seed(tmp_path):
 
 # --- 3. L1 divergence gate is WIRED into assemble-context for the threaded cand -
 
-def _write_l1_pre_research(proj, queries):
-    d = proj / "02_Agent_Notes" / "_pre_research"
-    d.mkdir(parents=True, exist_ok=True)
-    ql = "\n".join(f"- {q}" for q in queries)
-    txt = (f"# L1 research\n\n## Runtime digest\nfindings PMID: 111\n\n"
-           f"## Query log\n{ql}\n\n## Tool receipt\n- pubmed 2020 ok\n\n"
-           f"## Source count\n2\n")
-    (d / "L1_research.md").write_text(txt, encoding="utf-8")
+def _write_l1_research_fixture(proj, cand_id, queries):
+    persist_synthetic_evidence(proj, cand_id, "L1", queries)
 
 
 def _seed_family_cache(proj, families):
@@ -177,7 +173,7 @@ def _seed_family_cache(proj, families):
 def test_l1_divergence_gate_blocks_reused_families_via_cli(tmp_path):
     proj, cand_n, seed, cand_n1 = _round_n_plus_1(tmp_path)
     _seed_family_cache(proj, ["col6a1 collagen", "collagen enhancer vi"])
-    _write_l1_pre_research(proj, ["COL6A1 collagen", "collagen VI enhancer"])
+    _write_l1_research_fixture(proj, cand_n1, ["COL6A1 collagen", "collagen VI enhancer"])
     r = _run("assemble-context", str(proj), cand_n1, "--node", "L1")
     assert r.returncode == 3, (r.returncode, r.stderr)
     assert "new query" in r.stderr.lower()  # divergence gate message, wired -> rc=3
@@ -186,8 +182,8 @@ def test_l1_divergence_gate_blocks_reused_families_via_cli(tmp_path):
 def test_l1_divergence_gate_passes_with_two_new_families_via_cli(tmp_path):
     proj, cand_n, seed, cand_n1 = _round_n_plus_1(tmp_path)
     _seed_family_cache(proj, ["col6a1 collagen"])
-    _write_l1_pre_research(
-        proj, ["cardiac tissue stiffness AFM", "myocardial passive compliance measurement"])
+    _write_l1_research_fixture(
+        proj, cand_n1, ["cardiac tissue stiffness AFM", "myocardial passive compliance measurement"])
     r = _run("assemble-context", str(proj), cand_n1, "--node", "L1")
     assert r.returncode == 0, r.stderr
 
@@ -196,6 +192,6 @@ def test_divergence_gate_bypassed_for_correction_loop_via_cli(tmp_path):
     # non-divergent loop types thread the same seed but skip the family requirement
     proj, cand_n, seed, cand_n1 = _round_n_plus_1(tmp_path, loop_type="correction")
     _seed_family_cache(proj, ["col6a1 collagen"])
-    _write_l1_pre_research(proj, ["col6a1 collagen"])  # reused, but correction bypasses
+    _write_l1_research_fixture(proj, cand_n1, ["col6a1 collagen"])  # reused, but correction bypasses
     r = _run("assemble-context", str(proj), cand_n1, "--node", "L1")
     assert r.returncode == 0, r.stderr

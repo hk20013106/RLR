@@ -6,7 +6,6 @@ current engine. Full history is in git.
 
 | File | What it was | Superseded by |
 |------|-------------|---------------|
-| `research_loop_v03.py` | v0.3 research-loop engine (2433 lines) | `research_loop/engine.py` (active) |
 | `rlr_v05b.py` | v0.5b literature-gated DAG prototype (L4a/L4b split); its deep-research gate was promoted into the canonical engine | `research_loop/engine.py::_audit_pre_research`, enforced by `assemble-context` |
 
 ## Active runtime (use this)
