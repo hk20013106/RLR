@@ -1,44 +1,35 @@
-# Python
+# Python caches and local tooling
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
-# Temporary scripts (build helpers)
-_*.py
-_*.ps1
-# ...but never ignore Python package markers (e.g. research_loop/__init__.py)
-!**/__init__.py
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
 
-# Recovery / temp
-_recovery/
-.tmp-local/
+# Local indexes, reports, and runtime output
+.tokensave/
+.reports/
+.claude/
+.omm/
+09_Literature_Database/
+08_Audit/
+10_Pitfall_Ledger/
+_turing_workspace_*/
+*_delta.json
+run_receipt_*.json
 
-# Obsidian vault (local copy, not for git)
-# (synced copies live in the actual vault)
-
-# OS
+# OS/editor files
 Thumbs.db
 desktop.ini
 .DS_Store
-_tmp_*.json
-
-# --- Generated RLR project RUN DATA (output, NOT source) ---
-# Live research projects are runtime output (deltas, run-receipts, audit
-# manifests, reports, decision logs, turing workspaces, literature DB).
-# Keep them on disk but OUT of the source repo. DemoProject_v03 is kept as the
-# tracked example.
-Yigene_WGCNA_v03/
-Yigene_Enhancer_v04/
-
-# Stray run artifacts accidentally written to the repo root
-scripts_wgcna_loop/
 nul
-_codex_write_probe.txt
-*.bak
-_*_delta.json
-_tmp_lines.txt
-
-# DemoProject generated RUN DATA (the demo is tracked, its outputs are not)
-DemoProject_v03/08_Audit/
-DemoProject_v03/10_Pitfall_Ledger/
-DemoProject_v03/rlr_runner.yaml
-.tokensave
