@@ -47,7 +47,7 @@
 | **Literature DB** | `manage_literature_db.py` | 243 | Cross-round paper dedup + reuse | (none) |
 | **Obsidian Sync** | `sync_to_obsidian.py` | 555 | End-of-round vault sync + wikilinks | (none) |
 | **Legacy** | `rlr_v05b.py` | 559 | v0.5b prototype (superseded) | (none) |
-| **Legacy** | `research_loop_v03.py` | ~2600 | v0.3 engine (reference only) | (none) |
+| **Historical (removed)** | `research_loop_v03.py` | 2433 (historical count) | v0.3 engine; removed from the standalone tree | (none) |
 
 ---
 
@@ -323,7 +323,7 @@ Mitigation (v0.7): JSON-RPC layer, keep CLI for backward compat, versioned proto
 
 ### 3. Legacy Code Accumulation (~3160 lines dead)
 
-`research_loop_v03.py` (~2600 lines) and `rlr_v05b.py` (559 lines) are not used at runtime. Options: move to `legacy/` subdirectory, or delete and rely on git history.
+`research_loop_v03.py` (2433 historical lines) was removed from the standalone tree and is recoverable from Git history. `rlr_v05b.py` (559 lines) remains under `legacy/` only for characterization tests; neither is used by active runtime code.
 
 ---
 

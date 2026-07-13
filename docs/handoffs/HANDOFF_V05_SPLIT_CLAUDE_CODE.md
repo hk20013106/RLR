@@ -202,7 +202,7 @@ sync_to_obsidian.py
 | run_loop.py | 771 | 循环驱动器 |
 | sync_to_obsidian.py | 492 | Obsidian 同步 |
 | orchestrator.py | 389 | provider 层 |
-| research_loop_v03.py | — | v0.3 旧版（deprecated） |
+| research_loop_v03.py | — | v0.3 旧版；已从独立仓库移除，可从 Git 历史恢复 |
 | templates/ | — | persona + layer 模板 |
 | scripts_wgcna_loop/ | — | WGCNA R 脚本 |
 | Yigene_WGCNA_v03/ | — | 实际分析项目 |

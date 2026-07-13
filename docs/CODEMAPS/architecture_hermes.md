@@ -91,7 +91,7 @@ L10b delta + ledgers -> emit-loop-memory -> next_loop_memory.json
 | Literature DB | `manage_literature_db.py` | 243 | Cross-round paper dedup + reuse |
 | Obsidian Sync | `sync_to_obsidian.py` | 555 | End-of-round vault sync |
 | Legacy | `rlr_v05b.py` | 559 | v0.5b prototype (superseded, gate promoted to engine) |
-| Legacy | `research_loop_v03.py` | ~2600 | v0.3 engine (preserved for reference) |
+| Historical (removed) | `research_loop_v03.py` | 2433 (historical count) | v0.3 engine; removed from the standalone tree, recoverable from Git history |
 
 ---
 

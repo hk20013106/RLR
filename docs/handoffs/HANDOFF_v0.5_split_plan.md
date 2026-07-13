@@ -20,7 +20,7 @@ RLR (Research Loop Room) 是一个 DAG 驱动的多 agent 科研审议框架。
 | run_loop.py | 771 | 循环驱动器：多轮编排 + StopPolicy + Review gate |
 | sync_to_obsidian.py | 492 | Obsidian 同步：PDF 转 PNG + wikilink 嵌入 |
 | orchestrator.py | 389 | provider 抽象层（Manual / Command） |
-| research_loop_v03.py | ~2600 | v0.3 旧版（已标 deprecated，保留不动） |
+| research_loop_v03.py | 2433（历史记录） | v0.3 旧版；独立仓库中已删除，可从 Git 历史恢复 |
 
 外部依赖：
 - run_loop.py `import research_loop_v04 as rl`（引用 DAG 元数据、helper 函数）
