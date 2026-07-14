@@ -27,6 +27,26 @@ contract, and the optional Hypothesis Ranking Reliability Layer produces a
 separate advisory ranking artifact. Neither addition changes an existing
 formal gate or decision.
 
+## Installation and smoke test
+
+```bash
+# Runtime dependency
+python -m pip install -r requirements.txt
+
+# Optional test dependencies
+python -m pip install -r requirements-dev.txt
+
+# Minimal local smoke test (does not replace the real dependency gate)
+python research_loop_v04.py demo
+python research_loop_v04.py --help
+python run_loop.py --help
+```
+
+The `demo` command is the smallest local verification path. A real research
+run still requires the Academic Research runtime, a Zotero connector, and an
+Obsidian vault. These are checked by the L0 gate; missing services stop the
+run with an actionable error instead of being silently skipped.
+
 ---
 
 ## Version history
@@ -276,7 +296,7 @@ python run_loop.py print-main-agent-prompt MyProject <CAND_ID>
 # Paste the output into your host agent (Claude Code / Codex / etc.)
 ```
 
-See [MAIN_AGENT_RUN.md](MAIN_AGENT_RUN.md) and [MAIN_AGENT_PROMPT.md](MAIN_AGENT_PROMPT.md) for the full orchestration protocol.
+See [MAIN_AGENT_RUN.md](docs/MAIN_AGENT_RUN.md) and [MAIN_AGENT_PROMPT.md](docs/MAIN_AGENT_PROMPT.md) for the full orchestration protocol.
 
 ---
 
@@ -285,7 +305,7 @@ See [MAIN_AGENT_RUN.md](MAIN_AGENT_RUN.md) and [MAIN_AGENT_PROMPT.md](MAIN_AGENT
 ```
 research_loop/
 ├── research_loop_v04.py          # Historical CLI/import compatibility shim
-├── research_loop/
+├── src/research_loop/
 │   ├── cli.py                    # Stable CLI dispatch surface
 │   ├── engine.py                 # Command handlers and orchestration operations
 │   ├── api.py                    # In-process EngineAPI facade
@@ -301,15 +321,15 @@ research_loop/
 │   ├── paths.py / yamlio.py      # Safe paths and YAML/frontmatter I/O
 │   ├── ledger.py / presearch.py  # Pitfall/evidence ledgers and pre-research
 │   └── errors.py                 # Typed runtime errors
-├── run_loop.py                   # Canonical multi-round runner and StopPolicy
-├── manage_literature_db.py       # Growable literature database
-├── sync_to_obsidian.py           # End-of-round Obsidian sync
-├── templates/                    # Layer + persona templates
-├── MAIN_AGENT_RUN.md             # Main-agent execution protocol
-├── MAIN_AGENT_PROMPT.md          # Paste-ready startup prompt
-├── RUNNER.md                     # Runner modes + StopPolicy
-├── DAG_TOPOLOGY.md               # Full DAG dependency table
-└── DemoProject_v03/              # Tracked example (one full walk)
+├── run_loop.py                   # Root compatibility entry point
+├── src/run_loop.py               # Canonical multi-round runner and StopPolicy
+├── src/manage_literature_db.py   # Growable literature database
+├── src/sync_to_obsidian.py       # End-of-round Obsidian sync
+├── docs/MAIN_AGENT_RUN.md        # Main-agent execution protocol
+├── docs/MAIN_AGENT_PROMPT.md     # Paste-ready startup prompt
+├── docs/RUNNER.md                # Runner modes + StopPolicy
+├── docs/DAG_TOPOLOGY.md          # Full DAG dependency table
+└── templates/                    # Layer + persona templates
 ```
 
 `research_loop_v04.py` remains in the repository because tests and external

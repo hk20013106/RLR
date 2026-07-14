@@ -12,6 +12,25 @@ RLR 是一个**证据门禁的科学研究审查框架**：把一个研究问题
 - [English README](README.md)
 - 运行入口：`python run_loop.py run PROJECT CAND`
 
+## 安装与最小验证
+
+```bash
+# 安装运行依赖
+python -m pip install -r requirements.txt
+
+# 可选：安装测试依赖
+python -m pip install -r requirements-dev.txt
+
+# 最小本地演示，不代表真实研究流程已通过全部门禁
+python research_loop_v04.py demo
+python research_loop_v04.py --help
+python run_loop.py --help
+```
+
+真实研究流程仍需要 Academic Research runtime、Zotero connector 和
+Obsidian vault。L0 会严格检查这些依赖；缺少时会给出错误并停止，不会
+静默跳过或伪造通过。
+
 V0.7 的深度研究门禁覆盖 L1、L4 和 L8.5；每次文献运行都保存可定位、可复核的 evidence pack。L0 还会校验严格的输入契约；可选的 Hypothesis Ranking Reliability Layer 只生成 advisory artifact，不改变正式 gate 或决策。
 
 ## 明确边界
