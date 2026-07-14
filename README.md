@@ -1,12 +1,12 @@
 # Research Loop Room (RLR)
 
-[English](README.md) | [中文](README_CN.md)
+[English](README.md) | [中文](docs/README_CN.md)
 
-**RLR turns a single research question into a structured multi-agent debate.**
+**RLR turns a single research question into a structured, evidence-gated multi-agent debate.**
 
 You give it a scientific question. RLR walks it through a 15-step pipeline (L0 → L10c) where 10 expert personas — each acting as an isolated subagent — generate hypotheses, critique them, design methods, execute code, audit evidence, verify against literature, and reach a final KEEP / REVISE / DROP decision. No single agent sees the full picture; each sees only what the DAG allows. This prevents bias contamination (e.g., the agent proposing a hypothesis never sees the critique of its own idea until a decision is made).
 
-L1, L4, and L8.5 run a verifiable Academic Research Skills (ARS) pass before their node; L7 separately searches reusable code. Each literature run stores a versioned evidence pack rather than trusting a prose summary.
+L1, L4, and L8.5 run a verifiable Academic Research Skills (ARS) pass before their node; L7 separately searches reusable code. Each literature run stores a versioned evidence pack rather than trusting a prose summary. Missing evidence or dependencies stops the loop instead of being silently ignored.
 
 > **Core principle:** cognitive agents are isolated by information invisibility (Path B). The execution agent (Turing) is isolated by a controlled workspace + command allowlist (Path A). We do not pretend `spawn_agent` is an OS sandbox.
 
