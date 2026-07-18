@@ -73,9 +73,22 @@ The following are correctness boundaries, not optional conventions.
 * Do not duplicate large source documents in deltas. Store stable IDs, hashes, cards, or explicit references unless the schema requires the full content.
 * Never fabricate missing state, paths, lineage, decisions, conclusions, hashes, references, or scientific results.
 
+### Hypothesis ledger (when enabled)
+
+* A project bound to a hypothesis ledger must use its configured store binding;
+  missing or mismatched `store_id` / `project_id` is a fail-closed error.
+* Ledger facts and commit receipts are append-only. A delta is authoritative for
+  runtime use only when its committed ledger emission and on-disk hash match.
+* Treat graph, current-status, ranking, and memory views as rebuildable
+  projections. Do not write them as a competing source of truth.
+* Keep workflow status on a candidate/round occurrence and epistemic status on
+  the hypothesis version. Only the designated epistemic review authority may
+  change epistemic status.
+
 ### Gates and validation
 
 * Missing required dependencies or artifacts must fail closed.
+
 * Never bypass a gate by:
 
   * inserting a sentinel string without validating the underlying artifact;
@@ -84,8 +97,11 @@ The following are correctness boundaries, not optional conventions.
   * catching validation errors and continuing;
   * inferring required lineage or round metadata;
   * modifying fixtures only to suppress a legitimate failure.
+
 * Use one authoritative validator for each contract. All entry points that consume that contract must call the same validator.
+
 * Validation must occur at the actual boundary of use, not only during object creation.
+
 * Error messages must identify the failed invariant and the affected artifact.
 
 ### L0 input contract
@@ -155,7 +171,7 @@ Preferred commands on the current workstation:
 ```powershell
 rtk proxy python -m pytest path\to\relevant_test.py -q
 rtk proxy python -m pytest -q
-git diff --check
+rtk git diff --check
 python run_loop.py --help
 ```
 

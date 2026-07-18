@@ -208,19 +208,29 @@ def emit_delta(project, cand, node, persona, delta, run_dir, receipt=None):
 
 def advance(project, cand, step):
     ac = step.get("advance_command")
-    if ac == "decision":
+    if step.get("node") == "L10b":
+        # A v2 L10b is the sole candidate-decision input.  Do not repeat its
+        # conclusion through the generic mutable decision command.
+        _ctl("finalize-candidate", project, cand)
+    elif ac == "decision":
         _ctl("decision", project, cand, "--status", step.get("advance_status"),
              "--reason", step.get("advance_reason") or "auto")
     elif ac == "triage-idea":
         d = load_delta(project, cand, "L3_oppenheimer") or {}
-        dec = "select" if d.get("selected") else "reject"
-        _ctl("triage-idea", project, cand, "--decision", dec,
-             "--reason", d.get("reason") or "auto")
+        if d.get("schema_version") == "2.0":
+            _ctl("triage-idea", project, cand)
+        else:
+            dec = "select" if d.get("selected") else "reject"
+            _ctl("triage-idea", project, cand, "--decision", dec,
+                 "--reason", d.get("reason") or "auto")
     elif ac == "triage-method":
         d = load_delta(project, cand, "L6_oppenheimer") or {}
-        dec = "approve" if d.get("approved_strategy") else "reject"
-        _ctl("triage-method", project, cand, "--decision", dec,
-             "--reason", d.get("reason") or "auto")
+        if d.get("schema_version") == "2.0":
+            _ctl("triage-method", project, cand)
+        else:
+            dec = "approve" if d.get("approved_strategy") else "reject"
+            _ctl("triage-method", project, cand, "--decision", dec,
+                 "--reason", d.get("reason") or "auto")
     elif ac == "execution-gate":
         _ctl("execution-gate", project, cand)
     elif ac == "aggregate-report":
@@ -474,7 +484,9 @@ def exec_cognitive(project, cand, step, cfg, args, run_dir, round_id,
             raise RuntimeError(f"L0 input-contract gate (pre-dispatch): {c_reason}")
     prov = provider_for(node, cfg, args)
     pname = getattr(prov, "name", getattr(prov, "type", "unknown"))
-    schema = rl.DELTA_SCHEMAS.get(f"{node}_{persona.lower()}")
+    schema = (rl.NODE_SCHEMAS.get(node) if
+              (Path(project) / "00_Preflight" / "hypothesis_store_binding.json").exists()
+              else rl.DELTA_SCHEMAS.get(f"{node}_{persona.lower()}"))
     try:
         delta = prov.run_agent(node, persona, ctx, output_schema=schema,
                                tools=step.get("tools_policy"),
@@ -518,7 +530,9 @@ def exec_turing(project, cand, step, cfg, args, run_dir, round_id, exec_state):
     ctx, manifest = assemble_context(project, cand, "L7")
     prov = provider_for("L7", cfg, args)
     pname = getattr(prov, "name", getattr(prov, "type", "unknown"))
-    schema = rl.DELTA_SCHEMAS.get("L7_turing")
+    schema = (rl.NODE_SCHEMAS.get("L7") if
+              (Path(project) / "00_Preflight" / "hypothesis_store_binding.json").exists()
+              else rl.DELTA_SCHEMAS.get("L7_turing"))
     try:
         delta = prov.run_agent("L7", "Turing", ctx, output_schema=schema,
                                workspace=workspace,

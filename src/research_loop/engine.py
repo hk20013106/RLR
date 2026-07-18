@@ -166,7 +166,11 @@ from research_loop.paths import (  # inward shim (Phase 1b)
 from research_loop.delta import (  # inward shim (Phase 2a)
     DELTA_SCHEMAS, DELTA_PERSONA, _validate_delta,
     _delta_file, _candidate_delta_file,
-    _delta_for_candidate, _delta_belongs_to_candidate,
+    _delta_for_candidate, _delta_belongs_to_candidate, _v2_candidate_delta_file,
+)
+from research_loop.hypothesis_ledger import (
+    DELTA_SCHEMA_VERSION, NODE_SCHEMAS, HypothesisLedger, LedgerError,
+    canonical_json, binding_path,
 )
 
 # Map: delta key -> persona name (for file path resolution)
@@ -1541,6 +1545,79 @@ def cmd_literature_report(args):
 # --- 2. Pre-research injection mode-aware logic ---
 
 
+def _ledger_for(project_dir, configured_path=None, *, require_binding=True):
+    """Construct the configured ledger without permitting a silent fallback."""
+    store_path = configured_path or os.environ.get("RLR_HYPOTHESIS_STORE")
+    if not store_path:
+        raise LedgerError("hypothesis ledger requires --knowledge-store or RLR_HYPOTHESIS_STORE")
+    ledger = HypothesisLedger(store_path)
+    if require_binding:
+        ledger.require_binding(project_dir)
+    return ledger
+
+
+def _write_hypothesis_commit_receipt(project_dir, receipt):
+    directory = Path(project_dir) / "08_Audit" / "hypothesis_commits"
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / (f"H{int(receipt['commit_seq']):08d}_"
+                          f"{receipt['candidate_id']}_{receipt['node']}.json")
+    raw = canonical_json(receipt)
+    if target.exists():
+        if target.read_text(encoding="utf-8") != raw:
+            raise LedgerError(f"hypothesis commit receipt collision: {target}")
+        return target
+    with target.open("x", encoding="utf-8") as handle:
+        handle.write(raw)
+    return target
+
+
+def _emit_delta_v2(args, data):
+    """Persist a v2 delta and its ledger events as one fail-closed boundary."""
+    project_dir = Path(args.project_dir)
+    cf = _candidate_file(project_dir, args.cand_id)
+    if not cf.exists():
+        print(f"ERROR: no candidate {args.cand_id}", file=sys.stderr)
+        return 2
+    delta_key = f"{args.node}_{args.persona.lower()}"
+    if delta_key not in DELTA_PERSONA:
+        print(f"ERROR: no schema for {delta_key}", file=sys.stderr)
+        return 2
+    fm = _load_yaml_front(cf)
+    round_id = str(fm.get("round_id") or "1")
+    out_file = _v2_candidate_delta_file(project_dir, delta_key, args.cand_id)
+    if out_file is None:
+        print(f"ERROR: cannot resolve v2 artifact path for {delta_key}", file=sys.stderr)
+        return 2
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        ledger = _ledger_for(project_dir, getattr(args, "knowledge_store", None))
+        result = ledger.commit_delta(project_dir=project_dir, candidate_id=args.cand_id,
+                                     round_id=round_id, node=args.node,
+                                     persona=args.persona, delta=data,
+                                     delta_path=out_file)
+        # The ledger hashes canonical bytes.  Persist exactly those bytes so the
+        # runtime resolver can revalidate the artifact instead of trusting text.
+        raw = canonical_json(result.normalized_delta)
+        if out_file.exists() and out_file.read_text(encoding="utf-8") != raw:
+            raise LedgerError(f"refusing to overwrite a different v2 delta: {out_file}")
+        if not out_file.exists():
+            temporary = out_file.with_suffix(out_file.suffix + ".tmp")
+            temporary.write_text(raw, encoding="utf-8")
+            os.replace(temporary, out_file)
+        actual = _sha256(out_file)
+        if actual != result.delta_hash:
+            raise LedgerError("persisted v2 delta hash differs from ledger emission hash")
+        receipt_path = _write_hypothesis_commit_receipt(project_dir, result.receipt)
+    except LedgerError as exc:
+        print(f"DELTA V2 VALIDATION: REJECT\n  {exc}", file=sys.stderr)
+        return 1
+    print("DELTA V2 VALIDATION: PASS")
+    print(f"  schema: {delta_key}@{DELTA_SCHEMA_VERSION}")
+    print(f"  written: {out_file}")
+    print(f"  hypothesis commit: {receipt_path}")
+    return 0
+
+
 
 def cmd_emit_delta(args):
     """Validate delta JSON against schema and write to 02_Agent_Notes/."""
@@ -1561,6 +1638,9 @@ def cmd_emit_delta(args):
     except json.JSONDecodeError as e:
         print(f"ERROR: invalid JSON: {e}", file=sys.stderr)
         return 2
+
+    if data.get("schema_version") == DELTA_SCHEMA_VERSION:
+        return _emit_delta_v2(args, data)
 
     # Recursive structural validation against the (possibly nested) schema:
     # enforces container types AND the required keys of objects inside lists and
@@ -1852,6 +1932,12 @@ def cmd_new_project(args):
     (project_dir / "00_Project_Index.md").write_text(
         _index_template(name, topic), encoding="utf-8")
     pl.init_ledger(project_dir)
+    if getattr(args, "knowledge_store", None):
+        try:
+            _ledger_for(project_dir, args.knowledge_store, require_binding=False).bind_project(project_dir)
+        except LedgerError as exc:
+            print(f"ERROR: hypothesis ledger project binding failed: {exc}", file=sys.stderr)
+            return 2
     print(f"Created V0.7 project: {project_dir.resolve()}")
     print("Next: run `preflight` (Linnaeus L0) before any candidate work.")
     return 0
@@ -1891,12 +1977,27 @@ def cmd_new_candidate(args):
         except (FileNotFoundError, ValueError) as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 2
+        if binding_path(project_dir).exists():
+            snapshot = mem.get("hypothesis_ledger")
+            if not isinstance(snapshot, dict) or not mem.get("next_round_hypothesis_id"):
+                print("ERROR: bound project continuation requires v2 loop-memory ledger snapshot and successor hypothesis ID", file=sys.stderr)
+                return 2
+            try:
+                ledger = _ledger_for(project_dir, getattr(args, "knowledge_store", None))
+            except LedgerError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return 2
+            if snapshot.get("store_id") != ledger.store_id:
+                print("ERROR: loop-memory ledger store_id does not match configured store", file=sys.stderr)
+                return 2
         mem_fields = {
             "from_memory": True, "loop_type": loop_type,
             "prior_candidate": mem["source_candidate_id"],
             "memory_file": str(from_memory),
             "memory_hash": _sha256_file(from_memory),
         }
+        if mem.get("next_round_hypothesis_id"):
+            mem_fields["hypothesis_id"] = mem["next_round_hypothesis_id"]
 
     cand_id = "C" + _stamp()
 
@@ -2429,22 +2530,41 @@ def cmd_triage_idea(args):
     fm = _load_yaml_front(cf)
     if not _require_status(fm, args.cand_id, "IDEA_PROPOSED"):
         return 2
+    delta = _delta_for_candidate(project_dir, "L3_oppenheimer", args.cand_id)
+    if delta and str(delta).endswith(".v2.json"):
+        try:
+            data = json.loads(delta.read_text(encoding="utf-8"))
+            decisions = data["triage"]
+            selected = [item for item in decisions if item["disposition"] == "SELECTED"]
+            reason = "; ".join(item["reason"] for item in decisions)
+        except (OSError, json.JSONDecodeError, KeyError) as exc:
+            print(f"ERROR: invalid committed L3 v2 delta: {exc}", file=sys.stderr)
+            return 1
+        if getattr(args, "decision", None) or getattr(args, "reason", None):
+            print("ERROR: v2 triage-idea derives decision and reason from committed L3 delta", file=sys.stderr)
+            return 2
+        decision = "select" if selected else "reject"
+    else:
+        decision, reason = args.decision, args.reason
+        if not decision or not reason:
+            print("ERROR: legacy triage-idea requires --decision and --reason", file=sys.stderr)
+            return 2
     frm = fm.get("current_status")
-    if args.decision == "select":
+    if decision == "select":
         to, owner = "IDEA_SELECTED", "Fisher"
     else:
         to, owner = "DROP", "Oppenheimer"
-    seq = _append_decision(project_dir, args.cand_id, frm, to, args.reason,
+    seq = _append_decision(project_dir, args.cand_id, frm, to, reason,
                            route_to=owner, agent="Oppenheimer",
                            kind="candidate_triage")
     (project_dir / "05_Decision_Log" /
      f"candidate_triage_decision_{args.cand_id}.md").write_text(
-        _decision_log_template(seq, args.cand_id, frm, to, args.reason, owner,
+        _decision_log_template(seq, args.cand_id, frm, to, reason, owner,
                                agent="Oppenheimer", kind="candidate_triage"),
         encoding="utf-8")
     _set_status(project_dir, args.cand_id, to, owner)
     if to == "DROP":
-        _replace_field(cf, "final_decision", f"DROP: {args.reason}")
+        _replace_field(cf, "final_decision", f"DROP: {reason}")
         archive = project_dir / "99_Archive"
         archive.mkdir(exist_ok=True)
         target = archive / cf.name
@@ -2466,22 +2586,39 @@ def cmd_triage_method(args):
     fm = _load_yaml_front(cf)
     if not _require_status(fm, args.cand_id, "METHOD_PROPOSED"):
         return 2
+    delta = _delta_for_candidate(project_dir, "L6_oppenheimer", args.cand_id)
+    if delta and str(delta).endswith(".v2.json"):
+        try:
+            data = json.loads(delta.read_text(encoding="utf-8"))
+            decision = "approve" if data["method_decision"] == "APPROVE" else "reject"
+            reason = data["reason"]
+        except (OSError, json.JSONDecodeError, KeyError) as exc:
+            print(f"ERROR: invalid committed L6 v2 delta: {exc}", file=sys.stderr)
+            return 1
+        if getattr(args, "decision", None) or getattr(args, "reason", None):
+            print("ERROR: v2 triage-method derives decision and reason from committed L6 delta", file=sys.stderr)
+            return 2
+    else:
+        decision, reason = args.decision, args.reason
+        if not decision or not reason:
+            print("ERROR: legacy triage-method requires --decision and --reason", file=sys.stderr)
+            return 2
     frm = fm.get("current_status")
-    if args.decision == "approve":
+    if decision == "approve":
         to, owner = "METHOD_APPROVED", "Oppenheimer"
     else:
         to, owner = "DROP", "Oppenheimer"
-    seq = _append_decision(project_dir, args.cand_id, frm, to, args.reason,
+    seq = _append_decision(project_dir, args.cand_id, frm, to, reason,
                            route_to=owner, agent="Oppenheimer",
                            kind="analysis_plan")
     (project_dir / "05_Decision_Log" /
      f"analysis_plan_decision_{args.cand_id}.md").write_text(
-        _decision_log_template(seq, args.cand_id, frm, to, args.reason, owner,
+        _decision_log_template(seq, args.cand_id, frm, to, reason, owner,
                                agent="Oppenheimer", kind="analysis_plan"),
         encoding="utf-8")
     _set_status(project_dir, args.cand_id, to, owner)
     if to == "DROP":
-        _replace_field(cf, "final_decision", f"DROP: {args.reason}")
+        _replace_field(cf, "final_decision", f"DROP: {reason}")
         archive = project_dir / "99_Archive"
         archive.mkdir(exist_ok=True)
         target = archive / cf.name
@@ -2493,6 +2630,111 @@ def cmd_triage_method(args):
     print(f"analysis_plan: {frm} -> {to} (route: {owner})")
     if to == "METHOD_APPROVED":
         print("  approved plan recorded; run `execution-gate` before Turing.")
+    return 0
+
+
+def cmd_finalize_candidate(args):
+    """Apply the L10b v2 candidate decision after its ledger commit."""
+    project_dir = Path(args.project_dir)
+    cf = _candidate_file(project_dir, args.cand_id)
+    if not cf.exists():
+        print(f"ERROR: no candidate {args.cand_id}", file=sys.stderr)
+        return 2
+    delta_path = _delta_for_candidate(project_dir, "L10b_oppenheimer", args.cand_id)
+    if not delta_path or not str(delta_path).endswith(".v2.json"):
+        print("ERROR: finalize-candidate requires a committed L10b v2 delta", file=sys.stderr)
+        return 1
+    try:
+        data = json.loads(delta_path.read_text(encoding="utf-8"))
+        decision, reason = data["decision"], data["reason"]
+    except (OSError, json.JSONDecodeError, KeyError) as exc:
+        print(f"ERROR: invalid committed L10b v2 delta: {exc}", file=sys.stderr)
+        return 1
+    fm = _load_yaml_front(cf)
+    frm = fm.get("current_status")
+    if decision not in FINAL_STATUSES or decision not in DECISION_TRANSITIONS.get(frm, set()):
+        print(f"ERROR: illegal final transition {frm} -> {decision}", file=sys.stderr)
+        return 1
+    seq = _append_decision(project_dir, args.cand_id, frm, decision, reason,
+                           route_to="Oppenheimer", agent="Oppenheimer", kind="final_decision")
+    _set_status(project_dir, args.cand_id, decision, "Oppenheimer")
+    _replace_field(cf, "final_decision", f"{decision}: {reason}")
+    print(f"D{seq:04d}: {frm} -> {decision}")
+    return 0
+
+
+def _ledger_cli(args):
+    try:
+        return _ledger_for(args.project_dir, args.knowledge_store)
+    except LedgerError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return None
+
+
+def cmd_hypothesis_show(args):
+    ledger = _ledger_cli(args)
+    if ledger is None:
+        return 2
+    try:
+        graph = ledger.graph(args.hypothesis_id, as_of=args.as_of)
+    except LedgerError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(graph, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_hypothesis_history(args):
+    ledger = _ledger_cli(args)
+    if ledger is None:
+        return 2
+    try:
+        history = ledger.history(args.hypothesis_id, after=args.after, limit=args.limit)
+    except LedgerError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(history, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_hypothesis_search(args):
+    ledger = _ledger_cli(args)
+    if ledger is None:
+        return 2
+    print(json.dumps(ledger.search(args.text or "", args.limit), indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_hypothesis_verify(args):
+    ledger = _ledger_cli(args)
+    if ledger is None:
+        return 2
+    problems = ledger.verify()
+    if problems:
+        print("HYPOTHESIS LEDGER: REJECT", file=sys.stderr)
+        for problem in problems:
+            print(f"  {problem}", file=sys.stderr)
+        return 1
+    print("HYPOTHESIS LEDGER: PASS")
+    return 0
+
+
+def cmd_hypothesis_authorize_context(args):
+    ledger = _ledger_cli(args)
+    if ledger is None:
+        return 2
+    try:
+        result = ledger.authorize_context(args.project_dir, args.hypothesis_id,
+                                          args.through_commit_seq, args.reason)
+    except LedgerError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    out_dir = Path(args.project_dir) / "08_Audit" / "hypothesis_context"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    target = out_dir / f"{result['authorization_id'].replace(':', '_')}.json"
+    if not target.exists():
+        target.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 
@@ -3070,7 +3312,7 @@ def _list_card_ids(project_dir, cand_id, sub):
     return sorted(p.stem for p in d.glob("*.json"))
 
 
-def _build_loop_memory(project_dir, cand_id):
+def _build_loop_memory(project_dir, cand_id, knowledge_store=None):
     project_dir = Path(project_dir)
     cf = _candidate_file(project_dir, cand_id)
     fm = _load_yaml_front(cf) if cf and cf.exists() else {}
@@ -3093,7 +3335,7 @@ def _build_loop_memory(project_dir, cand_id):
     # it -> default "1"); the next round is +1.
     _src_rid = str(fm.get("round_id") or "1")
     _next_rid = str(int(_src_rid) + 1) if _src_rid.isdigit() else _src_rid
-    return {
+    memory = {
         "source_candidate_id": cand_id,
         "terminal_node": "L10c",
         "terminal_decision": l10.get("decision", ""),
@@ -3121,6 +3363,25 @@ def _build_loop_memory(project_dir, cand_id):
         "method_card_ids": _list_card_ids(project_dir, cand_id, "method_cards"),
         "hashes": {},
     }
+    # v2 binds continuation context to an immutable event cursor.  It never
+    # asks the shared ledger for whatever happens to be current in another
+    # project after this memory has been emitted.
+    if binding_path(project_dir).exists():
+        try:
+            ledger = _ledger_for(project_dir, knowledge_store)
+            snapshot = ledger.snapshot_candidate(project_dir, cand_id, _src_rid)
+        except LedgerError as exc:
+            raise LedgerError(f"v2 loop-memory requires the bound knowledge store: {exc}") from exc
+        proposal = l10.get("next_round_proposal") or {}
+        memory.update({
+            "schema_version": "2.0",
+            "hypothesis_ledger": snapshot,
+            "previous_hypothesis_ids": [item.get("hypothesis_id") for item in l10.get("hypothesis_decisions", []) if item.get("hypothesis_id")],
+            "next_round_hypothesis_id": proposal.get("hypothesis_id", ""),
+            "next_round_hypothesis": proposal.get("statement", memory["next_round_hypothesis"]),
+            "loop_type": proposal.get("loop_type", ""),
+        })
+    return memory
 
 
 
@@ -3200,7 +3461,12 @@ def cmd_modality_scan(args):
 def cmd_emit_loop_memory(args):
     """L10c: emit the next_loop_memory seed (JSON + MD) from this candidate's deltas."""
     project_dir = Path(args.project_dir)
-    mem = _build_loop_memory(project_dir, args.cand_id)
+    try:
+        mem = _build_loop_memory(project_dir, args.cand_id,
+                                 getattr(args, "knowledge_store", None))
+    except LedgerError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     out_dir = project_dir / "08_Audit" / "loop_memory"
     out_dir.mkdir(parents=True, exist_ok=True)
     jp = out_dir / f"{args.cand_id}_next_loop_memory.json"
@@ -3901,6 +4167,8 @@ def build_parser():
     sp = sub.add_parser("new-project", help="create a new v0.4 project folder")
     sp.add_argument("name")
     sp.add_argument("topic", nargs="?", default="")
+    sp.add_argument("--knowledge-store", dest="knowledge_store",
+                    help="shared HypothesisLedger SQLite store; binds this project")
     sp.set_defaults(func=cmd_new_project)
 
     # preflight
@@ -3928,6 +4196,8 @@ def build_parser():
                          "(default: derived from --input)")
     sp.add_argument("--from-memory", dest="from_memory", default=None,
                     help="path to a next_loop_memory.json seed (divergence loop)")
+    sp.add_argument("--knowledge-store", dest="knowledge_store",
+                    help="shared HypothesisLedger SQLite store (or RLR_HYPOTHESIS_STORE)")
     sp.add_argument("--loop-type", dest="loop_type", default=None,
                     choices=["divergent", "correction", "data-acquisition"],
                     help="required with --from-memory")
@@ -4029,6 +4299,8 @@ def build_parser():
     sp.add_argument("--file", required=True, help="delta JSON file to import")
     sp.add_argument("--receipt", help="context_manifest JSON from assemble-context; "
                     "verifies upstream delta hashes if provided")
+    sp.add_argument("--knowledge-store", dest="knowledge_store",
+                    help="shared HypothesisLedger SQLite store (or RLR_HYPOTHESIS_STORE)")
     sp.set_defaults(func=cmd_emit_delta)
 
     # route
@@ -4058,8 +4330,9 @@ def build_parser():
                         help="L3 Oppenheimer: IDEA_PROPOSED -> SELECTED/REJECTED")
     sp.add_argument("project_dir")
     sp.add_argument("cand_id")
-    sp.add_argument("--decision", required=True, choices=["select", "reject"])
-    sp.add_argument("--reason", required=True)
+    sp.add_argument("--decision", choices=["select", "reject"],
+                    help="legacy-only; v2 derives this from its committed L3 delta")
+    sp.add_argument("--reason", help="legacy-only; v2 derives this from its committed L3 delta")
     sp.set_defaults(func=cmd_triage_idea)
 
     # triage-method
@@ -4067,9 +4340,61 @@ def build_parser():
                         help="L6 Oppenheimer: METHOD_PROPOSED -> APPROVED/REJECTED")
     sp.add_argument("project_dir")
     sp.add_argument("cand_id")
-    sp.add_argument("--decision", required=True, choices=["approve", "reject"])
-    sp.add_argument("--reason", required=True)
+    sp.add_argument("--decision", choices=["approve", "reject"],
+                    help="legacy-only; v2 derives this from its committed L6 delta")
+    sp.add_argument("--reason", help="legacy-only; v2 derives this from its committed L6 delta")
     sp.set_defaults(func=cmd_triage_method)
+
+    sp = sub.add_parser("finalize-candidate",
+                        help="derive the L10b candidate decision from a committed v2 delta")
+    sp.add_argument("project_dir")
+    sp.add_argument("cand_id")
+    sp.add_argument("--knowledge-store", dest="knowledge_store",
+                    help="shared HypothesisLedger SQLite store (or RLR_HYPOTHESIS_STORE)")
+    sp.set_defaults(func=cmd_finalize_candidate)
+
+    sp = sub.add_parser("hypothesis-show", help="show a hypothesis graph DTO")
+    sp.add_argument("project_dir")
+    sp.add_argument("hypothesis_id")
+    sp.add_argument("--as-of", dest="as_of", type=int)
+    sp.add_argument("--knowledge-store", dest="knowledge_store")
+    sp.set_defaults(func=cmd_hypothesis_show)
+
+    sp = sub.add_parser("hypothesis-history", help="show append-only hypothesis events")
+    sp.add_argument("project_dir")
+    sp.add_argument("hypothesis_id")
+    sp.add_argument("--after", type=int, default=0)
+    sp.add_argument("--limit", type=int, default=100)
+    sp.add_argument("--knowledge-store", dest="knowledge_store")
+    sp.set_defaults(func=cmd_hypothesis_history)
+
+    sp = sub.add_parser("hypothesis-lineage", help="show hypothesis lineage graph DTO")
+    sp.add_argument("project_dir")
+    sp.add_argument("hypothesis_id")
+    sp.add_argument("--as-of", dest="as_of", type=int)
+    sp.add_argument("--knowledge-store", dest="knowledge_store")
+    sp.set_defaults(func=cmd_hypothesis_show)
+
+    sp = sub.add_parser("hypothesis-search", help="search hypotheses by normalized statement")
+    sp.add_argument("project_dir")
+    sp.add_argument("--text", required=True)
+    sp.add_argument("--limit", type=int, default=50)
+    sp.add_argument("--knowledge-store", dest="knowledge_store")
+    sp.set_defaults(func=cmd_hypothesis_search)
+
+    sp = sub.add_parser("hypothesis-verify", help="verify ledger projections and emissions")
+    sp.add_argument("project_dir")
+    sp.add_argument("--knowledge-store", dest="knowledge_store")
+    sp.set_defaults(func=cmd_hypothesis_verify)
+
+    sp = sub.add_parser("hypothesis-authorize-context",
+                        help="create a fixed-cursor, hypothesis-scoped context authorization")
+    sp.add_argument("project_dir")
+    sp.add_argument("hypothesis_id")
+    sp.add_argument("--through-commit-seq", type=int, required=True)
+    sp.add_argument("--reason", required=True)
+    sp.add_argument("--knowledge-store", dest="knowledge_store")
+    sp.set_defaults(func=cmd_hypothesis_authorize_context)
 
     # execution-gate
     sp = sub.add_parser("execution-gate",
@@ -4105,6 +4430,8 @@ def build_parser():
                         help="L10c: emit next_loop_memory seed (JSON+MD) for a candidate")
     sp.add_argument("project_dir")
     sp.add_argument("cand_id")
+    sp.add_argument("--knowledge-store", dest="knowledge_store",
+                    help="shared HypothesisLedger SQLite store (or RLR_HYPOTHESIS_STORE)")
     sp.set_defaults(func=cmd_emit_loop_memory)
 
     # branch-status

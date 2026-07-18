@@ -10,6 +10,35 @@ from pathlib import Path
 from research_loop.paths import _sha256
 
 
+def _v2_candidate_delta_file(project_dir, delta_key, cand_id):
+    """Return the non-overwriting v2 delta artifact path."""
+    legacy = _delta_file(project_dir, delta_key)
+    if legacy is None:
+        return None
+    return legacy.with_name(f"{cand_id}_{delta_key}_delta.v2.json")
+
+
+def _v2_commit_valid(project_dir, delta_key, cand_id, path):
+    """A v2 artifact is consumable only with a matching immutable receipt."""
+    if not path or not path.exists():
+        return False
+    digest = _sha256(path)
+    node = delta_key.split("_", 1)[0]
+    commits = Path(project_dir) / "08_Audit" / "hypothesis_commits"
+    if not commits.is_dir():
+        return False
+    for receipt_path in commits.glob("*.json"):
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (receipt.get("candidate_id") == str(cand_id)
+                and receipt.get("node") == node
+                and receipt.get("delta_hash") == digest):
+            return True
+    return False
+
+
 DELTA_SCHEMAS = {
     "L0_linnaeus": {
         "skills_found": list, "skills_gaps": list, "input_verified": dict,
@@ -105,6 +134,13 @@ def _candidate_delta_file(project_dir, delta_key, cand_id):
 
 def _delta_for_candidate(project_dir, delta_key, cand_id):
     """Resolve an owned candidate delta, with legacy receipt compatibility."""
+    v2 = _v2_candidate_delta_file(project_dir, delta_key, cand_id)
+    if _v2_commit_valid(project_dir, delta_key, cand_id, v2):
+        return v2
+    # A ledger-bound project has explicitly cut over: uncommitted v2 output and
+    # all v1 artifacts are intentionally invisible to runtime consumers.
+    if (Path(project_dir) / "00_Preflight" / "hypothesis_store_binding.json").exists():
+        return None
     candidate = _candidate_delta_file(project_dir, delta_key, cand_id)
     legacy = _delta_file(project_dir, delta_key)
     node = delta_key.split("_", 1)[0]
