@@ -23,6 +23,13 @@ Before modifying code:
 3. Treat executable code and passing tests as more authoritative than old plans, reports, or architecture notes.
 4. Report any conflict between documentation and current code; do not silently choose the more convenient interpretation.
 
+## Agent orientation
+
+For a compact architecture map, runtime entry points, authority boundaries, and
+takeover procedure, read `docs/AGENT_CONTEXT.md` after this file. It is an
+orientation aid only; executable code, validators, and passing tests remain
+authoritative.
+
 Do not hard-code transient facts such as current branch names, commit hashes, test counts, line numbers, or roadmap phase status into production logic.
 
 ## Phase-gated workflow
