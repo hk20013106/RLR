@@ -8,15 +8,158 @@ from research_loop.hypothesis_ledger import HypothesisLedger, LedgerError, canon
 from research_loop.engine import main
 
 
-def _commit(ledger, project, node, delta, *, candidate="C1", round_id="1"):
-    return ledger.commit_delta(
+def _commit(ledger, project, node, delta, *, candidate="C1", round_id="1",
+            finalize=True):
+    delta_path = (
+        project / "02_Agent_Notes" / "Test" /
+        f"{candidate}_{node}_delta.v2.json"
+    )
+    result = ledger.commit_delta(
         project_dir=project,
         candidate_id=candidate,
         round_id=round_id,
         node=node,
         persona="Test",
         delta=delta,
-        delta_path=project / "02_Agent_Notes" / "Test" / f"{candidate}_{node}_delta.v2.json",
+        delta_path=delta_path,
+    )
+    if finalize:
+        delta_path.parent.mkdir(parents=True, exist_ok=True)
+        delta_raw = canonical_json(result.normalized_delta)
+        if not delta_path.exists():
+            delta_path.write_text(delta_raw, encoding="utf-8")
+        assert delta_path.read_text(encoding="utf-8") == delta_raw
+        receipt_path = (
+            project / "08_Audit" / "hypothesis_commits" /
+            f"H{result.commit_seq:08d}_{candidate}_{node}.json"
+        )
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_raw = canonical_json(result.receipt)
+        if not receipt_path.exists():
+            receipt_path.write_text(receipt_raw, encoding="utf-8")
+        ledger.finalize_emission(
+            result.delta_hash,
+            artifact_sha256=hashlib.sha256(delta_path.read_bytes()).hexdigest(),
+            receipt_sha256=hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+        )
+    return result
+
+
+def _l1_delta(statement="A"):
+    return {
+        "schema_version": "2.0",
+        "hypotheses": [{
+            "proposal_key": "a",
+            "statement": statement,
+            "operationalization": "measure",
+            "falsification_criteria": ["absent"],
+            "rationale": "fixture",
+        }],
+        "primary_proposal_key": "a",
+        "key_uncertainty": "uncertain",
+    }
+
+
+def _finalize(ledger, result):
+    ledger.finalize_emission(
+        result.delta_hash,
+        artifact_sha256=result.delta_hash,
+        receipt_sha256=hashlib.sha256(
+            canonical_json(result.receipt).encode("utf-8")
+        ).hexdigest(),
+    )
+
+
+def test_orphan_l1_hidden_from_ranking_until_finalized(tmp_path):
+    project = tmp_path / "P"
+    project.mkdir()
+    ledger = HypothesisLedger(tmp_path / "shared.sqlite")
+    ledger.bind_project(project, "P1")
+    orphan = _commit(ledger, project, "L1", _l1_delta(), finalize=False)
+
+    with pytest.raises(
+        LedgerError, match="ranking candidate has no ledger L1 occurrence"
+    ):
+        ledger.ranking_inputs(["C1"], "L3", project_id="P1")
+
+    _finalize(ledger, orphan)
+    assert ledger.ranking_inputs(
+        ["C1"], "L3", project_id="P1"
+    )["candidates"][0]["candidate_id"] == "C1"
+
+
+def test_orphan_decision_keeps_unavailable_until_finalized(tmp_path):
+    project = tmp_path / "P"
+    project.mkdir()
+    ledger = HypothesisLedger(tmp_path / "shared.sqlite")
+    ledger.bind_project(project, "P1")
+    l1 = _commit(ledger, project, "L1", _l1_delta())
+    hid = l1.normalized_delta["primary_hypothesis_id"]
+    orphan = _commit(ledger, project, "L3", {
+        "schema_version": "2.0",
+        "triage": [{
+            "hypothesis_id": hid,
+            "disposition": "SELECTED",
+            "reason_code": "fixture",
+            "reason": "fixture",
+        }],
+        "route_to": "Fisher",
+    }, finalize=False)
+
+    before = ledger.ranking_inputs(["C1"], "L3", project_id="P1")
+    assert before["formal_decisions"][0]["formal_decision"] == "UNAVAILABLE"
+
+    _finalize(ledger, orphan)
+    after = ledger.ranking_inputs(["C1"], "L3", project_id="P1")
+    assert after["formal_decisions"][0]["formal_decision"] == "SELECTED"
+
+
+def test_orphan_absent_from_authorized_context(tmp_path):
+    project = tmp_path / "P"
+    project.mkdir()
+    ledger = HypothesisLedger(tmp_path / "shared.sqlite")
+    ledger.bind_project(project, "P1")
+    orphan = _commit(ledger, project, "L1", _l1_delta(), finalize=False)
+
+    before = ledger.materialize_authorized_context(project, "C1", "1", "L2")
+    assert before["events"] == []
+
+    _finalize(ledger, orphan)
+    after = ledger.materialize_authorized_context(project, "C1", "1", "L2")
+    assert any(event["node"] == "L1" for event in after["events"])
+
+
+def test_verify_emits_orphan_diagnostic(tmp_path):
+    project = tmp_path / "P"
+    project.mkdir()
+    ledger = HypothesisLedger(tmp_path / "shared.sqlite")
+    ledger.bind_project(project, "P1")
+    orphan = _commit(ledger, project, "L1", _l1_delta(), finalize=False)
+
+    assert any(
+        item.startswith("orphan emission missing finalization marker:")
+        for item in ledger.verify()
+    )
+
+    _finalize(ledger, orphan)
+    assert ledger.verify() == []
+
+
+def test_snapshot_candidate_excludes_orphan(tmp_path):
+    project = tmp_path / "P"
+    project.mkdir()
+    ledger = HypothesisLedger(tmp_path / "shared.sqlite")
+    ledger.bind_project(project, "P1")
+    orphan = _commit(ledger, project, "L1", _l1_delta(), finalize=False)
+
+    before = ledger.snapshot_candidate(project, "C1", "1")
+    assert before["authorized_events"] == []
+
+    _finalize(ledger, orphan)
+    after = ledger.snapshot_candidate(project, "C1", "1")
+    assert any(
+        event["commit_seq"] == orphan.commit_seq
+        for event in after["authorized_events"]
     )
 
 
