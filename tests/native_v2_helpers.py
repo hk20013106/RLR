@@ -130,3 +130,6 @@ def seed_revise_continuation(project_dir, candidate_id="C_prev", *, write_memory
     path.write_text(json.dumps(memory, indent=2, ensure_ascii=False,
                                sort_keys=True), encoding="utf-8")
     return path
+
+
+commit_finalized = commit_v2

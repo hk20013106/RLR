@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from research_loop import engine
 from research_loop.hypothesis_ledger import HypothesisLedger
+from native_v2_helpers import commit_finalized
 
 
 def _project_with_hypotheses(tmp_path, *, final=False):
@@ -19,11 +20,8 @@ def _project_with_hypotheses(tmp_path, *, final=False):
     binding = ledger.bind_project(project)
 
     def commit(candidate_id, node, persona, delta):
-        return ledger.commit_delta(
-            project_dir=project, candidate_id=candidate_id, round_id="1",
-            node=node, persona=persona, delta=delta,
-            delta_path=project / "02_Agent_Notes" / persona /
-            f"{candidate_id}_{node}_{persona.lower()}_delta.v2.json",
+        return commit_finalized(
+            project, candidate_id, node, persona, delta, round_id="1"
         )
 
     for candidate_id, text in (("C1", "Hypothesis one"),

@@ -31,6 +31,9 @@ from research_loop.hypothesis_contracts import (
 STORE_SCHEMA_VERSION = "2.0"
 GRAPH_SCHEMA_VERSION = "1.0"
 NAMESPACE = uuid.UUID("d879c2d5-e8e7-4835-bf91-17c6a7d8da99")
+_FINALIZED_EMISSION_PREDICATE = (
+    "EXISTS (SELECT 1 FROM committed_emissions c WHERE c.delta_hash = m.delta_hash)"
+)
 
 WORKFLOW_STATUSES = {
     "PROPOSED", "SELECTED", "REJECTED", "METHOD_DESIGNED",
@@ -930,7 +933,9 @@ class HypothesisLedger:
         con = self._connect(readonly=True)
         try:
             cursor = int(as_of) if as_of is not None else int(con.execute(
-                "SELECT COALESCE(MAX(commit_seq),0) FROM events"
+                "SELECT COALESCE(MAX(e.commit_seq),0) FROM events e "
+                "JOIN emissions m ON m.commit_seq=e.commit_seq WHERE "
+                + _FINALIZED_EMISSION_PREDICATE
             ).fetchone()[0])
             candidates = []
             decisions = []
@@ -945,7 +950,8 @@ class HypothesisLedger:
                     "FROM events e JOIN versions v ON v.hypothesis_id=e.hypothesis_id "
                     "JOIN emissions m ON m.commit_seq=e.commit_seq "
                     "WHERE e.candidate_id=? AND e.event_type='PROPOSED' "
-                    "AND e.commit_seq<=?" + project_clause +
+                    "AND e.commit_seq<=? AND " + _FINALIZED_EMISSION_PREDICATE
+                    + project_clause +
                     " ORDER BY e.commit_seq,e.event_id", params,
                 ).fetchall()
                 if not rows:
@@ -967,9 +973,12 @@ class HypothesisLedger:
                                   {"RETAINED", "REVISION_REQUIRED", "ARCHIVED"})
                 placeholders = ",".join("?" for _ in decision_types)
                 decision = con.execute(
-                    f"SELECT event_type,outcome,commit_seq,event_id FROM events "
-                    f"WHERE occurrence_id=? AND commit_seq<=? AND event_type IN ({placeholders}) "
-                    "ORDER BY commit_seq DESC,event_id DESC LIMIT 1",
+                    "SELECT e.event_type,e.outcome,e.commit_seq,e.event_id "
+                    "FROM events e JOIN emissions m ON m.commit_seq=e.commit_seq "
+                    "WHERE e.occurrence_id=? AND e.commit_seq<=? "
+                    f"AND e.event_type IN ({placeholders}) AND "
+                    + _FINALIZED_EMISSION_PREDICATE +
+                    " ORDER BY e.commit_seq DESC,e.event_id DESC LIMIT 1",
                     (primary["occurrence_id"], cursor, *sorted(decision_types)),
                 ).fetchone()
                 formal = "UNAVAILABLE"
@@ -998,6 +1007,15 @@ class HypothesisLedger:
                 problems.append("unsupported hypothesis ledger schema version")
             bad = con.execute("SELECT e.event_id FROM events e LEFT JOIN emissions m ON m.commit_seq=e.commit_seq WHERE m.commit_seq IS NULL").fetchall()
             problems.extend(f"event without emission: {row[0]}" for row in bad)
+            orphans = con.execute(
+                "SELECT m.delta_hash FROM emissions m WHERE NOT "
+                + _FINALIZED_EMISSION_PREDICATE
+                + " ORDER BY m.delta_hash"
+            ).fetchall()
+            problems.extend(
+                "orphan emission missing finalization marker: " + row[0]
+                for row in orphans
+            )
             if rebuild:
                 before = content_hash({
                     "workflow": [dict(row) for row in con.execute(
@@ -1018,7 +1036,10 @@ class HypothesisLedger:
                     "ARCHIVED": "ARCHIVED", "SUPERSEDED": "SUPERSEDED",
                 }
                 for row in con.execute(
-                    "SELECT * FROM events ORDER BY commit_seq,event_id"
+                    "SELECT e.* FROM events e "
+                    "JOIN emissions m ON m.commit_seq=e.commit_seq WHERE "
+                    + _FINALIZED_EMISSION_PREDICATE
+                    + " ORDER BY e.commit_seq,e.event_id"
                 ).fetchall():
                     event = dict(row)
                     workflow = workflow_events.get(event["event_type"])
@@ -1066,9 +1087,12 @@ class HypothesisLedger:
         con = self._connect(readonly=True)
         try:
             rows = con.execute(
-                "SELECT event_id,commit_seq,hypothesis_id,occurrence_id,event_type,outcome "
-                "FROM events WHERE project_id=? AND candidate_id=? AND round_id=? "
-                "ORDER BY commit_seq,event_id",
+                "SELECT e.event_id,e.commit_seq,e.hypothesis_id,e.occurrence_id,"
+                "e.event_type,e.outcome "
+                "FROM events e JOIN emissions m ON m.commit_seq=e.commit_seq "
+                "WHERE e.project_id=? AND e.candidate_id=? AND e.round_id=? AND "
+                + _FINALIZED_EMISSION_PREDICATE
+                + " ORDER BY e.commit_seq,e.event_id",
                 (binding["project_id"], candidate_id, str(round_id)),
             ).fetchall()
             event_refs = [dict(row) for row in rows]
@@ -1112,8 +1136,10 @@ class HypothesisLedger:
         con = self._connect()
         try:
             latest = con.execute(
-                "SELECT COALESCE(MAX(commit_seq),0) FROM events WHERE project_id=? "
-                "AND candidate_id=? AND round_id=?",
+                "SELECT COALESCE(MAX(e.commit_seq),0) FROM events e "
+                "JOIN emissions m ON m.commit_seq=e.commit_seq "
+                "WHERE e.project_id=? AND e.candidate_id=? AND e.round_id=? AND "
+                + _FINALIZED_EMISSION_PREDICATE,
                 (binding["project_id"], candidate_id, str(round_id)),
             ).fetchone()[0]
             cursor = int(latest if as_of is None else as_of)
@@ -1122,9 +1148,13 @@ class HypothesisLedger:
             if allowed_nodes:
                 placeholders = ",".join("?" for _ in allowed_nodes)
                 rows = con.execute(
-                    f"SELECT * FROM events WHERE project_id=? AND candidate_id=? "
-                    f"AND round_id=? AND commit_seq<=? AND node IN ({placeholders}) "
-                    "ORDER BY commit_seq,event_id",
+                    "SELECT e.* FROM events e "
+                    "JOIN emissions m ON m.commit_seq=e.commit_seq "
+                    f"WHERE e.project_id=? AND e.candidate_id=? "
+                    f"AND e.round_id=? AND e.commit_seq<=? "
+                    f"AND e.node IN ({placeholders}) AND "
+                    + _FINALIZED_EMISSION_PREDICATE
+                    + " ORDER BY e.commit_seq,e.event_id",
                     (binding["project_id"], candidate_id, str(round_id), cursor,
                      *allowed_nodes),
                 ).fetchall()
