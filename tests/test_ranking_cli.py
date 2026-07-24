@@ -1,49 +1,84 @@
 """Public CLI seam tests for shadow ranking commands."""
 import hashlib
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
 from research_loop import engine
+from research_loop.hypothesis_ledger import HypothesisLedger
 
 
-def _project_with_hypotheses(tmp_path):
+def _project_with_hypotheses(tmp_path, *, final=False):
     project = tmp_path / "ranking-project"
     project.mkdir()
     (project / "00_Project_Index.md").write_text("# Test project\n", encoding="utf-8")
-    einstein = project / "02_Agent_Notes" / "Einstein"
     oppenheimer = project / "02_Agent_Notes" / "Oppenheimer"
-    einstein.mkdir(parents=True)
     oppenheimer.mkdir(parents=True)
-    for candidate_id, hypothesis_id, text in (
-        ("C1", "H1", "Hypothesis one"),
-        ("C2", "H2", "Hypothesis two"),
-    ):
+    ledger = HypothesisLedger(os.environ["RLR_HYPOTHESIS_STORE"])
+    binding = ledger.bind_project(project)
+
+    def commit(candidate_id, node, persona, delta):
+        return ledger.commit_delta(
+            project_dir=project, candidate_id=candidate_id, round_id="1",
+            node=node, persona=persona, delta=delta,
+            delta_path=project / "02_Agent_Notes" / persona /
+            f"{candidate_id}_{node}_{persona.lower()}_delta.v2.json",
+        )
+
+    for candidate_id, text in (("C1", "Hypothesis one"),
+                               ("C2", "Hypothesis two")):
         (project / "01_Candidates").mkdir(exist_ok=True)
         (project / "01_Candidates" / f"{candidate_id}.md").write_text(
             "---\n"
             f"candidate_id: {candidate_id}\n"
             "---\n",
             encoding="utf-8")
-        (einstein / f"{candidate_id}_L1_einstein_delta.json").write_text(
-            json.dumps({"candidate_id": candidate_id,
-                        "hypotheses": [{"id": hypothesis_id, "text": text,
-                                        "testable": True, "rationale": "fixture"}],
-                        "key_uncertainty": "none", "primary_hypothesis": text}),
-            encoding="utf-8")
+        l1 = commit(candidate_id, "L1", "Einstein", {
+            "schema_version": "2.0", "hypotheses": [{
+                "proposal_key": "primary", "statement": text,
+                "operationalization": "measure", "falsification_criteria": ["absent"],
+                "rationale": "fixture"}], "primary_proposal_key": "primary",
+            "key_uncertainty": "none",
+        })
+        hid = l1.normalized_delta["primary_hypothesis_id"]
+        disposition = "SELECTED" if final or candidate_id == "C2" else "REJECTED"
+        commit(candidate_id, "L3", "Oppenheimer", {
+            "schema_version": "2.0", "triage": [{"hypothesis_id": hid,
+                "disposition": disposition, "reason_code": "fixture", "reason": "fixture"}],
+            "route_to": "Fisher",
+        })
+        if final:
+            commit(candidate_id, "L4", "Fisher", {"schema_version": "2.0",
+                "strategies": [{"strategy_id": "S1", "hypothesis_ids": [hid],
+                                "name": "method", "steps": ["measure"]}]})
+            commit(candidate_id, "L6", "Oppenheimer", {"schema_version": "2.0",
+                "analysis_plan": [{"strategy_id": "S1", "hypothesis_ids": [hid],
+                                   "scripts": [], "parameters": {}, "outputs": []}],
+                "method_decision": "APPROVE", "reason": "fixture"})
+            l7 = commit(candidate_id, "L7", "Turing", {"schema_version": "2.0",
+                "results": [{"result_key": "R", "hypothesis_ids": [hid],
+                    "summary": "result", "artifact_refs": [{"path": "result.json",
+                    "sha256": "a" * 64}]}], "scripts_run": [], "warnings": [], "failures": []})
+            evidence_id = l7.normalized_delta["results"][0]["evidence_id"]
+            commit(candidate_id, "L8", "Curie", {"schema_version": "2.0",
+                "evidence_assessments": [{"evidence_id": evidence_id,
+                    "verification": "VERIFIED", "relations": [{"hypothesis_id": hid,
+                    "outcome": "SUPPORTS", "reason": "fixture"}]}]})
+            commit(candidate_id, "L9a", "Feynman", {"schema_version": "2.0",
+                "assessments": [{"hypothesis_id": hid,
+                    "epistemic_status": "PROVISIONALLY_SUPPORTED", "reason": "fixture",
+                    "evidence_ids": [evidence_id]}]})
+            keep = candidate_id == "C2"
+            commit(candidate_id, "L10b", "Oppenheimer", {"schema_version": "2.0",
+                "decision": "KEEP" if keep else "DROP", "reason": "fixture",
+                "next_steps": [], "hypothesis_decisions": [{"hypothesis_id": hid,
+                    "disposition": "RETAIN" if keep else "ARCHIVE", "reason": "fixture"}]})
     l3 = oppenheimer / "C1_L3_oppenheimer_delta.json"
     l3.write_text(json.dumps({"candidate_id": "C1", "selected": [],
                               "rejected": ["H1"], "reason": "fixture", "route_to": "ARCHIVED"}),
                   encoding="utf-8")
-    (oppenheimer / "C2_L3_oppenheimer_delta.json").write_text(
-        json.dumps({"candidate_id": "C2", "selected": ["H2"], "rejected": [],
-                    "reason": "fixture", "route_to": "L4"}), encoding="utf-8")
-    (oppenheimer / "C1_L10b_oppenheimer_delta.json").write_text(
-        json.dumps({"candidate_id": "C1", "decision": "DROP", "reason": "fixture"}),
-        encoding="utf-8")
-    (oppenheimer / "C2_L10b_oppenheimer_delta.json").write_text(
-        json.dumps({"candidate_id": "C2", "decision": "KEEP", "reason": "fixture"}),
-        encoding="utf-8")
+    assert binding["project_id"]
     return project, l3
 
 
@@ -95,7 +130,7 @@ def test_ranking_shadow_writes_only_isolated_audit_artifacts(tmp_path, capsys):
 
 
 def test_ranking_shadow_records_l10b_disagreement_and_report(tmp_path, capsys):
-    project, _ = _project_with_hypotheses(tmp_path)
+    project, _ = _project_with_hypotheses(tmp_path, final=True)
 
     assert engine.main([
         "ranking-shadow", str(project), "--stage", "L10b",

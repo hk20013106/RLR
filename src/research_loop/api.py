@@ -94,11 +94,14 @@ class EngineAPI:
             raise RuntimeError(f"next-step did not return JSON: "
                                f"{r.stdout!r} {r.stderr!r}")
 
-    def assemble_context(self, project, cand, node):
+    def assemble_context(self, project, cand, node, authorization_id=None):
         """cmd_assemble_context: return (context_text, manifest_or_None). Raises
         RuntimeError (same message) on the fail-closed gate (rc != 0), preserving
         the hard-stop semantics — the runner never continues without context."""
-        r = self.run_cli("assemble-context", project, cand, "--node", node)
+        args = ["assemble-context", project, cand, "--node", node]
+        if authorization_id:
+            args.extend(["--authorization-id", authorization_id])
+        r = self.run_cli(*args)
         if r.returncode != 0:
             raise RuntimeError(f"assemble-context {node} failed: "
                                f"{r.stderr.strip() or r.stdout.strip()}")

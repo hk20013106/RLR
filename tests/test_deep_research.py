@@ -234,13 +234,15 @@ def test_emit_l10b_rejects_missing_literature_evidence_ids(tmp_path):
     rejected = subprocess.run([sys.executable, str(cli), "emit-delta", str(project), cand_id,
                                "--node", "L10b", "--persona", "Oppenheimer", "--file", str(src)],
                               capture_output=True, text=True)
-    assert rejected.returncode != 0 and "literature_evidence_ids" in (rejected.stderr + rejected.stdout)
+    assert rejected.returncode != 0
+    assert "only committed delta v2" in (rejected.stderr + rejected.stdout)
     delta["literature_evidence_ids"] = [dr.evidence_ids(project, cand_id, ["L1"])[0]]
     src.write_text(json.dumps(delta), encoding="utf-8")
     accepted = subprocess.run([sys.executable, str(cli), "emit-delta", str(project), cand_id,
                                "--node", "L10b", "--persona", "Oppenheimer", "--file", str(src)],
                               capture_output=True, text=True)
-    assert accepted.returncode == 0, accepted.stderr
+    assert accepted.returncode != 0
+    assert "only committed delta v2" in (accepted.stderr + accepted.stdout)
 
 
 def test_deep_research_cli_executes_a_local_fake_codex(tmp_path):

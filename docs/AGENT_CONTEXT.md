@@ -27,7 +27,10 @@ src/run_loop.py             loop runner, main-agent orchestration protocol
 src/research_loop/engine.py command dispatch, gates, persistence
 src/research_loop/topology.py executable DAG, transitions, authority metadata
 src/research_loop/context.py scoped cognitive-context assembly
-src/research_loop/delta.py  delta schemas and candidate-owned resolution
+src/research_loop/delta.py  committed-v2 artifact resolution (no v1 runtime fallback)
+src/research_loop/hypothesis_contracts.py Draft 2020-12 node delta v2 schemas
+src/research_loop/hypothesis_ledger.py append-only SQLite facts, projections, queries
+src/research_loop/hypothesis_migration.py project-atomic v1 migration workflow
 src/research_loop/gates.py  boundary gates and traceability checks
 src/research_loop/l0_contract.py strict L0 contract and authoritative validator
 src/research_loop/deep_research.py ARS evidence receipts/packs
@@ -110,6 +113,18 @@ edits.
 - Revalidate an on-disk artifact and hash immediately before the consuming
   boundary, especially provider dispatch.
 
+Every production project is bound to an activated shared hypothesis store.
+Create native projects with `new-project --knowledge-store STORE`. Legacy
+projects must first run `hypothesis-migrate PROJECT --knowledge-store STORE
+--dry-run`, resolve every reported ambiguity, then commit with `--resolution`
+and `--resolved-by`. Runtime commands never read v1 deltas.
+
+`HypothesisLedger` is the sole hypothesis-fact writer. Occurrence workflow and
+hypothesis epistemic state remain distinct; only L9a may alter epistemic state.
+`assemble-context` injects a hash-bound `AUTHORIZED HYPOTHESIS SNAPSHOT` derived
+from the DAG. L9a and L9b receive the same pre-parallel cursor and neither
+snapshot contains sibling events.
+
 L0 is strict. `research_loop.l0_contract.validate_l0_input_contract` is the
 single authoritative validator. It requires explicit `round_type`, verifiable
 input provenance, existing local paths, and stable/verified remote locators.
@@ -159,9 +174,10 @@ L10c: aggregate-report → human-readable sync → StopPolicy
 Use `next-step` instead of reconstructing control flow from memory. It returns
 the active node(s), persona, allowed context inputs, and advance command.
 
-After L10c, stop for terminal outcomes. For a genuine `REVISE` decision with
-executable next steps, create a child candidate with lineage; do not overwrite
-the parent candidate to represent another round.
+After L10c, stop for terminal outcomes. Only a genuine committed `REVISE`
+decision with an L10b successor may continue. The runner first emits immutable
+loop-memory and then calls `new-candidate --from-memory --loop-type`; it never
+edits child frontmatter directly.
 
 The prescribed end-of-round human-readable sync needs an explicit Obsidian
 vault (`OBSIDIAN_VAULT` or `--vault`) and fails loudly if unavailable.

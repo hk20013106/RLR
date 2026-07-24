@@ -6,6 +6,7 @@ context_manifest.allowed_inputs / injected_deltas audit contract byte-for-byte.
 """
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -20,7 +21,11 @@ from research_loop.topology import NODE_MAP, DELTA_DAG_ORDER
 from research_loop.common import (
     PERSONA_TITLE, _now, _stamp, _input_alias, _everos_scopes_for,
 )
-from research_loop.delta import DELTA_SCHEMAS, _delta_for_candidate
+from research_loop.delta import _delta_for_candidate
+from research_loop.hypothesis_contracts import NODE_SCHEMAS
+from research_loop.hypothesis_ledger import (
+    HypothesisLedger, LedgerError, binding_path, canonical_json,
+)
 from research_loop.yamlio import _load_yaml_front
 from research_loop.preresearch import (
     PRE_RESEARCH_MAP, _LIT_PRE_RESEARCH_TYPES, _estimate_tokens,
@@ -111,7 +116,7 @@ def _generate_contract(node_info, project_dir):
     persona = node_info["persona"]
     title = node_info.get("title", PERSONA_TITLE.get(persona, ""))
     schema_key = f"{node_id}_{persona.lower()}"
-    schema = DELTA_SCHEMAS.get(schema_key, {})
+    schema = NODE_SCHEMAS.get(node_id, {})
     kb = node_info.get("knowledge_base", "none")
     lines = []
     lines.append(f"=== CONTRACT: {node_id} | {persona} | {title} ===")
@@ -142,7 +147,9 @@ def _generate_contract(node_info, project_dir):
         lines.append("STOP IF:")
         for s in stop:
             lines.append(f"  - {s}")
-    lines.append(f"OUTPUT: {schema_key} -- {list(schema.keys())}")
+    fields = list(schema.get("properties", {}).keys())
+    required = schema.get("required", [])
+    lines.append(f"OUTPUT: {schema_key} delta v2 -- fields={fields}; required={required}")
     lines.append(f"ACTION: {node_info.get('action_hint', '')}")
     return lines
 
@@ -161,6 +168,38 @@ def cmd_assemble_context(args):
 
     node_info = NODE_MAP[node_id]
     inputs = node_info["context_inputs"]
+
+    hypothesis_snapshot = None
+    if binding_path(project_dir).exists():
+        store = getattr(args, "knowledge_store", None) or os.environ.get(
+            "RLR_HYPOTHESIS_STORE"
+        )
+        if not store:
+            print("ERROR: bound project context requires --knowledge-store or "
+                  "RLR_HYPOTHESIS_STORE", file=sys.stderr)
+            return 2
+        try:
+            ledger = HypothesisLedger(store)
+            fm_for_round = _load_yaml_front(cf)
+            authorization_id = getattr(args, "authorization_id", None)
+            if authorization_id:
+                hypothesis_snapshot = ledger.load_authorized_context(
+                    project_dir, authorization_id
+                )
+                if (hypothesis_snapshot.get("candidate_id") != args.cand_id
+                        or hypothesis_snapshot.get("node") != node_id):
+                    raise LedgerError(
+                        "authorization snapshot candidate/node does not match context request"
+                    )
+            else:
+                hypothesis_snapshot = ledger.materialize_authorized_context(
+                    project_dir, args.cand_id,
+                    str(fm_for_round.get("round_id") or "1"), node_id,
+                )
+        except LedgerError as exc:
+            print(f"ERROR: hypothesis context authorization failed: {exc}",
+                  file=sys.stderr)
+            return 2
 
     # --- L0 structured input-contract gate (strict-on-reaching-L0) -----------
     # Fail closed BEFORE any context is rendered/printed: an invalid L0 input
@@ -194,6 +233,13 @@ def cmd_assemble_context(args):
                       "already present in your context.")
     sections.append(directive)
     sections.append("")
+    if hypothesis_snapshot is not None:
+        sections.append("=== AUTHORIZED HYPOTHESIS SNAPSHOT ===")
+        sections.append(canonical_json({
+            key: value for key, value in hypothesis_snapshot.items()
+            if key != "artifact_path"
+        }))
+        sections.append("")
 
     injected = []  # audit: deltas actually embedded {delta_key, sha256, path}
 
@@ -472,6 +518,12 @@ def cmd_assemble_context(args):
                       if (is_exec and workspaces) else None),
         "pre_research": pre_research_meta,
         "deep_research_evidence": evidence_meta,
+        "hypothesis_authorization": ({
+            "authorization_id": hypothesis_snapshot["authorization_id"],
+            "as_of_commit_seq": hypothesis_snapshot["as_of_commit_seq"],
+            "projection_hash": hypothesis_snapshot["projection_hash"],
+            "artifact_hash": hypothesis_snapshot["artifact_hash"],
+        } if hypothesis_snapshot else None),
         "pitfalls_injected": pitfall_meta,
         **caveman_meta,
     }

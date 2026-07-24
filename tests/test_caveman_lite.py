@@ -10,6 +10,7 @@ HERE = Path(__file__).resolve().parent
 RL = str(HERE.parent / "research_loop_v04.py")
 sys.path.insert(0, str(HERE))
 import research_loop_v04 as rl
+from native_v2_helpers import activate_native_project
 
 
 def _run(*args):
@@ -26,7 +27,7 @@ def _project():
         "---\ncandidate_id: C20260705000000000001\n"
         "current_status: NEEDS_EXECUTION\ncurrent_owner: Turing\n---\n",
         encoding="utf-8")
-    return root
+    return activate_native_project(root)
 
 
 def test_caveman_lite_preserves_required_fields_and_canonical_file():
@@ -140,14 +141,8 @@ def test_l7_budget_zero_archives_digest_and_records_manifest_metadata():
         "emit-delta", str(root), "C20260705000000000001",
         "--node", "L7", "--persona", "Turing", "--file", str(delta),
         "--receipt", str(manifest_path))
-    assert emitted.returncode == 0, emitted.stderr
-    receipts = list((root / "08_Audit").glob("run_receipt_L7_*.json"))
-    assert len(receipts) == 1
-    receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
-    assert receipt["pre_research"]["archived_only"] is True
-    assert receipt["pre_research"]["digest_tokens_est"] > 0
-    assert receipt["pre_research"]["omitted_reason"] == (
-        "budget=0 / archived-only")
+    assert emitted.returncode == 2
+    assert "only committed delta v2" in emitted.stderr
 
 
 def _run_as_script():

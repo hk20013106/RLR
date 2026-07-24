@@ -1,0 +1,10 @@
+[run]
+branch = True
+parallel = True
+source =
+    src/research_loop
+    src/run_loop.py
+
+[report]
+show_missing = True
+skip_covered = False

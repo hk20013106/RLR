@@ -190,8 +190,8 @@ def load_delta(project, cand, delta_key):
     return None
 
 
-def assemble_context(project, cand, node):
-    return ENGINE.assemble_context(project, cand, node)
+def assemble_context(project, cand, node, authorization_id=None):
+    return ENGINE.assemble_context(project, cand, node, authorization_id)
 
 
 def emit_delta(project, cand, node, persona, delta, run_dir, receipt=None):
@@ -467,9 +467,9 @@ def run_shadow_ranking(project, cand, node, args, round_id):
 # --- node execution ---------------------------------------------------------
 
 def exec_cognitive(project, cand, step, cfg, args, run_dir, round_id,
-                   do_advance=True):
+                   do_advance=True, authorization_id=None):
     node, persona = step["node"], step["persona"]
-    ctx, manifest = assemble_context(project, cand, node)
+    ctx, manifest = assemble_context(project, cand, node, authorization_id)
     # Fail-closed re-gate at the dispatch boundary: for L0, run the SAME unified
     # validator (l0_contract.validate_l0_input_contract, via _audit_l0_contract)
     # immediately before the provider writes its prompt. assemble_context above
@@ -638,10 +638,28 @@ def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
             log(f"terminal status: {step.get('status')}")
             return "terminal"
         if step.get("is_parallel"):
+            authorization_ids = {}
+            if (Path(project) / "00_Preflight" /
+                    "hypothesis_store_binding.json").exists():
+                authorized = _ctl(
+                    "hypothesis-authorize-context", project, cand,
+                    "--node", "L9a", "--node", "L9b",
+                    "--round-id", str(round_id),
+                )
+                if authorized.returncode != 0:
+                    raise RuntimeError(
+                        "cannot create fixed pre-parallel hypothesis snapshots: "
+                        f"{authorized.stderr or authorized.stdout}"
+                    )
+                authorization_ids = {
+                    item["node"]: item["authorization_id"]
+                    for item in json.loads(authorized.stdout)
+                }
             for sub in step["nodes"]:
                 log(f"node {sub['node']} ({sub['persona']}) [parallel]")
                 ok = exec_cognitive(project, cand, sub, cfg, args, run_dir,
-                                    round_id, do_advance=False)
+                                    round_id, do_advance=False,
+                                    authorization_id=authorization_ids.get(sub["node"]))
                 if not ok and _bump_node_failure(exec_state, sub["node"], max_node):
                     log(f"node {sub['node']} failed emit "
                         f"{exec_state['node_failures'][sub['node']]}x -- "
@@ -806,10 +824,7 @@ class StopPolicy:
 
         # ---- CONTINUE conditions ----
         executable = self._executable(next_steps, review)
-        cont = (decision == "REVISE"
-                or review_verdict == "major_revision"
-                or executable)
-        if cont and round_id < self.max_rounds:
+        if decision == "REVISE" and executable and round_id < self.max_rounds:
             return self._continue(l10b, review, parent_fm)
 
         # ---- conservative default: stop ----
@@ -833,6 +848,27 @@ def evidence_sig(project, cand):
 
 def create_child(project, parent_cand, decision, new_round):
     parent_fm = rl._load_yaml_front(rl._candidate_file(Path(project), parent_cand))
+    l10b = load_delta(project, parent_cand, "L10b_oppenheimer") or {}
+    proposal = l10b.get("next_round_proposal") or {}
+    if str(l10b.get("decision", "")).upper() != "REVISE":
+        raise RuntimeError("only a committed L10b REVISE decision may create a child")
+    loop_type = proposal.get("loop_type")
+    successor = proposal.get("hypothesis_id")
+    if not loop_type or not successor:
+        raise RuntimeError("L10b REVISE lacks loop_type or successor hypothesis_id")
+    emitted = _ctl("emit-loop-memory", project, parent_cand)
+    if emitted.returncode != 0:
+        raise RuntimeError(f"emit-loop-memory failed: {emitted.stdout} {emitted.stderr}")
+    memory_path = (Path(project) / "08_Audit" / "loop_memory" /
+                   f"{parent_cand}_next_loop_memory.json")
+    try:
+        memory = json.loads(memory_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot reload emitted loop-memory: {exc}") from exc
+    if (memory.get("schema_version") != "2.0"
+            or memory.get("loop_type") != loop_type
+            or memory.get("next_round_hypothesis_id") != successor):
+        raise RuntimeError("emitted loop-memory does not match the L10b continuation proposal")
     src = (f"Round {new_round - 1} FINAL_REPORT.md + key deltas "
            f"(L8/L9a/L9b/L10b) of {parent_cand}")
     r = _ctl("new-candidate", project,
@@ -840,13 +876,11 @@ def create_child(project, parent_cand, decision, new_round):
              "--question", decision["new_candidate_question"]
              or parent_fm.get("question", ""),
              "--claim", decision["new_candidate_claim"] or "revised claim",
-             "--input", src)
+             "--input", src, "--from-memory", str(memory_path),
+             "--loop-type", loop_type)
     child = r.stdout.split()[0] if r.stdout.strip() else None
     if not child:
         raise RuntimeError(f"new-candidate failed: {r.stdout} {r.stderr}")
-    cf = rl._candidate_file(Path(project), child)
-    rl._replace_field(cf, "parent_candidate_id", parent_cand)
-    rl._replace_field(cf, "round_id", str(new_round))
     return child
 
 
@@ -902,6 +936,10 @@ def dry_run_plan(project, cand, cfg, max_rounds, review_on):
 
 def cmd_run(args):
     project, cand = args.project_dir, args.cand_id
+    if getattr(args, "knowledge_store", None):
+        os.environ["RLR_HYPOTHESIS_STORE"] = str(
+            Path(args.knowledge_store).resolve()
+        )
     if not rl._candidate_file(Path(project), cand).exists() \
             and not (Path(project) / "99_Archive" / f"{cand}.md").exists():
         log(f"ERROR: no candidate {cand} in {project}")
@@ -1064,6 +1102,8 @@ def build_parser():
     sp.add_argument("project_dir")
     sp.add_argument("cand_id")
     sp.add_argument("--config", help="runner config (default: PROJECT_DIR/rlr_runner.yaml)")
+    sp.add_argument("--knowledge-store",
+                    help="shared hypothesis SQLite store (or use RLR_HYPOTHESIS_STORE)")
     sp.add_argument("--max-rounds", dest="max_rounds", type=int, default=None)
     sp.add_argument("--provider", choices=["main_agent", "host", "command", "manual"],
                     default=None,

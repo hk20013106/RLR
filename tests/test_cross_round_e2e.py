@@ -51,7 +51,7 @@ def _new_project(tmp_path):
     return tmp_path / "P"
 
 
-def _seed_terminal_candidate(proj):
+def _seed_terminal_candidate(proj, loop_type="divergent"):
     """Round N: a candidate carrying the L1 + L10b deltas that _build_loop_memory
     reads, with a NON-EMPTY next_steps so the produced seed satisfies the L0
     gate's `required_new_search_directions` requirement."""
@@ -59,29 +59,62 @@ def _seed_terminal_candidate(proj):
              "--claim", "C", "--input", "in")
     assert r.returncode == 0, r.stderr
     cand = r.stdout.strip().splitlines()[0]
-    notes = proj / "02_Agent_Notes"
+    source_dir = proj / "08_Audit" / "test_sources"
+    source_dir.mkdir(parents=True, exist_ok=True)
 
-    def drop(persona, key, obj):
-        d = notes / persona
-        d.mkdir(parents=True, exist_ok=True)
-        obj = {**obj, "candidate_id": cand}
-        (d / f"{cand}_{key}_delta.json").write_text(json.dumps(obj), encoding="utf-8")
+    def emit(node, persona, obj):
+        source = source_dir / f"{cand}_{node}.json"
+        source.write_text(json.dumps({"schema_version": "2.0", **obj}), encoding="utf-8")
+        result = _run("emit-delta", str(proj), cand, "--node", node,
+                      "--persona", persona, "--file", str(source))
+        assert result.returncode == 0, result.stderr
 
-    drop("Einstein", "L1_einstein",
-         {"hypotheses": [{"id": "H1", "text": "h", "testable": True, "rationale": "r"}],
-          "key_uncertainty": "u", "primary_hypothesis": "H1",
-          "candidate_branches": [{"id": "b1", "description": "d"}]})
-    drop("Oppenheimer", "L10b_oppenheimer",
-         {"decision": "DOWNGRADE", "evidence_level": "weak", "reason": "because",
-          "next_round_hypothesis": "H_next",
-          "next_steps": ["explore atrial chamber", "add Hi-C contact data"]})
+    emit("L1", "Einstein", {
+        "hypotheses": [{"proposal_key": "H1", "statement": "h",
+                         "operationalization": "measure h",
+                         "falsification_criteria": ["h absent"], "rationale": "r"}],
+        "primary_proposal_key": "H1", "key_uncertainty": "u",
+        "candidate_branches": [{"id": "b1", "description": "d"}],
+    })
+    l1_path = next((proj / "02_Agent_Notes" / "Einstein").glob(f"{cand}_*_delta.v2.json"))
+    hid = json.loads(l1_path.read_text(encoding="utf-8"))["primary_hypothesis_id"]
+    emit("L3", "Oppenheimer", {"triage": [{"hypothesis_id": hid,
+         "disposition": "SELECTED", "reason_code": "R", "reason": "r"}],
+         "route_to": "Fisher"})
+    emit("L4", "Fisher", {"strategies": [{"strategy_id": "S1",
+         "hypothesis_ids": [hid], "name": "m", "steps": ["measure"]}]})
+    emit("L6", "Oppenheimer", {"analysis_plan": [{"strategy_id": "S1",
+         "hypothesis_ids": [hid], "scripts": [], "parameters": {}, "outputs": []}],
+         "method_decision": "APPROVE", "reason": "r"})
+    emit("L7", "Turing", {"results": [{"result_key": "R1",
+         "hypothesis_ids": [hid], "summary": "result", "artifact_refs": [{
+             "path": "04_Analysis_Outputs/result.json", "sha256": "a" * 64}]}],
+         "scripts_run": [], "warnings": [], "failures": []})
+    l7_path = next((proj / "02_Agent_Notes" / "Turing").glob(f"{cand}_*_delta.v2.json"))
+    evidence_id = json.loads(l7_path.read_text(encoding="utf-8"))["results"][0]["evidence_id"]
+    emit("L8", "Curie", {"evidence_assessments": [{"evidence_id": evidence_id,
+         "verification": "VERIFIED", "relations": [{"hypothesis_id": hid,
+             "outcome": "SUPPORTS", "reason": "r"}]}]})
+    emit("L9a", "Feynman", {"assessments": [{"hypothesis_id": hid,
+         "epistemic_status": "PROVISIONALLY_SUPPORTED", "reason": "r",
+         "evidence_ids": [evidence_id]}]})
+    emit("L10b", "Oppenheimer", {
+        "decision": "REVISE", "reason": "because",
+        "next_steps": ["explore atrial chamber", "add Hi-C contact data"],
+        "hypothesis_decisions": [{"hypothesis_id": hid,
+             "disposition": "REVISE", "reason": "r"}],
+        "next_round_proposal": {"proposal_key": "H2", "statement": "H_next",
+             "operationalization": "measure next", "falsification_criteria": ["next absent"],
+             "relationship": "DERIVED_FROM", "parent_hypothesis_ids": [hid],
+             "loop_type": loop_type, "reason": "r"},
+    })
     return cand
 
 
 def _round_n_plus_1(tmp_path, loop_type="divergent"):
     """Build the full chain and return (proj, cand_n, seed_path, cand_n1)."""
     proj = _new_project(tmp_path)
-    cand_n = _seed_terminal_candidate(proj)
+    cand_n = _seed_terminal_candidate(proj, loop_type)
 
     r = _run("emit-loop-memory", str(proj), cand_n)
     assert r.returncode == 0, r.stderr
@@ -110,7 +143,7 @@ def test_emit_loop_memory_seed_threads_into_next_candidate(tmp_path):
     mem = json.loads(seed.read_text(encoding="utf-8"))
     # the seed is the REAL product of _build_loop_memory over round N's deltas
     assert mem["source_candidate_id"] == cand_n
-    assert mem["previous_hypothesis"] == "H1"          # from L1 primary_hypothesis
+    assert mem["previous_hypothesis"] == "h"           # v2 primary statement summary
     assert mem["next_round_hypothesis"] == "H_next"    # from L10b
     assert mem["required_new_search_directions"] == [
         "explore atrial chamber", "add Hi-C contact data"]  # from L10b next_steps

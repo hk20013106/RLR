@@ -145,7 +145,7 @@ def test_ambiguous_col6a1_stops_s2():
 
 # 4. a script the L6 plan names but that is absent from disk is reported as
 #    missing, not silently skipped -- regression for the original L7 blocker.
-def test_approved_execution_scripts_reports_missing():
+def test_uncommitted_v1_analysis_plan_is_not_execution_input():
     sys.path.insert(0, str(HERE))
     import research_loop_v04 as rl
     with tempfile.TemporaryDirectory() as tmp:
@@ -158,7 +158,7 @@ def test_approved_execution_scripts_reports_missing():
             encoding="utf-8")
         resolved, missing = rl._approved_execution_scripts(str(project), "C1")
         assert resolved == []
-        assert any("does_not_exist.py" in m for m in missing), missing
+        assert missing == ["missing execution script plan: L6_oppenheimer delta"]
 
 
 def _run_as_script():

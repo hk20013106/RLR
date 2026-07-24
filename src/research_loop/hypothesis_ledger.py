@@ -18,14 +18,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-try:
-    import jsonschema
-except ImportError as exc:  # pragma: no cover - installation contract
-    raise RuntimeError("jsonschema is required for hypothesis delta v2") from exc
+from research_loop.hypothesis_contracts import (
+    DELTA_SCHEMA_VERSION,
+    EPISTEMIC_STATUSES,
+    LOOP_TYPES,
+    NODE_SCHEMAS,
+    validate_persisted,
+    validate_submission,
+)
 
 
-STORE_SCHEMA_VERSION = "1.0"
-DELTA_SCHEMA_VERSION = "2.0"
+STORE_SCHEMA_VERSION = "2.0"
 GRAPH_SCHEMA_VERSION = "1.0"
 NAMESPACE = uuid.UUID("d879c2d5-e8e7-4835-bf91-17c6a7d8da99")
 
@@ -34,11 +37,6 @@ WORKFLOW_STATUSES = {
     "METHOD_APPROVED", "EXECUTED", "AUDITED", "REVIEWED", "RETAINED",
     "REVISION_REQUIRED", "SUPERSEDED", "ARCHIVED",
 }
-EPISTEMIC_STATUSES = {
-    "UNASSESSED", "INSUFFICIENT_EVIDENCE", "PROVISIONALLY_SUPPORTED",
-    "CONTRADICTED", "FALSIFIED",
-}
-LOOP_TYPES = {"correction", "divergent", "data-acquisition"}
 WORKFLOW_TRANSITIONS = {
     "PROPOSED": {"SELECTED", "REJECTED", "ARCHIVED"},
     "SELECTED": {"METHOD_DESIGNED", "ARCHIVED"},
@@ -88,139 +86,6 @@ def _uuid(kind: str, *parts: str) -> str:
     return f"{kind}:{uuid.uuid5(NAMESPACE, '|'.join(parts))}"
 
 
-def _required(properties: dict[str, Any], required: list[str], *, extra=True):
-    result = {"type": "object", "properties": properties, "required": required}
-    if not extra:
-        result["additionalProperties"] = False
-    return result
-
-
-_ID = {"type": "string", "minLength": 1}
-_STR = {"type": "string", "minLength": 1}
-_STR_LIST = {"type": "array", "items": _STR}
-_REF = _required({
-    "path": _STR, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "json_pointer": {"type": "string"},
-}, ["path", "sha256"], extra=False)
-_HYPOTHESIS = _required({
-    "proposal_key": _STR, "statement": _STR, "operationalization": _STR,
-    "falsification_criteria": {"type": "array", "minItems": 1, "items": _STR},
-    "rationale": _STR,
-}, ["proposal_key", "statement", "operationalization", "falsification_criteria", "rationale"])
-_TRIAGE = _required({
-    "hypothesis_id": _ID, "disposition": {"enum": ["SELECTED", "REJECTED"]},
-    "reason_code": _STR, "reason": _STR,
-}, ["hypothesis_id", "disposition", "reason_code", "reason"], extra=False)
-_ATTACK = _required({
-    "hypothesis_id": _ID, "severity": _STR, "text": _STR,
-}, ["hypothesis_id", "severity", "text"])
-_TARGETED = _required({
-    "hypothesis_ids": {"type": "array", "minItems": 1, "items": _ID},
-}, ["hypothesis_ids"])
-
-
-def _node_schema(node: str) -> dict[str, Any]:
-    """Return a Draft 2020-12 submission schema for one node."""
-    base = {
-        "schema_version": {"const": DELTA_SCHEMA_VERSION},
-        "candidate_id": _ID,
-    }
-    if node == "L1":
-        base.update({"hypotheses": {"type": "array", "minItems": 1, "items": _HYPOTHESIS},
-                     "primary_proposal_key": _STR, "key_uncertainty": _STR})
-        required = ["schema_version", "hypotheses", "primary_proposal_key", "key_uncertainty"]
-    elif node == "L2":
-        base.update({"attacks": {"type": "array", "items": _ATTACK},
-                     "confounders": {"type": "array", "items": _ATTACK},
-                     "diagnostic_tests": {"type": "array", "items": _ATTACK}, "verdict": _STR})
-        required = ["schema_version", "attacks", "confounders", "diagnostic_tests", "verdict"]
-    elif node == "L3":
-        base.update({"triage": {"type": "array", "minItems": 1, "items": _TRIAGE}, "route_to": _STR})
-        required = ["schema_version", "triage", "route_to"]
-    elif node in {"L4", "L5", "L6"}:
-        key = "strategies" if node == "L4" else ("attacks" if node == "L5" else "analysis_plan")
-        base[key] = {"type": "array", "minItems": 1,
-                     "items": {"allOf": [_TARGETED, {"type": "object"}]}}
-        if node == "L6":
-            base["method_decision"] = {"enum": ["APPROVE", "REJECT"]}
-            base["reason"] = _STR
-            required = ["schema_version", key, "method_decision", "reason"]
-        else:
-            required = ["schema_version", key]
-    elif node == "L7":
-        result = _required({"result_key": _STR, "hypothesis_ids": {"type": "array", "minItems": 1, "items": _ID},
-                            "summary": _STR, "artifact_refs": {"type": "array", "minItems": 1, "items": _REF}},
-                           ["result_key", "hypothesis_ids", "summary", "artifact_refs"])
-        base.update({"results": {"type": "array", "minItems": 1, "items": result},
-                     "scripts_run": {"type": "array"}, "warnings": {"type": "array"}, "failures": {"type": "array"}})
-        required = ["schema_version", "results", "scripts_run", "warnings", "failures"]
-    elif node == "L8":
-        assessment = _required({
-            "evidence_id": _ID, "verification": {"enum": ["VERIFIED", "REJECTED"]},
-            "relations": {"type": "array", "items": _required({"hypothesis_id": _ID,
-                "outcome": {"enum": ["SUPPORTS", "CONTRADICTS", "INCONCLUSIVE"]}, "reason": _STR},
-                ["hypothesis_id", "outcome", "reason"], extra=False)},
-        }, ["evidence_id", "verification", "relations"], extra=False)
-        base["evidence_assessments"] = {"type": "array", "items": assessment}
-        required = ["schema_version", "evidence_assessments"]
-    elif node == "L8.5":
-        paper = _required({"evidence_id": _ID, "hypothesis_ids": {"type": "array", "minItems": 1, "items": _ID},
-                           "outcome": {"enum": ["SUPPORTS", "CONTRADICTS", "INCONCLUSIVE"]}, "comparison": _STR},
-                          ["evidence_id", "hypothesis_ids", "outcome", "comparison"])
-        base.update({"papers": {"type": "array", "items": paper}, "summary": _STR})
-        required = ["schema_version", "papers", "summary"]
-    elif node == "L9a":
-        assessment = _required({
-            "hypothesis_id": _ID, "epistemic_status": {"enum": sorted(EPISTEMIC_STATUSES)},
-            "reason": _STR, "evidence_ids": {"type": "array", "items": _ID},
-            "falsification_criterion": {"type": "string"}, "supersedes_event_id": {"type": "string"},
-        }, ["hypothesis_id", "epistemic_status", "reason", "evidence_ids"])
-        base["assessments"] = {"type": "array", "minItems": 1, "items": assessment}
-        required = ["schema_version", "assessments"]
-    elif node in {"L9b", "L10a"}:
-        base["assessments"] = {"type": "array", "minItems": 1,
-                               "items": {"allOf": [_TARGETED, {"type": "object"}]}}
-        required = ["schema_version", "assessments"]
-    elif node == "L10b":
-        disposition = _required({"hypothesis_id": _ID,
-                                 "disposition": {"enum": ["RETAIN", "REVISE", "ARCHIVE"]},
-                                 "reason": _STR}, ["hypothesis_id", "disposition", "reason"], extra=False)
-        proposal = _required({
-            "proposal_key": _STR, "statement": _STR, "operationalization": _STR,
-            "falsification_criteria": {"type": "array", "minItems": 1, "items": _STR},
-            "relationship": {"enum": ["REVISION_OF", "DERIVED_FROM"]},
-            "parent_hypothesis_ids": {"type": "array", "minItems": 1, "items": _ID},
-            "loop_type": {"enum": sorted(LOOP_TYPES)}, "reason": _STR,
-        }, ["proposal_key", "statement", "operationalization", "falsification_criteria", "relationship", "parent_hypothesis_ids", "loop_type", "reason"], extra=False)
-        base.update({"decision": {"enum": ["KEEP", "REVISE", "DOWNGRADE", "DROP"]},
-                     "reason": _STR, "next_steps": {"type": "array", "items": _STR},
-                     "hypothesis_decisions": {"type": "array", "items": disposition},
-                     "next_round_proposal": proposal})
-        required = ["schema_version", "decision", "reason", "next_steps", "hypothesis_decisions"]
-    else:
-        # L0 is versioned for ownership/provenance but keeps its existing payload.
-        return {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object",
-                "properties": base, "required": ["schema_version"], "additionalProperties": True}
-    return {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object",
-            "properties": base, "required": required, "additionalProperties": True}
-
-
-NODE_SCHEMAS = {node: _node_schema(node) for node in
-                ("L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L8.5", "L9a", "L9b", "L10a", "L10b")}
-
-
-def validate_submission(node: str, delta: dict[str, Any]) -> list[str]:
-    if node not in NODE_SCHEMAS:
-        return [f"unknown ledger node: {node}"]
-    errors = sorted(jsonschema.Draft202012Validator(NODE_SCHEMAS[node]).iter_errors(delta),
-                    key=lambda error: list(error.absolute_path))
-    rendered = []
-    for error in errors:
-        where = "/".join(str(part) for part in error.absolute_path) or "<root>"
-        rendered.append(f"{where}: {error.message}")
-    return rendered
-
-
 def binding_path(project_dir: str | Path) -> Path:
     return Path(project_dir) / "00_Preflight" / "hypothesis_store_binding.json"
 
@@ -233,11 +98,18 @@ class HypothesisLedger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(self.path, timeout=5, isolation_level=None)
+    def _connect(self, *, readonly: bool = False) -> sqlite3.Connection:
+        if readonly:
+            if not self.path.is_file():
+                raise LedgerError(f"hypothesis ledger store does not exist: {self.path}")
+            con = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True,
+                                  timeout=5, isolation_level=None)
+        else:
+            con = sqlite3.connect(self.path, timeout=5, isolation_level=None)
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA foreign_keys = ON")
-        con.execute("PRAGMA journal_mode = WAL")
+        if not readonly:
+            con.execute("PRAGMA journal_mode = WAL")
         con.execute("PRAGMA busy_timeout = 5000")
         return con
 
@@ -252,10 +124,14 @@ class HypothesisLedger:
                 CREATE TABLE IF NOT EXISTS occurrences (occurrence_id TEXT PRIMARY KEY, hypothesis_id TEXT NOT NULL REFERENCES versions(hypothesis_id), project_id TEXT NOT NULL REFERENCES projects(project_id), candidate_id TEXT NOT NULL, round_id TEXT NOT NULL, UNIQUE(hypothesis_id, project_id, candidate_id, round_id));
                 CREATE TABLE IF NOT EXISTS evidence_records (evidence_id TEXT PRIMARY KEY, source_kind TEXT NOT NULL, summary TEXT NOT NULL, artifact_refs_json TEXT NOT NULL, content_hash TEXT UNIQUE NOT NULL, created_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS emissions (delta_hash TEXT PRIMARY KEY, project_id TEXT NOT NULL, candidate_id TEXT NOT NULL, round_id TEXT NOT NULL, node TEXT NOT NULL, persona TEXT NOT NULL, delta_path TEXT NOT NULL, committed_at TEXT NOT NULL, commit_seq INTEGER NOT NULL UNIQUE);
+                CREATE TABLE IF NOT EXISTS committed_emissions (delta_hash TEXT PRIMARY KEY REFERENCES emissions(delta_hash), artifact_sha256 TEXT NOT NULL, receipt_sha256 TEXT NOT NULL, finalized_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS events (event_id TEXT PRIMARY KEY, commit_seq INTEGER NOT NULL, event_type TEXT NOT NULL, hypothesis_id TEXT, occurrence_id TEXT, evidence_id TEXT, project_id TEXT NOT NULL, candidate_id TEXT NOT NULL, round_id TEXT NOT NULL, node TEXT NOT NULL, persona TEXT NOT NULL, outcome TEXT, reason TEXT, artifact_ref_json TEXT NOT NULL, supersedes_event_id TEXT, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, fingerprint TEXT NOT NULL UNIQUE);
                 CREATE TABLE IF NOT EXISTS workflow_projection (occurrence_id TEXT PRIMARY KEY, workflow_status TEXT NOT NULL, event_id TEXT NOT NULL, commit_seq INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS epistemic_projection (hypothesis_id TEXT PRIMARY KEY, epistemic_status TEXT NOT NULL, event_id TEXT NOT NULL, commit_seq INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS authorizations (authorization_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, hypothesis_id TEXT NOT NULL, through_commit_seq INTEGER NOT NULL, snapshot_hash TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS migration_batches (migration_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, scan_hash TEXT NOT NULL, report_hash TEXT NOT NULL, resolved_by TEXT NOT NULL, manifest_hash TEXT NOT NULL, created_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS project_activations (project_id TEXT PRIMARY KEY REFERENCES projects(project_id), activation_mode TEXT NOT NULL CHECK(activation_mode IN ('NATIVE_V2','MIGRATED_V2')), migration_id TEXT REFERENCES migration_batches(migration_id), activated_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS authorization_snapshots (authorization_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, candidate_id TEXT NOT NULL, round_id TEXT NOT NULL, node TEXT NOT NULL, through_commit_seq INTEGER NOT NULL, event_ids_json TEXT NOT NULL, projection_hash TEXT NOT NULL, artifact_hash TEXT NOT NULL, created_at TEXT NOT NULL);
                 CREATE TRIGGER IF NOT EXISTS families_append_only BEFORE UPDATE ON families BEGIN SELECT RAISE(ABORT, 'families are append-only'); END;
                 CREATE TRIGGER IF NOT EXISTS families_no_delete BEFORE DELETE ON families BEGIN SELECT RAISE(ABORT, 'families are append-only'); END;
                 CREATE TRIGGER IF NOT EXISTS versions_append_only BEFORE UPDATE ON versions BEGIN SELECT RAISE(ABORT, 'versions are append-only'); END;
@@ -266,10 +142,19 @@ class HypothesisLedger:
                 CREATE TRIGGER IF NOT EXISTS evidence_no_delete BEFORE DELETE ON evidence_records BEGIN SELECT RAISE(ABORT, 'evidence records are append-only'); END;
                 CREATE TRIGGER IF NOT EXISTS emissions_append_only BEFORE UPDATE ON emissions BEGIN SELECT RAISE(ABORT, 'emissions are append-only'); END;
                 CREATE TRIGGER IF NOT EXISTS emissions_no_delete BEFORE DELETE ON emissions BEGIN SELECT RAISE(ABORT, 'emissions are append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS committed_emissions_append_only BEFORE UPDATE ON committed_emissions BEGIN SELECT RAISE(ABORT, 'committed emissions are append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS committed_emissions_no_delete BEFORE DELETE ON committed_emissions BEGIN SELECT RAISE(ABORT, 'committed emissions are append-only'); END;
                 CREATE TRIGGER IF NOT EXISTS events_append_only BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
                 CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS migrations_append_only BEFORE UPDATE ON migration_batches BEGIN SELECT RAISE(ABORT, 'migration batches are append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS migrations_no_delete BEFORE DELETE ON migration_batches BEGIN SELECT RAISE(ABORT, 'migration batches are append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS activations_append_only BEFORE UPDATE ON project_activations BEGIN SELECT RAISE(ABORT, 'project activations are append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS activations_no_delete BEFORE DELETE ON project_activations BEGIN SELECT RAISE(ABORT, 'project activations are append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS authorization_snapshots_append_only BEFORE UPDATE ON authorization_snapshots BEGIN SELECT RAISE(ABORT, 'authorization snapshots are append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS authorization_snapshots_no_delete BEFORE DELETE ON authorization_snapshots BEGIN SELECT RAISE(ABORT, 'authorization snapshots are append-only'); END;
             """)
             con.execute("INSERT OR IGNORE INTO ledger_meta(key, value) VALUES (?, ?)", ("schema_version", STORE_SCHEMA_VERSION))
+            con.execute("UPDATE ledger_meta SET value=? WHERE key='schema_version' AND value='1.0'", (STORE_SCHEMA_VERSION,))
             con.execute("INSERT OR IGNORE INTO ledger_meta(key, value) VALUES (?, ?)", ("store_id", _uuid("STORE", str(self.path.resolve()))))
         finally:
             con.close()
@@ -282,14 +167,25 @@ class HypothesisLedger:
         finally:
             con.close()
 
-    def bind_project(self, project_dir: str | Path, project_id: str | None = None) -> dict[str, Any]:
+    def bind_project(self, project_dir: str | Path, project_id: str | None = None,
+                     *, activate: bool = True,
+                     activation_mode: str = "NATIVE_V2",
+                     bound_at: str | None = None) -> dict[str, Any]:
         project_dir = Path(project_dir)
         project_id = project_id or _uuid("PROJECT", self.store_id, str(uuid.uuid4()))
-        binding = {"schema_version": "1.0", "store_id": self.store_id, "project_id": project_id, "bound_at": _now()}
+        binding = {"schema_version": "1.0", "store_id": self.store_id,
+                   "project_id": project_id, "bound_at": bound_at or _now()}
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
             con.execute("INSERT OR IGNORE INTO projects(project_id, store_id, created_at) VALUES (?, ?, ?)", (project_id, self.store_id, binding["bound_at"]))
+            if activate:
+                if activation_mode not in {"NATIVE_V2", "MIGRATED_V2"}:
+                    raise LedgerError(f"invalid project activation mode: {activation_mode}")
+                con.execute(
+                    "INSERT OR IGNORE INTO project_activations(project_id,activation_mode,migration_id,activated_at) VALUES (?,?,NULL,?)",
+                    (project_id, activation_mode, binding["bound_at"]),
+                )
             con.commit()
         finally:
             con.close()
@@ -305,6 +201,143 @@ class HypothesisLedger:
         os.replace(temporary, target)
         return binding
 
+    def commit_migration(self, *, project_id: str, migration_id: str,
+                         scan_hash: str, report_hash: str, resolved_by: str,
+                         manifest_hash: str, activated_at: str) -> None:
+        """Atomically record an immutable migration batch and activate its project."""
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            project = con.execute(
+                "SELECT store_id FROM projects WHERE project_id=?", (project_id,)
+            ).fetchone()
+            if not project or project[0] != self.store_id:
+                raise LedgerError("migration project is not bound to this store")
+            con.execute(
+                "INSERT OR IGNORE INTO migration_batches(migration_id,project_id,scan_hash,report_hash,resolved_by,manifest_hash,created_at) VALUES (?,?,?,?,?,?,?)",
+                (migration_id, project_id, scan_hash, report_hash, resolved_by,
+                 manifest_hash, activated_at),
+            )
+            existing = con.execute(
+                "SELECT project_id,scan_hash,report_hash,resolved_by,manifest_hash "
+                "FROM migration_batches WHERE migration_id=?", (migration_id,)
+            ).fetchone()
+            expected = (project_id, scan_hash, report_hash, resolved_by, manifest_hash)
+            if not existing or tuple(existing) != expected:
+                raise LedgerError("migration retry does not match immutable batch metadata")
+            con.execute(
+                "INSERT OR IGNORE INTO project_activations(project_id,activation_mode,migration_id,activated_at) VALUES (?,'MIGRATED_V2',?,?)",
+                (project_id, migration_id, activated_at),
+            )
+            activation = con.execute(
+                "SELECT activation_mode,migration_id FROM project_activations WHERE project_id=?",
+                (project_id,),
+            ).fetchone()
+            if not activation or tuple(activation) != ("MIGRATED_V2", migration_id):
+                raise LedgerError("project activation conflicts with migration batch")
+            con.commit()
+        except sqlite3.Error as exc:
+            con.rollback()
+            raise LedgerError(f"migration activation transaction failed: {exc}") from exc
+        except Exception:
+            con.rollback()
+            raise
+        finally:
+            con.close()
+
+    def create_continuation_occurrence(
+        self, *, project_dir: str | Path, candidate_id: str, round_id: str,
+        hypothesis_id: str, memory_path: str | Path, memory_hash: str,
+    ) -> str:
+        """Idempotently attach an L10b-created successor version to its child."""
+        binding = self.require_activated_project(project_dir)
+        project = Path(project_dir)
+        memory = Path(memory_path)
+        try:
+            relative = memory.resolve().relative_to(project.resolve()).as_posix()
+        except ValueError as exc:
+            raise LedgerError("continuation memory must be inside the project") from exc
+        actual_memory_hash = hashlib.sha256(memory.read_bytes()).hexdigest()
+        if actual_memory_hash != memory_hash:
+            raise LedgerError("continuation memory hash mismatch")
+        try:
+            memory_data = json.loads(memory.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise LedgerError("continuation memory is not valid JSON") from exc
+        snapshot = memory_data.get("hypothesis_ledger")
+        if (memory_data.get("schema_version") != "2.0"
+                or memory_data.get("next_round_hypothesis_id") != hypothesis_id
+                or not isinstance(snapshot, dict)
+                or snapshot.get("store_id") != self.store_id
+                or snapshot.get("project_id") != binding["project_id"]):
+            raise LedgerError("continuation memory ledger identity or successor mismatch")
+        occurrence_id = _uuid(
+            "HO", binding["project_id"], candidate_id, str(round_id), hypothesis_id
+        )
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            if not con.execute(
+                "SELECT 1 FROM versions WHERE hypothesis_id=?", (hypothesis_id,)
+            ).fetchone():
+                raise LedgerError("continuation references unknown successor hypothesis_id")
+            lineage = con.execute(
+                "SELECT payload_json FROM events WHERE hypothesis_id=? "
+                "AND candidate_id=? AND event_type IN ('REVISED','DERIVED') "
+                "ORDER BY commit_seq DESC LIMIT 1",
+                (hypothesis_id, memory_data.get("source_candidate_id")),
+            ).fetchone()
+            if not lineage:
+                raise LedgerError("continuation successor was not created by source L10b")
+            lineage_payload = json.loads(lineage[0])
+            if lineage_payload.get("loop_type") != memory_data.get("loop_type"):
+                raise LedgerError("continuation loop_type does not match successor lineage")
+            existing = con.execute(
+                "SELECT occurrence_id FROM occurrences WHERE occurrence_id=?",
+                (occurrence_id,),
+            ).fetchone()
+            if existing:
+                con.commit()
+                return occurrence_id
+            seq = self._next_commit_seq(con)
+            emission_hash = content_hash({
+                "memory_hash": memory_hash, "hypothesis_id": hypothesis_id,
+                "candidate_id": candidate_id, "round_id": str(round_id),
+            })
+            con.execute(
+                "INSERT INTO occurrences(occurrence_id,hypothesis_id,project_id,candidate_id,round_id) VALUES (?,?,?,?,?)",
+                (occurrence_id, hypothesis_id, binding["project_id"], candidate_id,
+                 str(round_id)),
+            )
+            con.execute(
+                "INSERT INTO emissions(delta_hash,project_id,candidate_id,round_id,node,persona,delta_path,committed_at,commit_seq) VALUES (?,?,?,?,?,?,?,?,?)",
+                (emission_hash, binding["project_id"], candidate_id, str(round_id),
+                 "L0", "Linnaeus", relative, _now(), seq),
+            )
+            event = self._event(
+                commit_seq=seq, delta_hash=emission_hash, ordinal=1,
+                event_type="PROPOSED", project_id=binding["project_id"],
+                candidate_id=candidate_id, round_id=str(round_id), node="L0",
+                persona="Linnaeus", hypothesis_id=hypothesis_id,
+                occurrence_id=occurrence_id, outcome="PROPOSED",
+                reason="continuation occurrence created from fixed loop-memory",
+                artifact_ref={"project_id": binding["project_id"], "path": relative,
+                              "sha256": memory_hash, "json_pointer": ""},
+                payload={"memory_hash": memory_hash},
+            )
+            self._insert_event(con, event)
+            self._set_workflow(con, occurrence_id, "PROPOSED", event)
+            con.commit()
+            return occurrence_id
+        except sqlite3.Error as exc:
+            con.rollback()
+            raise LedgerError(f"continuation occurrence transaction failed: {exc}") from exc
+        except Exception:
+            con.rollback()
+            raise
+        finally:
+            con.close()
+
     def require_binding(self, project_dir: str | Path) -> dict[str, Any]:
         target = binding_path(project_dir)
         if not target.exists():
@@ -316,6 +349,23 @@ class HypothesisLedger:
         if binding.get("store_id") != self.store_id or not binding.get("project_id"):
             raise LedgerError("hypothesis ledger binding does not match configured store")
         return binding
+
+    def require_activated_project(self, project_dir: str | Path) -> dict[str, Any]:
+        binding = self.require_binding(project_dir)
+        con = self._connect()
+        try:
+            row = con.execute(
+                "SELECT activation_mode,migration_id,activated_at FROM project_activations WHERE project_id=?",
+                (binding["project_id"],),
+            ).fetchone()
+        finally:
+            con.close()
+        if not row:
+            raise LedgerError(
+                "hypothesis ledger project is not activated; run hypothesis-migrate or create a native-v2 project"
+            )
+        return {**binding, "activation_mode": row[0], "migration_id": row[1],
+                "activated_at": row[2]}
 
     def _next_commit_seq(self, con: sqlite3.Connection) -> int:
         return int(con.execute("SELECT COALESCE(MAX(commit_seq), 0) + 1 FROM emissions").fetchone()[0])
@@ -349,10 +399,47 @@ class HypothesisLedger:
 
     def _require_occurrences(self, con: sqlite3.Connection, project_id: str, candidate_id: str, round_id: str, ids: list[str]) -> dict[str, str]:
         known = self._existing_occurrences(con, project_id, candidate_id, round_id)
+        if len(ids) != len(set(ids)):
+            raise LedgerError("hypothesis reference contains duplicate IDs")
         missing = sorted(set(ids) - set(known))
         if missing:
             raise LedgerError(f"unknown or unauthorized hypothesis IDs for this candidate/round: {missing}")
         return known
+
+    def _active_occurrences(self, con: sqlite3.Connection, occurrences: dict[str, str]) -> set[str]:
+        active = set()
+        for hypothesis_id, occurrence_id in occurrences.items():
+            row = con.execute(
+                "SELECT workflow_status FROM workflow_projection WHERE occurrence_id=?",
+                (occurrence_id,),
+            ).fetchone()
+            if row and row[0] not in {"REJECTED", "ARCHIVED", "SUPERSEDED"}:
+                active.add(hypothesis_id)
+        return active
+
+    def _require_exhaustive(self, label: str, submitted: list[str], expected: set[str]) -> None:
+        if len(submitted) != len(set(submitted)):
+            raise LedgerError(f"{label} contains duplicate hypothesis_id")
+        if set(submitted) != expected:
+            raise LedgerError(f"{label} must assess every and only authorized hypothesis occurrence")
+
+    def _strategy_ids(self, con: sqlite3.Connection, project_id: str,
+                      candidate_id: str, round_id: str) -> set[str]:
+        rows = con.execute(
+            "SELECT payload_json FROM events WHERE project_id=? AND candidate_id=? "
+            "AND round_id=? AND node='L4' AND event_type='METHOD_DESIGNED'",
+            (project_id, candidate_id, round_id),
+        ).fetchall()
+        return {str(json.loads(row[0]).get("strategy_id")) for row in rows
+                if json.loads(row[0]).get("strategy_id")}
+
+    def _verified_evidence_ids(self, con: sqlite3.Connection, *, project_id: str,
+                               candidate_id: str, round_id: str) -> set[str]:
+        return {str(row[0]) for row in con.execute(
+            "SELECT DISTINCT evidence_id FROM events WHERE event_type='EVIDENCE_VERIFIED' "
+            "AND evidence_id IS NOT NULL AND project_id=? AND candidate_id=? AND round_id=?",
+            (project_id, candidate_id, round_id),
+        ).fetchall()}
 
     def _set_workflow(self, con: sqlite3.Connection, occurrence_id: str, status: str, event: dict[str, Any]) -> None:
         if status not in WORKFLOW_STATUSES:
@@ -368,19 +455,22 @@ class HypothesisLedger:
         con.execute("INSERT INTO epistemic_projection(hypothesis_id, epistemic_status, event_id, commit_seq) VALUES (?, ?, ?, ?) ON CONFLICT(hypothesis_id) DO UPDATE SET epistemic_status=excluded.epistemic_status,event_id=excluded.event_id,commit_seq=excluded.commit_seq", (hypothesis_id, status, event["event_id"], event["commit_seq"]))
 
     def commit_delta(self, *, project_dir: str | Path, candidate_id: str, round_id: str,
-                     node: str, persona: str, delta: dict[str, Any], delta_path: str | Path) -> CommitResult:
+                     node: str, persona: str, delta: dict[str, Any], delta_path: str | Path,
+                     _allow_unactivated_migration: bool = False) -> CommitResult:
         """Validate and record one v2 delta atomically with its lifecycle events.
 
         The caller writes the normalized returned object only after this method
         succeeds.  The emission records the expected hash/path; consumers must
         verify both before treating the artifact as authoritative.
         """
-        binding = self.require_binding(project_dir)
+        binding = (self.require_binding(project_dir) if _allow_unactivated_migration
+                   else self.require_activated_project(project_dir))
         project_id = str(binding["project_id"])
         if delta.get("candidate_id") not in (None, candidate_id):
             raise LedgerError("candidate_id mismatch in delta")
         normalized = json.loads(json.dumps(delta))
         normalized["candidate_id"] = candidate_id
+        normalized["project_id"] = project_id
         normalized["schema_version"] = DELTA_SCHEMA_VERSION
         errors = validate_submission(node, normalized)
         if errors:
@@ -389,7 +479,11 @@ class HypothesisLedger:
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
-            prior = con.execute("SELECT commit_seq FROM emissions WHERE delta_hash=?", (delta_hash,)).fetchone()
+            prior = con.execute(
+                "SELECT commit_seq FROM emissions WHERE delta_hash=? AND project_id=? "
+                "AND candidate_id=? AND round_id=? AND node=?",
+                (delta_hash, project_id, candidate_id, str(round_id), node),
+            ).fetchone()
             if prior:
                 rows = con.execute("SELECT event_id FROM events WHERE commit_seq=? ORDER BY rowid", (prior["commit_seq"],)).fetchall()
                 receipt = self._receipt(project_id, candidate_id, round_id, node, persona, delta_hash, int(prior["commit_seq"]), [r[0] for r in rows])
@@ -406,8 +500,9 @@ class HypothesisLedger:
             def add(event_type: str, **kwargs: Any) -> dict[str, Any]:
                 nonlocal ordinal
                 ordinal += 1
+                event_artifact_ref = kwargs.pop("artifact_ref", artifact_ref)
                 event = self._event(commit_seq=seq, delta_hash=delta_hash, ordinal=ordinal, event_type=event_type,
-                                    project_id=project_id, candidate_id=candidate_id, round_id=str(round_id), node=node, persona=persona, artifact_ref=artifact_ref, **kwargs)
+                                    project_id=project_id, candidate_id=candidate_id, round_id=str(round_id), node=node, persona=persona, artifact_ref=event_artifact_ref, **kwargs)
                 events.append(event)
                 return event
             if node == "L1":
@@ -426,18 +521,27 @@ class HypothesisLedger:
                     con.execute("INSERT OR IGNORE INTO versions(hypothesis_id,family_id,statement,operationalization,falsification_criteria_json,definition_hash,created_at) VALUES (?,?,?,?,?,?,?)", (hypothesis_id, family_id, statement, item["operationalization"].strip(), canonical_json(item["falsification_criteria"]), definition_hash, _now()))
                     occurrence_id = _uuid("HO", project_id, candidate_id, str(round_id), hypothesis_id)
                     con.execute("INSERT OR IGNORE INTO occurrences(occurrence_id,hypothesis_id,project_id,candidate_id,round_id) VALUES (?,?,?,?,?)", (occurrence_id, hypothesis_id, project_id, candidate_id, str(round_id)))
-                    event = add("PROPOSED", hypothesis_id=hypothesis_id, occurrence_id=occurrence_id, outcome="PROPOSED", reason=item["rationale"], payload={"family_id": family_id, "proposal_key": item["proposal_key"]})
+                    event = add("PROPOSED", hypothesis_id=hypothesis_id, occurrence_id=occurrence_id, outcome="PROPOSED", reason=item["rationale"], payload={"family_id": family_id, "proposal_key": item["proposal_key"], "primary": item["proposal_key"] == normalized["primary_proposal_key"]})
                     self._set_workflow(con, occurrence_id, "PROPOSED", event)
                 if normalized["primary_proposal_key"] not in keys:
                     raise LedgerError("L1 primary_proposal_key does not identify a submitted hypothesis")
-                normalized["primary_hypothesis_id"] = keys[normalized.pop("primary_proposal_key")]
+                normalized["primary_hypothesis_id"] = keys[normalized["primary_proposal_key"]]
             else:
                 existing = self._existing_occurrences(con, project_id, candidate_id, str(round_id))
                 if node == "L2":
-                    for group in ("attacks", "confounders", "diagnostic_tests"):
+                    verdict_ids = [item["hypothesis_id"] for item in normalized["verdicts"]]
+                    self._require_exhaustive("L2 verdicts", verdict_ids, set(existing))
+                    scopes = {
+                        "attacks": "HYPOTHESIS_ATTACK",
+                        "confounders": "CONFOUNDER",
+                        "diagnostic_tests": "DIAGNOSTIC_TEST",
+                    }
+                    for group, scope in scopes.items():
                         for item in normalized[group]:
                             self._require_occurrences(con, project_id, candidate_id, str(round_id), [item["hypothesis_id"]])
-                            add("ATTACKED", hypothesis_id=item["hypothesis_id"], occurrence_id=existing[item["hypothesis_id"]], outcome=item["severity"], reason=item["text"])
+                            add("ATTACKED", hypothesis_id=item["hypothesis_id"], occurrence_id=existing[item["hypothesis_id"]], outcome=item.get("severity", "PROPOSED"), reason=item["text"], payload={"scope": scope, **item})
+                    for item in normalized["verdicts"]:
+                        add("ATTACKED", hypothesis_id=item["hypothesis_id"], occurrence_id=existing[item["hypothesis_id"]], outcome=item["outcome"], reason=item["reason"], payload={"scope": "VERDICT", **item})
                 elif node == "L3":
                     ids = [item["hypothesis_id"] for item in normalized["triage"]]
                     if len(ids) != len(set(ids)):
@@ -447,9 +551,9 @@ class HypothesisLedger:
                     for item in normalized["triage"]:
                         event = add(item["disposition"], hypothesis_id=item["hypothesis_id"], occurrence_id=existing[item["hypothesis_id"]], outcome=item["reason_code"], reason=item["reason"])
                         self._set_workflow(con, existing[item["hypothesis_id"]], item["disposition"], event)
-                elif node in {"L4", "L5", "L6", "L9b", "L10a"}:
-                    collection = normalized["strategies"] if node == "L4" else (normalized["attacks"] if node == "L5" else normalized["analysis_plan"] if node == "L6" else normalized["assessments"])
-                    mapping = {"L4": "METHOD_DESIGNED", "L5": "ATTACKED", "L6": "METHOD_APPROVED", "L9b": "INTERPRETED", "L10a": "VALUE_ASSESSED"}
+                elif node in {"L4", "L6"}:
+                    collection = normalized["strategies"] if node == "L4" else normalized["analysis_plan"]
+                    mapping = {"L4": "METHOD_DESIGNED", "L6": "METHOD_APPROVED"}
                     for item in collection:
                         ids = item.get("hypothesis_ids", [])
                         self._require_occurrences(con, project_id, candidate_id, str(round_id), ids)
@@ -457,6 +561,35 @@ class HypothesisLedger:
                             event = add(mapping[node], hypothesis_id=hid, occurrence_id=existing[hid], reason=str(item.get("reason") or item.get("name") or node), payload=item)
                             if node == "L4": self._set_workflow(con, existing[hid], "METHOD_DESIGNED", event)
                             if node == "L6" and normalized["method_decision"] == "APPROVE": self._set_workflow(con, existing[hid], "METHOD_APPROVED", event)
+                elif node == "L5":
+                    strategy_ids = self._strategy_ids(con, project_id, candidate_id, str(round_id))
+                    selected = {
+                        hid for hid, occurrence_id in existing.items()
+                        if (row := con.execute(
+                            "SELECT workflow_status FROM workflow_projection WHERE occurrence_id=?",
+                            (occurrence_id,),
+                        ).fetchone()) and row[0] == "METHOD_DESIGNED"
+                    }
+                    covered: set[str] = set()
+                    groups = (
+                        ("attacks", "METHOD"),
+                        ("qc_checkpoints", "QC"),
+                        ("failure_stop_rules", "STOP_RULE"),
+                    )
+                    for group, scope in groups:
+                        for item in normalized[group]:
+                            ids = item["hypothesis_ids"]
+                            self._require_occurrences(con, project_id, candidate_id, str(round_id), ids)
+                            if item["strategy_id"] not in strategy_ids:
+                                raise LedgerError(f"L5 references unknown L4 strategy_id: {item['strategy_id']}")
+                            covered.update(ids)
+                            for hid in ids:
+                                add("ATTACKED", hypothesis_id=hid, occurrence_id=existing[hid],
+                                    outcome=item.get("severity", "REVIEWED"),
+                                    reason=str(item.get("text") or item.get("criterion") or item.get("reason")),
+                                    payload={"scope": scope, **item})
+                    if covered != selected:
+                        raise LedgerError("L5 must review every selected hypothesis")
                 elif node == "L7":
                     for result in normalized["results"]:
                         self._require_occurrences(con, project_id, candidate_id, str(round_id), result["hypothesis_ids"])
@@ -469,10 +602,15 @@ class HypothesisLedger:
                             self._set_workflow(con, existing[hid], "EXECUTED", event)
                 elif node == "L8":
                     pending = {r["evidence_id"] for r in con.execute("SELECT DISTINCT evidence_id FROM events WHERE project_id=? AND candidate_id=? AND round_id=? AND node='L7'", (project_id, candidate_id, str(round_id))).fetchall()}
-                    submitted = {item["evidence_id"] for item in normalized["evidence_assessments"]}
+                    submitted_ids = [item["evidence_id"] for item in normalized["evidence_assessments"]]
+                    if len(submitted_ids) != len(set(submitted_ids)):
+                        raise LedgerError("L8 contains duplicate evidence assessments")
+                    submitted = set(submitted_ids)
                     if submitted != pending:
                         raise LedgerError("L8 must assess every and only L7 pending evidence record")
                     for item in normalized["evidence_assessments"]:
+                        if item["verification"] == "REJECTED" and item["relations"]:
+                            raise LedgerError("L8 rejected evidence cannot create hypothesis relations")
                         add(f"EVIDENCE_{item['verification']}", evidence_id=item["evidence_id"], outcome=item["verification"])
                         if item["verification"] == "VERIFIED":
                             for relation in item["relations"]:
@@ -480,21 +618,94 @@ class HypothesisLedger:
                                 event = add(f"EVIDENCE_{relation['outcome']}", hypothesis_id=relation["hypothesis_id"], occurrence_id=existing[relation["hypothesis_id"]], evidence_id=item["evidence_id"], outcome=relation["outcome"], reason=relation["reason"])
                                 self._set_workflow(con, existing[relation["hypothesis_id"]], "AUDITED", event)
                 elif node == "L8.5":
-                    for paper in normalized["papers"]:
-                        self._require_occurrences(con, project_id, candidate_id, str(round_id), paper["hypothesis_ids"])
-                        for hid in paper["hypothesis_ids"]:
-                            event = add(f"EVIDENCE_{paper['outcome']}", hypothesis_id=hid, occurrence_id=existing[hid], evidence_id=paper["evidence_id"], outcome=paper["outcome"], reason=paper["comparison"])
-                            self._set_workflow(con, existing[hid], "AUDITED", event)
+                    from research_loop import deep_research
+                    try:
+                        pack = deep_research.evidence_pack_details(
+                            project_dir, candidate_id, "L8.5"
+                        )
+                    except deep_research.DeepResearchError as exc:
+                        raise LedgerError(f"L8.5 deep-research evidence rejected: {exc}") from exc
+                    if normalized["deep_research_run_id"] != pack["run_id"]:
+                        raise LedgerError("L8.5 deep-research run ID mismatch")
+                    if normalized["deep_research_receipt_hash"] != pack["receipt_hash"]:
+                        raise LedgerError("L8.5 deep-research receipt hash mismatch")
+                    assessment_ids = [item["hypothesis_id"] for item in normalized["assessments"]]
+                    self._require_exhaustive(
+                        "L8.5 assessments", assessment_ids,
+                        self._active_occurrences(con, existing),
+                    )
+                    imported: set[str] = set()
+                    for assessment in normalized["assessments"]:
+                        hid = assessment["hypothesis_id"]
+                        for evidence_id in assessment["evidence_ids"]:
+                            record = pack["records"].get(evidence_id)
+                            if record is None:
+                                raise LedgerError(
+                                    f"L8.5 references unknown deep-research evidence: {evidence_id}"
+                                )
+                            evidence_body = {
+                                "source_kind": "DEEP_RESEARCH", "summary": record["summary"],
+                                "artifact_refs": [record["artifact_ref"]],
+                            }
+                            con.execute(
+                                "INSERT OR IGNORE INTO evidence_records(evidence_id,source_kind,summary,artifact_refs_json,content_hash,created_at) VALUES (?,?,?,?,?,?)",
+                                (evidence_id, "DEEP_RESEARCH", record["summary"],
+                                 canonical_json([record["artifact_ref"]]),
+                                 content_hash(evidence_body), _now()),
+                            )
+                            if evidence_id not in imported:
+                                add("EVIDENCE_VERIFIED", evidence_id=evidence_id,
+                                    outcome="VERIFIED", reason="verified deep-research receipt",
+                                    artifact_ref=record["artifact_ref"],
+                                    payload={"run_id": pack["run_id"]})
+                                imported.add(evidence_id)
+                            add(f"EVIDENCE_{assessment['outcome']}", hypothesis_id=hid,
+                                occurrence_id=existing[hid], evidence_id=evidence_id,
+                                outcome=assessment["outcome"],
+                                reason=assessment["comparison"],
+                                artifact_ref=record["artifact_ref"])
+                        self._set_workflow(
+                            con, existing[hid], "AUDITED", events[-1]
+                        )
+                elif node == "L9b":
+                    assessment_ids = [item["hypothesis_id"] for item in normalized["assessments"]]
+                    self._require_exhaustive(
+                        "L9b assessments", assessment_ids,
+                        self._active_occurrences(con, existing),
+                    )
+                    verified = self._verified_evidence_ids(
+                        con, project_id=project_id, candidate_id=candidate_id,
+                        round_id=str(round_id),
+                    )
+                    for item in normalized["assessments"]:
+                        unknown = set(item["evidence_ids"]) - verified
+                        if unknown:
+                            raise LedgerError(
+                                f"L9b may reference only verified evidence: {sorted(unknown)}"
+                            )
+                        add("INTERPRETED", hypothesis_id=item["hypothesis_id"],
+                            occurrence_id=existing[item["hypothesis_id"]],
+                            reason=item["interpretation"], payload=item)
+                elif node == "L10a":
+                    assessment_ids = [item["hypothesis_id"] for item in normalized["assessments"]]
+                    self._require_exhaustive(
+                        "L10a assessments", assessment_ids,
+                        self._active_occurrences(con, existing),
+                    )
+                    for item in normalized["assessments"]:
+                        add("VALUE_ASSESSED", hypothesis_id=item["hypothesis_id"],
+                            occurrence_id=existing[item["hypothesis_id"]],
+                            reason=item["value_assessment"], payload=item)
                 elif node == "L9a":
-                    active = {hid for hid, oid in existing.items() if (row := con.execute("SELECT workflow_status FROM workflow_projection WHERE occurrence_id=?", (oid,)).fetchone()) and row[0] not in {"REJECTED", "ARCHIVED", "SUPERSEDED"}}
-                    ids = {item["hypothesis_id"] for item in normalized["assessments"]}
-                    if ids != active:
-                        raise LedgerError("L9a must assess every and only active hypothesis occurrence")
+                    active = self._active_occurrences(con, existing)
+                    ids = [item["hypothesis_id"] for item in normalized["assessments"]]
+                    self._require_exhaustive("L9a assessments", ids, active)
                     for item in normalized["assessments"]:
                         status = item["epistemic_status"]
-                        verified = {str(row["evidence_id"]) for row in con.execute(
-                            "SELECT DISTINCT evidence_id FROM events WHERE event_type='EVIDENCE_VERIFIED' AND evidence_id IS NOT NULL"
-                        ).fetchall()}
+                        verified = self._verified_evidence_ids(
+                            con, project_id=project_id, candidate_id=candidate_id,
+                            round_id=str(round_id),
+                        )
                         unknown_evidence = set(item["evidence_ids"]) - verified
                         if unknown_evidence:
                             raise LedgerError(f"L9a may reference only verified evidence: {sorted(unknown_evidence)}")
@@ -502,15 +713,43 @@ class HypothesisLedger:
                         if status == "FALSIFIED" and not item.get("falsification_criterion"):
                             raise LedgerError("L9a FALSIFIED assessment requires falsification_criterion")
                         if status == "FALSIFIED":
-                            contradicted = {str(row["evidence_id"]) for row in con.execute(
-                                "SELECT evidence_id FROM events WHERE hypothesis_id=? AND event_type='EVIDENCE_CONTRADICTS' AND evidence_id IS NOT NULL",
+                            criteria = json.loads(con.execute(
+                                "SELECT falsification_criteria_json FROM versions WHERE hypothesis_id=?",
                                 (item["hypothesis_id"],),
+                            ).fetchone()[0])
+                            if item["falsification_criterion"] not in criteria:
+                                raise LedgerError(
+                                    "L9a FALSIFIED must cite an exact predeclared falsification criterion"
+                                )
+                            contradicted = {str(row["evidence_id"]) for row in con.execute(
+                                "SELECT evidence_id FROM events WHERE hypothesis_id=? "
+                                "AND project_id=? AND candidate_id=? AND round_id=? "
+                                "AND event_type='EVIDENCE_CONTRADICTS' AND evidence_id IS NOT NULL",
+                                (item["hypothesis_id"], project_id, candidate_id,
+                                 str(round_id)),
                             ).fetchall()}
                             if not set(item["evidence_ids"]) & contradicted:
                                 raise LedgerError("L9a FALSIFIED requires verified contradictory evidence for that hypothesis")
                         if prior and prior["epistemic_status"] == "FALSIFIED" and status != "FALSIFIED":
                             if not item.get("supersedes_event_id") or item["supersedes_event_id"] != prior["event_id"]:
                                 raise LedgerError("reopening FALSIFIED hypothesis must supersede the prior assessment event")
+                            prior_seq = con.execute(
+                                "SELECT commit_seq FROM events WHERE event_id=?",
+                                (prior["event_id"],),
+                            ).fetchone()[0]
+                            new_evidence = con.execute(
+                                "SELECT 1 FROM events WHERE hypothesis_id=? AND project_id=? "
+                                "AND candidate_id=? AND round_id=? "
+                                "AND event_type='EVIDENCE_CONTRADICTS' AND evidence_id IN ("
+                                + ",".join("?" for _ in item["evidence_ids"]) +
+                                ") AND commit_seq>? LIMIT 1",
+                                (item["hypothesis_id"], project_id, candidate_id,
+                                 str(round_id), *item["evidence_ids"], prior_seq),
+                            ).fetchone() if item["evidence_ids"] else None
+                            if not new_evidence:
+                                raise LedgerError(
+                                    "reopening FALSIFIED hypothesis requires newly committed verified contradictory evidence"
+                                )
                             event_type = "REOPENED"
                         else:
                             event_type = "FALSIFIED" if status == "FALSIFIED" else "EPISTEMIC_ASSESSED"
@@ -552,6 +791,11 @@ class HypothesisLedger:
                         add("REVISED" if proposal["relationship"] == "REVISION_OF" else "DERIVED", hypothesis_id=hid, outcome=proposal["relationship"], reason=proposal["reason"], payload={"parents": parents, "loop_type": proposal["loop_type"]})
                     elif proposal is not None:
                         raise LedgerError("only L10b REVISE may create next_round_proposal")
+            persisted_errors = validate_persisted(node, normalized)
+            if persisted_errors:
+                raise LedgerError(
+                    "persisted delta v2 schema rejected: " + "; ".join(persisted_errors)
+                )
             final_hash = content_hash(normalized)
             if final_hash != delta_hash:
                 delta_hash = final_hash
@@ -564,7 +808,11 @@ class HypothesisLedger:
             # visible on retry is not necessarily the submission hash checked
             # above. Roll back the speculative projection work and return the
             # prior immutable emission instead of creating a second commit.
-            final_prior = con.execute("SELECT commit_seq FROM emissions WHERE delta_hash=?", (delta_hash,)).fetchone()
+            final_prior = con.execute(
+                "SELECT commit_seq FROM emissions WHERE delta_hash=? AND project_id=? "
+                "AND candidate_id=? AND round_id=? AND node=?",
+                (delta_hash, project_id, candidate_id, str(round_id), node),
+            ).fetchone()
             if final_prior:
                 seq0 = int(final_prior["commit_seq"])
                 rows = con.execute("SELECT event_id FROM events WHERE commit_seq=? ORDER BY rowid", (seq0,)).fetchall()
@@ -572,7 +820,7 @@ class HypothesisLedger:
                 receipt = self._receipt(project_id, candidate_id, str(round_id), node, persona,
                                         delta_hash, seq0, [row[0] for row in rows])
                 return CommitResult(normalized, delta_hash, seq0, tuple(row[0] for row in rows), receipt)
-            con.execute("INSERT INTO emissions(delta_hash,project_id,candidate_id,round_id,node,persona,delta_path,committed_at,commit_seq) VALUES (?,?,?,?,?,?,?,?,?)", (delta_hash, project_id, candidate_id, str(round_id), node, persona, str(delta_path), _now(), seq))
+            con.execute("INSERT INTO emissions(delta_hash,project_id,candidate_id,round_id,node,persona,delta_path,committed_at,commit_seq) VALUES (?,?,?,?,?,?,?,?,?)", (delta_hash, project_id, candidate_id, str(round_id), node, persona, str(relative_delta_path).replace("\\", "/"), _now(), seq))
             for event in events:
                 self._insert_event(con, event)
             con.commit()
@@ -587,13 +835,47 @@ class HypothesisLedger:
         finally:
             con.close()
 
+    def finalize_emission(self, delta_hash: str, *, artifact_sha256: str,
+                          receipt_sha256: str) -> None:
+        """Mark an emission consumable after its artifact and receipt exist."""
+        if artifact_sha256 != delta_hash:
+            raise LedgerError("emission artifact hash does not match delta hash")
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            if not con.execute(
+                "SELECT 1 FROM emissions WHERE delta_hash=?", (delta_hash,)
+            ).fetchone():
+                raise LedgerError("cannot finalize an unknown ledger emission")
+            con.execute(
+                "INSERT OR IGNORE INTO committed_emissions"
+                "(delta_hash,artifact_sha256,receipt_sha256,finalized_at) "
+                "VALUES (?,?,?,?)",
+                (delta_hash, artifact_sha256, receipt_sha256, _now()),
+            )
+            row = con.execute(
+                "SELECT artifact_sha256,receipt_sha256 FROM committed_emissions "
+                "WHERE delta_hash=?", (delta_hash,),
+            ).fetchone()
+            if not row or tuple(row) != (artifact_sha256, receipt_sha256):
+                raise LedgerError("emission finalization conflicts with immutable marker")
+            con.commit()
+        except sqlite3.Error as exc:
+            con.rollback()
+            raise LedgerError(f"emission finalization failed: {exc}") from exc
+        except Exception:
+            con.rollback()
+            raise
+        finally:
+            con.close()
+
     def _receipt(self, project_id: str, candidate_id: str, round_id: str, node: str, persona: str, delta_hash: str, commit_seq: int, event_ids: list[str]) -> dict[str, Any]:
         return {"schema_version": "1.0", "store_id": self.store_id, "project_id": project_id,
                 "candidate_id": candidate_id, "round_id": str(round_id), "node": node, "persona": persona,
                 "delta_hash": delta_hash, "commit_seq": commit_seq, "event_ids": event_ids, "created_at": _now()}
 
     def graph(self, hypothesis_id: str, *, as_of: int | None = None) -> dict[str, Any]:
-        con = self._connect()
+        con = self._connect(readonly=True)
         try:
             version = con.execute("SELECT * FROM versions WHERE hypothesis_id=?", (hypothesis_id,)).fetchone()
             if not version:
@@ -602,9 +884,19 @@ class HypothesisLedger:
             params: list[Any] = [hypothesis_id]
             if as_of is not None: params.append(int(as_of))
             events = [dict(row) for row in con.execute("SELECT * FROM events WHERE hypothesis_id=?" + limit + " ORDER BY commit_seq,event_id", params).fetchall()]
-            occurrences = [dict(row) for row in con.execute("SELECT * FROM occurrences WHERE hypothesis_id=?", (hypothesis_id,)).fetchall()]
-            current = con.execute("SELECT * FROM epistemic_projection WHERE hypothesis_id=?", (hypothesis_id,)).fetchone()
-            node = {"kind": "hypothesis_version", **dict(version), "current_state": dict(current) if current else {"epistemic_status": "UNASSESSED"}}
+            occurrences = [dict(row) for row in con.execute(
+                "SELECT DISTINCT o.* FROM occurrences o JOIN events e ON e.occurrence_id=o.occurrence_id "
+                "WHERE o.hypothesis_id=?" + ("" if as_of is None else " AND e.commit_seq<=?"),
+                ((hypothesis_id,) if as_of is None else (hypothesis_id, int(as_of))),
+            ).fetchall()]
+            current_event = next((event for event in reversed(events)
+                                  if event["node"] == "L9a"
+                                  and event.get("outcome") in EPISTEMIC_STATUSES), None)
+            current_state = ({"epistemic_status": current_event["outcome"],
+                              "event_id": current_event["event_id"],
+                              "commit_seq": current_event["commit_seq"]}
+                             if current_event else {"epistemic_status": "UNASSESSED"})
+            node = {"kind": "hypothesis_version", **dict(version), "current_state": current_state}
             return {"schema_version": GRAPH_SCHEMA_VERSION, "nodes": [node], "edges": [], "events": events, "occurrences": occurrences}
         finally:
             con.close()
@@ -612,7 +904,7 @@ class HypothesisLedger:
     def history(self, hypothesis_id: str, *, after: int = 0, limit: int = 100) -> list[dict[str, Any]]:
         if limit < 1 or limit > 1000:
             raise LedgerError("history limit must be between 1 and 1000")
-        con = self._connect()
+        con = self._connect(readonly=True)
         try:
             rows = con.execute("SELECT * FROM events WHERE hypothesis_id=? AND commit_seq>? ORDER BY commit_seq,event_id LIMIT ?", (hypothesis_id, int(after), int(limit))).fetchall()
             return [dict(row) for row in rows]
@@ -620,15 +912,85 @@ class HypothesisLedger:
             con.close()
 
     def search(self, text: str = "", limit: int = 50) -> list[dict[str, Any]]:
-        con = self._connect()
+        con = self._connect(readonly=True)
         try:
             rows = con.execute("SELECT v.hypothesis_id,v.family_id,v.statement,v.operationalization,e.epistemic_status FROM versions v LEFT JOIN epistemic_projection e ON e.hypothesis_id=v.hypothesis_id WHERE v.statement LIKE ? ORDER BY v.statement LIMIT ?", (f"%{text}%", int(limit))).fetchall()
             return [dict(row) for row in rows]
         finally:
             con.close()
 
-    def verify(self) -> list[str]:
-        con = self._connect()
+    def ranking_inputs(self, candidate_ids: list[str], stage: str,
+                       *, as_of: int | None = None,
+                       project_id: str | None = None) -> dict[str, Any]:
+        """Return immutable ledger DTOs for the pure advisory ranking algorithm."""
+        if stage not in {"L3", "L10b"}:
+            raise LedgerError("ranking stage must be L3 or L10b")
+        if len(candidate_ids) != len(set(candidate_ids)):
+            raise LedgerError("ranking candidate IDs must be unique")
+        con = self._connect(readonly=True)
+        try:
+            cursor = int(as_of) if as_of is not None else int(con.execute(
+                "SELECT COALESCE(MAX(commit_seq),0) FROM events"
+            ).fetchone()[0])
+            candidates = []
+            decisions = []
+            for candidate_id in candidate_ids:
+                params: list[Any] = [candidate_id, cursor]
+                project_clause = ""
+                if project_id:
+                    project_clause = " AND e.project_id=?"
+                    params.append(project_id)
+                rows = con.execute(
+                    "SELECT e.*,v.statement,m.delta_hash,m.delta_path "
+                    "FROM events e JOIN versions v ON v.hypothesis_id=e.hypothesis_id "
+                    "JOIN emissions m ON m.commit_seq=e.commit_seq "
+                    "WHERE e.candidate_id=? AND e.event_type='PROPOSED' "
+                    "AND e.commit_seq<=?" + project_clause +
+                    " ORDER BY e.commit_seq,e.event_id", params,
+                ).fetchall()
+                if not rows:
+                    raise LedgerError(f"ranking candidate has no ledger L1 occurrence: {candidate_id}")
+                primary = next((row for row in rows
+                                if json.loads(row["payload_json"]).get("primary")), rows[0])
+                candidates.append({
+                    "candidate_id": candidate_id,
+                    "hypothesis_id": primary["hypothesis_id"],
+                    "statement": primary["statement"],
+                    "occurrence_id": primary["occurrence_id"],
+                    "source_emission": {
+                        "commit_seq": primary["commit_seq"],
+                        "delta_hash": primary["delta_hash"],
+                        "delta_path": primary["delta_path"],
+                    },
+                })
+                decision_types = ({"SELECTED", "REJECTED"} if stage == "L3" else
+                                  {"RETAINED", "REVISION_REQUIRED", "ARCHIVED"})
+                placeholders = ",".join("?" for _ in decision_types)
+                decision = con.execute(
+                    f"SELECT event_type,outcome,commit_seq,event_id FROM events "
+                    f"WHERE occurrence_id=? AND commit_seq<=? AND event_type IN ({placeholders}) "
+                    "ORDER BY commit_seq DESC,event_id DESC LIMIT 1",
+                    (primary["occurrence_id"], cursor, *sorted(decision_types)),
+                ).fetchone()
+                formal = "UNAVAILABLE"
+                if decision:
+                    formal = ({"RETAINED": "KEEP", "REVISION_REQUIRED": "REVISE",
+                               "ARCHIVED": "DROP"}.get(decision["event_type"],
+                              decision["event_type"]))
+                decisions.append({
+                    "candidate_id": candidate_id,
+                    "hypothesis_id": primary["hypothesis_id"],
+                    "formal_decision": formal,
+                    "source_event_id": decision["event_id"] if decision else None,
+                    "source_commit_seq": decision["commit_seq"] if decision else None,
+                })
+            return {"schema_version": "1.0", "as_of_commit_seq": cursor,
+                    "candidates": candidates, "formal_decisions": decisions}
+        finally:
+            con.close()
+
+    def verify(self, rebuild: bool = False) -> list[str]:
+        con = self._connect(readonly=not rebuild)
         try:
             problems = []
             version = con.execute("SELECT value FROM ledger_meta WHERE key='schema_version'").fetchone()
@@ -636,6 +998,63 @@ class HypothesisLedger:
                 problems.append("unsupported hypothesis ledger schema version")
             bad = con.execute("SELECT e.event_id FROM events e LEFT JOIN emissions m ON m.commit_seq=e.commit_seq WHERE m.commit_seq IS NULL").fetchall()
             problems.extend(f"event without emission: {row[0]}" for row in bad)
+            if rebuild:
+                before = content_hash({
+                    "workflow": [dict(row) for row in con.execute(
+                        "SELECT * FROM workflow_projection ORDER BY occurrence_id"
+                    )],
+                    "epistemic": [dict(row) for row in con.execute(
+                        "SELECT * FROM epistemic_projection ORDER BY hypothesis_id"
+                    )],
+                })
+                con.execute("BEGIN IMMEDIATE")
+                con.execute("DELETE FROM workflow_projection")
+                con.execute("DELETE FROM epistemic_projection")
+                workflow_events = {
+                    "PROPOSED": "PROPOSED", "SELECTED": "SELECTED",
+                    "REJECTED": "REJECTED", "METHOD_DESIGNED": "METHOD_DESIGNED",
+                    "METHOD_APPROVED": "METHOD_APPROVED", "EXECUTED": "EXECUTED",
+                    "RETAINED": "RETAINED", "REVISION_REQUIRED": "REVISION_REQUIRED",
+                    "ARCHIVED": "ARCHIVED", "SUPERSEDED": "SUPERSEDED",
+                }
+                for row in con.execute(
+                    "SELECT * FROM events ORDER BY commit_seq,event_id"
+                ).fetchall():
+                    event = dict(row)
+                    workflow = workflow_events.get(event["event_type"])
+                    if event["node"] in {"L8", "L8.5"} and event["hypothesis_id"]:
+                        workflow = "AUDITED"
+                    if event["node"] == "L9a" and event["hypothesis_id"]:
+                        workflow = "REVIEWED"
+                    if workflow and event["occurrence_id"]:
+                        con.execute(
+                            "INSERT INTO workflow_projection VALUES (?,?,?,?) "
+                            "ON CONFLICT(occurrence_id) DO UPDATE SET workflow_status=excluded.workflow_status,event_id=excluded.event_id,commit_seq=excluded.commit_seq",
+                            (event["occurrence_id"], workflow, event["event_id"],
+                             event["commit_seq"]),
+                        )
+                    if (event["node"] == "L9a"
+                            and event["outcome"] in EPISTEMIC_STATUSES
+                            and event["hypothesis_id"]):
+                        con.execute(
+                            "INSERT INTO epistemic_projection VALUES (?,?,?,?) "
+                            "ON CONFLICT(hypothesis_id) DO UPDATE SET epistemic_status=excluded.epistemic_status,event_id=excluded.event_id,commit_seq=excluded.commit_seq",
+                            (event["hypothesis_id"], event["outcome"],
+                             event["event_id"], event["commit_seq"]),
+                        )
+                after = content_hash({
+                    "workflow": [dict(row) for row in con.execute(
+                        "SELECT * FROM workflow_projection ORDER BY occurrence_id"
+                    )],
+                    "epistemic": [dict(row) for row in con.execute(
+                        "SELECT * FROM epistemic_projection ORDER BY hypothesis_id"
+                    )],
+                })
+                if before != after:
+                    con.rollback()
+                    problems.append("projection rebuild differs from persisted projection")
+                else:
+                    con.commit()
             return problems
         finally:
             con.close()
@@ -644,7 +1063,7 @@ class HypothesisLedger:
                            round_id: str) -> dict[str, Any]:
         """Return a fixed, candidate-scoped event cursor for loop memory/context."""
         binding = self.require_binding(project_dir)
-        con = self._connect()
+        con = self._connect(readonly=True)
         try:
             rows = con.execute(
                 "SELECT event_id,commit_seq,hypothesis_id,occurrence_id,event_type,outcome "
@@ -674,3 +1093,136 @@ class HypothesisLedger:
         finally:
             con.close()
         return {"authorization_id": authorization_id, "hypothesis_id": hypothesis_id, "through_commit_seq": int(through_commit_seq), "snapshot_hash": digest}
+
+    def materialize_authorized_context(
+        self, project_dir: str | Path, candidate_id: str, round_id: str,
+        node: str, *, as_of: int | None = None,
+    ) -> dict[str, Any]:
+        """Persist a candidate/node-scoped immutable snapshot derived from the DAG."""
+        from research_loop.topology import DAG_SEQUENCE, NODE_MAP
+
+        if node not in NODE_MAP:
+            raise LedgerError(f"unknown context authorization node: {node}")
+        binding = self.require_activated_project(project_dir)
+        raw_inputs = NODE_MAP[node].get("context_inputs", [])
+        if "ALL" in raw_inputs:
+            allowed_nodes = [item for item in DAG_SEQUENCE if item != "L9_parallel"]
+        else:
+            allowed_nodes = [item for item in raw_inputs if item in NODE_MAP]
+        con = self._connect()
+        try:
+            latest = con.execute(
+                "SELECT COALESCE(MAX(commit_seq),0) FROM events WHERE project_id=? "
+                "AND candidate_id=? AND round_id=?",
+                (binding["project_id"], candidate_id, str(round_id)),
+            ).fetchone()[0]
+            cursor = int(latest if as_of is None else as_of)
+            if cursor < 0 or cursor > int(latest):
+                raise LedgerError("authorization as-of cursor is outside candidate history")
+            if allowed_nodes:
+                placeholders = ",".join("?" for _ in allowed_nodes)
+                rows = con.execute(
+                    f"SELECT * FROM events WHERE project_id=? AND candidate_id=? "
+                    f"AND round_id=? AND commit_seq<=? AND node IN ({placeholders}) "
+                    "ORDER BY commit_seq,event_id",
+                    (binding["project_id"], candidate_id, str(round_id), cursor,
+                     *allowed_nodes),
+                ).fetchall()
+            else:
+                rows = []
+            events = []
+            for row in rows:
+                event = dict(row)
+                event["artifact_ref"] = json.loads(event.pop("artifact_ref_json"))
+                event["payload"] = json.loads(event.pop("payload_json"))
+                events.append(event)
+            occurrence_rows = con.execute(
+                "SELECT o.occurrence_id,o.hypothesis_id,v.statement "
+                "FROM occurrences o JOIN versions v ON v.hypothesis_id=o.hypothesis_id "
+                "WHERE o.project_id=? AND o.candidate_id=? AND o.round_id=?",
+                (binding["project_id"], candidate_id, str(round_id)),
+            ).fetchall()
+        finally:
+            con.close()
+        state = []
+        for occurrence in occurrence_rows:
+            relevant = [event for event in events
+                        if event.get("occurrence_id") == occurrence["occurrence_id"]]
+            if not relevant:
+                continue
+            epistemic = "UNASSESSED"
+            for event in relevant:
+                if event["node"] == "L9a" and event.get("outcome") in EPISTEMIC_STATUSES:
+                    epistemic = event["outcome"]
+            visible = {"occurrence_id": occurrence["occurrence_id"],
+                       "hypothesis_id": occurrence["hypothesis_id"],
+                       "epistemic_status": epistemic}
+            if "L1" in allowed_nodes:
+                visible["statement"] = occurrence["statement"]
+            state.append(visible)
+        projection = {"events": events, "current_state": state}
+        projection_hash = content_hash(projection)
+        event_ids = [event["event_id"] for event in events]
+        authorization_id = _uuid(
+            "AUTH", binding["project_id"], candidate_id, str(round_id), node,
+            str(cursor), projection_hash,
+        )
+        snapshot = {
+            "schema_version": "2.0", "authorization_id": authorization_id,
+            "store_id": self.store_id, "project_id": binding["project_id"],
+            "candidate_id": candidate_id, "round_id": str(round_id),
+            "node": node, "as_of_commit_seq": cursor,
+            "allowed_source_nodes": allowed_nodes, "event_ids": event_ids,
+            "projection_hash": projection_hash, **projection,
+        }
+        artifact_hash = content_hash(snapshot)
+        snapshot["artifact_hash"] = artifact_hash
+        target = (Path(project_dir) / "08_Audit" / "hypothesis_context" /
+                  f"{authorization_id.replace(':', '_')}.json")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        raw = canonical_json(snapshot)
+        if target.exists() and target.read_text(encoding="utf-8") != raw:
+            raise LedgerError(f"authorization snapshot collision: {target}")
+        if not target.exists():
+            with target.open("x", encoding="utf-8") as handle:
+                handle.write(raw)
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute(
+                "INSERT OR IGNORE INTO authorization_snapshots(authorization_id,project_id,candidate_id,round_id,node,through_commit_seq,event_ids_json,projection_hash,artifact_hash,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (authorization_id, binding["project_id"], candidate_id,
+                 str(round_id), node, cursor, canonical_json(event_ids),
+                 projection_hash, artifact_hash, _now()),
+            )
+            con.commit()
+        finally:
+            con.close()
+        return {**snapshot, "artifact_path": str(target)}
+
+    def load_authorized_context(self, project_dir: str | Path,
+                                authorization_id: str) -> dict[str, Any]:
+        binding = self.require_activated_project(project_dir)
+        con = self._connect()
+        try:
+            row = con.execute(
+                "SELECT * FROM authorization_snapshots WHERE authorization_id=? "
+                "AND project_id=?", (authorization_id, binding["project_id"]),
+            ).fetchone()
+        finally:
+            con.close()
+        if not row:
+            raise LedgerError("unknown or unauthorized hypothesis context snapshot")
+        target = (Path(project_dir) / "08_Audit" / "hypothesis_context" /
+                  f"{authorization_id.replace(':', '_')}.json")
+        try:
+            snapshot = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise LedgerError(f"authorization snapshot missing or invalid: {target}") from exc
+        actual_hash = content_hash({key: value for key, value in snapshot.items()
+                                    if key != "artifact_hash"})
+        if actual_hash != row["artifact_hash"] or snapshot.get("artifact_hash") != actual_hash:
+            raise LedgerError(f"authorization snapshot hash mismatch: {target}")
+        if snapshot.get("projection_hash") != row["projection_hash"]:
+            raise LedgerError(f"authorization projection hash mismatch: {target}")
+        return snapshot

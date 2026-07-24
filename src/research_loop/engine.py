@@ -172,6 +172,7 @@ from research_loop.hypothesis_ledger import (
     DELTA_SCHEMA_VERSION, NODE_SCHEMAS, HypothesisLedger, LedgerError,
     canonical_json, binding_path,
 )
+from research_loop import hypothesis_migration
 
 # Map: delta key -> persona name (for file path resolution)
 
@@ -1550,9 +1551,11 @@ def _ledger_for(project_dir, configured_path=None, *, require_binding=True):
     store_path = configured_path or os.environ.get("RLR_HYPOTHESIS_STORE")
     if not store_path:
         raise LedgerError("hypothesis ledger requires --knowledge-store or RLR_HYPOTHESIS_STORE")
+    if require_binding and not Path(store_path).is_file():
+        raise LedgerError(f"configured hypothesis ledger does not exist: {store_path}")
     ledger = HypothesisLedger(store_path)
     if require_binding:
-        ledger.require_binding(project_dir)
+        ledger.require_activated_project(project_dir)
     return ledger
 
 
@@ -1608,6 +1611,10 @@ def _emit_delta_v2(args, data):
         if actual != result.delta_hash:
             raise LedgerError("persisted v2 delta hash differs from ledger emission hash")
         receipt_path = _write_hypothesis_commit_receipt(project_dir, result.receipt)
+        ledger.finalize_emission(
+            result.delta_hash, artifact_sha256=actual,
+            receipt_sha256=_sha256(receipt_path),
+        )
     except LedgerError as exc:
         print(f"DELTA V2 VALIDATION: REJECT\n  {exc}", file=sys.stderr)
         return 1
@@ -1641,6 +1648,10 @@ def cmd_emit_delta(args):
 
     if data.get("schema_version") == DELTA_SCHEMA_VERSION:
         return _emit_delta_v2(args, data)
+    if binding_path(project_dir).exists():
+        print("ERROR: activated projects accept only committed delta v2 artifacts; "
+              "use hypothesis-migrate for v1 input", file=sys.stderr)
+        return 2
 
     # Recursive structural validation against the (possibly nested) schema:
     # enforces container types AND the required keys of objects inside lists and
@@ -1924,6 +1935,13 @@ def cmd_new_project(args):
     name = args.name
     topic = args.topic or ""
     project_dir = Path(name)
+    store_path = getattr(args, "knowledge_store", None) or os.environ.get(
+        "RLR_HYPOTHESIS_STORE"
+    )
+    if not store_path:
+        print("ERROR: new-project requires --knowledge-store or "
+              "RLR_HYPOTHESIS_STORE", file=sys.stderr)
+        return 2
     if project_dir.exists():
         print(f"ERROR: {project_dir} already exists; refusing to overwrite.",
               file=sys.stderr)
@@ -1932,12 +1950,11 @@ def cmd_new_project(args):
     (project_dir / "00_Project_Index.md").write_text(
         _index_template(name, topic), encoding="utf-8")
     pl.init_ledger(project_dir)
-    if getattr(args, "knowledge_store", None):
-        try:
-            _ledger_for(project_dir, args.knowledge_store, require_binding=False).bind_project(project_dir)
-        except LedgerError as exc:
-            print(f"ERROR: hypothesis ledger project binding failed: {exc}", file=sys.stderr)
-            return 2
+    try:
+        _ledger_for(project_dir, store_path, require_binding=False).bind_project(project_dir)
+    except LedgerError as exc:
+        print(f"ERROR: hypothesis ledger project binding failed: {exc}", file=sys.stderr)
+        return 2
     print(f"Created V0.7 project: {project_dir.resolve()}")
     print("Next: run `preflight` (Linnaeus L0) before any candidate work.")
     return 0
@@ -1968,6 +1985,7 @@ def cmd_new_candidate(args):
 
     mem_fields = {}
     mem = {}
+    continuation_ledger = None
     if from_memory:
         if not loop_type:
             print("ERROR: --from-memory requires --loop-type", file=sys.stderr)
@@ -1990,6 +2008,14 @@ def cmd_new_candidate(args):
             if snapshot.get("store_id") != ledger.store_id:
                 print("ERROR: loop-memory ledger store_id does not match configured store", file=sys.stderr)
                 return 2
+            binding = ledger.require_activated_project(project_dir)
+            if snapshot.get("project_id") != binding["project_id"]:
+                print("ERROR: loop-memory project_id does not match activated project", file=sys.stderr)
+                return 2
+            if mem.get("loop_type") != loop_type:
+                print("ERROR: --loop-type does not match the L10b continuation proposal", file=sys.stderr)
+                return 2
+            continuation_ledger = ledger
         mem_fields = {
             "from_memory": True, "loop_type": loop_type,
             "prior_candidate": mem["source_candidate_id"],
@@ -1999,7 +2025,15 @@ def cmd_new_candidate(args):
         if mem.get("next_round_hypothesis_id"):
             mem_fields["hypothesis_id"] = mem["next_round_hypothesis_id"]
 
-    cand_id = "C" + _stamp()
+    if from_memory:
+        continuation_key = (
+            f"{_sha256_file(from_memory)}:{mem.get('next_round_hypothesis_id', '')}"
+        )
+        cand_id = "C" + hashlib.sha256(
+            continuation_key.encode("utf-8")
+        ).hexdigest()[:16].upper()
+    else:
+        cand_id = "C" + _stamp()
 
     # --- structured source_input (from --source-input-file, or flags, or the
     # legacy single --input description as an inline input) -------------------
@@ -2092,7 +2126,32 @@ def cmd_new_candidate(args):
                                    input_alias=getattr(args, "input_alias", "") or "",
                                    extra_front=mem_fields)
     cf = _candidate_file(project_dir, cand_id)
+    if cf.exists() and from_memory:
+        existing = _load_yaml_front(cf)
+        if (existing.get("memory_hash") == mem_fields.get("memory_hash")
+                and existing.get("hypothesis_id") == mem_fields.get("hypothesis_id")):
+            if continuation_ledger is not None:
+                continuation_ledger.create_continuation_occurrence(
+                    project_dir=project_dir, candidate_id=cand_id,
+                    round_id=round_id, hypothesis_id=mem_fields["hypothesis_id"],
+                    memory_path=from_memory, memory_hash=mem_fields["memory_hash"],
+                )
+            print(cand_id)
+            print(f"  -> {cf}")
+            return 0
+        print(f"ERROR: continuation candidate collision: {cf}", file=sys.stderr)
+        return 2
     cf.write_text(body, encoding="utf-8")
+    if continuation_ledger is not None:
+        try:
+            continuation_ledger.create_continuation_occurrence(
+                project_dir=project_dir, candidate_id=cand_id, round_id=round_id,
+                hypothesis_id=mem_fields["hypothesis_id"], memory_path=from_memory,
+                memory_hash=mem_fields["memory_hash"],
+            )
+        except LedgerError as exc:
+            print(f"ERROR: continuation occurrence failed: {exc}", file=sys.stderr)
+            return 2
     _append_decision(project_dir, cand_id, "-", "NEW", "candidate created",
                      agent="Oppenheimer", kind="seed")
     print(cand_id)
@@ -2709,7 +2768,7 @@ def cmd_hypothesis_verify(args):
     ledger = _ledger_cli(args)
     if ledger is None:
         return 2
-    problems = ledger.verify()
+    problems = ledger.verify(rebuild=args.rebuild)
     if problems:
         print("HYPOTHESIS LEDGER: REJECT", file=sys.stderr)
         for problem in problems:
@@ -2719,22 +2778,46 @@ def cmd_hypothesis_verify(args):
     return 0
 
 
+def cmd_hypothesis_migrate(args):
+    try:
+        if not Path(args.knowledge_store).is_file():
+            raise LedgerError(
+                "hypothesis-migrate requires an existing shared knowledge store"
+            )
+        ledger = _ledger_for(args.project_dir, args.knowledge_store,
+                             require_binding=False)
+        if args.dry_run:
+            report, path = hypothesis_migration.dry_run(args.project_dir, ledger)
+            print(json.dumps({**report, "report_path": str(path)},
+                             ensure_ascii=False))
+            return 0
+        if not args.resolution or not args.resolved_by:
+            raise LedgerError(
+                "migration commit requires --resolution and --resolved-by"
+            )
+        manifest = hypothesis_migration.commit(
+            args.project_dir, ledger, args.resolution, args.resolved_by
+        )
+        print(json.dumps(manifest, ensure_ascii=False))
+        return 0
+    except (LedgerError, OSError, json.JSONDecodeError) as exc:
+        print(f"ERROR: hypothesis migration failed: {exc}", file=sys.stderr)
+        return 2
+
+
 def cmd_hypothesis_authorize_context(args):
     ledger = _ledger_cli(args)
     if ledger is None:
         return 2
     try:
-        result = ledger.authorize_context(args.project_dir, args.hypothesis_id,
-                                          args.through_commit_seq, args.reason)
+        results = [ledger.materialize_authorized_context(
+            args.project_dir, args.cand_id, args.round_id, node,
+            as_of=args.as_of,
+        ) for node in args.node]
     except LedgerError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    out_dir = Path(args.project_dir) / "08_Audit" / "hypothesis_context"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    target = out_dir / f"{result['authorization_id'].replace(':', '_')}.json"
-    if not target.exists():
-        target.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(json.dumps(result, ensure_ascii=False))
+    print(json.dumps(results, ensure_ascii=False))
     return 0
 
 
@@ -2819,7 +2902,14 @@ def _approved_execution_scripts(project_dir, cand_id):
         data = json.loads(delta.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return [], ["missing execution script plan: unreadable L6_oppenheimer delta"]
-    names = data.get("analysis_plan", {}).get("scripts", [])
+    plan = data.get("analysis_plan", [])
+    if isinstance(plan, dict):
+        names = plan.get("scripts", [])
+    elif isinstance(plan, list):
+        names = [name for item in plan if isinstance(item, dict)
+                 for name in item.get("scripts", [])]
+    else:
+        names = []
     roots = [
         Path(project_dir) / "04_Analysis_Outputs",
         Path(project_dir) / "scripts_v05b",
@@ -3215,9 +3305,13 @@ def _format_delta_body(delta_key, delta, lang="en"):
         L.append(f"**Reason:** {delta.get('reason', '')}")
         ap = delta.get("analysis_plan", {})
         L.append("\n**Analysis plan:**")
-        L.append(f"- Scripts: {_fmt_list(ap.get('scripts'))}")
-        L.append(f"- Parameters: {_fmt_dict(ap.get('parameters'))}")
-        L.append(f"- Outputs: {_fmt_list(ap.get('outputs'))}")
+        plans = ap if isinstance(ap, list) else [ap]
+        for item in plans:
+            if not isinstance(item, dict):
+                continue
+            L.append(f"- Scripts: {_fmt_list(item.get('scripts'))}")
+            L.append(f"- Parameters: {_fmt_dict(item.get('parameters'))}")
+            L.append(f"- Outputs: {_fmt_list(item.get('outputs'))}")
     elif delta_key == "L7_turing":
         for s in delta.get("scripts_run", []):
             L.append(f"- **{s.get('name', '')}** exit={s.get('exit_code', '?')}")
@@ -3328,6 +3422,11 @@ def _build_loop_memory(project_dir, cand_id, knowledge_store=None):
 
     l1 = _d("L1_einstein")
     l10 = _d("L10b_oppenheimer")
+    primary_id = l1.get("primary_hypothesis_id", "")
+    primary_item = next((item for item in l1.get("hypotheses", [])
+                         if item.get("hypothesis_id") == primary_id), {})
+    previous_hypothesis = (l1.get("primary_hypothesis")
+                           or primary_item.get("statement") or "")
     branches = l1.get("candidate_branches", []) or []
     bl = _read_branch_ledger(project_dir, cand_id)
     ml = _read_modality_ledger(project_dir, cand_id)
@@ -3340,7 +3439,7 @@ def _build_loop_memory(project_dir, cand_id, knowledge_store=None):
         "terminal_node": "L10c",
         "terminal_decision": l10.get("decision", ""),
         "original_question": fm.get("question", ""),
-        "previous_hypothesis": l1.get("primary_hypothesis", ""),
+        "previous_hypothesis": previous_hypothesis,
         "final_reason": l10.get("reason", ""),
         "next_round_hypothesis": l10.get("next_round_hypothesis", ""),
         # v1.0 input-contract seed fields: decision and conclusion are kept as
@@ -3470,9 +3569,21 @@ def cmd_emit_loop_memory(args):
     out_dir = project_dir / "08_Audit" / "loop_memory"
     out_dir.mkdir(parents=True, exist_ok=True)
     jp = out_dir / f"{args.cand_id}_next_loop_memory.json"
-    jp.write_text(json.dumps(mem, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    json_text = json.dumps(mem, ensure_ascii=False, indent=2, sort_keys=True)
+    if jp.exists() and jp.read_text(encoding="utf-8") != json_text:
+        print(f"ERROR: loop-memory collision: {jp}", file=sys.stderr)
+        return 2
+    if not jp.exists():
+        with jp.open("x", encoding="utf-8") as handle:
+            handle.write(json_text)
     mp = out_dir / f"{args.cand_id}_next_loop_memory.md"
-    mp.write_text(_loop_memory_to_md(mem), encoding="utf-8")
+    markdown = _loop_memory_to_md(mem)
+    if mp.exists() and mp.read_text(encoding="utf-8") != markdown:
+        print(f"ERROR: loop-memory markdown collision: {mp}", file=sys.stderr)
+        return 2
+    if not mp.exists():
+        with mp.open("x", encoding="utf-8") as handle:
+            handle.write(markdown)
     print("loop-memory written:")
     print(f"  {jp}")
     print(f"  {mp}")
@@ -3917,10 +4028,20 @@ def cmd_ranking_shadow(args):
         if args.cost_budget is not None and args.cost_budget < 0:
             raise ValueError("cost budget must be non-negative")
         events = _ranking_events(args.evidence)
-        snapshots = _ranking_candidates(project_dir, args.candidates)
+        ledger = _ledger_for(project_dir, args.knowledge_store)
+        binding = ledger.require_activated_project(project_dir)
+        ranking_dto = ledger.ranking_inputs(
+            args.candidates, args.stage, project_id=binding["project_id"]
+        )
+        snapshots = [ranking.hypothesis_candidate(
+            item["candidate_id"], item["statement"],
+            source_delta_hash=item["source_emission"]["delta_hash"],
+            source_delta=item, hypothesis_id=item["hypothesis_id"],
+        ) for item in ranking_dto["candidates"]]
         provenance = {
             "mode": "shadow", "stage": args.stage, "formal_decisions":
-                _ranking_formal_decisions(project_dir, args.stage, snapshots),
+                ranking_dto["formal_decisions"],
+            "ledger_as_of_commit_seq": ranking_dto["as_of_commit_seq"],
             "judge_mode": args.judge,
             "resumed_from": str(args.resume) if args.resume else None,
         }
@@ -4251,6 +4372,7 @@ def build_parser():
     sp.add_argument("--evidence", action="append", default=[],
                     help="JSON evidence event or evidence_events file (repeatable)")
     sp.add_argument("--run-id", help="safe unique artifact name (default: timestamp)")
+    sp.add_argument("--knowledge-store", dest="knowledge_store")
     sp.set_defaults(func=cmd_ranking_shadow)
 
     sp = sub.add_parser("ranking-benchmark",
@@ -4288,6 +4410,9 @@ def build_parser():
                     help="max tokens for pre-research injection (default: node-specific, e.g. L1=800)")
     sp.add_argument("--context-token-budget", type=int, default=8000,
                     help="max estimated tokens for assembled context (default: 8000; 0 disables)")
+    sp.add_argument("--authorization-id",
+                    help="fixed hypothesis context authorization to inject")
+    sp.add_argument("--knowledge-store", dest="knowledge_store")
     sp.set_defaults(func=cmd_assemble_context)
 
     # emit-delta
@@ -4385,14 +4510,29 @@ def build_parser():
     sp = sub.add_parser("hypothesis-verify", help="verify ledger projections and emissions")
     sp.add_argument("project_dir")
     sp.add_argument("--knowledge-store", dest="knowledge_store")
+    sp.add_argument("--rebuild", action="store_true",
+                    help="transactionally replay and compare mutable projections")
     sp.set_defaults(func=cmd_hypothesis_verify)
 
-    sp = sub.add_parser("hypothesis-authorize-context",
-                        help="create a fixed-cursor, hypothesis-scoped context authorization")
+    sp = sub.add_parser(
+        "hypothesis-migrate",
+        help="dry-run or atomically commit a legacy project migration",
+    )
     sp.add_argument("project_dir")
-    sp.add_argument("hypothesis_id")
-    sp.add_argument("--through-commit-seq", type=int, required=True)
-    sp.add_argument("--reason", required=True)
+    sp.add_argument("--knowledge-store", dest="knowledge_store", required=True)
+    mode = sp.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--resolution")
+    sp.add_argument("--resolved-by")
+    sp.set_defaults(func=cmd_hypothesis_migrate)
+
+    sp = sub.add_parser("hypothesis-authorize-context",
+                        help="create fixed-cursor DAG-scoped context authorizations")
+    sp.add_argument("project_dir")
+    sp.add_argument("cand_id")
+    sp.add_argument("--node", action="append", required=True, choices=NODE_MAP)
+    sp.add_argument("--round-id", required=True)
+    sp.add_argument("--as-of", type=int)
     sp.add_argument("--knowledge-store", dest="knowledge_store")
     sp.set_defaults(func=cmd_hypothesis_authorize_context)
 
@@ -4605,8 +4745,19 @@ def main(argv=None):
             pass
     args = build_parser().parse_args(argv)
     try:
+        if getattr(args, "knowledge_store", None):
+            os.environ["RLR_HYPOTHESIS_STORE"] = str(args.knowledge_store)
+        activated_commands = {
+            "preflight", "new-candidate", "normalize-l0-input", "next-step",
+            "assemble-context", "emit-delta", "triage-idea", "triage-method",
+            "execution-gate", "prepare-turing-workspace", "finalize-candidate",
+            "aggregate-report", "ranking-shadow", "emit-loop-memory",
+        }
+        if args.cmd in activated_commands:
+            project = getattr(args, "project_dir", None) or getattr(args, "project", None)
+            _ledger_for(project, getattr(args, "knowledge_store", None))
         return args.func(args)
-    except RLRError as e:
+    except (RLRError, LedgerError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
 

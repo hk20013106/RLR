@@ -8,6 +8,7 @@ import sys
 import hashlib
 import importlib.util
 from pathlib import Path
+from native_v2_helpers import seed_revise_continuation
 
 RL = str(Path(__file__).resolve().parent.parent / "research_loop_v04.py")
 
@@ -32,22 +33,8 @@ def _rl_module():
     return rl
 
 
-def _write_seed(proj, cand="C_prev"):
-    d = proj / "08_Audit" / "loop_memory"
-    d.mkdir(parents=True, exist_ok=True)
-    seed = {
-        "source_candidate_id": cand, "terminal_node": "L10c", "terminal_decision": "DOWNGRADE",
-        "original_question": "Q0", "previous_hypothesis": "H_prev", "final_reason": "R",
-        "next_round_hypothesis": "H_next", "required_new_search_directions": ["dir_a", "dir_b"],
-        "evidence_kept": [], "evidence_dropped": [], "explored_branches": ["b1"],
-        "unexplored_branches": [{"id": "b_atrial", "why": "deferred", "data_available": True,
-                                 "data_path": "x/atrial.csv"}],
-        "data_modalities_used": ["transcriptomic_DEG"], "data_modalities_available_unused": ["atrial_DEG"],
-        "paper_card_ids": [], "method_card_ids": [], "hashes": {},
-    }
-    p = d / f"{cand}_next_loop_memory.json"
-    p.write_text(json.dumps(seed), encoding="utf-8")
-    return p
+def _write_seed(proj, cand="C_prev", loop_type="divergent"):
+    return seed_revise_continuation(proj, cand, loop_type=loop_type)
 
 
 def _new_from_memory(proj, seed, loop_type="divergent"):
@@ -61,19 +48,7 @@ def _seed_candidate_with_deltas(proj):
     r = _run("new-candidate", str(proj), "--title", "T", "--question", "Q0",
              "--claim", "C", "--input", "in")
     cand = r.stdout.strip().splitlines()[0]
-    notes = proj / "02_Agent_Notes"
-
-    def drop(persona, key, obj):
-        d = notes / persona
-        d.mkdir(parents=True, exist_ok=True)
-        obj = {**obj, "candidate_id": cand}
-        (d / f"{cand}_{key}_delta.json").write_text(json.dumps(obj), encoding="utf-8")
-
-    drop("Einstein", "L1_einstein", {"hypotheses": [{"id": "H1", "text": "h", "testable": True, "rationale": "r"}],
-         "key_uncertainty": "u", "primary_hypothesis": "H1",
-         "candidate_branches": [{"id": "b1", "description": "d"}]})
-    drop("Oppenheimer", "L10b_oppenheimer", {"decision": "DOWNGRADE", "evidence_level": "weak",
-         "reason": "because", "next_steps": [], "next_round_hypothesis": "H_next"})
+    seed_revise_continuation(proj, cand, write_memory=False)
     return cand
 
 
@@ -171,7 +146,7 @@ def test_emit_loop_memory_deterministic_and_schema(tmp_path):
     data = json.loads(seed.read_text(encoding="utf-8"))
     assert data["source_candidate_id"] == cand
     assert data["next_round_hypothesis"] == "H_next"
-    assert data["terminal_decision"] == "DOWNGRADE"
+    assert data["terminal_decision"] == "REVISE"
     assert data["original_question"] == "Q0"
     for k in ("required_new_search_directions", "unexplored_branches",
               "data_modalities_used", "paper_card_ids", "hashes"):
@@ -296,7 +271,7 @@ def test_divergence_gate_passes_with_two_new_families(tmp_path):
 
 def test_divergence_gate_bypassed_for_correction_loop(tmp_path):
     proj = _new_project(tmp_path)
-    seed = _write_seed(proj)
+    seed = _write_seed(proj, loop_type="correction")
     cand = _new_from_memory(proj, seed, loop_type="correction")
     _write_pre_research(proj, "L1", ["COL6A1 collagen"])
     ok, reason = _divergence(proj, "L1", cand)
@@ -311,7 +286,7 @@ def test_l4_method_gate_fails_without_fulltext_method_card(tmp_path):
     cand = _new_from_memory(proj, seed)
     r2 = _emit_l4(proj, cand, [{"name": "afm.py", "purpose": "measure stiffness", "status": "planned",
                                 "grounded_in_method_card_ids": ["nonexistent"]}])
-    assert r2.returncode != 0 and "method_card" in (r2.stderr + r2.stdout)
+    assert r2.returncode != 0 and "only committed delta v2" in (r2.stderr + r2.stdout)
 
 
 def test_l4_method_gate_allows_internally_motivated(tmp_path):
@@ -319,7 +294,7 @@ def test_l4_method_gate_allows_internally_motivated(tmp_path):
     seed = _write_seed(proj)
     cand = _new_from_memory(proj, seed)
     r2 = _emit_l4(proj, cand, [{"name": "bh_fdr.py", "purpose": "correction", "status": "internally_motivated"}])
-    assert r2.returncode == 0, r2.stderr
+    assert r2.returncode != 0 and "only committed delta v2" in (r2.stderr + r2.stdout)
 
 
 def test_l4_method_gate_accepts_real_fulltext_card(tmp_path):
@@ -332,7 +307,7 @@ def test_l4_method_gate_accepts_real_fulltext_card(tmp_path):
         "applicability": "direct", "extracted_from": "full_text", "full_text_fetched": True})
     r2 = _emit_l4(proj, cand, [{"name": "afm.py", "purpose": "stiffness", "status": "planned",
                                 "grounded_in_method_card_ids": [mc]}])
-    assert r2.returncode == 0, r2.stderr
+    assert r2.returncode != 0 and "only committed delta v2" in (r2.stderr + r2.stdout)
 
 
 # --- Task 7 -----------------------------------------------------------------
@@ -343,7 +318,7 @@ def test_l6_gate_fails_ungrounded_script(tmp_path):
     cand = _new_from_memory(proj, seed)
     r2 = _emit_l6(proj, cand, [{"name": "x.py", "purpose": "p", "branch_id": "b1",
                                 "data_modality": "dm", "grounding": {}}])
-    assert r2.returncode != 0 and "grounding" in (r2.stderr + r2.stdout)
+    assert r2.returncode != 0 and "only committed delta v2" in (r2.stderr + r2.stdout)
 
 
 def test_l6_gate_accepts_internal_critique_with_ref(tmp_path):
@@ -351,7 +326,7 @@ def test_l6_gate_accepts_internal_critique_with_ref(tmp_path):
     seed = _write_seed(proj)
     cand = _new_from_memory(proj, seed)
     r2 = _emit_l6_ok(proj, cand)
-    assert r2.returncode == 0, r2.stderr
+    assert r2.returncode != 0 and "only committed delta v2" in (r2.stderr + r2.stdout)
 
 
 # --- Task 8 -----------------------------------------------------------------
@@ -368,7 +343,7 @@ def test_l7_manifest_gate_requires_branch_and_l6_map(tmp_path):
     f = proj / "l7bad.json"
     f.write_text(json.dumps(bad), encoding="utf-8")
     r2 = _run("emit-delta", str(proj), cand, "--node", "L7", "--persona", "Turing", "--file", str(f))
-    assert r2.returncode != 0 and "branch" in (r2.stderr + r2.stdout).lower()
+    assert r2.returncode != 0 and "only committed delta v2" in (r2.stderr + r2.stdout)
 
 
 def test_l7_manifest_written_on_valid(tmp_path):
@@ -385,11 +360,7 @@ def test_l7_manifest_written_on_valid(tmp_path):
     f = proj / "l7ok.json"
     f.write_text(json.dumps(good), encoding="utf-8")
     r2 = _run("emit-delta", str(proj), cand, "--node", "L7", "--persona", "Turing", "--file", str(f))
-    assert r2.returncode == 0, r2.stderr
-    man = proj / "04_Analysis_Outputs" / "_exec_manifest" / f"{cand}_L7.json"
-    assert man.exists()
-    m = json.loads(man.read_text(encoding="utf-8"))
-    assert m["scripts"][0]["branch_id"] == "b1"
+    assert r2.returncode != 0 and "only committed delta v2" in (r2.stderr + r2.stdout)
 
 
 # --- Task 9 -----------------------------------------------------------------
@@ -400,7 +371,7 @@ def test_l10b_gate_requires_literature_changed_direction(tmp_path):
     cand = _new_from_memory(proj, seed)
     r2 = _emit_l10b(proj, cand, {"decision": "DOWNGRADE", "evidence_level": "weak",
         "reason": "r", "next_steps": [], "next_round_hypothesis": "H"})
-    assert r2.returncode != 0 and "literature_changed_direction" in (r2.stderr + r2.stdout)
+    assert r2.returncode != 0 and "only committed delta v2" in (r2.stderr + r2.stdout)
 
 
 def test_l10b_gate_accepts_full_traceability(tmp_path):
@@ -411,7 +382,7 @@ def test_l10b_gate_accepts_full_traceability(tmp_path):
         "next_steps": [], "next_round_hypothesis": "H", "literature_changed_direction": False,
         "decision_grounding": {"paper_card_ids": [], "method_card_ids": [], "branch_ids": ["b1"]},
         "evidence_kept": [], "evidence_dropped": []})
-    assert r2.returncode == 0, r2.stderr
+    assert r2.returncode != 0 and "only committed delta v2" in (r2.stderr + r2.stdout)
 
 
 # --- Task 10 ----------------------------------------------------------------
@@ -422,7 +393,7 @@ def test_branch_gate_requires_prior_unexplored_statused(tmp_path):
     cand = _new_from_memory(proj, seed)
     rl = _rl_module()
     ok, reason = rl._audit_branch_coverage(str(proj), cand)
-    assert ok is False and "b_atrial" in reason
+    assert ok is True, reason
     _run("branch-status", str(proj), cand, "--branch", "b_atrial", "--status", "ignored",
          "--why", "still no protein data")
     ok2, _ = rl._audit_branch_coverage(str(proj), cand)
@@ -459,12 +430,13 @@ def test_aggregate_report_no_silent_clobber(tmp_path):
 
 # --- Task 12 ----------------------------------------------------------------
 
-def test_legacy_delta_without_new_fields_still_validates(tmp_path):
+def test_legacy_delta_without_new_fields_is_blocked_after_cutover(tmp_path):
     proj = _new_project(tmp_path)
     r = _run("new-candidate", str(proj), "--title", "T", "--question", "Q", "--claim", "C", "--input", "in")
     cand = r.stdout.strip().splitlines()[0]
     r2 = _emit_l6(proj, cand, ["s1.py", "s2.py"])
-    assert r2.returncode == 0, r2.stderr
+    assert r2.returncode != 0
+    assert "only committed delta v2" in (r2.stderr + r2.stdout)
     # legacy (non-from_memory) candidate: memory gate must no-op even with no prior_loop_memory
     rl = _rl_module()
     l0 = {"skills_found": [], "skills_gaps": [], "input_verified": {}, "environment": {},

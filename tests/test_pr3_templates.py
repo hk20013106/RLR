@@ -14,6 +14,7 @@ import sys
 import subprocess
 import tempfile
 from pathlib import Path
+from native_v2_helpers import activate_native_project
 
 HERE = Path(__file__).resolve().parent
 RL = str(HERE.parent / "research_loop_v04.py")
@@ -36,7 +37,7 @@ def _mkproj():
         "---\ncandidate_id: C1\ntitle: T\nquestion: Does X cause Y?\n"
         "claim: X causes Y\ncurrent_status: NEW\ncurrent_owner: Einstein\n"
         "---\n# C1\n", encoding="utf-8")
-    return d
+    return activate_native_project(d)
 
 
 # 1. Running pre-research node L1 creates a placeholder that contains sections

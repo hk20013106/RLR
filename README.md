@@ -242,6 +242,24 @@ the historical shim only re-exports the same surface.
 
 ## Strict L0 intake and advisory hypothesis ranking
 
+All production projects use an activated append-only hypothesis ledger. Set
+`RLR_HYPOTHESIS_STORE` or pass `--knowledge-store` explicitly. Native projects
+are activated by `new-project`; legacy v1 projects are blocked until a complete
+project-level migration is committed:
+
+```bash
+python research_loop_v04.py hypothesis-migrate MyProject \
+  --knowledge-store shared-hypotheses.sqlite --dry-run
+python research_loop_v04.py hypothesis-migrate MyProject \
+  --knowledge-store shared-hypotheses.sqlite \
+  --resolution resolution.json --resolved-by researcher-id
+```
+
+The SQLite ledger is authoritative. Delta receipts, current state, graph views,
+ranking inputs, loop-memory, and authorized node context are immutable or
+rebuildable projections. Runtime resolution accepts only hash-matched,
+receipt-backed delta v2 files; v1 remains untouched as migration evidence.
+
 `normalize-l0-input` converts a request file plus an explicit local path (or a
 stable remote dataset locator) into a validated L0 contract. It does not infer
 paths, IDs, decisions, or conclusions from prose. `--dry-run` writes nothing;
@@ -282,11 +300,14 @@ fail-soft: the existing RLR decision path continues unchanged.
 ## Quick start
 
 ```bash
-# 1. Create a project
-python research_loop_v04.py new-project MyProject
+# 1. Create a native-v2 project
+python research_loop_v04.py new-project MyProject \
+  --knowledge-store shared-hypotheses.sqlite
 
 # 2. Create a candidate (your research question)
-python research_loop_v04.py new-candidate MyProject --title "..." --question "..." --claim "..."
+python research_loop_v04.py new-candidate MyProject --title "..." \
+  --question "..." --claim "..." --input "..." \
+  --knowledge-store shared-hypotheses.sqlite
 
 # 3. Run preflight (L0 gate — stops if deps missing)
 python research_loop_v04.py preflight MyProject <CAND_ID>

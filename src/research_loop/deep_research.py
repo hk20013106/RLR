@@ -421,6 +421,41 @@ def evidence_ids(project_dir: str | Path, candidate_id: str, nodes: list[str]) -
     return found
 
 
+def evidence_pack_details(project_dir: str | Path, candidate_id: str,
+                          node: str = "L8.5") -> dict:
+    """Return hash-bound, source-located records for ledger import."""
+    ok, reason = audit_evidence_pack(project_dir, candidate_id, node)
+    if not ok:
+        raise DeepResearchError(reason)
+    root = Path(project_dir)
+    artifact = _latest_artifact(root, candidate_id, node)
+    if artifact is None:  # guarded by audit; keeps the return type explicit
+        raise DeepResearchError("evidence pack missing")
+    records = {}
+    for paper_ref in artifact.get("papers", []):
+        path = root / paper_ref["path"]
+        paper = json.loads(path.read_text(encoding="utf-8"))
+        file_hash = _sha(path.read_text(encoding="utf-8"))
+        for index, extract in enumerate(paper.get("evidence_extracts", [])):
+            if extract.get("verification_status") != "located" or not extract.get("locator"):
+                continue
+            records[str(extract["evidence_id"])] = {
+                "summary": str(extract["text"]),
+                "artifact_ref": {
+                    "path": str(path.relative_to(root)).replace("\\", "/"),
+                    "sha256": file_hash,
+                    "json_pointer": f"/evidence_extracts/{index}",
+                },
+            }
+    return {
+        "run_id": artifact["run_id"],
+        "receipt_hash": _sha(json.dumps(artifact["skill_receipt"],
+                                         ensure_ascii=False, sort_keys=True,
+                                         separators=(",", ":"))),
+        "records": records,
+    }
+
+
 def render_pre_research_markdown(artifact: dict) -> str:
     identifiers = []
     for paper in artifact.get("papers", []):

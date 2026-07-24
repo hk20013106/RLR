@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from native_v2_helpers import activate_native_project, commit_v2, seed_selected_hypothesis
 
 HERE = Path(__file__).resolve().parent
 RL = str(HERE.parent / "research_loop_v04.py")
@@ -42,17 +43,6 @@ def _fixture(missing_input=False, missing_script=False):
         f"| `registered_input` | `{source.as_posix()}/` | `real.csv` | CSV | primary | verified |\n",
         encoding="utf-8")
 
-    l0 = project / "02_Agent_Notes" / "Linnaeus"
-    l6 = project / "02_Agent_Notes" / "Oppenheimer"
-    l0.mkdir(parents=True)
-    l6.mkdir(parents=True)
-    (l0 / "C1_L0_linnaeus_delta.json").write_text(
-        json.dumps({"candidate_id": "C1"}), encoding="utf-8")
-    (l6 / "C1_L6_oppenheimer_delta.json").write_text(json.dumps({
-        "candidate_id": "C1",
-        "analysis_plan": {"scripts": ["analysis.py"]},
-    }), encoding="utf-8")
-
     scripts = project / "04_Analysis_Outputs"
     scripts.mkdir()
     if not missing_script:
@@ -62,6 +52,21 @@ def _fixture(missing_input=False, missing_script=False):
             "Path('results/result.txt').write_text(data)\n",
             encoding="utf-8")
     (project / "unrelated.txt").write_text("must not be copied", encoding="utf-8")
+    activate_native_project(project)
+    commit_v2(project, "C1", "L0", "Linnaeus", {"schema_version": "2.0"})
+    hid = seed_selected_hypothesis(project, "C1")
+    commit_v2(project, "C1", "L4", "Fisher", {
+        "schema_version": "2.0", "strategies": [{
+            "strategy_id": "S1", "hypothesis_ids": [hid],
+            "name": "workspace hydration", "steps": ["run analysis.py"],
+        }],
+    })
+    commit_v2(project, "C1", "L6", "Oppenheimer", {
+        "schema_version": "2.0", "analysis_plan": [{
+            "strategy_id": "S1", "hypothesis_ids": [hid],
+            "scripts": ["analysis.py"], "parameters": {}, "outputs": ["result.txt"],
+        }], "method_decision": "APPROVE", "reason": "ready",
+    })
     return project
 
 

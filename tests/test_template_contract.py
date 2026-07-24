@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from research_loop import deep_research as dr
+from native_v2_helpers import activate_native_project
 
 RL = str(Path(__file__).resolve().parent.parent / "research_loop_v04.py")
 
@@ -69,7 +70,7 @@ current_owner: Einstein
                                  {"section": "Discussion", "text": "discussion", "locator": "Discussion"},
                                  {"section": "Conclusion", "text": "conclusion", "locator": "Conclusion"}]}],
     }, dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"))
-    return d
+    return activate_native_project(d)
 
 
 # --- 1. contract mode does NOT include full template body ---

@@ -20,6 +20,7 @@ RL = str(HERE.parent / "research_loop_v04.py")
 sys.path.insert(0, str(HERE))
 import research_loop_v04 as rl  # noqa: E402
 from research_loop import deep_research as dr  # noqa: E402
+from native_v2_helpers import activate_native_project  # noqa: E402
 
 _DIGEST = ("## Runtime digest\n"
            "- [[09_Literature_Database/smith2020|Smith 2020]] doi:10.1000/abc123 "
@@ -49,7 +50,7 @@ def _mkproj():
         "---\ncandidate_id: C1\ntitle: T\nquestion: Does X cause Y?\n"
         "claim: X causes Y\ncurrent_status: NEW\ncurrent_owner: Einstein\n"
         "---\n# C1\n", encoding="utf-8")
-    return d
+    return activate_native_project(d)
 
 
 def _write_l1(d, text):

@@ -5,6 +5,8 @@ engine import, no cycle. Schemas kept byte-for-byte (no delta_version bump;
 that is v0.8). research_loop_v04 imports these back via inward shim.
 """
 import json
+import os
+import sqlite3
 from pathlib import Path
 
 from research_loop.paths import _sha256
@@ -24,6 +26,39 @@ def _v2_commit_valid(project_dir, delta_key, cand_id, path):
         return False
     digest = _sha256(path)
     node = delta_key.split("_", 1)[0]
+    binding_file = Path(project_dir) / "00_Preflight" / "hypothesis_store_binding.json"
+    store_path = os.environ.get("RLR_HYPOTHESIS_STORE")
+    if not binding_file.is_file() or not store_path or not Path(store_path).is_file():
+        return False
+    try:
+        binding = json.loads(binding_file.read_text(encoding="utf-8"))
+        relative_path = path.relative_to(project_dir).as_posix()
+        con = sqlite3.connect(
+            f"{Path(store_path).resolve().as_uri()}?mode=ro", uri=True
+        )
+        try:
+            store = con.execute(
+                "SELECT value FROM ledger_meta WHERE key='store_id'"
+            ).fetchone()
+            activation = con.execute(
+                "SELECT 1 FROM project_activations WHERE project_id=?",
+                (binding.get("project_id"),),
+            ).fetchone()
+            emission = con.execute(
+                "SELECT c.receipt_sha256 FROM emissions e JOIN committed_emissions c "
+                "ON c.delta_hash=e.delta_hash WHERE e.delta_hash=? AND e.project_id=? "
+                "AND e.candidate_id=? AND e.node=? AND e.delta_path=? "
+                "AND c.artifact_sha256=?",
+                (digest, binding.get("project_id"), str(cand_id), node,
+                 relative_path, digest),
+            ).fetchone()
+        finally:
+            con.close()
+        if (not store or store[0] != binding.get("store_id")
+                or not activation or not emission):
+            return False
+    except (OSError, ValueError, sqlite3.Error, json.JSONDecodeError):
+        return False
     commits = Path(project_dir) / "08_Audit" / "hypothesis_commits"
     if not commits.is_dir():
         return False
@@ -34,7 +69,8 @@ def _v2_commit_valid(project_dir, delta_key, cand_id, path):
             continue
         if (receipt.get("candidate_id") == str(cand_id)
                 and receipt.get("node") == node
-                and receipt.get("delta_hash") == digest):
+                and receipt.get("delta_hash") == digest
+                and _sha256(receipt_path) == emission[0]):
             return True
     return False
 
@@ -133,47 +169,10 @@ def _candidate_delta_file(project_dir, delta_key, cand_id):
     return legacy.with_name(f"{cand_id}_{legacy.name}")
 
 def _delta_for_candidate(project_dir, delta_key, cand_id):
-    """Resolve an owned candidate delta, with legacy receipt compatibility."""
+    """Resolve only a committed v2 delta; legacy files are migration input only."""
     v2 = _v2_candidate_delta_file(project_dir, delta_key, cand_id)
     if _v2_commit_valid(project_dir, delta_key, cand_id, v2):
         return v2
-    # A ledger-bound project has explicitly cut over: uncommitted v2 output and
-    # all v1 artifacts are intentionally invisible to runtime consumers.
-    if (Path(project_dir) / "00_Preflight" / "hypothesis_store_binding.json").exists():
-        return None
-    candidate = _candidate_delta_file(project_dir, delta_key, cand_id)
-    legacy = _delta_file(project_dir, delta_key)
-    node = delta_key.split("_", 1)[0]
-    audit = Path(project_dir) / "08_Audit"
-    receipts = []
-    for rp in audit.glob(f"run_receipt_{node}_*.json") if audit.is_dir() else []:
-        try:
-            receipts.append(json.loads(rp.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, OSError):
-            continue
-
-    for df in (candidate, legacy):
-        if not df or not df.exists():
-            continue
-        try:
-            data = json.loads(df.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        declared = data.get("candidate_id")
-        if declared is not None:
-            if str(declared) == str(cand_id):
-                return df
-            continue
-        digest = _sha256(df)
-        for receipt in receipts:
-            receipt_path = receipt.get("output_delta_path")
-            path_matches = (Path(receipt_path) == df if receipt_path
-                            else df == legacy)
-            if (str(receipt.get("candidate_id")) == str(cand_id)
-                    and receipt.get("delta_key") == delta_key
-                    and receipt.get("output_delta_sha256") == digest
-                    and path_matches):
-                return df
     return None
 
 def _delta_belongs_to_candidate(project_dir, delta_key, cand_id):

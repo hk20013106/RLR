@@ -26,14 +26,13 @@ import pytest  # noqa: E402
 
 from research_loop import l0_contract  # noqa: E402
 from research_loop.providers.command import CommandProvider  # noqa: E402
+from native_v2_helpers import seed_revise_continuation  # noqa: E402
 
 RL = str(HERE / "research_loop_v04.py")
-_ENV = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
-
-
 def _run(*args):
+    env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
     return subprocess.run([sys.executable, RL, *args], capture_output=True,
-                          text=True, encoding="utf-8", env=_ENV)
+                          text=True, encoding="utf-8", env=env)
 
 
 def _assemble(proj, cand, node, *extra):
@@ -381,8 +380,8 @@ def test_emit_delta_l0_rejects_missing_contract(tmp_path):
     df.write_text(json.dumps(delta), encoding="utf-8")
     r = _run("emit-delta", str(proj), cand, "--node", "L0",
              "--persona", "Linnaeus", "--file", str(df))
-    assert r.returncode == 1, (r.returncode, r.stderr)
-    assert "input-contract gate" in r.stderr
+    assert r.returncode == 2, (r.returncode, r.stderr)
+    assert "only committed delta v2" in r.stderr
 
 
 def test_round_type_conflict_initial_with_from_memory(tmp_path):
@@ -405,9 +404,10 @@ PREVCONC = "ZZZPREVCONC_SENTINEL"
 NEWHYP = "ZZZNEWHYP_SENTINEL"
 
 
-def _seed_full(tmp_path, **overrides):
-    mem = {
-        "source_candidate_id": "C_PARENT_0001",
+def _seed_full(proj, **overrides):
+    p = seed_revise_continuation(proj, "C_PARENT_0001")
+    mem = json.loads(p.read_text(encoding="utf-8"))
+    mem.update({
         "next_round_hypothesis": f"{NEWHYP} next hypothesis",
         "required_new_search_directions": ["dir1", "dir2"],
         "previous_hypothesis": f"{PREVHYP} prior hypothesis",
@@ -417,9 +417,8 @@ def _seed_full(tmp_path, **overrides):
         "terminal_decision": "REVISE",
         "final_reason": f"{PREVCONC} prior conclusion",
         "round_id": "2", "parent_round_id": "1",
-    }
+    })
     mem.update(overrides)
-    p = tmp_path / "seed.json"
     p.write_text(json.dumps(mem), encoding="utf-8")
     return p
 
@@ -437,7 +436,7 @@ def _new_continuation(proj, seed):
 
 def test_continuation_full_rc0_physical_injection(tmp_path):
     proj = _new_project(tmp_path)
-    seed = _seed_full(tmp_path)
+    seed = _seed_full(proj)
     cand = _new_continuation(proj, seed)
     rc, ctx, err = _assemble(proj, cand, "L0")
     assert rc == 0, err
@@ -450,7 +449,7 @@ def test_continuation_full_rc0_physical_injection(tmp_path):
 
 def test_continuation_previous_round_does_not_leak_to_l2(tmp_path):
     proj = _new_project(tmp_path)
-    seed = _seed_full(tmp_path)
+    seed = _seed_full(proj)
     cand = _new_continuation(proj, seed)
     rc, ctx, err = _assemble(proj, cand, "L2")
     assert PREVCONC not in ctx, "previous_round.conclusion leaked to L2"
@@ -459,7 +458,7 @@ def test_continuation_previous_round_does_not_leak_to_l2(tmp_path):
 
 def test_continuation_missing_previous_conclusion_rc3(tmp_path):
     proj = _new_project(tmp_path)
-    seed = _seed_full(tmp_path, previous_conclusion="", final_reason="")
+    seed = _seed_full(proj, previous_conclusion="", final_reason="")
     cand = _new_continuation(proj, seed)
     rc, ctx, err = _assemble(proj, cand, "L0")
     assert rc == 3, (rc, err)
@@ -468,7 +467,7 @@ def test_continuation_missing_previous_conclusion_rc3(tmp_path):
 
 def test_continuation_illegal_decision_rc3(tmp_path):
     proj = _new_project(tmp_path)
-    seed = _seed_full(tmp_path, previous_final_decision="accept",
+    seed = _seed_full(proj, previous_final_decision="accept",
                       terminal_decision="accept")
     cand = _new_continuation(proj, seed)
     rc, ctx, err = _assemble(proj, cand, "L0")
@@ -509,20 +508,11 @@ def test_build_loop_memory_emits_clean_fields(tmp_path):
     (no 'DROP: reason' munge)."""
     import research_loop_v04 as rl
     proj = _new_project(tmp_path)
-    cand = _new_initial(proj)
-    # minimal L1 + L10b deltas so the builder has something to read
-    for persona, key, obj in (
-        ("Einstein", "L1_einstein", {"primary_hypothesis": "H0"}),
-        ("Oppenheimer", "L10b_oppenheimer",
-         {"decision": "REVISE", "reason": "evidence weak",
-          "next_round_hypothesis": "H1"}),
-    ):
-        d = proj / "02_Agent_Notes" / persona
-        d.mkdir(parents=True, exist_ok=True)
-        (d / f"{cand}_{key}_delta.json").write_text(
-            json.dumps({**obj, "candidate_id": cand}), encoding="utf-8")
-    mem = rl._build_loop_memory(proj, cand)
+    cand = "C_MEMORY_SOURCE"
+    seed_revise_continuation(proj, cand, write_memory=False)
+    mem = rl._build_loop_memory(proj, cand, os.environ["RLR_HYPOTHESIS_STORE"])
     assert mem["previous_final_decision"] == "REVISE"
     assert mem["previous_conclusion"] == "evidence weak"
-    assert mem["new_hypothesis"] == "H1"
+    assert mem["next_round_hypothesis"] == "H_next"
+    assert mem["next_round_hypothesis_id"].startswith("H:")
     assert mem["round_id"] == "2" and mem["parent_round_id"] == "1"
