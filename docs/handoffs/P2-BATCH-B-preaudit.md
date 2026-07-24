@@ -1,7 +1,7 @@
 # P2-BATCH-B Symbol Boundary Pre-Audit Report
 
-> Pre-extraction boundary audit for **P2-BATCH-B**: extraction of **RANKING**, **PITFALL**, and **REPORTING** command families from `src/research_loop/engine.py`.  
-> Generated on 2026-07-25 against working tree branch `rlr/p2b-preaudit`.  
+> Pre-extraction boundary audit for **P2-BATCH-B**: extraction of **RANKING**, **PITFALL**, and **REPORTING** command families from `src/research_loop/engine.py`.
+> Generated on 2026-07-25 against working tree branch `rlr/p2b-preaudit`.
 > **Status:** Pre-audit complete. No production code modified. Extraction NOT started.
 
 ---
