@@ -64,8 +64,14 @@ from research_loop.topology import (  # inward shim (Phase 1a)
     DAG_SEQUENCE, DELTA_DAG_ORDER,
 )
 
-from research_loop.common import (  # inward shim (Phase 2b-1)
+from research_loop import common as _common
+from research_loop.common import (  # inward shim (Phase 7a)
     PERSONA_TITLE, _now, _stamp, _input_alias, _everos_scopes_for,
+    _port_open, _dep_present, _dep_fix_hint, _parse_declared_deps,
+    _check_dependencies, _slug, _next_seq, _require_status, _set_status,
+    _append_decision, _mkdirs, _fmt_list, _fmt_dict,
+    _empty_value_for_schema, _sha256_file, _load_loop_memory,
+    _render_extra_front,
 )
 
 VALID_STATUSES = [
@@ -200,95 +206,7 @@ REQUIRED_DEPENDENCIES = [
      "check_path": True, "attest_env": "RLR_OBSIDIAN",
      "needed_for": "end-of-round human-readable sync (sync_to_obsidian.py)"},
 ]
-
-
-def _port_open(host, port, timeout=0.6):
-    import socket
-    try:
-        with socket.create_connection((host, int(port)), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
-def _dep_present(dep):
-    """True if a dependency is satisfied. A non-empty `attest_env` env var ALWAYS
-    satisfies it -- the fail-closed escape hatch for things Python cannot
-    introspect (Claude skills, GUI apps like Zotero/Obsidian)."""
-    import os
-    ae = dep.get("attest_env")
-    if ae and os.environ.get(ae, "").strip():
-        return True
-    kind, name = dep.get("kind"), dep.get("name", "")
-    if kind == "python":
-        import importlib.util
-        return importlib.util.find_spec(name) is not None
-    if kind == "command":
-        return shutil.which(name) is not None
-    if kind == "env":
-        v = os.environ.get(dep.get("env", name), "").strip()
-        return bool(v) and (not dep.get("check_path") or Path(v).expanduser().exists())
-    if kind == "port":
-        host, _, port = (dep.get("addr") or "").partition(":")
-        return bool(port) and _port_open(host or "127.0.0.1", port)
-    if kind == "skill":
-        return False  # only satisfiable via attest_env (handled above): fail closed
-    return False
-
-
-def _dep_fix_hint(dep):
-    kind, ae = dep.get("kind"), dep.get("attest_env")
-    if kind == "python":
-        return f"pip install {dep.get('pip', dep['name'])}"
-    if kind == "command":
-        return f"install / put on PATH: {dep['name']}"
-    if kind == "skill":
-        return f"enable {dep.get('label', dep['name'])}, then attest: set {ae}=1"
-    if kind == "port":
-        return (f"start {dep.get('label', dep['name'])} (connector {dep.get('addr')})"
-                + (f", or set {ae}=1" if ae else ""))
-    if kind == "env":
-        return (f"set ${dep.get('env')}" + (" to an existing path" if dep.get("check_path") else "")
-                + (f", or set {ae}=1" if ae else ""))
-    return "(see 00_Preflight/dependencies.md)"
-
-
-def _parse_declared_deps(project_dir):
-    """Extra required deps declared in 00_Preflight/dependencies.md: lines of the
-    form '- python: NAME', '- command: NAME', or '- env: VAR' under a
-    '## Required' heading."""
-    f = Path(project_dir) / "00_Preflight" / "dependencies.md"
-    deps, required = [], False
-    if not f.exists():
-        return deps
-    for line in f.read_text(encoding="utf-8").splitlines():
-        s = line.strip()
-        if s.startswith("##"):
-            required = "required" in s.lower()
-            continue
-        if required:
-            m = re.match(r"-\s*(python|command|env):\s*([^\s(]+)", s, re.I)
-            if m:
-                deps.append({"kind": m.group(1).lower(), "name": m.group(2),
-                             "needed_for": "declared in dependencies.md"})
-    return deps
-
-
-def _check_dependencies(project_dir=None):
-    """Check framework + project-declared dependencies. Returns (ok, missing),
-    each a list of dep dicts with an added 'present' flag."""
-    items = [dict(d) for d in REQUIRED_DEPENDENCIES]
-    if project_dir:
-        seen = {(d["kind"], d["name"]) for d in items}
-        for d in _parse_declared_deps(project_dir):
-            if (d["kind"], d["name"]) not in seen:
-                items.append(d)
-    ok, missing = [], []
-    for d in items:
-        d = dict(d)
-        d["present"] = _dep_present(d)
-        (ok if d["present"] else missing).append(d)
-    return ok, missing
+_common.REQUIRED_DEPENDENCIES = REQUIRED_DEPENDENCIES
 
 
 def _knowledge_base_md(name):
@@ -396,10 +314,6 @@ LAYERS = [
 
 
 
-def _slug(s):
-    s = s.strip().lower()
-    s = re.sub(r"[^a-z0-9]+", "_", s)
-    return re.sub(r"^_+|_+$", "", s) or "candidate"
 
 
 
@@ -445,16 +359,6 @@ from research_loop import deep_research
 
 
 
-def _next_seq(project_dir, prefix):
-    d = Path(project_dir) / "05_Decision_Log"
-    n = 0
-    if d.exists():
-        for f in d.glob(f"{prefix}[0-9]*.md"):
-            m = re.match(rf"^{re.escape(prefix)}(\d+)", f.stem)
-            if m:
-                n = max(n, int(m.group(1)))
-    return n + 1
-
 from research_loop.yamlio import (  # inward shim (Phase 3a)
     _yaml_value, _load_yaml_front, _replace_field,
 )
@@ -465,119 +369,7 @@ from research_loop.context import (  # inward shim (Phase 2b-2)
     strip_candidate_to_frontmatter, _condense_delta, _generate_contract, cmd_assemble_context, _caveman_required_literals, _caveman_lite, _inject_pre_research,
 )
 
-def _require_status(fm, cand_id, expected):
-    cur = fm.get("current_status", "?")
-    if cur != expected:
-        print(f"ERROR: {cand_id} is {cur}, expected {expected} for this command.",
-              file=sys.stderr)
-        return False
-    return True
-
-def _set_status(project_dir, cand_id, new_status, owner=None):
-    cf = _candidate_file(project_dir, cand_id)
-    _replace_field(cf, "current_status", new_status)
-    if owner:
-        _replace_field(cf, "current_owner", owner)
-    _replace_field(cf, "updated_at", _now())
-
-def _append_decision(project_dir, cand_id, frm, to, reason, route_to="",
-                     agent="Oppenheimer", kind="decision"):
-    seq = _next_seq(project_dir, "D")
-    body = _decision_log_template(seq, cand_id, frm, to, reason, route_to,
-                                  agent=agent, kind=kind)
-    f = Path(project_dir) / "05_Decision_Log" / f"D{seq:04d}_{cand_id}.md"
-    f.write_text(body, encoding="utf-8")
-    cf = _candidate_file(project_dir, cand_id)
-    if cf.exists():
-        line = f"- [{_now()}] ({kind}/{agent}) {frm} -> {to}: {reason}"
-        if route_to:
-            line += f" | next: {route_to}"
-        text = cf.read_text(encoding="utf-8")
-        text = text.replace("## Decision History\n",
-                            "## Decision History\n" + line + "\n", 1)
-        cf.write_text(text, encoding="utf-8")
-    return seq
-
-def _mkdirs(project_dir):
-    """v0.4 directory layout (same structure as v0.2)."""
-    p = Path(project_dir)
-    for sub in ["00_Preflight", "01_Candidates", "03_Handoffs",
-                "04_Analysis_Outputs", "05_Decision_Log",
-                "06_Manuscript_Direction", "07_Obsidian_Sync",
-                "08_Audit", "10_Pitfall_Ledger", "99_Archive"]:
-        (p / sub).mkdir(parents=True, exist_ok=True)
-    for agent in AGENTS:
-        (p / "02_Agent_Notes" / agent).mkdir(parents=True, exist_ok=True)
-    return p
-
-def _fmt_list(lst):
-    if not lst:
-        return "_none_"
-    if isinstance(lst, list):
-        return ", ".join(str(x) for x in lst)
-    return str(lst)
-
-def _fmt_dict(d):
-    if not d:
-        return "_none_"
-    if isinstance(d, dict):
-        return "; ".join(f"{k}={v}" for k, v in d.items())
-    return str(d)
-
-def _empty_value_for_schema(v):
-    """Create an empty default matching a delta schema field type."""
-    if v is list:
-        return []
-    if v is dict:
-        return {}
-    if v is str:
-        return ""
-    if v is bool:
-        return False
-    if v is int:
-        return 0
-    if isinstance(v, list):
-        return []
-    if isinstance(v, dict):
-        return {}
-    return None
-
-
 # --- templates --------------------------------------------------------------
-
-def _sha256_file(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
-
-
-def _load_loop_memory(path):
-    """Load + minimally validate a next_loop_memory.json seed. Raises on error."""
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"loop-memory seed not found: {p}")
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except Exception as e:
-        raise ValueError(f"invalid loop-memory seed JSON: {e}")
-    required = {"source_candidate_id", "next_round_hypothesis", "required_new_search_directions"}
-    missing = required - set(data)
-    if missing:
-        raise ValueError(f"loop-memory seed missing keys: {sorted(missing)}")
-    return data
-
-
-def _render_extra_front(extra_front):
-    """Render additional frontmatter keys. Booleans emit lowercase true/false."""
-    if not extra_front:
-        return ""
-    lines = []
-    for k, v in extra_front.items():
-        if isinstance(v, bool):
-            lines.append(f"{k}: {'true' if v else 'false'}")
-        else:
-            lines.append(f"{k}: {_yaml_value(v)}")
-    return "\n".join(lines) + "\n"
-
-
 def _candidate_template(cand_id, title, source_input, question, claim,
                         input_alias="", extra_front=None):
     claim_or_question = f"{question} | {claim}"
@@ -777,6 +569,8 @@ created_at: {_yaml_value(_now())}
 - **Reason:** {reason}
 - **Next route:** {route_to or "_none (terminal or pending)_"}
 """
+
+_common._decision_log_template = _decision_log_template
 
 def _note_template(project_name, cand_id, agent, text):
     return f"""---
