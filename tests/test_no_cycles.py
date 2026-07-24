@@ -15,8 +15,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-# Local modules/packages we own and want kept acyclic. research_loop/ does not
-# exist yet (Phase 1) -- discovery below picks it up automatically once created.
+# Local modules/packages we own and want kept acyclic. The package lives at
+# src/research_loop/ (added to sys.path by tests/conftest.py). Root and src/
+# top-level .py files are also discovered by _local_module_files().
 LOCAL_TOPLEVEL = {
     "research_loop_v04", "run_loop", "orchestrator", "pitfall_ledger",
     "ars_card_adapter", "manage_literature_db", "sync_to_obsidian",
@@ -24,11 +25,18 @@ LOCAL_TOPLEVEL = {
 
 
 def _local_module_files():
-    """Map local module name -> file, for root .py and research_loop/ package."""
+    """Map local module name -> file, for root .py, src/*.py, and src/research_loop/ package."""
     files = {}
+    # Root-level .py (e.g. research_loop_v04.py shim, run_loop.py, sitecustomize.py)
     for p in REPO.glob("*.py"):
         files[p.stem] = p
-    pkg = REPO / "research_loop"
+    # src/ top-level .py (e.g. src/run_loop.py, src/orchestrator.py, src/research_loop_v04.py)
+    src_dir = REPO / "src"
+    if src_dir.exists():
+        for p in src_dir.glob("*.py"):
+            files[p.stem] = p
+    # src/research_loop/ package (the actual package, per conftest.py sys.path)
+    pkg = src_dir / "research_loop"
     if pkg.exists():
         for p in pkg.rglob("*.py"):
             rel = p.relative_to(REPO).with_suffix("")
