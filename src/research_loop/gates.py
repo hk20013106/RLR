@@ -122,7 +122,20 @@ def _l6_script_branches(project_dir, cand_id):
     out = {}
     if p and p.exists():
         try:
-            for s in (json.loads(p.read_text(encoding="utf-8")).get("analysis_plan") or {}).get("scripts", []):
+            analysis_plan = json.loads(
+                p.read_text(encoding="utf-8")).get("analysis_plan") or {}
+            if isinstance(analysis_plan, dict):
+                scripts = analysis_plan.get("scripts", [])
+            elif isinstance(analysis_plan, list):
+                scripts = [
+                    script
+                    for strategy in analysis_plan
+                    if isinstance(strategy, dict)
+                    for script in strategy.get("scripts", [])
+                ]
+            else:
+                scripts = []
+            for s in scripts:
                 if isinstance(s, dict) and s.get("name"):
                     out[s["name"]] = s.get("branch_id")
         except Exception:
@@ -170,7 +183,18 @@ def _audit_l6_traceability(project_dir, cand_id, delta):
     fm = _load_yaml_front(cf) if cf and cf.exists() else {}
     if not fm.get("from_memory"):
         return True, ""
-    scripts = (delta.get("analysis_plan") or {}).get("scripts", [])
+    analysis_plan = delta.get("analysis_plan") or {}
+    if isinstance(analysis_plan, dict):
+        scripts = analysis_plan.get("scripts", [])
+    elif isinstance(analysis_plan, list):
+        scripts = [
+            script
+            for strategy in analysis_plan
+            if isinstance(strategy, dict)
+            for script in strategy.get("scripts", [])
+        ]
+    else:
+        scripts = []
     mc_dir = Path(project_dir) / "09_Literature_Database" / "method_cards"
     for s in scripts:
         if isinstance(s, str):

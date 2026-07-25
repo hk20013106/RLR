@@ -1009,6 +1009,37 @@ def _emit_delta_v2(args, data):
                                      round_id=round_id, node=args.node,
                                      persona=args.persona, delta=data,
                                      delta_path=out_file)
+        # Gate checks (same as v1 path)
+        _errors = []
+        if args.node == "L4":
+            ok_m, m_reason = _audit_l4_methods(
+                project_dir, args.cand_id, data)
+            if not ok_m:
+                _errors.append(m_reason)
+        if args.node == "L6":
+            ok_l6, l6_reason = _audit_l6_traceability(
+                project_dir, args.cand_id, data)
+            if not ok_l6:
+                _errors.append(l6_reason)
+        if args.node == "L7":
+            ok_l7, l7_reason = _audit_l7_manifest(
+                project_dir, args.cand_id, data)
+            if not ok_l7:
+                _errors.append(l7_reason)
+        if args.node == "L10b":
+            ok_l10, l10_reason = _audit_l10_traceability(
+                project_dir, args.cand_id, data)
+            if not ok_l10:
+                _errors.append(l10_reason)
+            ok_evidence, evidence_reason = _audit_l10_evidence(
+                project_dir, args.cand_id, data)
+            if not ok_evidence:
+                _errors.append(evidence_reason)
+        if _errors:
+            print("DELTA V2 VALIDATION: REJECT", file=sys.stderr)
+            for e in _errors:
+                print(f"  {e}", file=sys.stderr)
+            return 1
         # The ledger hashes canonical bytes.  Persist exactly those bytes so the
         # runtime resolver can revalidate the artifact instead of trusting text.
         raw = canonical_json(result.normalized_delta)
