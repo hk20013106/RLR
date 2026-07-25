@@ -79,6 +79,8 @@ def _update_reports_index(project_dir, cand_id, status):
 
 def cmd_aggregate_report(args):
     """L10c Linnaeus: read all delta JSON, generate FINAL_REPORT.md + _CN.md."""
+    import json
+
     project_dir = Path(args.project_dir)
     cf = _candidate_file(project_dir, args.cand_id)
     if not cf.exists():

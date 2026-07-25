@@ -133,11 +133,18 @@ def _validate_ranking_resume_provenance(checkpoint, stage, judge_mode):
 
 
 def _resolve_ranking_judge(args, audit_run_dir=None):
-    engine_mod = sys.modules.get("research_loop.engine")
-    if engine_mod and hasattr(engine_mod, "_ranking_judge"):
-        engine_judge = getattr(engine_mod, "_ranking_judge")
-        if engine_judge is not _ranking_judge:
-            return engine_judge(args, audit_run_dir)
+    """Honor engine-level monkeypatch of _ranking_judge (test compat).
+
+    Tests use patch('research_loop.engine._ranking_judge') to inject fake
+    judges. Since cmd_ranking_shadow now lives in commands/ranking.py, the
+    engine module attribute is separate. This resolver checks if engine has
+    a different _ranking_judge bound and uses it. This is a deliberate
+    test-compat seam, not a logic change.
+    """
+    import research_loop.engine as _engine_mod  # noqa: F811 (runtime, not top-level)
+    engine_judge = getattr(_engine_mod, "_ranking_judge", None)
+    if engine_judge is not None and engine_judge is not _ranking_judge:
+        return engine_judge(args, audit_run_dir)
     return _ranking_judge(args, audit_run_dir)
 
 
