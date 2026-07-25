@@ -190,11 +190,41 @@ def _format_delta_body(delta_key, delta, lang="en"):
         L.append(f"**Approved strategy:** {delta.get('approved_strategy', '')}")
         L.append(f"**Modifications:** {_fmt_list(delta.get('modifications'))}")
         L.append(f"**Reason:** {delta.get('reason', '')}")
-        ap = delta.get("analysis_plan", {})
+        ap = delta.get("analysis_plan")
+        if isinstance(ap, dict):
+            scripts = ap.get("scripts")
+            parameters = ap.get("parameters")
+            outputs = ap.get("outputs")
+        elif isinstance(ap, list):
+            scripts = []
+            parameters = {}
+            outputs = []
+            for st in ap:
+                if isinstance(st, dict):
+                    st_scripts = st.get("scripts")
+                    if isinstance(st_scripts, list):
+                        scripts.extend(st_scripts)
+                    elif st_scripts:
+                        scripts.append(st_scripts)
+
+                    st_params = st.get("parameters")
+                    if isinstance(st_params, dict):
+                        parameters.update(st_params)
+
+                    st_outputs = st.get("outputs")
+                    if isinstance(st_outputs, list):
+                        outputs.extend(st_outputs)
+                    elif st_outputs:
+                        outputs.append(st_outputs)
+        else:
+            scripts = None
+            parameters = None
+            outputs = None
+
         L.append("\n**Analysis plan:**")
-        L.append(f"- Scripts: {_fmt_list(ap.get('scripts'))}")
-        L.append(f"- Parameters: {_fmt_dict(ap.get('parameters'))}")
-        L.append(f"- Outputs: {_fmt_list(ap.get('outputs'))}")
+        L.append(f"- Scripts: {_fmt_list(scripts)}")
+        L.append(f"- Parameters: {_fmt_dict(parameters)}")
+        L.append(f"- Outputs: {_fmt_list(outputs)}")
     elif delta_key == "L7_turing":
         for s in delta.get("scripts_run", []):
             L.append(f"- **{s.get('name', '')}** exit={s.get('exit_code', '?')}")
