@@ -37,7 +37,7 @@ from research_loop.commands.pitfall import (
 )
 from research_loop.commands.ranking import cmd_ranking_benchmark, cmd_ranking_report, cmd_ranking_shadow
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 _ledger_commands._write_exec_manifest = _write_exec_manifest
 

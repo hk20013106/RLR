@@ -50,7 +50,7 @@ from pathlib import Path
 
 import pitfall_ledger as pl  # additive: pitfall ledger (no DAG/schema coupling)
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 
 from research_loop.errors import RLRError  # inward shim (Phase 1a)

@@ -18,7 +18,7 @@ from research_loop.topology import DELTA_DAG_ORDER
 from research_loop.delta import DELTA_PERSONA
 from research_loop.yamlio import _load_yaml_front
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 
 def cmd_list(args):

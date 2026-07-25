@@ -115,7 +115,9 @@ def test_providers_never_import_engine():
     Enforced from Phase 4 onward when research_loop/providers/ exists; a no-op
     (vacuously true) until then.
     """
-    pkg = REPO / "research_loop" / "providers"
+    pkg = REPO / "src" / "research_loop" / "providers"
+    if not pkg.exists():
+        pkg = REPO / "research_loop" / "providers"
     if not pkg.exists():
         return
     for p in pkg.rglob("*.py"):

@@ -37,7 +37,8 @@ def _prompt_via_provider(context, run_dir):
     writer.write_text(
         "import pathlib,sys; pathlib.Path(sys.argv[2]).write_text('{}')",
         encoding="utf-8")
-    command = f"{sys.executable.replace('\\\\', '/')} {writer.as_posix()} {{prompt_file}} {{output_file}}"
+    python_bin = sys.executable.replace('\\\\', '/')
+    command = f"{python_bin} {writer.as_posix()} {{prompt_file}} {{output_file}}"
     provider = CommandProvider({"command": command})
     provider.run_agent("L0", "Linnaeus", context, run_dir=str(run_dir))
     return Path(provider.last_prompt_file).read_text(encoding="utf-8")
