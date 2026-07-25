@@ -7,8 +7,14 @@ import subprocess
 import sys
 import hashlib
 import importlib.util
+import os
+import sqlite3
 from pathlib import Path
-from native_v2_helpers import seed_revise_continuation
+from native_v2_helpers import (
+    commit_finalized,
+    seed_revise_continuation,
+)
+from research_loop.yamlio import _load_yaml_front
 
 RL = str(Path(__file__).resolve().parent.parent / "research_loop_v04.py")
 
@@ -61,42 +67,144 @@ def _write_pre_research(proj, node, queries, ident="PMID: 111"):
     (d / f"{node}_research.md").write_text(txt, encoding="utf-8")
 
 
+def _artifact(proj, cand, node, persona):
+    key = f"{node}_{persona.lower()}"
+    return proj / "02_Agent_Notes" / persona / f"{cand}_{key}_delta.v2.json"
+
+
+def _receipts(proj, cand, node):
+    return list((proj / "08_Audit" / "hypothesis_commits").glob(f"H*_{cand}_{node}.json"))
+
+
+def _finalization_count(cand, node):
+    with sqlite3.connect(os.environ["RLR_HYPOTHESIS_STORE"]) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM emissions e "
+            "JOIN committed_emissions c ON c.delta_hash=e.delta_hash "
+            "WHERE e.candidate_id=? AND e.node=?",
+            (cand, node),
+        ).fetchone()
+    return int(row[0])
+
+
+def _assert_finalized(proj, cand, node, persona):
+    assert _artifact(proj, cand, node, persona).exists()
+    assert _receipts(proj, cand, node)
+    assert _finalization_count(cand, node) == 1
+
+
+def _round_id(proj, cand):
+    return str(_load_yaml_front(proj / "01_Candidates" / f"{cand}.md")["round_id"])
+
+
+def _hypothesis_id(proj, cand):
+    with sqlite3.connect(os.environ["RLR_HYPOTHESIS_STORE"]) as conn:
+        rows = conn.execute(
+            "SELECT hypothesis_id FROM occurrences "
+            "WHERE candidate_id=? AND round_id=?",
+            (cand, _round_id(proj, cand)),
+        ).fetchall()
+    assert len(rows) == 1
+    return str(rows[0][0])
+
+
+def _seed_l4_prerequisites(proj, cand):
+    hid = _hypothesis_id(proj, cand)
+    commit_finalized(proj, cand, "L3", "Oppenheimer", {
+        "schema_version": "2.0",
+        "triage": [{
+            "hypothesis_id": hid, "disposition": "SELECTED",
+            "reason_code": "TEST", "reason": "testable",
+        }],
+        "route_to": "Fisher",
+    }, round_id=_round_id(proj, cand))
+    return hid
+
+
 def _emit_l4(proj, cand, scripts):
-    d = proj / "02_Agent_Notes" / "Fisher"
-    d.mkdir(parents=True, exist_ok=True)
-    obj = {"strategies": [{"id": "s1", "name": "n", "steps": [], "samples": 3, "status": "ok"}],
-           "recommended": "s1", "scripts_needed": scripts, "key_decisions": [], "candidate_id": cand}
+    hid = _seed_l4_prerequisites(proj, cand)
+    obj = {
+        "schema_version": "2.0",
+        "strategies": [{
+            "strategy_id": "S1", "hypothesis_ids": [hid], "name": "n",
+            "steps": ["run analysis"], "scripts_needed": scripts,
+        }],
+        "scripts_needed": scripts,
+    }
     f = proj / f"l4_{cand}.json"
     f.write_text(json.dumps(obj), encoding="utf-8")
     return _run("emit-delta", str(proj), cand, "--node", "L4", "--persona", "Fisher", "--file", str(f))
 
 
 def _emit_l6(proj, cand, scripts):
-    d = proj / "02_Agent_Notes" / "Oppenheimer"
-    d.mkdir(parents=True, exist_ok=True)
-    obj = {"approved_strategy": "s1", "modifications": [], "reason": "r",
-           "analysis_plan": {"scripts": scripts, "parameters": {}, "outputs": ["o.json"]},
-           "candidate_id": cand}
+    hid = _seed_l4_prerequisites(proj, cand)
+    commit_finalized(proj, cand, "L4", "Fisher", {
+        "schema_version": "2.0",
+        "strategies": [{
+            "strategy_id": "S1", "hypothesis_ids": [hid], "name": "method",
+            "steps": ["run analysis"],
+        }],
+    }, round_id=_round_id(proj, cand))
+    obj = {
+        "schema_version": "2.0",
+        "analysis_plan": [{
+            "strategy_id": "S1", "hypothesis_ids": [hid], "scripts": scripts,
+            "parameters": {}, "outputs": ["o.json"],
+        }],
+        "method_decision": "APPROVE",
+        "reason": "r",
+    }
     f = proj / f"l6_{cand}.json"
     f.write_text(json.dumps(obj), encoding="utf-8")
     return _run("emit-delta", str(proj), cand, "--node", "L6", "--persona", "Oppenheimer", "--file", str(f))
 
 
 def _emit_l6_ok(proj, cand):
-    d = proj / "02_Agent_Notes" / "Feynman"
-    d.mkdir(parents=True, exist_ok=True)
-    (d / f"{cand}_L2_feynman_delta.json").write_text(json.dumps({"attacks": [{"hypothesis_id": "H1",
-        "severity": "high", "text": "no multiple-testing correction"}], "confounders": [],
-        "diagnostic_tests": [], "verdict": "v", "candidate_id": cand}), encoding="utf-8")
-    return _emit_l6(proj, cand, [{"name": "bh.py", "purpose": "correction", "branch_id": "b1",
-        "data_modality": "stat", "grounding": {"type": "internal_critique",
-        "critique_delta_ref": "L2_feynman#0"}}])
+    hid = _seed_l4_prerequisites(proj, cand)
+    commit_finalized(proj, cand, "L2", "Feynman", {
+        "schema_version": "2.0",
+        "attacks": [{"hypothesis_id": hid, "severity": "high",
+                     "text": "no multiple-testing correction"}],
+        "confounders": [], "diagnostic_tests": [],
+        "verdicts": [{"hypothesis_id": hid, "outcome": "SURVIVES",
+                      "reason": "correctable"}],
+    }, round_id=_round_id(proj, cand))
+    commit_finalized(proj, cand, "L4", "Fisher", {
+        "schema_version": "2.0",
+        "strategies": [{
+            "strategy_id": "S1", "hypothesis_ids": [hid], "name": "method",
+            "steps": ["run analysis"],
+        }],
+    }, round_id=_round_id(proj, cand))
+    obj = {
+        "schema_version": "2.0",
+        "analysis_plan": [{
+            "strategy_id": "S1", "hypothesis_ids": [hid],
+            "scripts": [{"name": "bh.py", "purpose": "correction", "branch_id": "b1",
+                         "data_modality": "stat", "grounding": {
+                             "type": "internal_critique",
+                             "critique_delta_ref": "L2_feynman#0",
+                         }}],
+            "parameters": {}, "outputs": ["o.json"],
+        }],
+        "method_decision": "APPROVE",
+        "reason": "ready",
+    }
+    f = proj / f"l6_{cand}.json"
+    f.write_text(json.dumps(obj), encoding="utf-8")
+    return _run("emit-delta", str(proj), cand, "--node", "L6",
+                "--persona", "Oppenheimer", "--file", str(f))
 
 
 def _emit_l10b(proj, cand, obj):
-    d = proj / "02_Agent_Notes" / "Oppenheimer"
-    d.mkdir(parents=True, exist_ok=True)
-    obj = {**obj, "candidate_id": cand}
+    hid = _seed_l4_prerequisites(proj, cand)
+    obj = {
+        "schema_version": "2.0",
+        **obj,
+        "hypothesis_decisions": [{
+            "hypothesis_id": hid, "disposition": "ARCHIVE", "reason": "weak",
+        }],
+    }
     f = proj / f"l10b_{cand}.json"
     f.write_text(json.dumps(obj), encoding="utf-8")
     return _run("emit-delta", str(proj), cand, "--node", "L10b", "--persona", "Oppenheimer", "--file", str(f))
@@ -286,7 +394,9 @@ def test_l4_method_gate_fails_without_fulltext_method_card(tmp_path):
     cand = _new_from_memory(proj, seed)
     r2 = _emit_l4(proj, cand, [{"name": "afm.py", "purpose": "measure stiffness", "status": "planned",
                                 "grounded_in_method_card_ids": ["nonexistent"]}])
-    assert r2.returncode != 0 and "only committed delta v2" in (r2.stderr + r2.stdout)
+    assert r2.returncode != 0
+    assert "full_text method_card" in (r2.stderr + r2.stdout)
+    assert _finalization_count(cand, "L4") == 0
 
 
 def test_l4_method_gate_allows_internally_motivated(tmp_path):
@@ -294,7 +404,8 @@ def test_l4_method_gate_allows_internally_motivated(tmp_path):
     seed = _write_seed(proj)
     cand = _new_from_memory(proj, seed)
     r2 = _emit_l4(proj, cand, [{"name": "bh_fdr.py", "purpose": "correction", "status": "internally_motivated"}])
-    assert r2.returncode != 0 and "only committed delta v2" in (r2.stderr + r2.stdout)
+    assert r2.returncode == 0, r2.stderr
+    _assert_finalized(proj, cand, "L4", "Fisher")
 
 
 def test_l4_method_gate_accepts_real_fulltext_card(tmp_path):
@@ -307,7 +418,8 @@ def test_l4_method_gate_accepts_real_fulltext_card(tmp_path):
         "applicability": "direct", "extracted_from": "full_text", "full_text_fetched": True})
     r2 = _emit_l4(proj, cand, [{"name": "afm.py", "purpose": "stiffness", "status": "planned",
                                 "grounded_in_method_card_ids": [mc]}])
-    assert r2.returncode != 0 and "only committed delta v2" in (r2.stderr + r2.stdout)
+    assert r2.returncode == 0, r2.stderr
+    _assert_finalized(proj, cand, "L4", "Fisher")
 
 
 # --- Task 7 -----------------------------------------------------------------
@@ -318,7 +430,9 @@ def test_l6_gate_fails_ungrounded_script(tmp_path):
     cand = _new_from_memory(proj, seed)
     r2 = _emit_l6(proj, cand, [{"name": "x.py", "purpose": "p", "branch_id": "b1",
                                 "data_modality": "dm", "grounding": {}}])
-    assert r2.returncode != 0 and "only committed delta v2" in (r2.stderr + r2.stdout)
+    assert r2.returncode != 0
+    assert "grounding.type" in (r2.stderr + r2.stdout)
+    assert _finalization_count(cand, "L6") == 0
 
 
 def test_l6_gate_accepts_internal_critique_with_ref(tmp_path):
@@ -326,7 +440,8 @@ def test_l6_gate_accepts_internal_critique_with_ref(tmp_path):
     seed = _write_seed(proj)
     cand = _new_from_memory(proj, seed)
     r2 = _emit_l6_ok(proj, cand)
-    assert r2.returncode != 0 and "only committed delta v2" in (r2.stderr + r2.stdout)
+    assert r2.returncode == 0, r2.stderr
+    _assert_finalized(proj, cand, "L6", "Oppenheimer")
 
 
 # --- Task 8 -----------------------------------------------------------------
@@ -335,32 +450,61 @@ def test_l7_manifest_gate_requires_branch_and_l6_map(tmp_path):
     proj = _new_project(tmp_path)
     seed = _write_seed(proj)
     cand = _new_from_memory(proj, seed)
-    _emit_l6_ok(proj, cand)
-    d = proj / "02_Agent_Notes" / "Turing"
-    d.mkdir(parents=True, exist_ok=True)
-    bad = {"scripts_run": [{"name": "bh.py", "exit_code": 0, "output_files": ["o.json"]}],
-           "key_results": {}, "warnings": [], "failures": [], "candidate_id": cand}
+    l6 = _emit_l6_ok(proj, cand)
+    assert l6.returncode == 0, l6.stderr
+    hid = _hypothesis_id(proj, cand)
+    bad = {
+        "schema_version": "2.0",
+        "results": [{
+            "result_key": "r1", "hypothesis_ids": [hid], "summary": "result",
+            "artifact_refs": [{"path": "04_Analysis_Outputs/o.json",
+                               "sha256": "a" * 64}],
+        }],
+        "scripts_run": [{"name": "bh.py", "exit_code": 0, "output_files": ["o.json"]}],
+        "warnings": [], "failures": [],
+    }
     f = proj / "l7bad.json"
     f.write_text(json.dumps(bad), encoding="utf-8")
     r2 = _run("emit-delta", str(proj), cand, "--node", "L7", "--persona", "Turing", "--file", str(f))
-    assert r2.returncode != 0 and "only committed delta v2" in (r2.stderr + r2.stdout)
+    assert r2.returncode != 0
+    assert "missing branch_id" in (r2.stderr + r2.stdout)
+    assert _finalization_count(cand, "L7") == 0
 
 
 def test_l7_manifest_written_on_valid(tmp_path):
     proj = _new_project(tmp_path)
     seed = _write_seed(proj)
     cand = _new_from_memory(proj, seed)
-    _emit_l6_ok(proj, cand)
-    d = proj / "02_Agent_Notes" / "Turing"
-    d.mkdir(parents=True, exist_ok=True)
-    good = {"scripts_run": [{"name": "bh.py", "exit_code": 0, "output_files": ["o.json"],
+    l6 = _emit_l6_ok(proj, cand)
+    assert l6.returncode == 0, l6.stderr
+    hid = _hypothesis_id(proj, cand)
+    good = {
+        "schema_version": "2.0",
+        "results": [{
+            "result_key": "r1", "hypothesis_ids": [hid], "summary": "result",
+            "artifact_refs": [{"path": "04_Analysis_Outputs/o.json",
+                               "sha256": "a" * 64}],
+        }],
+        "scripts_run": [{"name": "bh.py", "exit_code": 0, "output_files": ["o.json"],
             "branch_id": "b1", "method_card_ids": [], "grounded_by": "bh.py",
             "input_hashes": ["h1"], "output_hashes": ["h2"]}],
-            "key_results": {}, "warnings": [], "failures": [], "candidate_id": cand}
+        "warnings": [], "failures": [],
+    }
     f = proj / "l7ok.json"
     f.write_text(json.dumps(good), encoding="utf-8")
     r2 = _run("emit-delta", str(proj), cand, "--node", "L7", "--persona", "Turing", "--file", str(f))
-    assert r2.returncode != 0 and "only committed delta v2" in (r2.stderr + r2.stdout)
+    assert r2.returncode == 0, r2.stderr
+    _assert_finalized(proj, cand, "L7", "Turing")
+    manifest = json.loads(
+        (proj / "04_Analysis_Outputs" / "_exec_manifest" / f"{cand}_L7.json")
+        .read_text(encoding="utf-8")
+    )
+    assert manifest["candidate_id"] == cand
+    assert manifest["scripts"] == [{
+        "name": "bh.py", "branch_id": "b1", "method_card_ids": [],
+        "grounded_by": "bh.py", "input_hashes": ["h1"],
+        "output_hashes": ["h2"], "output_files": ["o.json"],
+    }]
 
 
 # --- Task 9 -----------------------------------------------------------------
@@ -371,7 +515,9 @@ def test_l10b_gate_requires_literature_changed_direction(tmp_path):
     cand = _new_from_memory(proj, seed)
     r2 = _emit_l10b(proj, cand, {"decision": "DOWNGRADE", "evidence_level": "weak",
         "reason": "r", "next_steps": [], "next_round_hypothesis": "H"})
-    assert r2.returncode != 0 and "only committed delta v2" in (r2.stderr + r2.stdout)
+    assert r2.returncode != 0
+    assert "literature_changed_direction" in (r2.stderr + r2.stdout)
+    assert _finalization_count(cand, "L10b") == 0
 
 
 def test_l10b_gate_accepts_full_traceability(tmp_path):
@@ -382,16 +528,19 @@ def test_l10b_gate_accepts_full_traceability(tmp_path):
         "next_steps": [], "next_round_hypothesis": "H", "literature_changed_direction": False,
         "decision_grounding": {"paper_card_ids": [], "method_card_ids": [], "branch_ids": ["b1"]},
         "evidence_kept": [], "evidence_dropped": []})
-    assert r2.returncode != 0 and "only committed delta v2" in (r2.stderr + r2.stdout)
+    assert r2.returncode == 0, r2.stderr
+    _assert_finalized(proj, cand, "L10b", "Oppenheimer")
 
 
 # --- Task 10 ----------------------------------------------------------------
 
-def test_branch_gate_requires_prior_unexplored_statused(tmp_path):
+def test_branch_gate_noop_when_no_prior_branches(tmp_path):
     proj = _new_project(tmp_path)
     seed = _write_seed(proj)
     cand = _new_from_memory(proj, seed)
     rl = _rl_module()
+    # A divergent continuation with no recorded unexplored branches has no
+    # branch-status obligation; status entries added later remain harmless.
     ok, reason = rl._audit_branch_coverage(str(proj), cand)
     assert ok is True, reason
     _run("branch-status", str(proj), cand, "--branch", "b_atrial", "--status", "ignored",
@@ -434,7 +583,14 @@ def test_legacy_delta_without_new_fields_is_blocked_after_cutover(tmp_path):
     proj = _new_project(tmp_path)
     r = _run("new-candidate", str(proj), "--title", "T", "--question", "Q", "--claim", "C", "--input", "in")
     cand = r.stdout.strip().splitlines()[0]
-    r2 = _emit_l6(proj, cand, ["s1.py", "s2.py"])
+    legacy = {"approved_strategy": "s1", "modifications": [], "reason": "r",
+              "analysis_plan": {"scripts": ["s1.py", "s2.py"], "parameters": {},
+                                "outputs": ["o.json"]},
+              "candidate_id": cand}
+    f = proj / f"legacy_l6_{cand}.json"
+    f.write_text(json.dumps(legacy), encoding="utf-8")
+    r2 = _run("emit-delta", str(proj), cand, "--node", "L6",
+              "--persona", "Oppenheimer", "--file", str(f))
     assert r2.returncode != 0
     assert "only committed delta v2" in (r2.stderr + r2.stdout)
     # legacy (non-from_memory) candidate: memory gate must no-op even with no prior_loop_memory
