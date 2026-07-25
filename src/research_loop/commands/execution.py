@@ -101,7 +101,6 @@ def _approved_execution_scripts(project_dir, cand_id):
         names = []
     roots = [
         Path(project_dir) / "04_Analysis_Outputs",
-        Path(project_dir) / "scripts_v05b",
         Path(project_dir) / "02_Agent_Notes" / "Turing",
     ]
     resolved, missing = [], []
