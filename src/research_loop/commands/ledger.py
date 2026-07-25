@@ -150,6 +150,11 @@ def _emit_delta_v2(args, data):
             result.delta_hash, artifact_sha256=actual,
             receipt_sha256=_sha256(receipt_path),
         )
+        if args.node == "L7":
+            try:
+                _write_exec_manifest(project_dir, args.cand_id, data)
+            except Exception:
+                pass
     except LedgerError as exc:
         print(f"DELTA V2 VALIDATION: REJECT\n  {exc}", file=sys.stderr)
         return 1
