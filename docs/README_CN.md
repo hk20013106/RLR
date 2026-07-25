@@ -12,7 +12,7 @@ RLR（Research Loop Room）是一个**证据门禁的科学研究审查框架**�
 
 一句话：**用多角色对抗 + 文献证据包 + 执行门禁，把“AI 做研究”从自由发挥变成有约束、可审计的审查流程。**
 
-**当前版本：V0.7**（canonical gated runtime）
+**当前版本：V0.8**（modular architecture）
 
 > 根目录中文入口：[README_CN.md](../README_CN.md)。本页是中文完整说明；英文入口在仓库根目录 `README.md`。
 
@@ -20,7 +20,15 @@ RLR（Research Loop Room）是一个**证据门禁的科学研究审查框架**�
 
 ## 版本历史
 
-### V0.7 — 当前（canonical gated runtime）
+### V0.8 — 当前（modular architecture）
+
+- **Engine 模块化拆分**：`engine.py` 从 4768 行减少到 477 行。所有 42 个 `cmd_*` 处理函数提取到 `src/research_loop/commands/` 下的 8 个独立命令模块：continuation、execution、ledger、lifecycle、pitfall、ranking、reporting、research。`cli.py` 现在拥有 `build_parser` 和 `main`。所有向后兼容的 import 通过 inward shim 保留。
+- **假说账本读取边界正确性**：finalized emission predicate（`FINALIZED_EMISSION_PREDICATE`）应用于 `ranking_inputs`、`materialize_authorized_context`、`verify` 和 `snapshot_candidate`。crash window 产生的 orphan emission 对 consumptive reads 不可见，且被 `verify` 报告。
+- **V2 门禁集成**：L4/L6/L7/L10b traceability gates 已接入 v2 emission path（`_emit_delta_v2`），与 v1 path 行为一致。
+- **V2 schema 兼容**：gate 函数（`gates.py`）和报告渲染（`delta_render.py`）同时支持 dict（v1）和 list（v2）`analysis_plan` 格式。
+- **测试覆盖恢复**：native-v2 gate tests 现在通过 production CLI 到达真实 gates，而非被 v1 guard 拦截。
+
+### V0.7 — canonical gated runtime
 - **可验证 Deep Research 证据链**：Codex 显式调用 `$academic-research-suite`；Claude 显式调用已配置的 `academic-research-skills` plugin。L1 必须保存 Results/Discussion/Conclusion，L4 必须保存 Methods 与 review-search 回执，L8.5 必须保存论文验证结果；L10 注入定位摘录，L10b 必须引用 evidence ID。
 - **L0 严格输入契约**：`normalize-l0-input` 将请求文件和显式数据位置规范化为可验证、可审计的 L0 contract；不从自然语言猜测路径、ID、决策或结论。
 - **假说排序可靠性层（shadow mode）**：对显式候选集合执行 A/B 与 B/A 的公平 pairwise 判断；顺序翻转标记为 `UNCERTAIN`，并将排序、checkpoint、evidence event、正式决策分歧和失败审计隔离写入 `08_Audit/ranking/`。它绝不改变正式 gate、候选选择或 decision。
@@ -29,7 +37,7 @@ RLR（Research Loop Room）是一个**证据门禁的科学研究审查框架**�
 
 ---
 
-## 架构（V0.7）
+## 架构（V0.8）
 
 ### DAG 流水线（15 个节点）
 

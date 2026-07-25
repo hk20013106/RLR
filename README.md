@@ -10,9 +10,9 @@ L1, L4, and L8.5 run a verifiable Academic Research Skills (ARS) pass before the
 
 > **Core principle:** cognitive agents are isolated by information invisibility (Path B). The execution agent (Turing) is isolated by a controlled workspace + command allowlist (Path A). We do not pretend `spawn_agent` is an OS sandbox.
 
-**Current version: V0.7** (canonical gated runtime)
+**Current version: V0.8** (modular architecture)
 
-**Canonical runtime path:** `python run_loop.py run PROJECT CAND` drives the V0.7
+**Canonical runtime path:** `python run_loop.py run PROJECT CAND` drives the V0.8
 engine (`research_loop_v04.py`, filename retained for import stability). As of
 V0.7, `assemble-context` **enforces the deep-research gate** on the literature
 deep-research stages **L1, L4, and L8.5**: they **fail closed (rc=3)** unless a
@@ -51,7 +51,15 @@ run with an actionable error instead of being silently skipped.
 
 ## Version history
 
-### V0.7 — CURRENT (canonical gated runtime)
+### V0.8 — CURRENT (modular architecture)
+
+- **Engine modular extraction.** `engine.py` reduced from 4768 lines to 477 lines. All 42 `cmd_*` handlers extracted into 8 dedicated command modules under `src/research_loop/commands/`: continuation, execution, ledger, lifecycle, pitfall, ranking, reporting, research. `cli.py` now owns `build_parser` and `main`. All backward-compatible imports preserved via inward shims.
+- **Hypothesis ledger read-boundary correctness.** Finalized emission predicate (`FINALIZED_EMISSION_PREDICATE`) applied to `ranking_inputs`, `materialize_authorized_context`, `verify`, and `snapshot_candidate`. Orphan emissions (from crashes between `commit_delta` and `finalize_emission`) are now invisible to consumptive reads and flagged by `verify`.
+- **V2 gate integration.** L4/L6/L7/L10b traceability gates are now wired into the v2 emission path (`_emit_delta_v2`), matching the v1 path behavior.
+- **V2 schema compatibility.** Gate functions (`gates.py`) and report rendering (`delta_render.py`) handle both dict (v1) and list (v2) `analysis_plan` shapes.
+- **Test coverage restored.** Native-v2 gate tests now reach real gates via production CLI instead of hitting the v1 guard.
+
+### V0.7 — canonical gated runtime
 
 - **Added verifiable Deep Research evidence packs.** Codex explicitly invokes `$academic-research-suite`; Claude invokes the configured `academic-research-skills` plugin. L1 requires Results/Discussion/Conclusion, L4 requires Methods plus a review-search receipt, and L8.5 requires paper-based result verification. L10 receives located extracts and L10b cites evidence IDs.
 - **Added strict L0 intake.** `normalize-l0-input` builds a validated, auditable contract from a request file and explicit data location without guessing paths, IDs, decisions, or conclusions.
