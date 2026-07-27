@@ -12,6 +12,15 @@ from pathlib import Path
 from research_loop.paths import _sha256
 
 
+def artifact_key_for(node: str, persona: str, *, profile_id: str | None = None) -> str:
+    """Resolve stable artifact keys independently of profile display persona."""
+    # L8_curie is a durable artifact identifier, not an authority statement.
+    # Native v2.1 displays Tukey while preserving this key for all readers.
+    if node == "L8":
+        return "L8_curie"
+    return f"{node}_{persona.lower()}"
+
+
 def _v2_candidate_delta_file(project_dir, delta_key, cand_id):
     """Return the non-overwriting v2 delta artifact path."""
     legacy = _delta_file(project_dir, delta_key)

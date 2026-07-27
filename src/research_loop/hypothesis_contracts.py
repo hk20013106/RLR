@@ -7,7 +7,8 @@ from typing import Any
 import jsonschema
 
 
-DELTA_SCHEMA_VERSION = "2.0"
+DELTA_SCHEMA_VERSION = "2.0"  # Legacy public compatibility alias.
+SUPPORTED_DELTA_SCHEMA_VERSIONS = ("2.0", "2.1")
 EPISTEMIC_STATUSES = {
     "UNASSESSED", "INSUFFICIENT_EVIDENCE", "PROVISIONALLY_SUPPORTED",
     "CONTRADICTED", "FALSIFIED",
@@ -37,13 +38,13 @@ def _target_ids():
     return {"type": "array", "minItems": 1, "uniqueItems": True, "items": _ID}
 
 
-def _base():
-    return {"schema_version": {"const": DELTA_SCHEMA_VERSION},
+def _base(schema_version: str):
+    return {"schema_version": {"const": schema_version},
             "candidate_id": _ID}
 
 
-def _node_schema(node: str) -> dict[str, Any]:
-    props = _base()
+def _node_schema(node: str, schema_version: str = DELTA_SCHEMA_VERSION) -> dict[str, Any]:
+    props = _base(schema_version)
     required = ["schema_version"]
     if node == "L1":
         hypothesis = _object({
@@ -208,20 +209,65 @@ def _node_schema(node: str) -> dict[str, Any]:
             "additionalProperties": True}
 
 
-NODE_SCHEMAS = {node: _node_schema(node) for node in (
+_LEDGER_NODES = (
     "L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L8.5",
     "L9a", "L9b", "L10a", "L10b",
-)}
+)
+NODE_SCHEMAS = {node: _node_schema(node, "2.0") for node in _LEDGER_NODES}
+_V21_NODE_SCHEMAS = {node: _node_schema(node, "2.1") for node in _LEDGER_NODES}
+_V21_NODE_SCHEMAS["L1"]["properties"]["hypotheses"].update({"minItems": 3, "maxItems": 12})
+# 2.1 is intentionally additive: historic 2.0 payloads retain their exact
+# contract while native projects get the auditable fields required by v0.9.
+_V21_NODE_SCHEMAS["L2"]["properties"]["verdicts"]["items"]["properties"].update({
+    "outcome": {"enum": ["SURVIVES", "REVISE", "REJECT", "NOT_APPLICABLE"]},
+    "not_applicable_reason": _STR,
+    "not_applicable_evidence": _REF,
+})
+_V21_NODE_SCHEMAS["L2"]["properties"]["verdicts"]["items"]["allOf"] = [{
+    "if": {
+        "properties": {"outcome": {"const": "NOT_APPLICABLE"}},
+        "required": ["outcome"],
+    },
+    "then": {"required": ["not_applicable_reason", "not_applicable_evidence"]},
+}]
+_criterion = _object({"verdict": {"enum": ["PASS", "FAIL", "UNCERTAIN"]},
+                      "evidence": _STR}, ["verdict", "evidence"])
+_V21_NODE_SCHEMAS["L3"]["properties"]["triage"]["items"]["properties"].update({
+    "reason_code": {"enum": ["TESTABLE", "NOVEL", "FEASIBLE", "IMPACTFUL", "INSUFFICIENT_EVIDENCE", "NOT_FEASIBLE", "LOW_IMPACT", "REDUNDANT"]},
+    "assessments": _object({
+        "testability": _criterion, "novelty": _criterion,
+        "feasibility": _criterion, "impact": _criterion,
+    }, ["testability", "novelty", "feasibility", "impact"]),
+})
+_V21_NODE_SCHEMAS["L3"]["properties"]["triage"]["items"]["required"].append("assessments")
+_V21_NODE_SCHEMAS["L5"]["properties"]["attacks"]["items"]["properties"].update({
+    "attack_id": _ID, "resolution": _STR,
+})
+_V21_NODE_SCHEMAS["L5"]["properties"]["attacks"]["items"]["required"].append("attack_id")
+_V21_NODE_SCHEMAS["L6"]["properties"]["analysis_plan"].update({"maxItems": 4})
+_attack_resolution = _object({
+    "attack_id": _ID,
+    "verdict": {"enum": ["RESOLVED", "UNRESOLVED"]},
+    "evidence": _STR,
+}, ["attack_id", "verdict", "evidence"])
+_V21_NODE_SCHEMAS["L6"]["properties"]["analysis_plan"]["items"]["properties"].update({
+    "feasibility_assessment": _criterion,
+    "attack_resolutions": {
+        "type": "array", "items": _attack_resolution, "uniqueItems": True,
+    },
+})
+_V21_NODE_SCHEMAS["L6"]["properties"]["analysis_plan"]["items"]["required"].append("feasibility_assessment")
+SCHEMA_REGISTRY = {"2.0": NODE_SCHEMAS, "2.1": _V21_NODE_SCHEMAS}
 
 
-def _persisted_schema(node: str) -> dict[str, Any]:
+def _persisted_schema(node: str, schema_version: str) -> dict[str, Any]:
     """Return the engine-normalized artifact contract for a node.
 
     Submission contracts deliberately omit ledger-owned identity fields.  The
     persisted contract retains all submission fields and permits only the
     explicit identities assigned during normalization.
     """
-    schema = copy.deepcopy(NODE_SCHEMAS[node])
+    schema = copy.deepcopy(SCHEMA_REGISTRY[schema_version][node])
     schema["properties"]["project_id"] = _ID
     schema["required"].extend(["candidate_id", "project_id"])
     if node == "L1":
@@ -242,13 +288,20 @@ def _persisted_schema(node: str) -> dict[str, Any]:
     return schema
 
 
-PERSISTED_NODE_SCHEMAS = {node: _persisted_schema(node) for node in NODE_SCHEMAS}
+PERSISTED_SCHEMA_REGISTRY = {
+    version: {node: _persisted_schema(node, version) for node in schemas}
+    for version, schemas in SCHEMA_REGISTRY.items()
+}
+PERSISTED_NODE_SCHEMAS = PERSISTED_SCHEMA_REGISTRY["2.0"]
 
 
-def validate_submission(node: str, delta: dict[str, Any]) -> list[str]:
-    if node not in NODE_SCHEMAS:
+def validate_submission(node: str, delta: dict[str, Any], *, schema_version: str) -> list[str]:
+    schemas = SCHEMA_REGISTRY.get(schema_version)
+    if schemas is None:
+        return [f"unsupported ledger schema version: {schema_version}"]
+    if node not in schemas:
         return [f"unknown ledger node: {node}"]
-    errors = sorted(jsonschema.Draft202012Validator(NODE_SCHEMAS[node]).iter_errors(delta),
+    errors = sorted(jsonschema.Draft202012Validator(schemas[node]).iter_errors(delta),
                     key=lambda error: list(error.absolute_path))
     rendered = []
     for error in errors:
@@ -257,11 +310,14 @@ def validate_submission(node: str, delta: dict[str, Any]) -> list[str]:
     return rendered
 
 
-def validate_persisted(node: str, delta: dict[str, Any]) -> list[str]:
-    if node not in PERSISTED_NODE_SCHEMAS:
+def validate_persisted(node: str, delta: dict[str, Any], *, schema_version: str) -> list[str]:
+    schemas = PERSISTED_SCHEMA_REGISTRY.get(schema_version)
+    if schemas is None:
+        return [f"unsupported ledger schema version: {schema_version}"]
+    if node not in schemas:
         return [f"unknown ledger node: {node}"]
     errors = sorted(
-        jsonschema.Draft202012Validator(PERSISTED_NODE_SCHEMAS[node]).iter_errors(delta),
+        jsonschema.Draft202012Validator(schemas[node]).iter_errors(delta),
         key=lambda error: list(error.absolute_path),
     )
     rendered = []
@@ -269,3 +325,13 @@ def validate_persisted(node: str, delta: dict[str, Any]) -> list[str]:
         where = "/".join(str(part) for part in error.absolute_path) or "<root>"
         rendered.append(f"{where}: {error.message}")
     return rendered
+
+
+def validate_submission_legacy(node: str, delta: dict[str, Any]) -> list[str]:
+    """Compatibility entry point for callers that intentionally read 2.0."""
+    return validate_submission(node, delta, schema_version="2.0")
+
+
+def validate_persisted_legacy(node: str, delta: dict[str, Any]) -> list[str]:
+    """Compatibility entry point for callers that intentionally read 2.0."""
+    return validate_persisted(node, delta, schema_version="2.0")

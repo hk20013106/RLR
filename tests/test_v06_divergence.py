@@ -14,6 +14,7 @@ from native_v2_helpers import (
     commit_finalized,
     seed_revise_continuation,
 )
+from research_loop.hypothesis_ledger import HypothesisLedger
 from research_loop.yamlio import _load_yaml_front
 
 RL = str(Path(__file__).resolve().parent.parent / "research_loop_v04.py")
@@ -99,6 +100,16 @@ def _round_id(proj, cand):
 
 def _hypothesis_id(proj, cand):
     with sqlite3.connect(os.environ["RLR_HYPOTHESIS_STORE"]) as conn:
+        primary = conn.execute(
+            "SELECT e.hypothesis_id FROM events e JOIN emissions m "
+            "ON m.commit_seq=e.commit_seq JOIN committed_emissions c "
+            "ON c.delta_hash=m.delta_hash WHERE e.candidate_id=? "
+            "AND e.round_id=? AND e.node='L1' AND "
+            "json_extract(e.payload_json,'$.primary')=1 LIMIT 1",
+            (cand, _round_id(proj, cand)),
+        ).fetchone()
+        if primary:
+            return str(primary[0])
         rows = conn.execute(
             "SELECT hypothesis_id FROM occurrences "
             "WHERE candidate_id=? AND round_id=?",
@@ -108,14 +119,101 @@ def _hypothesis_id(proj, cand):
     return str(rows[0][0])
 
 
+def _hypothesis_ids(proj, cand):
+    with sqlite3.connect(os.environ["RLR_HYPOTHESIS_STORE"]) as conn:
+        rows = conn.execute(
+            "SELECT hypothesis_id FROM occurrences "
+            "WHERE candidate_id=? AND round_id=? ORDER BY hypothesis_id",
+            (cand, _round_id(proj, cand)),
+        ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+def _schema_version(proj):
+    ledger = HypothesisLedger(os.environ["RLR_HYPOTHESIS_STORE"])
+    return "2.1" if ledger.project_profile(proj) == "v2.1" else "2.0"
+
+
 def _seed_l4_prerequisites(proj, cand):
     hid = _hypothesis_id(proj, cand)
+    schema_version = _schema_version(proj)
+    if schema_version == "2.1":
+        with sqlite3.connect(os.environ["RLR_HYPOTHESIS_STORE"]) as conn:
+            version = conn.execute(
+                "SELECT statement,operationalization,falsification_criteria_json "
+                "FROM versions WHERE hypothesis_id=?", (hid,),
+            ).fetchone()
+        l1 = commit_finalized(proj, cand, "L1", "Einstein", {
+            "schema_version": "2.1",
+            "hypotheses": [
+                {
+                    "proposal_key": "p1",
+                    "statement": version[0],
+                    "operationalization": version[1],
+                    "falsification_criteria": json.loads(version[2]),
+                    "rationale": "continued hypothesis",
+                },
+                {
+                    "proposal_key": "p2",
+                    "statement": f"{version[0]} alternative A",
+                    "operationalization": "measure alternative A",
+                    "falsification_criteria": ["alternative A absent"],
+                    "rationale": "fixture alternative",
+                },
+                {
+                    "proposal_key": "p3",
+                    "statement": f"{version[0]} alternative B",
+                    "operationalization": "measure alternative B",
+                    "falsification_criteria": ["alternative B absent"],
+                    "rationale": "fixture alternative",
+                },
+            ],
+            "primary_proposal_key": "p1",
+            "key_uncertainty": "fixture",
+        }, round_id=_round_id(proj, cand))
+        ids = [
+            item["hypothesis_id"] for item in l1.normalized_delta["hypotheses"]
+        ]
+    else:
+        ids = [hid]
+    if schema_version == "2.1":
+        commit_finalized(proj, cand, "L2", "Feynman", {
+            "schema_version": "2.1", "attacks": [{
+                "hypothesis_id": hid, "severity": "high",
+                "text": "no multiple-testing correction",
+            }], "confounders": [],
+            "diagnostic_tests": [], "verdicts": [{
+                "hypothesis_id": hypothesis_id,
+                "outcome": "SURVIVES" if hypothesis_id == hid else "REJECT",
+                "reason": "fixture verdict",
+            } for hypothesis_id in ids],
+        }, round_id=_round_id(proj, cand))
+    triage = []
+    for hypothesis_id in ids:
+        selected = hypothesis_id == hid
+        item = {
+            "hypothesis_id": hypothesis_id,
+            "disposition": "SELECTED" if selected else "REJECTED",
+            "reason_code": (
+                "TESTABLE" if selected and schema_version == "2.1"
+                else "LOW_IMPACT" if schema_version == "2.1" else "TEST"
+            ),
+            "reason": "testable" if selected else "fixture alternative",
+        }
+        if schema_version == "2.1":
+            item["assessments"] = {
+                criterion: {
+                    "verdict": "PASS" if selected else "FAIL",
+                    "evidence": "fixture",
+                }
+                for criterion in (
+                    "testability", "novelty", "feasibility", "impact"
+                )
+            }
+        triage.append(item)
     commit_finalized(proj, cand, "L3", "Oppenheimer", {
-        "schema_version": "2.0",
-        "triage": [{
-            "hypothesis_id": hid, "disposition": "SELECTED",
-            "reason_code": "TEST", "reason": "testable",
-        }],
+        "schema_version": schema_version,
+        "triage": triage,
         "route_to": "Fisher",
     }, round_id=_round_id(proj, cand))
     return hid
@@ -124,7 +222,7 @@ def _seed_l4_prerequisites(proj, cand):
 def _emit_l4(proj, cand, scripts):
     hid = _seed_l4_prerequisites(proj, cand)
     obj = {
-        "schema_version": "2.0",
+        "schema_version": _schema_version(proj),
         "strategies": [{
             "strategy_id": "S1", "hypothesis_ids": [hid], "name": "n",
             "steps": ["run analysis"], "scripts_needed": scripts,
@@ -138,18 +236,36 @@ def _emit_l4(proj, cand, scripts):
 
 def _emit_l6(proj, cand, scripts):
     hid = _seed_l4_prerequisites(proj, cand)
+    schema_version = _schema_version(proj)
     commit_finalized(proj, cand, "L4", "Fisher", {
-        "schema_version": "2.0",
+        "schema_version": schema_version,
         "strategies": [{
             "strategy_id": "S1", "hypothesis_ids": [hid], "name": "method",
             "steps": ["run analysis"],
         }],
     }, round_id=_round_id(proj, cand))
+    if schema_version == "2.1":
+        commit_finalized(proj, cand, "L5", "Tukey", {
+            "schema_version": "2.1",
+            "attacks": [{"attack_id": "A1", "strategy_id": "S1", "hypothesis_ids": [hid],
+                         "severity": "HIGH", "text": "fixture"}],
+            "qc_checkpoints": [{"strategy_id": "S1", "hypothesis_ids": [hid],
+                                "name": "QC", "criterion": "pass"}],
+            "failure_stop_rules": [{"strategy_id": "S1", "hypothesis_ids": [hid],
+                                    "name": "Stop", "condition": "failure", "reason": "fixture"}],
+        }, round_id=_round_id(proj, cand))
     obj = {
-        "schema_version": "2.0",
+        "schema_version": schema_version,
         "analysis_plan": [{
             "strategy_id": "S1", "hypothesis_ids": [hid], "scripts": scripts,
             "parameters": {}, "outputs": ["o.json"],
+            **({
+                "feasibility_assessment": {
+                    "verdict": "PASS", "evidence": "fixture"
+                },
+                "attack_resolutions": [{"attack_id": "A1", "verdict": "RESOLVED",
+                                        "evidence": "fixture"}],
+            } if schema_version == "2.1" else {}),
         }],
         "method_decision": "APPROVE",
         "reason": "r",
@@ -161,23 +277,26 @@ def _emit_l6(proj, cand, scripts):
 
 def _emit_l6_ok(proj, cand):
     hid = _seed_l4_prerequisites(proj, cand)
-    commit_finalized(proj, cand, "L2", "Feynman", {
-        "schema_version": "2.0",
-        "attacks": [{"hypothesis_id": hid, "severity": "high",
-                     "text": "no multiple-testing correction"}],
-        "confounders": [], "diagnostic_tests": [],
-        "verdicts": [{"hypothesis_id": hid, "outcome": "SURVIVES",
-                      "reason": "correctable"}],
-    }, round_id=_round_id(proj, cand))
+    schema_version = _schema_version(proj)
     commit_finalized(proj, cand, "L4", "Fisher", {
-        "schema_version": "2.0",
+        "schema_version": schema_version,
         "strategies": [{
             "strategy_id": "S1", "hypothesis_ids": [hid], "name": "method",
             "steps": ["run analysis"],
         }],
     }, round_id=_round_id(proj, cand))
+    if schema_version == "2.1":
+        commit_finalized(proj, cand, "L5", "Tukey", {
+            "schema_version": "2.1",
+            "attacks": [{"attack_id": "A1", "strategy_id": "S1", "hypothesis_ids": [hid],
+                         "severity": "HIGH", "text": "fixture"}],
+            "qc_checkpoints": [{"strategy_id": "S1", "hypothesis_ids": [hid],
+                                "name": "QC", "criterion": "pass"}],
+            "failure_stop_rules": [{"strategy_id": "S1", "hypothesis_ids": [hid],
+                                    "name": "Stop", "condition": "failure", "reason": "fixture"}],
+        }, round_id=_round_id(proj, cand))
     obj = {
-        "schema_version": "2.0",
+        "schema_version": schema_version,
         "analysis_plan": [{
             "strategy_id": "S1", "hypothesis_ids": [hid],
             "scripts": [{"name": "bh.py", "purpose": "correction", "branch_id": "b1",
@@ -186,6 +305,13 @@ def _emit_l6_ok(proj, cand):
                              "critique_delta_ref": "L2_feynman#0",
                          }}],
             "parameters": {}, "outputs": ["o.json"],
+            **({
+                "feasibility_assessment": {
+                    "verdict": "PASS", "evidence": "fixture"
+                },
+                "attack_resolutions": [{"attack_id": "A1", "verdict": "RESOLVED",
+                                        "evidence": "fixture"}],
+            } if schema_version == "2.1" else {}),
         }],
         "method_decision": "APPROVE",
         "reason": "ready",
@@ -199,7 +325,7 @@ def _emit_l6_ok(proj, cand):
 def _emit_l10b(proj, cand, obj):
     hid = _seed_l4_prerequisites(proj, cand)
     obj = {
-        "schema_version": "2.0",
+        "schema_version": _schema_version(proj),
         **obj,
         "hypothesis_decisions": [{
             "hypothesis_id": hid, "disposition": "ARCHIVE", "reason": "weak",
@@ -479,7 +605,7 @@ def test_l7_manifest_written_on_valid(tmp_path):
     assert l6.returncode == 0, l6.stderr
     hid = _hypothesis_id(proj, cand)
     good = {
-        "schema_version": "2.0",
+        "schema_version": _schema_version(proj),
         "results": [{
             "result_key": "r1", "hypothesis_ids": [hid], "summary": "result",
             "artifact_refs": [{"path": "04_Analysis_Outputs/o.json",

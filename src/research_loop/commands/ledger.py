@@ -11,6 +11,7 @@ from research_loop import hypothesis_migration
 from research_loop.common import _append_decision, _now, _set_status, _stamp
 from research_loop.delta import (
     DELTA_PERSONA,
+    artifact_key_for,
     DELTA_SCHEMAS,
     _candidate_delta_file,
     _delta_for_candidate,
@@ -26,7 +27,7 @@ from research_loop.gates import (
     _audit_l6_traceability,
     _audit_l7_manifest,
 )
-from research_loop.hypothesis_contracts import DELTA_SCHEMA_VERSION
+from research_loop.hypothesis_contracts import DELTA_SCHEMA_VERSION, SUPPORTED_DELTA_SCHEMA_VERSIONS
 from research_loop.hypothesis_ledger import (
     HypothesisLedger,
     LedgerError,
@@ -85,7 +86,7 @@ def _emit_delta_v2(args, data):
     if not cf.exists():
         print(f"ERROR: no candidate {args.cand_id}", file=sys.stderr)
         return 2
-    delta_key = f"{args.node}_{args.persona.lower()}"
+    delta_key = artifact_key_for(args.node, args.persona)
     if delta_key not in DELTA_PERSONA:
         print(f"ERROR: no schema for {delta_key}", file=sys.stderr)
         return 2
@@ -97,12 +98,10 @@ def _emit_delta_v2(args, data):
         return 2
     out_file.parent.mkdir(parents=True, exist_ok=True)
     try:
-        ledger = _ledger_for(project_dir, getattr(args, "knowledge_store", None))
-        result = ledger.commit_delta(project_dir=project_dir, candidate_id=args.cand_id,
-                                     round_id=round_id, node=args.node,
-                                     persona=args.persona, delta=data,
-                                     delta_path=out_file)
-        # Gate checks (same as v1 path)
+        # Filesystem/provider checks remain at their actual use boundary, but
+        # must complete before the ledger persistence transaction.  Pure
+        # cross-delta rules live in constraint_validation inside that
+        # transaction.
         _errors = []
         if args.node == "L4":
             ok_m, m_reason = _audit_l4_methods(
@@ -133,6 +132,11 @@ def _emit_delta_v2(args, data):
             for e in _errors:
                 print(f"  {e}", file=sys.stderr)
             return 1
+        ledger = _ledger_for(project_dir, getattr(args, "knowledge_store", None))
+        result = ledger.commit_delta(project_dir=project_dir, candidate_id=args.cand_id,
+                                     round_id=round_id, node=args.node,
+                                     persona=args.persona, delta=data,
+                                     delta_path=out_file)
         # The ledger hashes canonical bytes.  Persist exactly those bytes so the
         # runtime resolver can revalidate the artifact instead of trusting text.
         raw = canonical_json(result.normalized_delta)
@@ -159,7 +163,7 @@ def _emit_delta_v2(args, data):
         print(f"DELTA V2 VALIDATION: REJECT\n  {exc}", file=sys.stderr)
         return 1
     print("DELTA V2 VALIDATION: PASS")
-    print(f"  schema: {delta_key}@{DELTA_SCHEMA_VERSION}")
+    print(f"  schema: {delta_key}@{result.normalized_delta['schema_version']}")
     print(f"  written: {out_file}")
     print(f"  hypothesis commit: {receipt_path}")
     return 0
@@ -173,7 +177,7 @@ def cmd_emit_delta(args):
         print(f"ERROR: delta file not found: {src}", file=sys.stderr)
         return 2
 
-    delta_key = f"{args.node}_{args.persona.lower()}"
+    delta_key = artifact_key_for(args.node, args.persona)
     schema = DELTA_SCHEMAS.get(delta_key)
     if schema is None:
         print(f"ERROR: no schema for {delta_key}", file=sys.stderr)
@@ -185,7 +189,7 @@ def cmd_emit_delta(args):
         print(f"ERROR: invalid JSON: {e}", file=sys.stderr)
         return 2
 
-    if data.get("schema_version") == DELTA_SCHEMA_VERSION:
+    if data.get("schema_version") in SUPPORTED_DELTA_SCHEMA_VERSIONS:
         return _emit_delta_v2(args, data)
     if binding_path(project_dir).exists():
         print("ERROR: activated projects accept only committed delta v2 artifacts; "
@@ -561,8 +565,31 @@ def cmd_hypothesis_migrate(args):
             raise LedgerError(
                 "hypothesis-migrate requires an existing shared knowledge store"
             )
-        ledger = _ledger_for(args.project_dir, args.knowledge_store,
-                             require_binding=False)
+        target_profile = getattr(args, "target_profile", None)
+        if target_profile and args.dry_run:
+            ledger = HypothesisLedger.open_readonly(args.knowledge_store)
+        else:
+            ledger = _ledger_for(args.project_dir, args.knowledge_store,
+                                 require_binding=False)
+        if target_profile:
+            if args.dry_run:
+                report = hypothesis_migration.dry_run_profile_upgrade(
+                    args.project_dir, ledger
+                )
+                print(json.dumps(report, ensure_ascii=False))
+                return 0
+            if not args.resolution or not args.resolved_by:
+                raise LedgerError(
+                    "profile migration commit requires --resolution and --resolved-by"
+                )
+            receipt = hypothesis_migration.upgrade_profile(
+                args.project_dir,
+                ledger,
+                resolution_path=args.resolution,
+                resolved_by=args.resolved_by,
+            )
+            print(json.dumps(receipt, ensure_ascii=False))
+            return 0
         if args.dry_run:
             report, path = hypothesis_migration.dry_run(args.project_dir, ledger)
             print(json.dumps({**report, "report_path": str(path)},

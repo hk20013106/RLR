@@ -17,12 +17,13 @@ from research_loop.paths import (
     _candidate_file, _pre_research_file, _sha256,
     _persona_template_path, _layer_template_path, _audit_dir,
 )
-from research_loop.topology import NODE_MAP, DELTA_DAG_ORDER
+from research_loop.topology import DELTA_DAG_ORDER, topology_for_profile
 from research_loop.common import (
     PERSONA_TITLE, _now, _stamp, _input_alias, _everos_scopes_for,
 )
 from research_loop.delta import _delta_for_candidate
-from research_loop.hypothesis_contracts import NODE_SCHEMAS
+from research_loop.compatibility import PROFILE_V20, get_profile
+from research_loop.hypothesis_contracts import SCHEMA_REGISTRY
 from research_loop.hypothesis_ledger import (
     HypothesisLedger, LedgerError, binding_path, canonical_json,
 )
@@ -110,13 +111,13 @@ def _condense_delta(delta_key, data):
                     
     return d
 
-def _generate_contract(node_info, project_dir):
+def _generate_contract(node_info, project_dir, schema_version):
     """Generate compact template contract for cognitive nodes."""
     node_id = node_info["node"]
     persona = node_info["persona"]
     title = node_info.get("title", PERSONA_TITLE.get(persona, ""))
     schema_key = f"{node_id}_{persona.lower()}"
-    schema = NODE_SCHEMAS.get(node_id, {})
+    schema = SCHEMA_REGISTRY[schema_version].get(node_id, {})
     kb = node_info.get("knowledge_base", "none")
     lines = []
     lines.append(f"=== CONTRACT: {node_id} | {persona} | {title} ===")
@@ -162,13 +163,8 @@ def cmd_assemble_context(args):
         return 2
 
     node_id = args.node
-    if node_id not in NODE_MAP:
-        print(f"ERROR: unknown node {node_id}", file=sys.stderr)
-        return 2
-
-    node_info = NODE_MAP[node_id]
-    inputs = node_info["context_inputs"]
-
+    profile_id = PROFILE_V20
+    profile = get_profile(profile_id)
     hypothesis_snapshot = None
     if binding_path(project_dir).exists():
         store = getattr(args, "knowledge_store", None) or os.environ.get(
@@ -180,6 +176,8 @@ def cmd_assemble_context(args):
             return 2
         try:
             ledger = HypothesisLedger(store)
+            profile_id = ledger.project_profile(project_dir)
+            profile = get_profile(profile_id)
             fm_for_round = _load_yaml_front(cf)
             authorization_id = getattr(args, "authorization_id", None)
             if authorization_id:
@@ -200,6 +198,13 @@ def cmd_assemble_context(args):
             print(f"ERROR: hypothesis context authorization failed: {exc}",
                   file=sys.stderr)
             return 2
+
+    _, node_map, _ = topology_for_profile(profile_id)
+    if node_id not in node_map:
+        print(f"ERROR: unknown node {node_id}", file=sys.stderr)
+        return 2
+    node_info = node_map[node_id]
+    inputs = node_info["context_inputs"]
 
     # --- L0 structured input-contract gate (strict-on-reaching-L0) -----------
     # Fail closed BEFORE any context is rendered/printed: an invalid L0 input
@@ -244,6 +249,10 @@ def cmd_assemble_context(args):
     injected = []  # audit: deltas actually embedded {delta_key, sha256, path}
 
     for inp in inputs:
+        # Serial L9b sees L9a exclusively in its immutable authorized ledger
+        # snapshot, never through a second direct artifact injection.
+        if profile_id != PROFILE_V20 and node_id == "L9b" and inp == "L9a":
+            continue
         if inp == "candidate_frontmatter":
             # L0 (input verification) sees the real source_input path; every
             # other cognitive node sees only the path-free alias.
@@ -442,7 +451,9 @@ def cmd_assemble_context(args):
               f"(workspace-fs) nodes; use contract.", file=sys.stderr)
         return 2
 
-    contract_text = "\n".join(_generate_contract(node_info, project_dir))
+    contract_text = "\n".join(_generate_contract(
+        node_info, project_dir, profile.delta_schema_version
+    ))
     contract_hash = hashlib.sha256(contract_text.encode("utf-8")).hexdigest()
     sections.append(contract_text)
     sections.append("")
@@ -504,6 +515,10 @@ def cmd_assemble_context(args):
         "candidate_id": args.cand_id,
         "node": node_id,
         "persona": persona,
+        "profile_id": profile.profile_id,
+        "schema_version": profile.delta_schema_version,
+        "topology_version": profile.topology_version,
+        "persona_catalog_version": profile.persona_catalog_version,
         "timestamp": _now(),
         "template_mode": template_mode,
         "contract_hash": contract_hash,

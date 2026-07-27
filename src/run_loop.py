@@ -38,6 +38,8 @@ sys.path.insert(0, str(HERE))
 import research_loop_v04 as rl       # noqa: E402  (controller: DAG metadata + helpers)
 import orchestrator as orch          # noqa: E402
 from research_loop.api import EngineAPI  # noqa: E402  (in-process controller facade)
+from research_loop.compatibility import PROFILE_V20
+from research_loop.topology import topology_for_profile
 
 # In-process engine facade — replaces the subprocess `_ctl()` transport (Phase 5).
 # Byte-for-byte equivalent to spawning `python research_loop_v04.py <cmd>`, but
@@ -886,8 +888,8 @@ def create_child(project, parent_cand, decision, new_round):
 
 # --- dry run ----------------------------------------------------------------
 
-def _plan_line(nid, cfg, is_l10c=False):
-    ni = rl.NODE_MAP[nid]
+def _plan_line(nid, cfg, node_map, is_l10c=False):
+    ni = node_map[nid]
     if is_l10c:
         return (f"  {nid:5} {ni['persona']:11} provider=-          "
                 f"advance=aggregate-report (controller -- no agent call)")
@@ -906,19 +908,19 @@ def dry_run_plan(project, cand, cfg, max_rounds, review_on):
         log(f"candidate is terminal ({step.get('status')}); nothing to plan")
         return 0
     start = step["nodes"][0]["node"] if step.get("is_parallel") else step["node"]
-    key = "L9_parallel" if start in ("L9a", "L9b") else start
-    seq = rl.DAG_SEQUENCE
-    i = seq.index(key) if key in seq else 0
+    profile_id = step.get("profile_id", PROFILE_V20)
+    _, node_map, seq = topology_for_profile(profile_id)
+    i = seq.index(start) if start in seq else 0
     log(f"current status={status_of(project, cand)}  next node={start}")
     print("planned nodes this round:")
     for nid in seq[i:]:
         if nid == "L9_parallel":
             for sub in ("L9a", "L9b"):
-                print(_plan_line(sub, cfg))
+                print(_plan_line(sub, cfg, node_map))
         elif nid == "L10c":
-            print(_plan_line(nid, cfg, is_l10c=True))
+            print(_plan_line(nid, cfg, node_map, is_l10c=True))
         else:
-            print(_plan_line(nid, cfg))
+            print(_plan_line(nid, cfg, node_map))
     print()
     tail = "review gate -> " if review_on else ""
     log(f"after L10c: {tail}StopPolicy(max_rounds={max_rounds}) decides stop/continue")
@@ -1064,7 +1066,7 @@ Key rules:
 - Deep Research runs BEFORE L1/L4/L8.5 and is embedded via assemble-context; it does NOT
   change the 15-node DAG topology.
 - L7 Turing: use prepare-turing-workspace, run scripts only in that workspace.
-- L9a/L9b: run both before advancing. They must be independent.
+- {l9_rule}
 - If emit-delta fails validation, fix the JSON and retry. Do NOT skip.
 - You are the orchestrator. Do not ask the user to copy-paste between nodes.
 """
@@ -1076,8 +1078,18 @@ def cmd_print_main_agent_prompt(args):
     if Path(cfg_path).exists():
         cfg = orch.ProviderConfig.load(cfg_path)
         max_rounds = cfg.max_rounds or 3
+    try:
+        profile_id = next_step(project, cand).get("profile_id", PROFILE_V20)
+    except Exception:
+        profile_id = PROFILE_V20
+    l9_rule = (
+        "L9a/L9b: run both before advancing. They must be independent."
+        if profile_id == PROFILE_V20 else
+        "L9: emit and finalize L9a, then assemble and emit L9b, then permit L10a."
+    )
     prompt = MAIN_AGENT_PROMPT_TEMPLATE.format(
-        project=project, cand_id=cand, max_rounds=max_rounds)
+        project=project, cand_id=cand, max_rounds=max_rounds,
+        l9_rule=l9_rule)
     prompt, meta = rl._caveman_lite(
         prompt, required_literals=[project, cand, "main-agent", "Do NOT"])
     print(prompt)

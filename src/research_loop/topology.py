@@ -5,6 +5,10 @@ these back (inward shim) so external importers keep working unchanged.
 DAGTopology is a thin namespace over the constants for the future EngineAPI.
 """
 
+import copy
+
+from research_loop.compatibility import PROFILE_V20, PROFILE_V21, get_profile
+
 AGENTS = ["Linnaeus", "Einstein", "Feynman", "Oppenheimer", "Fisher",
           "Tukey", "Turing", "Curie", "Darwin", "Jobs"]
 
@@ -228,6 +232,31 @@ DELTA_DAG_ORDER = [
     "L8_curie", "L8.5_curie", "L9a_feynman", "L9b_darwin",
     "L10a_jobs", "L10b_oppenheimer",
 ]
+
+
+def topology_for_profile(profile_id: str) -> tuple[list[dict], dict[str, dict], list[str]]:
+    """Return the DAG view selected by an immutable compatibility profile."""
+    profile = get_profile(profile_id)
+    nodes = copy.deepcopy(DAG_NODES)
+    if profile.profile_id == PROFILE_V21:
+        by_node = {item["node"]: item for item in nodes}
+        by_node["L8"]["persona"] = "Tukey"
+        by_node["L9a"]["is_parallel"] = False
+        by_node["L9b"].update({
+            "is_parallel": False,
+            "advance_command": "decision",
+            "advance_status": "UNDER_REVIEW",
+            "advance_reason": "L9b interpretation complete",
+            "context_inputs": ["L1", "L7", "L8", "L8.5", "L9a"],
+            "must_not": ["Execute code", "Change status"],
+        })
+        sequence = [item for item in DAG_SEQUENCE if item != "L9_parallel"]
+        sequence[sequence.index("L10a"):sequence.index("L10a")] = ["L9a", "L9b"]
+    elif profile.profile_id == PROFILE_V20:
+        sequence = list(DAG_SEQUENCE)
+    else:
+        raise ValueError(f"unsupported topology profile: {profile.profile_id}")
+    return nodes, {item["node"]: item for item in nodes}, sequence
 
 
 class DAGTopology:

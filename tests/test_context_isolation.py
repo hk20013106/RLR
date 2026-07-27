@@ -83,6 +83,13 @@ def test_parallel_nodes_mutually_invisible(node, forbidden, context_project):
     assert rc == 0, f"{node} assemble should succeed (rc=0), got {rc}"
     assert manifest is not None, f"{node} must write a context manifest"
     allowed = manifest.get("allowed_inputs", [])
+    if manifest.get("profile_id") == "v2.1" and node == "L9b":
+        assert "L9a" in allowed
+        assert not any(
+            item["delta_key"].startswith("L9a_")
+            for item in manifest.get("injected_deltas", [])
+        )
+        return
     assert forbidden not in allowed, (
         f"ISOLATION VIOLATION: {node}.allowed_inputs={allowed} must not contain {forbidden}"
     )
@@ -93,6 +100,14 @@ def test_l9a_allowed_inputs_exact(context_project):
     rc, manifest = _assemble("L9a", *context_project)
     assert rc == 0 and manifest is not None
     assert set(manifest["allowed_inputs"]) == {"L1", "L7", "L8", "L8.5"}
+
+
+def test_native_v21_context_identifies_tukey_for_l8(context_project):
+    rc, manifest = _assemble("L8", *context_project)
+    assert rc == 0 and manifest is not None
+    assert manifest["profile_id"] == "v2.1"
+    assert manifest["persona"] == "Tukey"
+    assert manifest["schema_version"] == "2.1"
 
 
 def test_injected_deltas_subset_of_allowed(context_project):

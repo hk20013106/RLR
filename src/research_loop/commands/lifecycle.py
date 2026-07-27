@@ -17,9 +17,10 @@ from research_loop.common import (
     _set_status, _sha256_file, _stamp,
 )
 from research_loop.delta import (
-    DELTA_SCHEMAS, _delta_belongs_to_candidate, _delta_for_candidate,
+    DELTA_SCHEMAS, artifact_key_for, _delta_belongs_to_candidate, _delta_for_candidate,
 )
 from research_loop.hypothesis_ledger import LedgerError, binding_path
+from research_loop.compatibility import PROFILE_V20, PROFILE_V21, get_profile
 from research_loop.paths import (
     _candidate_file, _layer_template_path, _persona_template_path,
 )
@@ -28,7 +29,7 @@ from research_loop.templates import (
     _handoff_template, _index_template, _knowledge_base_md, _note_template,
     _preflight_template,
 )
-from research_loop.topology import AGENTS, DECISION_TRANSITIONS, NODE_MAP
+from research_loop.topology import AGENTS, DECISION_TRANSITIONS, NODE_MAP, topology_for_profile
 from research_loop.yamlio import _load_yaml_front, _replace_field
 
 # Preserve repository-relative lookup semantics from the former engine owner.
@@ -94,10 +95,27 @@ def cmd_next_step(args):
         return 1
     fm = _load_yaml_front(cf)
     status = fm.get("current_status", "NEW")
+    # Unbound directories are legacy read-only inputs.  Bound projects always
+    # select the topology from their immutable ledger profile.
+    profile_id = PROFILE_V20
+    if binding_path(project_dir).exists():
+        try:
+            profile_id = _ledger_for(project_dir, getattr(args, "knowledge_store", None)).project_profile(project_dir)
+        except LedgerError as exc:
+            print(json.dumps({"error": str(exc)}))
+            return 1
+    _, node_map, _ = topology_for_profile(profile_id)
+    profile = get_profile(profile_id)
+    profile_metadata = {
+        "profile_id": profile.profile_id,
+        "schema_version": profile.delta_schema_version,
+        "topology_version": profile.topology_version,
+        "persona_catalog_version": profile.persona_catalog_version,
+    }
 
     if status in FINAL_STATUSES:
         if status == "KEEP":
-            node_info = NODE_MAP.get("L10c")
+            node_info = node_map.get("L10c")
             if node_info:
                 result = {
                     "node": "L10c",
@@ -119,6 +137,7 @@ def cmd_next_step(args):
                 _warnings = pl.scan_pitfalls(project_dir, node="L10c")
                 if _warnings:
                     result["pitfall_warnings"] = _warnings
+                result.update(profile_metadata)
                 print(json.dumps(result, indent=2))
                 return 0
         print(json.dumps({"terminal": True, "status": status}))
@@ -133,7 +152,8 @@ def cmd_next_step(args):
         "NEEDS_EXECUTION": ["L7"],
         "EXECUTED": ["L8"],
         "AUDITED": ["L8.5"],
-        "UNDER_REVIEW": ["L9_parallel", "L10a", "L10b"],
+        "UNDER_REVIEW": (["L9_parallel", "L10a", "L10b"]
+                         if profile_id == PROFILE_V20 else ["L9a", "L9b", "L10a", "L10b"]),
     }
 
     node_candidates = status_to_nodes.get(status, [])
@@ -148,9 +168,9 @@ def cmd_next_step(args):
                     continue
                 node_id = "L9_parallel"
                 break
-            ni = NODE_MAP.get(cand_node)
+            ni = node_map.get(cand_node)
             if ni:
-                delta_key = f"{cand_node}_{ni['persona'].lower()}"
+                delta_key = artifact_key_for(cand_node, ni["persona"], profile_id=profile_id)
                 if _delta_belongs_to_candidate(
                         project_dir, delta_key, args.cand_id):
                     continue
@@ -166,7 +186,7 @@ def cmd_next_step(args):
     if node_id == "L9_parallel":
         nodes = []
         for nid in ["L9a", "L9b"]:
-            ni = NODE_MAP[nid]
+            ni = node_map[nid]
             nodes.append({
                 "node": nid,
                 "persona": ni["persona"],
@@ -183,6 +203,7 @@ def cmd_next_step(args):
             "is_parallel": True,
             "nodes": nodes,
         }
+        result.update(profile_metadata)
         result["pitfall_warnings"] = {
             "L9a": _pitfall_warnings_for_node(project_dir, "L9a"),
             "L9b": _pitfall_warnings_for_node(project_dir, "L9b"),
@@ -190,7 +211,7 @@ def cmd_next_step(args):
         print(json.dumps(result, indent=2))
         return 0
 
-    node_info = NODE_MAP[node_id]
+    node_info = node_map[node_id]
     result = {
         "node": node_id,
         "persona": node_info["persona"],
@@ -207,6 +228,7 @@ def cmd_next_step(args):
         "everos_read_scopes": _everos_scopes_for(node_info, project_dir.name),
         "knowledge_base": node_info.get("knowledge_base"),
     }
+    result.update(profile_metadata)
     # L7 is reused under both METHOD_APPROVED and NEEDS_EXECUTION. Its DAG
     # advance_command (execution-gate) only applies at METHOD_APPROVED -- that
     # gate is what opens NEEDS_EXECUTION. Once the gate is open, Turing runs
@@ -249,7 +271,8 @@ def cmd_new_project(args):
         _index_template(name, topic), encoding="utf-8")
     pl.init_ledger(project_dir)
     try:
-        _ledger_for(project_dir, store_path, require_binding=False).bind_project(project_dir)
+        _ledger_for(project_dir, store_path, require_binding=False).bind_project(
+            project_dir, profile_id=PROFILE_V21)
     except LedgerError as exc:
         print(f"ERROR: hypothesis ledger project binding failed: {exc}", file=sys.stderr)
         return 2

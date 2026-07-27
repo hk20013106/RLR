@@ -26,6 +26,8 @@ from research_loop.hypothesis_contracts import (
     validate_persisted,
     validate_submission,
 )
+from research_loop.compatibility import PROFILE_V20, PROFILE_V21, get_profile
+from research_loop.constraint_validation import ConstraintViolation, validate_finalized_upstream
 
 
 STORE_SCHEMA_VERSION = "2.0"
@@ -101,11 +103,24 @@ class HypothesisLedger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def _connect(self, *, readonly: bool = False) -> sqlite3.Connection:
+    @classmethod
+    def open_readonly(cls, store_path: str | Path) -> "HypothesisLedger":
+        """Open an existing store without running schema initialization."""
+        path = Path(store_path)
+        if not path.is_file():
+            raise LedgerError(f"hypothesis ledger store does not exist: {path}")
+        ledger = cls.__new__(cls)
+        ledger.path = path
+        return ledger
+
+    def _connect(self, *, readonly: bool = False,
+                 immutable: bool = False) -> sqlite3.Connection:
         if readonly:
             if not self.path.is_file():
                 raise LedgerError(f"hypothesis ledger store does not exist: {self.path}")
-            con = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True,
+            immutable_arg = "&immutable=1" if immutable else ""
+            con = sqlite3.connect(
+                f"{self.path.resolve().as_uri()}?mode=ro{immutable_arg}", uri=True,
                                   timeout=5, isolation_level=None)
         else:
             con = sqlite3.connect(self.path, timeout=5, isolation_level=None)
@@ -133,6 +148,7 @@ class HypothesisLedger:
                 CREATE TABLE IF NOT EXISTS epistemic_projection (hypothesis_id TEXT PRIMARY KEY, epistemic_status TEXT NOT NULL, event_id TEXT NOT NULL, commit_seq INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS authorizations (authorization_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, hypothesis_id TEXT NOT NULL, through_commit_seq INTEGER NOT NULL, snapshot_hash TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS migration_batches (migration_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, scan_hash TEXT NOT NULL, report_hash TEXT NOT NULL, resolved_by TEXT NOT NULL, manifest_hash TEXT NOT NULL, created_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS profile_transitions (transition_id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(project_id), source_profile_id TEXT NOT NULL, target_profile_id TEXT NOT NULL, dry_run_report_hash TEXT NOT NULL, resolution_hash TEXT NOT NULL, manifest_hash TEXT NOT NULL, source_ledger_state_hash TEXT NOT NULL, destination_ledger_state_hash TEXT NOT NULL, receipt_hash TEXT NOT NULL, receipt_json TEXT NOT NULL, resolved_by TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(project_id, manifest_hash));
                 CREATE TABLE IF NOT EXISTS project_activations (project_id TEXT PRIMARY KEY REFERENCES projects(project_id), activation_mode TEXT NOT NULL CHECK(activation_mode IN ('NATIVE_V2','MIGRATED_V2')), migration_id TEXT REFERENCES migration_batches(migration_id), activated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS authorization_snapshots (authorization_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, candidate_id TEXT NOT NULL, round_id TEXT NOT NULL, node TEXT NOT NULL, through_commit_seq INTEGER NOT NULL, event_ids_json TEXT NOT NULL, projection_hash TEXT NOT NULL, artifact_hash TEXT NOT NULL, created_at TEXT NOT NULL);
                 CREATE TRIGGER IF NOT EXISTS families_append_only BEFORE UPDATE ON families BEGIN SELECT RAISE(ABORT, 'families are append-only'); END;
@@ -151,11 +167,28 @@ class HypothesisLedger:
                 CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
                 CREATE TRIGGER IF NOT EXISTS migrations_append_only BEFORE UPDATE ON migration_batches BEGIN SELECT RAISE(ABORT, 'migration batches are append-only'); END;
                 CREATE TRIGGER IF NOT EXISTS migrations_no_delete BEFORE DELETE ON migration_batches BEGIN SELECT RAISE(ABORT, 'migration batches are append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS profile_transitions_append_only BEFORE UPDATE ON profile_transitions BEGIN SELECT RAISE(ABORT, 'profile transitions are append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS profile_transitions_no_delete BEFORE DELETE ON profile_transitions BEGIN SELECT RAISE(ABORT, 'profile transitions are append-only'); END;
                 CREATE TRIGGER IF NOT EXISTS activations_append_only BEFORE UPDATE ON project_activations BEGIN SELECT RAISE(ABORT, 'project activations are append-only'); END;
                 CREATE TRIGGER IF NOT EXISTS activations_no_delete BEFORE DELETE ON project_activations BEGIN SELECT RAISE(ABORT, 'project activations are append-only'); END;
                 CREATE TRIGGER IF NOT EXISTS authorization_snapshots_append_only BEFORE UPDATE ON authorization_snapshots BEGIN SELECT RAISE(ABORT, 'authorization snapshots are append-only'); END;
                 CREATE TRIGGER IF NOT EXISTS authorization_snapshots_no_delete BEFORE DELETE ON authorization_snapshots BEGIN SELECT RAISE(ABORT, 'authorization snapshots are append-only'); END;
             """)
+            profile_columns = {
+                str(row[1]) for row in con.execute(
+                    "PRAGMA table_info(profile_transitions)"
+                )
+            }
+            for column in (
+                "source_ledger_state_hash",
+                "destination_ledger_state_hash",
+                "receipt_json",
+            ):
+                if column not in profile_columns:
+                    con.execute(
+                        f"ALTER TABLE profile_transitions ADD COLUMN {column} "
+                        "TEXT NOT NULL DEFAULT ''"
+                    )
             con.execute("INSERT OR IGNORE INTO ledger_meta(key, value) VALUES (?, ?)", ("schema_version", STORE_SCHEMA_VERSION))
             con.execute("UPDATE ledger_meta SET value=? WHERE key='schema_version' AND value='1.0'", (STORE_SCHEMA_VERSION,))
             con.execute("INSERT OR IGNORE INTO ledger_meta(key, value) VALUES (?, ?)", ("store_id", _uuid("STORE", str(self.path.resolve()))))
@@ -164,20 +197,35 @@ class HypothesisLedger:
 
     @property
     def store_id(self) -> str:
-        con = self._connect()
+        con = self._connect(readonly=True)
         try:
             return str(con.execute("SELECT value FROM ledger_meta WHERE key='store_id'").fetchone()[0])
         finally:
             con.close()
 
     def bind_project(self, project_dir: str | Path, project_id: str | None = None,
-                     *, activate: bool = True,
-                     activation_mode: str = "NATIVE_V2",
-                     bound_at: str | None = None) -> dict[str, Any]:
+                      *, activate: bool = True,
+                      activation_mode: str = "NATIVE_V2",
+                      bound_at: str | None = None,
+                      profile_id: str = PROFILE_V20) -> dict[str, Any]:
         project_dir = Path(project_dir)
+        get_profile(profile_id)
+        target = binding_path(project_dir)
+        if target.exists():
+            existing = json.loads(target.read_text(encoding="utf-8"))
+            existing_profile = existing.get("profile_id", PROFILE_V20)
+            get_profile(existing_profile)
+            if existing_profile != profile_id:
+                raise LedgerError(f"project profile mismatch: {target}")
+            if project_id is not None and existing.get("project_id") != project_id:
+                raise LedgerError(f"project binding mismatch: {target}")
+            if existing.get("store_id") != self.store_id:
+                raise LedgerError(f"project binding mismatch: {target}")
+            return {**existing, "profile_id": existing_profile}
         project_id = project_id or _uuid("PROJECT", self.store_id, str(uuid.uuid4()))
         binding = {"schema_version": "1.0", "store_id": self.store_id,
-                   "project_id": project_id, "bound_at": bound_at or _now()}
+                   "project_id": project_id, "profile_id": profile_id,
+                   "bound_at": bound_at or _now()}
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
@@ -192,17 +240,339 @@ class HypothesisLedger:
             con.commit()
         finally:
             con.close()
-        target = binding_path(project_dir)
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
-            existing = json.loads(target.read_text(encoding="utf-8"))
-            if existing.get("store_id") != self.store_id or existing.get("project_id") != project_id:
-                raise LedgerError(f"project binding mismatch: {target}")
-            return existing
         temporary = target.with_suffix(".tmp")
         temporary.write_text(json.dumps(binding, indent=2, ensure_ascii=False), encoding="utf-8")
         os.replace(temporary, target)
         return binding
+
+    def project_profile(self, project_dir: str | Path) -> str:
+        """Return the binding profile advanced only by an immutable transition."""
+        binding = self.require_binding(project_dir)
+        con = self._connect(readonly=True)
+        try:
+            return self._project_profile_in_connection(con, binding)
+        finally:
+            con.close()
+
+    @staticmethod
+    def _project_profile_in_connection(con: sqlite3.Connection,
+                                       binding: dict[str, Any]) -> str:
+        row = con.execute(
+            "SELECT target_profile_id,source_ledger_state_hash,"
+            "destination_ledger_state_hash,receipt_json "
+            "FROM profile_transitions WHERE project_id=? "
+            "ORDER BY rowid DESC LIMIT 1", (binding["project_id"],)
+        ).fetchone()
+        if row and (not row[1] or not row[2] or not row[3]):
+            raise LedgerError("incomplete profile transition blocks profile resolution")
+        profile_id = str(row[0] if row else binding.get("profile_id", PROFILE_V20))
+        get_profile(profile_id)
+        return profile_id
+
+    @staticmethod
+    def _require_profile_persona(profile_id: str, node: str, persona: str) -> None:
+        from research_loop.topology import topology_for_profile
+
+        # Legacy receipts historically used caller-provided labels; preserve
+        # that read/write compatibility while enforcing native v2.1 authority.
+        if profile_id == PROFILE_V20:
+            return
+        _, node_map, _ = topology_for_profile(profile_id)
+        node_info = node_map.get(node)
+        if node_info is None:
+            raise LedgerError(f"unknown ledger node for profile {profile_id}: {node}")
+        expected = str(node_info["persona"])
+        if persona != expected:
+            raise LedgerError(
+                f"{node} persona {persona} conflicts with profile {profile_id}; "
+                f"expected {expected}"
+            )
+
+    @staticmethod
+    def _profile_state_hash(con: sqlite3.Connection, project_id: str,
+                            *, before_rowid: int | None = None,
+                            through_commit_seq: int | None = None) -> str:
+        """Hash canonical immutable ledger facts belonging to one project."""
+        def rows(sql: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
+            return [dict(row) for row in con.execute(sql, params).fetchall()]
+
+        transition_where = "project_id=?"
+        transition_params: tuple[Any, ...] = (project_id,)
+        if before_rowid is not None:
+            transition_where += " AND rowid<?"
+            transition_params = (project_id, before_rowid)
+        if through_commit_seq is None:
+            through_commit_seq = int(con.execute(
+                "SELECT COALESCE(MAX(commit_seq),0) FROM emissions "
+                "WHERE project_id=?", (project_id,),
+            ).fetchone()[0])
+        has_profile_transitions = bool(con.execute(
+            "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='profile_transitions'"
+        ).fetchone())
+        state = {
+            "project": rows(
+                "SELECT * FROM projects WHERE project_id=? ORDER BY project_id",
+                (project_id,),
+            ),
+            "activation": rows(
+                "SELECT * FROM project_activations WHERE project_id=? "
+                "ORDER BY project_id",
+                (project_id,),
+            ),
+            "occurrences": rows(
+                "SELECT DISTINCT o.* FROM occurrences o JOIN events e "
+                "ON e.occurrence_id=o.occurrence_id WHERE o.project_id=? "
+                "AND e.commit_seq<=? ORDER BY o.occurrence_id",
+                (project_id, through_commit_seq),
+            ),
+            "versions": rows(
+                "SELECT DISTINCT v.* FROM versions v JOIN events e "
+                "ON e.hypothesis_id=v.hypothesis_id WHERE e.project_id=? "
+                "AND e.commit_seq<=? "
+                "ORDER BY v.hypothesis_id",
+                (project_id, through_commit_seq),
+            ),
+            "families": rows(
+                "SELECT DISTINCT f.* FROM families f JOIN versions v "
+                "ON v.family_id=f.family_id JOIN events e "
+                "ON e.hypothesis_id=v.hypothesis_id WHERE e.project_id=? "
+                "AND e.commit_seq<=? "
+                "ORDER BY f.family_id",
+                (project_id, through_commit_seq),
+            ),
+            "evidence": rows(
+                "SELECT DISTINCT r.* FROM evidence_records r JOIN events e "
+                "ON e.evidence_id=r.evidence_id WHERE e.project_id=? "
+                "AND e.commit_seq<=? "
+                "ORDER BY r.evidence_id",
+                (project_id, through_commit_seq),
+            ),
+            "emissions": rows(
+                "SELECT * FROM emissions WHERE project_id=? AND commit_seq<=? "
+                "ORDER BY commit_seq",
+                (project_id, through_commit_seq),
+            ),
+            "committed_emissions": rows(
+                "SELECT c.* FROM committed_emissions c JOIN emissions e "
+                "ON e.delta_hash=c.delta_hash WHERE e.project_id=? "
+                "AND e.commit_seq<=? "
+                "ORDER BY e.commit_seq",
+                (project_id, through_commit_seq),
+            ),
+            "events": rows(
+                "SELECT * FROM events WHERE project_id=? AND commit_seq<=? "
+                "ORDER BY commit_seq,event_id",
+                (project_id, through_commit_seq),
+            ),
+            "profile_transitions": (rows(
+                "SELECT transition_id,source_profile_id,target_profile_id,"
+                "dry_run_report_hash,resolution_hash,manifest_hash,receipt_hash,"
+                "resolved_by,created_at FROM profile_transitions WHERE "
+                + transition_where + " ORDER BY rowid",
+                transition_params,
+            ) if has_profile_transitions else []),
+        }
+        return content_hash(state)
+
+    def record_profile_transition(self, *, project_dir: str | Path,
+                                  source_profile_id: str, target_profile_id: str,
+                                  dry_run_report_hash: str, resolution_hash: str,
+                                  manifest_hash: str, resolved_by: str,
+                                  candidate_state_hash: str,
+                                  expected_source_ledger_state_hash: str,
+                                  expected_through_commit_seq: int,
+                                  created_at: str | None = None) -> dict[str, Any]:
+        """Append and return one complete, hash-chained profile receipt."""
+        binding = self.require_binding(project_dir)
+        get_profile(source_profile_id)
+        get_profile(target_profile_id)
+        if source_profile_id == target_profile_id:
+            raise LedgerError("profile transition must change the compatibility profile")
+        transition_id = _uuid("PROFILE", binding["project_id"], manifest_hash)
+        created_at = created_at or _now()
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            activation = con.execute(
+                "SELECT 1 FROM project_activations WHERE project_id=?",
+                (binding["project_id"],),
+            ).fetchone()
+            if not activation:
+                raise LedgerError("profile transition requires an activated project")
+            existing = con.execute(
+                "SELECT * FROM profile_transitions WHERE transition_id=?",
+                (transition_id,),
+            ).fetchone()
+            if existing:
+                expected = (
+                    source_profile_id,
+                    target_profile_id,
+                    dry_run_report_hash,
+                    resolution_hash,
+                    manifest_hash,
+                    resolved_by,
+                )
+                actual = (
+                    existing["source_profile_id"],
+                    existing["target_profile_id"],
+                    existing["dry_run_report_hash"],
+                    existing["resolution_hash"],
+                    existing["manifest_hash"],
+                    existing["resolved_by"],
+                )
+                if actual != expected or not existing["receipt_json"]:
+                    raise LedgerError(
+                        "profile transition retry does not match immutable receipt"
+                    )
+                con.commit()
+                return json.loads(existing["receipt_json"])
+            latest = con.execute(
+                "SELECT target_profile_id FROM profile_transitions "
+                "WHERE project_id=? ORDER BY rowid DESC LIMIT 1",
+                (binding["project_id"],),
+            ).fetchone()
+            current_profile = str(
+                latest[0] if latest else binding.get("profile_id", PROFILE_V20)
+            )
+            if current_profile != source_profile_id:
+                raise LedgerError(
+                    "profile transition source does not match current project profile"
+                )
+            current_candidate_state_hash = content_hash({
+                path.relative_to(Path(project_dir)).as_posix():
+                    hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in sorted(
+                    (Path(project_dir) / "01_Candidates").glob("C*.md")
+                )
+            })
+            if current_candidate_state_hash != candidate_state_hash:
+                raise LedgerError(
+                    "profile transition candidate state changed after dry-run"
+                )
+            through_commit_seq = int(con.execute(
+                "SELECT COALESCE(MAX(commit_seq),0) FROM emissions "
+                "WHERE project_id=?", (binding["project_id"],),
+            ).fetchone()[0])
+            source_state_hash = self._profile_state_hash(
+                con, str(binding["project_id"]),
+                through_commit_seq=through_commit_seq,
+            )
+            if (through_commit_seq != int(expected_through_commit_seq)
+                    or source_state_hash != expected_source_ledger_state_hash):
+                raise LedgerError(
+                    "profile transition ledger state changed after dry-run"
+                )
+            transition_body = {
+                "schema_version": "1.0",
+                "transition_id": transition_id,
+                "store_id": str(binding["store_id"]),
+                "project_id": str(binding["project_id"]),
+                "source_profile_id": source_profile_id,
+                "target_profile_id": target_profile_id,
+                "dry_run_report_hash": dry_run_report_hash,
+                "resolution_hash": resolution_hash,
+                "manifest_hash": manifest_hash,
+                "candidate_state_hash": candidate_state_hash,
+                "through_commit_seq": through_commit_seq,
+                "resolved_by": resolved_by,
+                "created_at": created_at,
+            }
+            destination_state_hash = content_hash({
+                "source_ledger_state_hash": source_state_hash,
+                "transition": transition_body,
+            })
+            receipt_body = {
+                **transition_body,
+                "source_ledger_state_hash": source_state_hash,
+                "destination_ledger_state_hash": destination_state_hash,
+            }
+            receipt = {
+                **receipt_body,
+                "receipt_hash": content_hash(receipt_body),
+            }
+            con.execute(
+                "INSERT INTO profile_transitions("
+                "transition_id,project_id,source_profile_id,target_profile_id,"
+                "dry_run_report_hash,resolution_hash,manifest_hash,"
+                "source_ledger_state_hash,destination_ledger_state_hash,"
+                "receipt_hash,receipt_json,resolved_by,created_at"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (transition_id, binding["project_id"], source_profile_id, target_profile_id,
+                 dry_run_report_hash, resolution_hash, manifest_hash,
+                 source_state_hash, destination_state_hash, receipt["receipt_hash"],
+                 canonical_json(receipt), resolved_by, created_at),
+            )
+            con.commit()
+            return receipt
+        except sqlite3.Error as exc:
+            con.rollback()
+            raise LedgerError(f"profile transition transaction failed: {exc}") from exc
+        except Exception:
+            con.rollback()
+            raise
+        finally:
+            con.close()
+
+    def verify_profile_transition(self, transition_id: str) -> list[str]:
+        """Recompute the immutable receipt and logical profile-state chain."""
+        con = self._connect(readonly=True)
+        try:
+            row = con.execute(
+                "SELECT rowid,* FROM profile_transitions WHERE transition_id=?",
+                (transition_id,),
+            ).fetchone()
+            if not row:
+                return [f"profile transition not found: {transition_id}"]
+            try:
+                receipt = json.loads(row["receipt_json"])
+            except (TypeError, json.JSONDecodeError):
+                return ["profile transition receipt_json is invalid"]
+            problems = []
+            receipt_body = {
+                key: value for key, value in receipt.items()
+                if key != "receipt_hash"
+            }
+            if content_hash(receipt_body) != row["receipt_hash"]:
+                problems.append("profile transition receipt hash mismatch")
+            source_hash = self._profile_state_hash(
+                con, str(row["project_id"]), before_rowid=int(row["rowid"]),
+                through_commit_seq=int(receipt.get("through_commit_seq", -1)),
+            )
+            transition_body = {
+                key: receipt.get(key) for key in (
+                    "schema_version", "transition_id", "store_id", "project_id",
+                    "source_profile_id", "target_profile_id",
+                    "dry_run_report_hash", "resolution_hash", "manifest_hash",
+                    "candidate_state_hash",
+                    "through_commit_seq",
+                    "resolved_by", "created_at",
+                )
+            }
+            destination_hash = content_hash({
+                "source_ledger_state_hash": source_hash,
+                "transition": transition_body,
+            })
+            if receipt.get("source_ledger_state_hash") != source_hash:
+                problems.append("profile transition source ledger-state hash mismatch")
+            if receipt.get("destination_ledger_state_hash") != destination_hash:
+                problems.append(
+                    "profile transition destination ledger-state hash mismatch"
+                )
+            for field in (
+                "transition_id", "project_id", "source_profile_id",
+                "target_profile_id", "dry_run_report_hash", "resolution_hash",
+                "manifest_hash", "source_ledger_state_hash",
+                "destination_ledger_state_hash", "receipt_hash", "resolved_by",
+                "created_at",
+            ):
+                if receipt.get(field) != row[field]:
+                    problems.append(
+                        f"profile transition receipt field mismatch: {field}"
+                    )
+            return problems
+        finally:
+            con.close()
 
     def commit_migration(self, *, project_id: str, migration_id: str,
                          scan_hash: str, report_hash: str, resolved_by: str,
@@ -351,11 +721,15 @@ class HypothesisLedger:
             raise LedgerError(f"invalid hypothesis ledger binding: {target}") from exc
         if binding.get("store_id") != self.store_id or not binding.get("project_id"):
             raise LedgerError("hypothesis ledger binding does not match configured store")
+        try:
+            get_profile(str(binding.get("profile_id", PROFILE_V20)))
+        except ValueError as exc:
+            raise LedgerError(f"invalid hypothesis ledger profile: {exc}") from exc
         return binding
 
     def require_activated_project(self, project_dir: str | Path) -> dict[str, Any]:
         binding = self.require_binding(project_dir)
-        con = self._connect()
+        con = self._connect(readonly=True)
         try:
             row = con.execute(
                 "SELECT activation_mode,migration_id,activated_at FROM project_activations WHERE project_id=?",
@@ -367,7 +741,8 @@ class HypothesisLedger:
             raise LedgerError(
                 "hypothesis ledger project is not activated; run hypothesis-migrate or create a native-v2 project"
             )
-        return {**binding, "activation_mode": row[0], "migration_id": row[1],
+        return {**binding, "profile_id": self.project_profile(project_dir),
+                "activation_mode": row[0], "migration_id": row[1],
                 "activated_at": row[2]}
 
     def _next_commit_seq(self, con: sqlite3.Connection) -> int:
@@ -469,29 +844,65 @@ class HypothesisLedger:
         binding = (self.require_binding(project_dir) if _allow_unactivated_migration
                    else self.require_activated_project(project_dir))
         project_id = str(binding["project_id"])
+        profile = get_profile(self.project_profile(project_dir))
+        self._require_profile_persona(profile.profile_id, node, persona)
         if delta.get("candidate_id") not in (None, candidate_id):
             raise LedgerError("candidate_id mismatch in delta")
+        submitted_schema = delta.get("schema_version")
+        if not isinstance(submitted_schema, str) or not submitted_schema:
+            raise LedgerError("delta schema_version is required and must match the project profile")
+        if submitted_schema != profile.delta_schema_version:
+            raise LedgerError(
+                f"delta schema {submitted_schema} conflicts with project profile "
+                f"{profile.profile_id} ({profile.delta_schema_version})")
         normalized = json.loads(json.dumps(delta))
         normalized["candidate_id"] = candidate_id
         normalized["project_id"] = project_id
-        normalized["schema_version"] = DELTA_SCHEMA_VERSION
-        errors = validate_submission(node, normalized)
+        normalized["schema_version"] = profile.delta_schema_version
+        errors = validate_submission(node, normalized,
+                                     schema_version=profile.delta_schema_version)
         if errors:
             raise LedgerError("delta v2 schema rejected: " + "; ".join(errors))
         delta_hash = content_hash(normalized)
         con = self._connect()
         try:
             con.execute("BEGIN IMMEDIATE")
+            transaction_profile = get_profile(
+                self._project_profile_in_connection(con, binding)
+            )
+            if transaction_profile.profile_id != profile.profile_id:
+                raise LedgerError(
+                    "project profile changed while acquiring the commit transaction"
+                )
+            self._require_profile_persona(
+                transaction_profile.profile_id, node, persona
+            )
+            # Validate the submission again inside the write transaction.  The
+            # profile/schema check and all cross-delta reads therefore share
+            # one immutable finalized-upstream view with the ensuing write.
+            transactional_errors = validate_submission(
+                node, normalized, schema_version=transaction_profile.delta_schema_version
+            )
+            if transactional_errors:
+                raise LedgerError("delta v2 schema rejected: " + "; ".join(transactional_errors))
             prior = con.execute(
-                "SELECT commit_seq FROM emissions WHERE delta_hash=? AND project_id=? "
+                "SELECT commit_seq,persona FROM emissions WHERE delta_hash=? AND project_id=? "
                 "AND candidate_id=? AND round_id=? AND node=?",
                 (delta_hash, project_id, candidate_id, str(round_id), node),
             ).fetchone()
             if prior:
                 rows = con.execute("SELECT event_id FROM events WHERE commit_seq=? ORDER BY rowid", (prior["commit_seq"],)).fetchall()
-                receipt = self._receipt(project_id, candidate_id, round_id, node, persona, delta_hash, int(prior["commit_seq"]), [r[0] for r in rows])
+                receipt = self._receipt(project_id, candidate_id, round_id, node, str(prior["persona"]), delta_hash, int(prior["commit_seq"]), [r[0] for r in rows], profile=transaction_profile)
                 con.commit()
                 return CommitResult(normalized, delta_hash, int(prior["commit_seq"]), tuple(r[0] for r in rows), receipt)
+            try:
+                validate_finalized_upstream(
+                    con=con, profile=transaction_profile, node=node, delta=normalized,
+                    project_id=project_id, candidate_id=candidate_id,
+                    round_id=str(round_id),
+                )
+            except ConstraintViolation as exc:
+                raise LedgerError(str(exc)) from exc
             seq = self._next_commit_seq(con)
             try:
                 relative_delta_path = Path(delta_path).relative_to(project_dir)
@@ -794,7 +1205,8 @@ class HypothesisLedger:
                         add("REVISED" if proposal["relationship"] == "REVISION_OF" else "DERIVED", hypothesis_id=hid, outcome=proposal["relationship"], reason=proposal["reason"], payload={"parents": parents, "loop_type": proposal["loop_type"]})
                     elif proposal is not None:
                         raise LedgerError("only L10b REVISE may create next_round_proposal")
-            persisted_errors = validate_persisted(node, normalized)
+            persisted_errors = validate_persisted(
+                node, normalized, schema_version=transaction_profile.delta_schema_version)
             if persisted_errors:
                 raise LedgerError(
                     "persisted delta v2 schema rejected: " + "; ".join(persisted_errors)
@@ -812,7 +1224,7 @@ class HypothesisLedger:
             # above. Roll back the speculative projection work and return the
             # prior immutable emission instead of creating a second commit.
             final_prior = con.execute(
-                "SELECT commit_seq FROM emissions WHERE delta_hash=? AND project_id=? "
+                "SELECT commit_seq,persona FROM emissions WHERE delta_hash=? AND project_id=? "
                 "AND candidate_id=? AND round_id=? AND node=?",
                 (delta_hash, project_id, candidate_id, str(round_id), node),
             ).fetchone()
@@ -820,14 +1232,14 @@ class HypothesisLedger:
                 seq0 = int(final_prior["commit_seq"])
                 rows = con.execute("SELECT event_id FROM events WHERE commit_seq=? ORDER BY rowid", (seq0,)).fetchall()
                 con.rollback()
-                receipt = self._receipt(project_id, candidate_id, str(round_id), node, persona,
-                                        delta_hash, seq0, [row[0] for row in rows])
+                receipt = self._receipt(project_id, candidate_id, str(round_id), node, str(final_prior["persona"]),
+                                        delta_hash, seq0, [row[0] for row in rows], profile=transaction_profile)
                 return CommitResult(normalized, delta_hash, seq0, tuple(row[0] for row in rows), receipt)
             con.execute("INSERT INTO emissions(delta_hash,project_id,candidate_id,round_id,node,persona,delta_path,committed_at,commit_seq) VALUES (?,?,?,?,?,?,?,?,?)", (delta_hash, project_id, candidate_id, str(round_id), node, persona, str(relative_delta_path).replace("\\", "/"), _now(), seq))
             for event in events:
                 self._insert_event(con, event)
             con.commit()
-            receipt = self._receipt(project_id, candidate_id, str(round_id), node, persona, delta_hash, seq, [event["event_id"] for event in events])
+            receipt = self._receipt(project_id, candidate_id, str(round_id), node, persona, delta_hash, seq, [event["event_id"] for event in events], profile=transaction_profile)
             return CommitResult(normalized, delta_hash, seq, tuple(event["event_id"] for event in events), receipt)
         except sqlite3.Error as exc:
             con.rollback()
@@ -872,9 +1284,13 @@ class HypothesisLedger:
         finally:
             con.close()
 
-    def _receipt(self, project_id: str, candidate_id: str, round_id: str, node: str, persona: str, delta_hash: str, commit_seq: int, event_ids: list[str]) -> dict[str, Any]:
+    def _receipt(self, project_id: str, candidate_id: str, round_id: str, node: str, persona: str, delta_hash: str, commit_seq: int, event_ids: list[str], *, profile=None) -> dict[str, Any]:
         return {"schema_version": "1.0", "store_id": self.store_id, "project_id": project_id,
                 "candidate_id": candidate_id, "round_id": str(round_id), "node": node, "persona": persona,
+                "profile_id": profile.profile_id if profile else PROFILE_V20,
+                "delta_schema_version": profile.delta_schema_version if profile else "2.0",
+                "topology_version": profile.topology_version if profile else "2.0",
+                "persona_catalog_version": profile.persona_catalog_version if profile else "body-only-1",
                 "delta_hash": delta_hash, "commit_seq": commit_seq, "event_ids": event_ids, "created_at": _now()}
 
     def graph(self, hypothesis_id: str, *, as_of: int | None = None) -> dict[str, Any]:
@@ -1123,16 +1539,17 @@ class HypothesisLedger:
         node: str, *, as_of: int | None = None,
     ) -> dict[str, Any]:
         """Persist a candidate/node-scoped immutable snapshot derived from the DAG."""
-        from research_loop.topology import DAG_SEQUENCE, NODE_MAP
-
-        if node not in NODE_MAP:
-            raise LedgerError(f"unknown context authorization node: {node}")
         binding = self.require_activated_project(project_dir)
-        raw_inputs = NODE_MAP[node].get("context_inputs", [])
+        profile = get_profile(str(binding.get("profile_id", PROFILE_V20)))
+        from research_loop.topology import topology_for_profile
+        _, node_map, dag_sequence = topology_for_profile(profile.profile_id)
+        if node not in node_map:
+            raise LedgerError(f"unknown context authorization node: {node}")
+        raw_inputs = node_map[node].get("context_inputs", [])
         if "ALL" in raw_inputs:
-            allowed_nodes = [item for item in DAG_SEQUENCE if item != "L9_parallel"]
+            allowed_nodes = [item for item in dag_sequence if item != "L9_parallel"]
         else:
-            allowed_nodes = [item for item in raw_inputs if item in NODE_MAP]
+            allowed_nodes = [item for item in raw_inputs if item in node_map]
         con = self._connect()
         try:
             latest = con.execute(
@@ -1198,7 +1615,11 @@ class HypothesisLedger:
             str(cursor), projection_hash,
         )
         snapshot = {
-            "schema_version": "2.0", "authorization_id": authorization_id,
+            "schema_version": profile.delta_schema_version,
+            "profile_id": profile.profile_id,
+            "topology_version": profile.topology_version,
+            "persona_catalog_version": profile.persona_catalog_version,
+            "authorization_id": authorization_id,
             "store_id": self.store_id, "project_id": binding["project_id"],
             "candidate_id": candidate_id, "round_id": str(round_id),
             "node": node, "as_of_commit_seq": cursor,

@@ -294,6 +294,11 @@ def build_parser():
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--resolution")
     sp.add_argument("--resolved-by")
+    sp.add_argument(
+        "--target-profile",
+        choices=("v2.1",),
+        help="explicitly upgrade an activated v2.0 project to the selected profile",
+    )
     sp.set_defaults(func=cmd_hypothesis_migrate)
 
     sp = sub.add_parser("hypothesis-authorize-context",

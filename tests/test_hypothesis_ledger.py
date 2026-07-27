@@ -275,7 +275,11 @@ def test_cli_v2_emission_requires_binding_and_writes_receipt(tmp_path):
     assert main(["new-candidate", str(project), "--title", "t", "--question", "q", "--claim", "c", "--input", "inline", "--knowledge-store", str(store)]) == 0
     candidate = next((project / "01_Candidates").glob("C*.md")).stem
     source = tmp_path / "l1.json"
-    source.write_text(json.dumps({"schema_version": "2.0", "hypotheses": [{"proposal_key": "one", "statement": "S", "operationalization": "O", "falsification_criteria": ["F"], "rationale": "R"}], "primary_proposal_key": "one", "key_uncertainty": "U"}), encoding="utf-8")
+    source.write_text(json.dumps({"schema_version": "2.1", "hypotheses": [
+        {"proposal_key": "one", "statement": "S1", "operationalization": "O", "falsification_criteria": ["F"], "rationale": "R"},
+        {"proposal_key": "two", "statement": "S2", "operationalization": "O", "falsification_criteria": ["F"], "rationale": "R"},
+        {"proposal_key": "three", "statement": "S3", "operationalization": "O", "falsification_criteria": ["F"], "rationale": "R"},
+    ], "primary_proposal_key": "one", "key_uncertainty": "U"}), encoding="utf-8")
     assert main(["emit-delta", str(project), candidate, "--node", "L1", "--persona", "Einstein", "--file", str(source), "--knowledge-store", str(store)]) == 0
     delta = project / "02_Agent_Notes" / "Einstein" / f"{candidate}_L1_einstein_delta.v2.json"
     assert delta.exists()
