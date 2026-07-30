@@ -187,8 +187,9 @@ from research_loop import hypothesis_migration
 # Runtime dependencies the L0 preflight HARD-CHECKS. A missing REQUIRED
 # dependency STOPS the loop (preflight exits non-zero) -- it must NEVER be
 # skipped. Project-specific deps are declared in 00_Preflight/dependencies.md
-# and are checked the same way.
-_common.REQUIRED_DEPENDENCIES = REQUIRED_DEPENDENCIES
+# and are checked the same way. The constant itself is owned by
+# research_loop.common and imported directly by templates/lifecycle -- engine
+# only re-exports it (line 81) for the research_loop_v04 symbol contract.
 
 
 from research_loop import templates as _templates
@@ -197,7 +198,6 @@ from research_loop.templates import (  # inward shim (Phase 7a)
     _index_template, _handoff_template, _decision_log_template,
     _note_template, _preflight_template,
 )
-_templates.REQUIRED_DEPENDENCIES = REQUIRED_DEPENDENCIES
 _templates.VALID_STATUSES = VALID_STATUSES
 _templates.__version__ = __version__
 _common._decision_log_template = _decision_log_template

@@ -123,6 +123,25 @@ def _parse_declared_deps(project_dir):
     return deps
 
 
+# --- L0 dependency gate -----------------------------------------------------
+# Runtime dependencies the L0 preflight HARD-CHECKS. A missing REQUIRED
+# dependency STOPS the loop (preflight exits non-zero) -- it must NEVER be
+# skipped. Project-specific deps are declared in 00_Preflight/dependencies.md
+# and are checked the same way. Owned here (not in a command module) so every
+# consumer -- common, templates, lifecycle, the standalone CLI -- resolves it by
+# plain import instead of an engine.py monkey-patch.
+REQUIRED_DEPENDENCIES = [
+    {"kind": "python", "name": "yaml", "label": "PyYAML", "pip": "PyYAML",
+     "needed_for": "manage_literature_db.py (growable literature DB; L1/L4/L8.5)"},
+    {"kind": "port", "name": "zotero", "label": "Zotero", "addr": "127.0.0.1:23119",
+     "attest_env": "RLR_ZOTERO",
+     "needed_for": "reference manager / citation source for the literature DB"},
+    {"kind": "env", "name": "obsidian", "label": "Obsidian vault", "env": "OBSIDIAN_VAULT",
+     "check_path": True, "attest_env": "RLR_OBSIDIAN",
+     "needed_for": "end-of-round human-readable sync (sync_to_obsidian.py)"},
+]
+
+
 def _check_dependencies(project_dir=None):
     """Check framework + project-declared dependencies. Returns (ok, missing),
     each a list of dep dicts with an added 'present' flag."""

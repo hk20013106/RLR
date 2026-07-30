@@ -12,6 +12,7 @@ import pitfall_ledger as pl
 from research_loop import deep_research, l0_contract, l0_intake
 from research_loop.commands.ledger import _ledger_for
 from research_loop.common import (
+    REQUIRED_DEPENDENCIES,
     _append_decision, _check_dependencies, _dep_fix_hint, _empty_value_for_schema,
     _everos_scopes_for, _load_loop_memory, _mkdirs, _now, _require_status,
     _set_status, _sha256_file, _stamp,
@@ -80,16 +81,6 @@ PREFLIGHT_FILES = [
     "output_manifest.md", "forbidden_shortcuts.md",
 ]
 
-REQUIRED_DEPENDENCIES = [
-    {"kind": "python", "name": "yaml", "label": "PyYAML", "pip": "PyYAML",
-     "needed_for": "manage_literature_db.py (growable literature DB; L1/L4/L8.5)"},
-    {"kind": "port", "name": "zotero", "label": "Zotero", "addr": "127.0.0.1:23119",
-     "attest_env": "RLR_ZOTERO",
-     "needed_for": "reference manager / citation source for the literature DB"},
-    {"kind": "env", "name": "obsidian", "label": "Obsidian vault", "env": "OBSIDIAN_VAULT",
-     "check_path": True, "attest_env": "RLR_OBSIDIAN",
-     "needed_for": "end-of-round human-readable sync (sync_to_obsidian.py)"},
-]
 
 def _pitfall_warnings_for_node(project_dir, node_id):
     """Return a list of relevant confirmed pitfall summaries for a DAG node.
@@ -642,9 +633,18 @@ def cmd_preflight(args):
     created, skipped = [], []
     runtime_file = deep_research.runtime_config_path(project_dir)
     if not runtime_file.exists() or args.force:
-        runtime_file.write_text(json.dumps(deep_research.default_runtime_config(), indent=2),
-                                encoding="utf-8")
+        try:
+            runtime_config = deep_research.default_runtime_config(
+                getattr(args, "backend", None))
+        except deep_research.DeepResearchError as exc:
+            print(f"ERROR: cannot pick a Deep Research backend: {exc}", file=sys.stderr)
+            return 2
+        runtime_file.write_text(json.dumps(runtime_config, indent=2), encoding="utf-8")
         created.append(runtime_file.name)
+        if runtime_config["backend"] == "claude":
+            print("NOTE: set plugin_dir in "
+                  f"{runtime_file.name} to the academic-research-skills plugin path; "
+                  "deep-research-run stays blocked until it is set.", file=sys.stderr)
     else:
         skipped.append(runtime_file.name)
     for fname in PREFLIGHT_FILES:

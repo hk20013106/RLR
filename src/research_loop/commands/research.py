@@ -488,6 +488,11 @@ def cmd_deep_research_run(args):
     except deep_research.DeepResearchError as exc:
         print(f"ERROR: Deep Research runtime is not configured: {exc}", file=sys.stderr)
         return 3
+    if not getattr(args, "allow_host_mismatch", False):
+        same_host, host_reason = deep_research.host_matches(spec)
+        if not same_host:
+            print(f"ERROR: Deep Research host mismatch: {host_reason}", file=sys.stderr)
+            return 3
     ready, reason = deep_research.runtime_ready(spec)
     if not ready:
         print(f"ERROR: Deep Research runtime is not ready: {reason}", file=sys.stderr)

@@ -56,12 +56,24 @@ def test_claude_command_requires_plugin_dir_and_ars_alias(tmp_path):
         dr.build_invocation(dr.RuntimeSpec(backend="claude", executable="claude"), "L4", "Q", "H", tmp_path)
 
 
+def test_claude_command_requests_json_output_format_so_schema_envelope_is_readable(tmp_path):
+    spec = dr.RuntimeSpec(backend="claude", executable="claude", plugin_dir="C:/ars")
+    command, _ = dr.build_invocation(spec, "L1", "Q", "H", tmp_path)
+    assert "--output-format" in command
+    assert command[command.index("--output-format") + 1] == "json"
+
+
 def test_l85_invocation_includes_actual_l7_l8_results(tmp_path):
     _, prompt = dr.build_invocation(dr.RuntimeSpec(backend="codex", executable="codex"),
                                     "L8.5", "Q", "H", tmp_path,
                                     result_context='{"L7_key_results": {"gene": "ACTC1"}}')
     assert "Actual L7/L8 findings to verify" in prompt
     assert "ACTC1" in prompt
+
+
+def test_codex_output_schema_is_closed_for_structured_outputs():
+    schema = dr._runtime_schema()
+    assert schema["additionalProperties"] is False
 
 
 def test_persisted_open_access_paper_keeps_source_and_extracts(tmp_path):
@@ -81,6 +93,31 @@ def test_persisted_open_access_paper_keeps_source_and_extracts(tmp_path):
     assert saved["source_metadata_response"]["id"] == "123456"
     assert {x["section"] for x in saved["evidence_extracts"]} >= {"Results", "Discussion", "Conclusion"}
     assert (tmp_path / saved["source_payload_path"]).exists()
+
+
+def test_persist_run_keeps_valid_papers_and_audits_unidentifiable_ones(tmp_path):
+    payload = _payload()
+    payload["papers"].append({
+        "doi": "", "pmid": "", "url": "", "title": "Unverifiable record",
+        "source_database": "fixture", "source_metadata_response": {"id": "x", "title": "x"},
+        "extracts": [], "open_access": False, "metadata": {},
+    })
+    artifact = dr.persist_run(
+        tmp_path, "C1", "L1", payload,
+        dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"),
+    )
+    assert len(artifact["papers"]) == 1
+    assert artifact["rejected_papers"][0]["title"] == "Unverifiable record"
+
+
+def test_persist_run_fails_closed_when_all_papers_are_unidentifiable(tmp_path):
+    payload = _payload()
+    payload["papers"][0]["doi"] = payload["papers"][0]["pmid"] = payload["papers"][0]["url"] = ""
+    with pytest.raises(dr.DeepResearchError, match="no retrievable papers"):
+        dr.persist_run(
+            tmp_path, "C1", "L1", payload,
+            dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"),
+        )
 
 
 def test_changed_paper_payload_creates_a_new_immutable_record(tmp_path):
@@ -265,8 +302,12 @@ def test_deep_research_cli_executes_a_local_fake_codex(tmp_path):
     runtime.parent.mkdir(parents=True, exist_ok=True)
     runtime.write_text(json.dumps({"backend": "codex", "executable": str(command),
                                    "skill_path": str(skill), "skill_version": "fixture"}), encoding="utf-8")
+    # The fake executable stands in for Codex whichever host runs the suite, so
+    # the cross-host run is declared instead of left to the ambient environment
+    # -- otherwise this test would pass or fail by session type.
     result = subprocess.run([sys.executable, str(cli), "deep-research-run", str(project), cand_id,
-                             "--node", "L1"], capture_output=True, text=True)
+                             "--node", "L1", "--allow-host-mismatch"],
+                            capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert "deep_research_run" in result.stdout
     context = subprocess.run([sys.executable, str(cli), "assemble-context", str(project), cand_id,
@@ -300,3 +341,95 @@ def test_deep_research_cli_executes_a_local_fake_claude_plugin(tmp_path):
                              "--node", "L4"], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert "deep_research_run" in result.stdout
+
+
+# --- host / backend consistency (v0.9 candidate defect: Codex was hardcoded) --
+
+def test_detect_host_backend_reads_claude_code_markers():
+    assert dr.detect_host_backend({"CLAUDECODE": "1"}) == "claude"
+    assert dr.detect_host_backend({"CLAUDE_CODE": "1"}) == "claude"
+
+
+def test_detect_host_backend_returns_none_when_no_marker_is_present():
+    """Codex exposes no marker this repo has verified, so an unmarked host is
+    reported as unknown rather than silently assumed to be Codex."""
+    assert dr.detect_host_backend({}) is None
+    assert dr.detect_host_backend({"CLAUDECODE": ""}) is None
+
+
+def test_default_runtime_config_follows_the_detected_host():
+    config = dr.default_runtime_config(env={"CLAUDECODE": "1"})
+    assert config["backend"] == "claude"
+    assert config["executable"] == "claude"
+    assert ".codex" not in json.dumps(config)
+
+
+def test_default_runtime_config_accepts_an_explicit_backend():
+    config = dr.default_runtime_config("codex", env={"CLAUDECODE": "1"})
+    assert config["backend"] == "codex"
+    assert config["executable"] == "codex"
+    assert "academic-research-suite" in config["skill_path"]
+
+
+def test_default_runtime_config_fails_loud_when_the_host_is_unknown():
+    with pytest.raises(dr.DeepResearchError) as exc:
+        dr.default_runtime_config(env={})
+    assert "--backend" in str(exc.value)
+
+
+def test_default_runtime_config_rejects_an_unsupported_backend():
+    with pytest.raises(dr.DeepResearchError):
+        dr.default_runtime_config("antigravity", env={"CLAUDECODE": "1"})
+
+
+def test_host_matches_rejects_running_codex_from_a_claude_session():
+    spec = dr.RuntimeSpec(backend="codex", executable="codex")
+    ok, reason = dr.host_matches(spec, {"CLAUDECODE": "1"})
+    assert not ok
+    assert "claude" in reason and "codex" in reason
+
+
+def test_host_matches_accepts_a_backend_equal_to_the_detected_host():
+    spec = dr.RuntimeSpec(backend="claude", executable="claude", plugin_dir="C:/ars")
+    assert dr.host_matches(spec, {"CLAUDECODE": "1"}) == (True, "")
+
+
+def test_host_matches_stays_permissive_when_the_host_is_unknown():
+    """Detection gaps must not block every run -- only a positive mismatch does."""
+    spec = dr.RuntimeSpec(backend="codex", executable="codex")
+    assert dr.host_matches(spec, {}) == (True, "")
+
+
+def _mismatch_project(tmp_path):
+    (tmp_path / "01_Candidates").mkdir(parents=True)
+    (tmp_path / "01_Candidates" / "C1.md").write_text("---\ntitle: t\n---\n", encoding="utf-8")
+    dr.runtime_config_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+    dr.runtime_config_path(tmp_path).write_text(
+        json.dumps(dr.default_runtime_config("codex", env={})), encoding="utf-8")
+    return SimpleNamespace(
+        project_dir=str(tmp_path), cand_id="C1", node="L1", backend=None,
+        executable=None, plugin_dir=None, skill_path=None, skill_version=None,
+        model=None, timeout=None, allow_host_mismatch=False,
+    )
+
+
+def test_deep_research_run_refuses_a_host_backend_mismatch(tmp_path, monkeypatch, capsys):
+    from research_loop.commands.research import cmd_deep_research_run
+    monkeypatch.setenv("CLAUDECODE", "1")
+    args = _mismatch_project(tmp_path)
+    assert cmd_deep_research_run(args) == 3
+    err = capsys.readouterr().err
+    assert "claude" in err and "codex" in err
+    assert "--allow-host-mismatch" in err
+
+
+def test_deep_research_run_allows_an_explicitly_accepted_mismatch(tmp_path, monkeypatch, capsys):
+    """Deliberate cross-host runs stay possible; they just cannot be silent."""
+    from research_loop.commands.research import cmd_deep_research_run
+    monkeypatch.setenv("CLAUDECODE", "1")
+    args = _mismatch_project(tmp_path)
+    args.allow_host_mismatch = True
+    assert cmd_deep_research_run(args) == 3
+    err = capsys.readouterr().err
+    assert "--allow-host-mismatch" not in err
+    assert "not ready" in err

@@ -4,6 +4,16 @@
 
 Research Loop is a DAG-based, multi-agent system for auditable scientific research.
 
+### Current product policy
+
+New work uses the native v2.1 contract directly. Old v2.0 projects are not a
+product target for new runs, migration, or long-term compatibility work. Do
+not silently reinterpret old data as v2.1, and do not admit old data into a
+new v2.1 run. The existing v2.0 read/compatibility code remains temporarily
+only to avoid an unplanned breaking change; remove it only in an explicit,
+separately reviewed cleanup. The next release is v1.0; from v1.0 onward,
+v2.0 compatibility is removed and v1.0 accepts only the native contract.
+
 Primary priorities, in order:
 
 1. Scientific and logical correctness.
@@ -60,7 +70,9 @@ The following are correctness boundaries, not optional conventions.
 
 * Preserve the declared DAG. Do not introduce backward dependencies or hidden cross-node communication.
 * Preserve node-specific information visibility.
-* L9a and L9b must remain mutually invisible during their parallel execution; only DAG-declared downstream nodes may combine their outputs.
+* Historical v2.0 L9a/L9b runs remain parallel and mutually invisible. Native
+  v2.1 runs are serial: L9b may read only the finalized, cursor-authorized L9a
+  snapshot; no other hidden cross-node communication is permitted.
 * Only the designated decision authority may change candidate status.
 * Only the designated execution node may execute analysis code.
 * Cognitive nodes must operate on their assembled, DAG-authorized context rather than arbitrary repository state.
@@ -107,7 +119,7 @@ The following are correctness boundaries, not optional conventions.
 ### L0 input contract
 
 * Any candidate reaching L0 must satisfy the current strict L0 input contract.
-* Legacy data may remain readable, but it must be explicitly migrated before entering L0.
+* New L0 runs accept only the native v2.1 input contract. Legacy data is out of scope for new runs; do not infer, upgrade, or migrate it implicitly.
 * `round_type` must be explicit; never infer it from file presence or another boolean.
 * File and directory inputs with missing paths must hard-fail.
 * Remote datasets require a stable locator or ID, an explicit verification status, and a reason when not verified.

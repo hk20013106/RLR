@@ -37,6 +37,7 @@ from research_loop.commands.pitfall import (
 )
 from research_loop.commands.ranking import cmd_ranking_benchmark, cmd_ranking_report, cmd_ranking_shadow
 from research_loop.compatibility import DEFAULT_NATIVE_PROFILE, PROFILES
+from research_loop.deep_research import SUPPORTED_BACKENDS
 from research_loop.version import VERSION
 
 __version__ = VERSION
@@ -72,6 +73,9 @@ def build_parser():
     sp = sub.add_parser("preflight", help="L0 Linnaeus boot gate (00_Preflight/)")
     sp.add_argument("project_dir")
     sp.add_argument("--force", action="store_true", help="overwrite existing files")
+    sp.add_argument("--backend", choices=list(SUPPORTED_BACKENDS),
+                    help=("Deep Research backend for this project; defaults to the "
+                          "detected agent host and fails loud when it is unknown"))
     sp.set_defaults(func=cmd_preflight)
 
     # check-deps (L0 dependency gate, standalone)
@@ -407,7 +411,11 @@ def build_parser():
     sp.add_argument("project_dir")
     sp.add_argument("cand_id")
     sp.add_argument("--node", required=True, choices=["L1", "L4", "L8.5"])
-    sp.add_argument("--backend", choices=["codex", "claude"], help="override configured backend")
+    sp.add_argument("--backend", choices=list(SUPPORTED_BACKENDS),
+                    help="override configured backend")
+    sp.add_argument("--allow-host-mismatch", action="store_true",
+                    help=("run a backend that differs from the detected agent host "
+                          "(spends that provider's quota on purpose)"))
     sp.add_argument("--executable", help="override configured CLI executable")
     sp.add_argument("--plugin-dir", help="required Academic Research Skills plugin path for Claude")
     sp.add_argument("--skill-path", help="Codex academic-research-suite installation path")

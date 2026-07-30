@@ -12,7 +12,12 @@ RLR（Research Loop Room）是一个**证据门禁的科学研究审查框架**�
 
 一句话：**用多角色对抗 + 文献证据包 + 执行门禁，把“AI 做研究”从自由发挥变成有约束、可审计的审查流程。**
 
-**当前版本：V0.8**（modular architecture）
+**当前稳定版：V0.8。** V0.9 的 native v2.1 收尾功能已在当前工作树实现，
+但 80% 覆盖率发布门尚未满足，仍处于发布候选状态。
+
+新项目默认绑定 `v2.1-catalog-1`；L8 为 Tukey / `L8_tukey`，L9 按 L9a →
+finalized L9a → L9b 串行。既有 profile 不被重解释。dashboard、literature
+source MCP、PaSa、完整 AI4AI 与 v2.0 清理都已后置到独立阶段。
 
 > 根目录中文入口：[README_CN.md](../README_CN.md)。本页是中文完整说明；英文入口在仓库根目录 `README.md`。
 
@@ -20,7 +25,14 @@ RLR（Research Loop Room）是一个**证据门禁的科学研究审查框架**�
 
 ## 版本历史
 
-### V0.8 — 当前（modular architecture）
+### V0.9 — 开发中（native v2.1 收尾）
+
+- 新项目绑定 `v2.1-catalog-1`，使用带 YAML frontmatter 的 persona catalog；已有 body-only `v2.1` 不被重解释。
+- 原生运行必须将 `ContextManifest/v2`、`RunReceipt/v1` 和实际 provider delta 绑定后才允许 emission；L1/L4 的 Curie 前置检索带精确 `EvidenceRunReceipt/v1.1` run ID。
+- L8 为 Tukey；L9a finalized 后才能将授权 snapshot 传入 L9b。v2.0 仅保留历史读取。
+- dashboard、literature-source MCP、PaSa、完整 AI4AI 与 v2.0 清理不属于本版本。
+
+### V0.8 — 当前稳定版（modular architecture）
 
 - **Engine 模块化拆分**：`engine.py` 从 4768 行减少到 477 行。所有 42 个 `cmd_*` 处理函数提取到 `src/research_loop/commands/` 下的 8 个独立命令模块：continuation、execution、ledger、lifecycle、pitfall、ranking、reporting、research。`cli.py` 现在拥有 `build_parser` 和 `main`。所有向后兼容的 import 通过 inward shim 保留。
 - **假说账本读取边界正确性**：finalized emission predicate（`FINALIZED_EMISSION_PREDICATE`）应用于 `ranking_inputs`、`materialize_authorized_context`、`verify` 和 `snapshot_candidate`。crash window 产生的 orphan emission 对 consumptive reads 不可见，且被 `verify` 报告。
@@ -29,6 +41,7 @@ RLR（Research Loop Room）是一个**证据门禁的科学研究审查框架**�
 - **测试覆盖恢复**：native-v2 gate tests 现在通过 production CLI 到达真实 gates，而非被 v1 guard 拦截。
 
 ### V0.7 — canonical gated runtime
+
 - **可验证 Deep Research 证据链**：Codex 显式调用 `$academic-research-suite`；Claude 显式调用已配置的 `academic-research-skills` plugin。L1 必须保存 Results/Discussion/Conclusion，L4 必须保存 Methods 与 review-search 回执，L8.5 必须保存论文验证结果；L10 注入定位摘录，L10b 必须引用 evidence ID。
 - **L0 严格输入契约**：`normalize-l0-input` 将请求文件和显式数据位置规范化为可验证、可审计的 L0 contract；不从自然语言猜测路径、ID、决策或结论。
 - **假说排序可靠性层（shadow mode）**：对显式候选集合执行 A/B 与 B/A 的公平 pairwise 判断；顺序翻转标记为 `UNCERTAIN`，并将排序、checkpoint、evidence event、正式决策分歧和失败审计隔离写入 `08_Audit/ranking/`。它绝不改变正式 gate、候选选择或 decision。
@@ -37,7 +50,7 @@ RLR（Research Loop Room）是一个**证据门禁的科学研究审查框架**�
 
 ---
 
-## 架构（V0.8）
+## 架构（V0.9）
 
 ### DAG 流水线（15 个节点）
 
@@ -60,12 +73,12 @@ L6  奥本海默     批准分析方案
        │
 L7  图灵         执行脚本（前面先做代码搜索）
        │
-L8  居里         审计结果，验证可重复性
+L8  图基         审计结果，验证可重复性
        │
 L8.5 居里        文献验证：拿实际结果去查 PubMed
        │
-L9a 费曼 ╮       并行（互相不可见）
-L9b 达尔文 ╰──→  证伪 / 生物学解读
+L9a 费曼         证伪；必须先 finalized
+L9b 达尔文       基于授权的 L9a snapshot 作生物学解读
        │
 L10a 乔布斯      价值评估，规划论文方向
        │
@@ -78,12 +91,12 @@ L10c 林奈        聚合所有 delta，生成最终报告
 
 L0 当前有 **4 项框架级必需依赖**。这是 fail-closed 门禁：任一项缺失，循环在 L0 停止，不会进入 L1。
 
-| 依赖 | 检测/声明方式 | 用途 |
-|------|---------------|------|
-| PyYAML | Python import `yaml` | contract、frontmatter 和文献数据库 I/O |
-| Academic Research runtime | `00_Preflight/deep_research_runtime.json`：CLI + Codex skill manifest 或 Claude plugin manifest | L1/L4/L8.5 证据获取 |
-| Zotero connector | `127.0.0.1:23119` 或 `RLR_ZOTERO` | 文献管理和引用来源 |
-| Obsidian vault | 有效 `$OBSIDIAN_VAULT` 路径或 `RLR_OBSIDIAN` | 回合结束的人类可读同步 |
+| 依赖                        | 检测/声明方式                                                                                       | 用途                              |
+| ------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------- |
+| PyYAML                    | Python import `yaml`                                                                          | contract、frontmatter 和文献数据库 I/O |
+| Academic Research runtime | `00_Preflight/deep_research_runtime.json`：CLI + Codex skill manifest 或 Claude plugin manifest | L1/L4/L8.5 证据获取                 |
+| Zotero connector          | `127.0.0.1:23119` 或 `RLR_ZOTERO`                                                              | 文献管理和引用来源                       |
+| Obsidian vault            | 有效 `$OBSIDIAN_VAULT` 路径或 `RLR_OBSIDIAN`                                                       | 回合结束的人类可读同步                     |
 
 项目还可以在 `00_Preflight/dependencies.md` 中用 `- python:`、
 `- command:` 或 `- env:` 增加依赖；这些是附加项，不会替代上述 4 项。
@@ -113,12 +126,12 @@ L0 当前有 **4 项框架级必需依赖**。这是 fail-closed 门禁：任一
 
 ### 可验证 Deep Research（L1 / L4 / L8.5）
 
-| 在哪个节点之前 | 步骤 | 做什么 |
-|----------------|------|--------|
-| L1 | 深度文献检索 | 通过 ARS 获取论文，保存可定位的 Results/Discussion/Conclusion 摘录 |
-| L4 | 方法综述 | 保存研究论文的 Methods，并保存相关综述 Results/Conclusion 或零结果检索回执 |
-| L8.5 | 结果后文献验证 | 用 L7/L8 的实际结果检索并保存支持/矛盾/未解决证据 |
-| L7 | 代码搜索 | 搜 GitHub/Bioconductor/CRAN，复用已有 pipeline |
+| 在哪个节点之前 | 步骤      | 做什么                                                 |
+| ------- | ------- | --------------------------------------------------- |
+| L1      | 深度文献检索  | 通过 ARS 获取论文，保存可定位的 Results/Discussion/Conclusion 摘录 |
+| L4      | 方法综述    | 保存研究论文的 Methods，并保存相关综述 Results/Conclusion 或零结果检索回执 |
+| L8.5    | 结果后文献验证 | 用 L7/L8 的实际结果检索并保存支持/矛盾/未解决证据                       |
+| L7      | 代码搜索    | 搜 GitHub/Bioconductor/CRAN，复用已有 pipeline            |
 
 文献运行不再以手写摘要作为成功条件。每次运行的 CLI/skill receipt、来源数据库元数据响应、开放获取源文本（如可用）、定位摘录及 hash 都写入 `09_Literature_Database/evidence_packs/`；`assemble-context` 只接受通过该契约的 artifact。
 
@@ -141,43 +154,43 @@ L7/L8 出结果后，L8.5（居里 的第二实例）基于**实际结果的关�
 
 ## 角色表
 
-| 节点 | 角色 | 职责 | 隔离方式 |
-|------|------|------|----------|
-| L0 | 林奈 | 预检、扫描技能、验证输入数据 | 路径 B |
-| L1 | 爱因斯坦 | 提出科学假设 | 路径 B |
-| L2 | 费曼 | 盲审攻击 L1 假设，找混淆因素 | 路径 B |
-| L3 | 奥本海默 | 裁决假设，选出可测试的 | 路径 B |
-| L4 | 费舍尔 | 设计实验/分析策略 | 路径 B |
-| L5 | 图基 | 从 EDA/QC 角度审查方法 | 路径 B |
-| L6 | 奥本海默 | 批准或驳回分析方案 | 路径 B |
-| L7 | 图灵 | 在受控 workspace 中执行脚本 | **路径 A** |
-| L8 | 居里 | 审计结果，验证可重复性 | 路径 B |
-| L8.5 | 居里 | 文献验证，增长文献数据库 | 路径 B |
-| L9a | 费曼 | 硬证伪（统计/逻辑完备性） | 路径 B（与 L9b 并行，互不可见） |
-| L9b | 达尔文 | 生物学解读 | 路径 B（与 L9a 并行，互不可见） |
-| L10a | 乔布斯 | 价值评估，规划论文方向 | 路径 B |
-| L10b | 奥本海默 | 终审：KEEP / REVISE / DOWNGRADE / DROP | 路径 B |
-| L10c | 林奈 | 聚合所有 delta，生成最终报告 | 读取所有 delta |
+| 节点   | 角色   | 职责                                  | 隔离方式                |
+| ---- | ---- | ----------------------------------- | ------------------- |
+| L0   | 林奈   | 预检、扫描技能、验证输入数据                      | 路径 B                |
+| L1   | 爱因斯坦 | 提出科学假设                              | 路径 B                |
+| L2   | 费曼   | 盲审攻击 L1 假设，找混淆因素                    | 路径 B                |
+| L3   | 奥本海默 | 裁决假设，选出可测试的                         | 路径 B                |
+| L4   | 费舍尔  | 设计实验/分析策略                           | 路径 B                |
+| L5   | 图基   | 从 EDA/QC 角度审查方法                     | 路径 B                |
+| L6   | 奥本海默 | 批准或驳回分析方案                           | 路径 B                |
+| L7   | 图灵   | 在受控 workspace 中执行脚本                 | **路径 A**            |
+| L8   | 图基   | 审计结果，验证可重复性                         | 路径 B                |
+| L8.5 | 居里   | 文献验证，增长文献数据库                        | 路径 B                |
+| L9a  | 费曼   | 硬证伪（统计/逻辑完备性）；先 finalized          | 路径 B（不读取 L9b）       |
+| L9b  | 达尔文  | 基于授权 L9a snapshot 作生物学解读             | 路径 B（L9a finalized 后） |
+| L10a | 乔布斯  | 价值评估，规划论文方向                         | 路径 B                |
+| L10b | 奥本海默 | 终审：KEEP / REVISE / DOWNGRADE / DROP | 路径 B                |
+| L10c | 林奈   | 聚合所有 delta，生成最终报告                   | 读取所有 delta          |
 
 ### V0.7 每个节点到底做什么
 
-| 节点 | 读取 | 产出 | 正式效果 |
-|------|------|------|----------|
-| L0 林奈 | candidate frontmatter + 严格 L0 contract | 输入验证、技能计划、依赖/预检审计 | 缺依赖或输入未验证则停止；通过后进入 `IDEA_PROPOSED` |
-| L1 爱因斯坦 | frontmatter + L0 + 定位的 Results/Discussion/Conclusion | 可测试假设、主假设 | 生成假设 delta |
-| L2 费曼 | frontmatter + L1 | 盲审攻击、混淆因素、诊断检验 | 不改状态 |
-| L3 奥本海默 | L1 + L2 | 选中/拒绝假设及理由 | `triage-idea`；delta 成功写入后才可触发 shadow ranking |
-| L4 费舍尔 | L1/L2/L3 + Methods/review evidence | 策略、脚本、参数、输出计划 | 提出分析方案 |
-| L5 图基 | L4 + L2 | QC 检查点、失败规则、方法攻击 | 不改状态 |
-| L6 奥本海默 | L4 + L5 | 分析方案批准/拒绝及修改 | `triage-method`；刻意不接入 ranking hook |
-| L7 图灵 | L6 + L0 + 准备好的白名单 workspace | 脚本退出码、输出文件、关键结果 | 唯一允许执行代码的节点；先过 `execution-gate` |
-| L8 居里 | L7 + L6 + frontmatter | 证据审计、可重复性检查、证据等级 | 进入 `AUDITED` |
-| L8.5 居里 | L7 + L8 + 论文验证 evidence | 支持/矛盾审计和文献记录 | 进入 review |
-| L9a 费曼 | L1 + L7 + L8 + L8.5 | 统计/逻辑证伪 | 与 L9b 并行，不能读取 L9b |
-| L9b 达尔文 | L1 + L7 + L8 + L8.5 | 生物学解读和局限 | 与 L9a 并行，不能读取 L9a |
-| L10a 乔布斯 | frontmatter + L8/L8.5/L9a/L9b + 定位 L1/L8.5 evidence | 价值评估和论文框架 | 不改状态 |
-| L10b 奥本海默 | L10a + L8/L8.5/L9a/L9b + evidence IDs | 最终决策和可追溯理由 | `KEEP/REVISE/DOWNGRADE/DROP`；delta 成功写入后才可触发 shadow ranking |
-| L10c 林奈 | 所有允许读取的 delta | 中英文 FINAL_REPORT 和同步输入 | 聚合报告；不执行代码，也不替 ranking 选胜者 |
+| 节点        | 读取                                                   | 产出                     | 正式效果                                                        |
+| --------- | ---------------------------------------------------- | ---------------------- | ----------------------------------------------------------- |
+| L0 林奈     | candidate frontmatter + 严格 L0 contract               | 输入验证、技能计划、依赖/预检审计      | 缺依赖或输入未验证则停止；通过后进入 `IDEA_PROPOSED`                          |
+| L1 爱因斯坦   | frontmatter + L0 + 定位的 Results/Discussion/Conclusion | 可测试假设、主假设              | 生成假设 delta                                                  |
+| L2 费曼     | frontmatter + L1                                     | 盲审攻击、混淆因素、诊断检验         | 不改状态                                                        |
+| L3 奥本海默   | L1 + L2                                              | 选中/拒绝假设及理由             | `triage-idea`；delta 成功写入后才可触发 shadow ranking                |
+| L4 费舍尔    | L1/L2/L3 + Methods/review evidence                   | 策略、脚本、参数、输出计划          | 提出分析方案                                                      |
+| L5 图基     | L4 + L2                                              | QC 检查点、失败规则、方法攻击       | 不改状态                                                        |
+| L6 奥本海默   | L4 + L5                                              | 分析方案批准/拒绝及修改           | `triage-method`；刻意不接入 ranking hook                          |
+| L7 图灵     | L6 + L0 + 准备好的白名单 workspace                          | 脚本退出码、输出文件、关键结果        | 唯一允许执行代码的节点；先过 `execution-gate`                             |
+| L8 图基     | L7 + L6 + frontmatter                                | 证据审计、可重复性检查、证据等级       | 进入 `AUDITED`                                                |
+| L8.5 居里   | L7 + L8 + 论文验证 evidence                              | 支持/矛盾审计和文献记录           | 进入 review                                                   |
+| L9a 费曼    | L1 + L7 + L8 + L8.5                                  | 统计/逻辑证伪                | 先 finalized；不能读取 L9b                                          |
+| L9b 达尔文   | L1 + L7 + L8 + L8.5 + 授权 L9a snapshot              | 生物学解读和局限               | 只能在 L9a finalized 后运行                                          |
+| L10a 乔布斯  | frontmatter + L8/L8.5/L9a/L9b + 定位 L1/L8.5 evidence  | 价值评估和论文框架              | 不改状态                                                        |
+| L10b 奥本海默 | L10a + L8/L8.5/L9a/L9b + evidence IDs                | 最终决策和可追溯理由             | `KEEP/REVISE/DOWNGRADE/DROP`；delta 成功写入后才可触发 shadow ranking |
+| L10c 林奈   | 所有允许读取的 delta                                        | 中英文 FINAL_REPORT 和同步输入 | 聚合报告；不执行代码，也不替 ranking 选胜者                                  |
 
 ranking 只是 L3/L10b 之后生成的 advisory signal，不参与
 `triage-idea`、`triage-method` 或正式 `decision` 转移校验。
@@ -212,33 +225,33 @@ ranking 只是 L3/L10b 之后生成的 advisory signal，不参与
 
 ## 命令
 
-| 命令 | 说明 |
-|------|------|
-| `demo` | 生成 demo 项目，走完 15 个节点 |
-| `new-project` | 创建 V0.7 项目目录 |
-| `preflight` | L0 预检 + 依赖门禁 |
-| `normalize-l0-input` | 将显式请求和数据位置规范化为严格 L0 contract |
-| `check-deps` | 独立依赖检查 |
-| `new-candidate` | 创建带拆分 frontmatter 的 candidate |
-| `next-step` | 获取下一个 DAG 节点调度包 |
-| `pre-research` | 打印旧研究提示或 L7 代码搜索提示（文献节点使用 `deep-research-run`） |
-| `deep-research-run` | 调用配置的 Codex/Claude ARS 并持久化验证过的 evidence pack |
-| `audit-literature-evidence` / `literature-report` | fail-closed 论文证据审计 / 定位证据报告 |
-| `assemble-context` | 构建节点的隔离上下文 |
-| `emit-delta` | 校验并写入 delta JSON |
-| `route` | 把 candidate 交给一个角色 |
-| `note` | 追加角色笔记 |
-| `triage-idea` | L3：假设裁决 |
-| `triage-method` | L6：方法裁决 |
-| `execution-gate` | 执行门禁 |
-| `decision` | 状态变更 |
-| `aggregate-report` | L10c：生成 FINAL_REPORT |
-| `obsidian-sync` | 同步到 Obsidian vault |
-| `ranking-shadow` | 对显式候选运行隔离的 advisory 公平排序 |
-| `ranking-benchmark` | 运行免费的 synthetic fair-vs-naive 排序 benchmark |
-| `ranking-report` | 输出 shadow ranking artifact 的 JSON 或 Markdown 报告 |
-| `list` | 列出 candidate |
-| `show` | 查看 candidate 文件 |
+| 命令                                                | 说明                                              |
+| ------------------------------------------------- | ----------------------------------------------- |
+| `demo`                                            | 生成 demo 项目，走完 15 个节点                            |
+| `new-project`                                     | 创建 V0.7 项目目录                                    |
+| `preflight`                                       | L0 预检 + 依赖门禁                                    |
+| `normalize-l0-input`                              | 将显式请求和数据位置规范化为严格 L0 contract                    |
+| `check-deps`                                      | 独立依赖检查                                          |
+| `new-candidate`                                   | 创建带拆分 frontmatter 的 candidate                   |
+| `next-step`                                       | 获取下一个 DAG 节点调度包                                 |
+| `pre-research`                                    | 打印旧研究提示或 L7 代码搜索提示（文献节点使用 `deep-research-run`）  |
+| `deep-research-run`                               | 调用配置的 Codex/Claude ARS 并持久化验证过的 evidence pack   |
+| `audit-literature-evidence` / `literature-report` | fail-closed 论文证据审计 / 定位证据报告                     |
+| `assemble-context`                                | 构建节点的隔离上下文                                      |
+| `emit-delta`                                      | 校验并写入 delta JSON                                |
+| `route`                                           | 把 candidate 交给一个角色                              |
+| `note`                                            | 追加角色笔记                                          |
+| `triage-idea`                                     | L3：假设裁决                                         |
+| `triage-method`                                   | L6：方法裁决                                         |
+| `execution-gate`                                  | 执行门禁                                            |
+| `decision`                                        | 状态变更                                            |
+| `aggregate-report`                                | L10c：生成 FINAL_REPORT                            |
+| `obsidian-sync`                                   | 同步到 Obsidian vault                              |
+| `ranking-shadow`                                  | 对显式候选运行隔离的 advisory 公平排序                        |
+| `ranking-benchmark`                               | 运行免费的 synthetic fair-vs-naive 排序 benchmark      |
+| `ranking-report`                                  | 输出 shadow ranking artifact 的 JSON 或 Markdown 报告 |
+| `list`                                            | 列出 candidate                                    |
+| `show`                                            | 查看 candidate 文件                                 |
 
 ---
 

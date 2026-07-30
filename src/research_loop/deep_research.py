@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import json
+import os as _os
 import re
 import shutil
 import subprocess
@@ -18,6 +19,16 @@ from pathlib import Path
 
 SCHEMA_VERSION = "1.0"
 _STAGES = {"L1", "L4", "L8.5"}
+
+# Deep Research backends. Deliberately closed: every backend needs a verified
+# invocation shape, a skill/plugin layout, and evidence-gate coverage, so a name
+# is only added once those exist.
+SUPPORTED_BACKENDS = ("codex", "claude")
+
+# Environment markers that identify the agent host. Claude Code sets these and
+# providers/headless.py already depends on them. No Codex marker is listed
+# because none has been verified in this repository -- see detect_host_backend.
+_HOST_MARKERS = {"claude": ("CLAUDECODE", "CLAUDE_CODE")}
 _MAX_SOURCE_BYTES = 5 * 1024 * 1024
 
 
@@ -39,16 +50,68 @@ def runtime_config_path(project_dir: str | Path) -> Path:
     return Path(project_dir) / "00_Preflight" / "deep_research_runtime.json"
 
 
-def default_runtime_config() -> dict:
-    return {
+def detect_host_backend(env: dict | None = None) -> str | None:
+    """Name the agent host running this process, or None when it is unknown.
+
+    Only the Claude Code markers are verified (providers/headless.py relies on
+    the same two variables). Codex exposes no marker this repository has
+    confirmed, so an unmarked host is reported as unknown -- never assumed to be
+    Codex. Guessing here is what let a Claude session spend Codex quota.
+    """
+    env = _os.environ if env is None else env
+    for backend, markers in _HOST_MARKERS.items():
+        if any(env.get(marker) for marker in markers):
+            return backend
+    return None
+
+
+def default_runtime_config(backend: str | None = None,
+                           env: dict | None = None) -> dict:
+    """Runtime config for an explicit backend, or for the detected host.
+
+    Fails loud when the host cannot be detected: silently defaulting to one
+    backend is what sent Claude-hosted runs to the Codex CLI.
+    """
+    backend = backend or detect_host_backend(env)
+    if backend is None:
+        raise DeepResearchError(
+            "cannot detect the current agent host; pass --backend "
+            f"{'|'.join(SUPPORTED_BACKENDS)} to name the runtime explicitly")
+    if backend not in SUPPORTED_BACKENDS:
+        raise DeepResearchError(
+            f"backend must be one of {', '.join(SUPPORTED_BACKENDS)}, got {backend!r}")
+    config = {
         "schema_version": SCHEMA_VERSION,
-        "backend": "codex",
-        "executable": "codex",
-        "skill_path": str(Path.home() / ".codex" / "skills" / "academic-research-suite"),
+        "backend": backend,
+        "executable": backend,
+        "skill_path": "",
         "plugin_dir": "",
         "skill_version": "unknown",
         "timeout": 900,
     }
+    if backend == "codex":
+        config["skill_path"] = str(
+            Path.home() / ".codex" / "skills" / "academic-research-suite")
+    # The Claude plugin directory is installation-specific and is left empty
+    # rather than guessed; runtime_ready() reports it as missing.
+    return config
+
+
+def host_matches(spec: RuntimeSpec, env: dict | None = None) -> tuple[bool, str]:
+    """Reject a configured backend that contradicts the detected host.
+
+    An unknown host is permissive: a detection gap must not block every run.
+    Only a positive mismatch stops one, because that is the case that spends the
+    wrong provider's quota.
+    """
+    host = detect_host_backend(env)
+    if host is None or host == spec.backend:
+        return True, ""
+    return False, (
+        f"running inside the {host!r} host but the project runtime is configured "
+        f"for backend {spec.backend!r}. This would spend {spec.backend!r} quota "
+        f"from a {host!r} session. Either re-run with --backend {host} or, if the "
+        f"cross-host run is intended, pass --allow-host-mismatch")
 
 
 def load_runtime_spec(project_dir: str | Path, overrides: dict | None = None) -> tuple[RuntimeSpec, str]:
@@ -88,15 +151,77 @@ def _safe_id(value: str) -> str:
 
 
 def _runtime_schema() -> dict:
+    extract = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "section": {"type": "string"},
+            "text": {"type": "string"},
+            "locator": {"type": "string"},
+            "extraction_method": {"type": "string"},
+            "verification_status": {"type": "string"},
+        },
+        "required": ["section", "text", "locator", "extraction_method", "verification_status"],
+    }
+    paper = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "doi": {"type": "string"},
+            "pmid": {"type": "string"},
+            "url": {"type": "string"},
+            "title": {"type": "string"},
+            "source_database": {"type": "string"},
+            "metadata": {
+                "type": "object", "additionalProperties": False,
+                "properties": {"year": {"type": "integer"}, "journal": {"type": "string"}},
+                "required": ["year", "journal"],
+            },
+            "source_metadata_response": {
+                "type": "object", "additionalProperties": False,
+                "properties": {"id": {"type": "string"}, "title": {"type": "string"}},
+                "required": ["id", "title"],
+            },
+            "open_access": {"type": "boolean"},
+            "content_type": {"type": "string"},
+            "source_payload": {"type": "string"},
+            "paper_type": {"type": "string"},
+            "extracts": {"type": "array", "items": extract},
+        },
+        "required": [
+            "doi", "pmid", "url", "title", "source_database", "metadata",
+            "source_metadata_response", "open_access", "content_type",
+            "source_payload", "paper_type", "extracts",
+        ],
+    }
+    review_search = {
+        "type": "object", "additionalProperties": False,
+        "properties": {
+            "query": {"type": "string"},
+            "status": {"type": "string"},
+            "receipt": {"type": "string"},
+        },
+        "required": ["query", "status", "receipt"],
+    }
+    verification = {
+        "type": "object", "additionalProperties": False,
+        "properties": {
+            "finding": {"type": "string"},
+            "verdict": {"type": "string"},
+            "evidence_ids": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["finding", "verdict", "evidence_ids"],
+    }
     return {
         "type": "object",
-        "required": ["schema_version", "queries", "papers"],
+        "additionalProperties": False,
+        "required": ["schema_version", "queries", "papers", "review_search", "verification"],
         "properties": {
-            "schema_version": {"const": SCHEMA_VERSION},
-            "queries": {"type": "array", "items": {"type": "string"}},
-            "papers": {"type": "array", "items": {"type": "object"}},
-            "review_search": {"type": "object"},
-            "verification": {"type": "array", "items": {"type": "object"}},
+            "schema_version": {"type": "string", "const": SCHEMA_VERSION},
+            "queries": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+            "papers": {"type": "array", "minItems": 1, "items": paper},
+            "review_search": review_search,
+            "verification": {"type": "array", "items": verification},
         },
     }
 
@@ -126,8 +251,9 @@ def build_invocation(spec: RuntimeSpec, node: str, question: str, claim: str,
     """
     if node not in _STAGES:
         raise DeepResearchError(f"unsupported Deep Research stage {node!r}")
-    if spec.backend not in {"codex", "claude"}:
-        raise DeepResearchError("backend must be 'codex' or 'claude'")
+    if spec.backend not in SUPPORTED_BACKENDS:
+        raise DeepResearchError(
+            f"backend must be one of {', '.join(SUPPORTED_BACKENDS)}")
     if not spec.executable:
         raise DeepResearchError("executable is required")
     work_dir = Path(work_dir)
@@ -141,7 +267,7 @@ def build_invocation(spec: RuntimeSpec, node: str, question: str, claim: str,
         if not spec.plugin_dir:
             raise DeepResearchError("Claude backend requires plugin_dir for academic-research-skills")
         command = [spec.executable, "-p", "--plugin-dir", str(spec.plugin_dir),
-                   "--json-schema", str(schema_path)]
+                   "--json-schema", str(schema_path), "--output-format", "json"]
         if spec.model:
             command.extend(["--model", spec.model])
         invocation = "/ars-lit-review" if node == "L4" else "/ars-full"
@@ -204,6 +330,34 @@ def _parse_cli_output(stdout: str) -> dict:
     return value
 
 
+def _filter_unidentifiable_papers(payload: dict) -> tuple[dict, list[dict]]:
+    """Keep citable records and return an auditable list of rejected records."""
+    papers = payload.get("papers") if isinstance(payload, dict) else None
+    if not isinstance(papers, list):
+        return payload, []
+    accepted, rejected = [], []
+    for index, paper in enumerate(papers):
+        if isinstance(paper, dict) and any(
+                str(paper.get(key, "")).strip() for key in ("doi", "pmid", "url")):
+            accepted.append(paper)
+            continue
+        rejected.append({
+            "index": index,
+            "title": str(paper.get("title", "")) if isinstance(paper, dict) else "",
+            "doi": str(paper.get("doi", "")) if isinstance(paper, dict) else "",
+            "pmid": str(paper.get("pmid", "")) if isinstance(paper, dict) else "",
+            "url": str(paper.get("url", "")) if isinstance(paper, dict) else "",
+            "reason": "missing DOI, PMID, or stable URL",
+        })
+    if not accepted:
+        raise DeepResearchError("no retrievable papers remain after identifier filtering")
+    if not rejected:
+        return payload, []
+    filtered = dict(payload)
+    filtered["papers"] = accepted
+    return filtered, rejected
+
+
 def validate_payload(payload: dict) -> None:
     if payload.get("schema_version") != SCHEMA_VERSION:
         raise DeepResearchError("payload schema_version is missing or unsupported")
@@ -264,6 +418,7 @@ def persist_run(
     """Persist immutable paper records and a run artifact from a validated payload."""
     if node not in _STAGES:
         raise DeepResearchError(f"unsupported Deep Research stage {node!r}")
+    payload, rejected_papers = _filter_unidentifiable_papers(payload)
     validate_payload(payload)
     if receipt.get("exit_code") != 0 or not receipt.get("command_hash") or not receipt.get("prompt_hash"):
         raise DeepResearchError("skill receipt is incomplete or records a failed invocation")
@@ -321,6 +476,7 @@ def persist_run(
         "profile_id": profile_id,
         "status": "completed", "candidate_id": candidate_id, "node": node, "created_at": _now(),
         "queries": payload["queries"], "skill_receipt": receipt, "papers": records,
+        "rejected_papers": rejected_papers,
         "review_search": payload.get("review_search", {}), "verification": payload.get("verification", []),
         "result_context_hash": _sha(result_context) if result_context else "",
     }
@@ -652,6 +808,7 @@ def run_and_persist(
     command, prompt = build_invocation(spec, node, question, claim, work_dir, result_context)
     try:
         completed = subprocess.run(command + [prompt], capture_output=True, text=True,
+                                   encoding="utf-8", errors="strict",
                                    timeout=spec.timeout, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         raise DeepResearchError(f"Academic Research CLI invocation failed: {exc}") from exc
@@ -672,8 +829,8 @@ def run_and_persist(
 
 
 def runtime_ready(spec: RuntimeSpec) -> tuple[bool, str]:
-    if spec.backend not in {"codex", "claude"}:
-        return False, "backend must be codex or claude"
+    if spec.backend not in SUPPORTED_BACKENDS:
+        return False, f"backend must be one of {', '.join(SUPPORTED_BACKENDS)}"
     if not shutil.which(spec.executable):
         return False, f"executable not found: {spec.executable}"
     if spec.backend == "claude":

@@ -16,12 +16,10 @@ from research_loop.providers.command import CommandProvider
 
 ROOT = Path(__file__).resolve().parents[1]
 RL = str(ROOT / "research_loop_v04.py")
-_ENV = {**os.environ, "PYTHONPATH": str(ROOT)}
-
-
 def _run(*args):
+    env = {**os.environ, "PYTHONPATH": str(ROOT)}
     return subprocess.run([sys.executable, RL, *args], capture_output=True,
-                          text=True, encoding="utf-8", env=_ENV)
+                          text=True, encoding="utf-8", env=env)
 
 
 def _new_project(tmp_path):

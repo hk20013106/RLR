@@ -1,7 +1,8 @@
 """Markdown templates extracted from the runtime engine."""
 
 from research_loop.common import (
-    PERSONA_TITLE, _dep_fix_hint, _input_alias, _now, _render_extra_front,
+    PERSONA_TITLE, REQUIRED_DEPENDENCIES, _dep_fix_hint, _input_alias, _now,
+    _render_extra_front,
 )
 from research_loop.topology import AGENTS, DAG_NODES
 from research_loop.yamlio import _yaml_value
