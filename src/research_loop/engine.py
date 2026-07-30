@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Research Loop Room V0.7 — canonical gated runtime engine.
+"""Research Loop v0.9 preview — canonical gated runtime engine.
 
-This IS the V0.7 runtime. The filename `research_loop_v04.py` is retained only
+This is the v0.9 candidate runtime. The filename `research_loop_v04.py` is retained only
 for import/CLI stability (run_loop.py and the main-agent protocol import it);
-it is not a legacy engine. As of V0.7, `assemble-context` enforces the
+it is not a legacy engine. As of v0.9, `assemble-context` enforces the
 Deep Research gate (`_audit_pre_research`) on L1, L4, and L8.5: it fails closed
 (rc=3) unless a successful Academic Research Skills receipt and source-located
 evidence pack are persisted. A handwritten prose digest or an environment
@@ -50,7 +50,9 @@ from pathlib import Path
 
 import pitfall_ledger as pl  # additive: pitfall ledger (no DAG/schema coupling)
 
-__version__ = "0.8.0"
+from research_loop.version import VERSION
+
+__version__ = VERSION
 
 
 from research_loop.errors import RLRError  # inward shim (Phase 1a)
@@ -89,7 +91,7 @@ from research_loop.commands.lifecycle import (  # inward shim (Phase 7d)
 # `decision --force` (so KEEP-from-NEW and similar jumps fail by default while
 # manual recovery stays possible).
 
-# --- DAG topology (15 nodes, L9a/L9b parallel) ------------------------------
+# --- DAG topology (15 nodes; profile selects native serial or legacy parallel L9)
 # Each node: node_id, persona, status_before, status_after_optional,
 #            context_inputs, is_parallel, is_execution, advance_command,
 #            action_hint
@@ -142,7 +144,7 @@ for _n in DAG_NODES:
         _n["everos_read_scopes"] = _scopes
 del _n
 
-# Order of single-path nodes (L9a and L9b are parallel, listed together)
+# Profile-specific order is owned by topology_for_profile().
 
 # Map: node_id -> layer template filename on disk. The files are named
 # descriptively (e.g. L7_execution.md), not L7.md, so next-step must map the

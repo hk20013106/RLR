@@ -21,8 +21,9 @@ from research_loop.topology import DELTA_DAG_ORDER, topology_for_profile
 from research_loop.common import (
     PERSONA_TITLE, _now, _stamp, _input_alias, _everos_scopes_for,
 )
-from research_loop.delta import _delta_for_candidate
+from research_loop.delta import _delta_for_candidate, artifact_for_node
 from research_loop.compatibility import PROFILE_V20, get_profile
+from research_loop.persona_catalog import resolve_persona_template, PersonaCatalogError
 from research_loop.hypothesis_contracts import SCHEMA_REGISTRY
 from research_loop.hypothesis_ledger import (
     HypothesisLedger, LedgerError, binding_path, canonical_json,
@@ -90,8 +91,8 @@ def _condense_delta(delta_key, data):
                 if isinstance(s, dict) and "output_files" in s and isinstance(s["output_files"], list) and len(s["output_files"]) > 5:
                     s["output_files"] = s["output_files"][:3] + [f"... ({len(s['output_files'])} output files total)"]
                     
-    # 4. Truncate evidence verified list in L8 Curie
-    elif delta_key == "L8_curie":
+    # 4. Truncate the profile-bound L8 audit evidence list.
+    elif delta_key in {"L8_curie", "L8_tukey"}:
         if "evidence_verified" in d and isinstance(d["evidence_verified"], list) and len(d["evidence_verified"]) > 10:
             d["evidence_verified"] = d["evidence_verified"][:5] + [f"... ({len(d['evidence_verified'])} files audited in total)"]
 
@@ -163,6 +164,8 @@ def cmd_assemble_context(args):
         return 2
 
     node_id = args.node
+    candidate_frontmatter = _load_yaml_front(cf)
+    round_id = str(candidate_frontmatter.get("round_id") or "1")
     profile_id = PROFILE_V20
     profile = get_profile(profile_id)
     hypothesis_snapshot = None
@@ -178,7 +181,6 @@ def cmd_assemble_context(args):
             ledger = HypothesisLedger(store)
             profile_id = ledger.project_profile(project_dir)
             profile = get_profile(profile_id)
-            fm_for_round = _load_yaml_front(cf)
             authorization_id = getattr(args, "authorization_id", None)
             if authorization_id:
                 hypothesis_snapshot = ledger.load_authorized_context(
@@ -191,8 +193,19 @@ def cmd_assemble_context(args):
                     )
             else:
                 hypothesis_snapshot = ledger.materialize_authorized_context(
-                    project_dir, args.cand_id,
-                    str(fm_for_round.get("round_id") or "1"), node_id,
+                    project_dir, args.cand_id, round_id, node_id,
+                )
+            if (
+                node_id == "L9b"
+                and not profile.l9_parallel
+                and not any(
+                    event.get("node") == "L9a"
+                    for event in hypothesis_snapshot.get("events", [])
+                )
+            ):
+                raise LedgerError(
+                    "native L9b context requires a finalized L9a in its "
+                    "authorized snapshot"
                 )
         except LedgerError as exc:
             print(f"ERROR: hypothesis context authorization failed: {exc}",
@@ -205,6 +218,11 @@ def cmd_assemble_context(args):
         return 2
     node_info = node_map[node_id]
     inputs = node_info["context_inputs"]
+
+    def _profile_delta_key(delta_key: str) -> str:
+        """Map the historical L8 list entry to this project's bound artifact."""
+        return (artifact_for_node(profile, "L8").storage_key
+                if delta_key == "L8_curie" else delta_key)
 
     # --- L0 structured input-contract gate (strict-on-reaching-L0) -----------
     # Fail closed BEFORE any context is rendered/printed: an invalid L0 input
@@ -273,6 +291,7 @@ def cmd_assemble_context(args):
         elif inp == "ALL":
             # L10c: read all deltas
             for delta_key in DELTA_DAG_ORDER:
+                delta_key = _profile_delta_key(delta_key)
                 df = _delta_for_candidate(project_dir, delta_key, args.cand_id)
                 if df and df.exists():
                     try:
@@ -295,6 +314,7 @@ def cmd_assemble_context(args):
             corrupt = False
             for dk in DELTA_DAG_ORDER:
                 if dk.startswith(inp + "_"):
+                    dk = _profile_delta_key(dk)
                     df = _delta_for_candidate(project_dir, dk, args.cand_id)
                     if df and df.exists():
                         try:
@@ -340,7 +360,29 @@ def cmd_assemble_context(args):
         prf = _pre_research_file(project_dir, node_id)
         is_lit = pr_cfg.get("type") in _LIT_PRE_RESEARCH_TYPES
         if is_lit:
-            ok, reason = _audit_pre_research(project_dir, node_id, pr_cfg, args.cand_id)
+            evidence_run_id = getattr(args, "evidence_run_id", None)
+            # Selecting an exact evidence run is meaningful only after the
+            # required pre-research artifact exists.  Preserve the primary
+            # gate diagnostic for stages that were never run.
+            if not prf.exists():
+                print(f"ERROR: V0.7 deep-research gate -- {node_id} pre-research "
+                      f"invalid: artifact missing ({prf.as_posix()})", file=sys.stderr)
+                print(f"Run real deep research and write a valid artifact to "
+                      f"{prf.as_posix()} first (no 'NOT YET RUN' placeholder).",
+                      file=sys.stderr)
+                return 3
+            if profile.delta_schema_version == "2.1" and not evidence_run_id:
+                evidence_run_id = deep_research.unique_run_id(
+                    project_dir, args.cand_id, node_id
+                )
+                if not evidence_run_id:
+                    print(f"ERROR: {node_id} requires --evidence-run-id when its evidence run is ambiguous",
+                          file=sys.stderr)
+                    return 3
+            ok, reason = _audit_pre_research(
+                project_dir, node_id, pr_cfg, args.cand_id,
+                evidence_run_id=evidence_run_id,
+            )
             if not ok:
                 print(f"ERROR: V0.7 deep-research gate -- {node_id} pre-research "
                       f"invalid: {reason}", file=sys.stderr)
@@ -348,6 +390,54 @@ def cmd_assemble_context(args):
                       f"{prf.as_posix()} first (no 'NOT YET RUN' placeholder).",
                       file=sys.stderr)
                 return 3
+            evidence_artifacts = None
+            if evidence_run_id:
+                try:
+                    evidence_artifacts = deep_research.evidence_artifact_manifest(
+                        project_dir, args.cand_id, node_id, evidence_run_id
+                    )
+                except deep_research.DeepResearchError as exc:
+                    print(
+                        f"ERROR: {node_id} exact evidence artifacts are invalid: {exc}",
+                        file=sys.stderr,
+                    )
+                    return 3
+            if profile.delta_schema_version == "2.1":
+                expected_evidence_identity = {
+                    "project_id": str(hypothesis_snapshot["project_id"]),
+                    "candidate_id": str(args.cand_id),
+                    "round_id": round_id,
+                    "profile_id": profile.profile_id,
+                    "target_node": node_id,
+                    "research_phase": "pre_research",
+                    "research_persona": str(
+                        node_info.get("research_persona") or ""
+                    ),
+                    "receipt_schema": "EvidenceRunReceipt/v1.1",
+                }
+                for field, expected_value in expected_evidence_identity.items():
+                    if evidence_artifacts.get(field) != expected_value:
+                        print(
+                            f"ERROR: {node_id} evidence receipt {field} "
+                            "does not match the bound run",
+                            file=sys.stderr,
+                        )
+                        return 3
+            if evidence_artifacts:
+                summary = next(
+                    (
+                        item for item in evidence_artifacts["files"]
+                        if item["kind"] == "summary"
+                    ),
+                    None,
+                )
+                if summary is None:
+                    print(
+                        f"ERROR: {node_id} evidence run has no immutable summary",
+                        file=sys.stderr,
+                    )
+                    return 3
+                prf = project_dir / summary["path"]
             # v0.6 divergence + branch-coverage gates (L1, from_memory only)
             if node_id == "L1":
                 dok, dreason = _audit_divergence(project_dir, node_id, args.cand_id)
@@ -366,6 +456,9 @@ def cmd_assemble_context(args):
                       f"{node_id}: {pre_research_meta['error']}",
                       file=sys.stderr)
                 return 2
+            if is_lit:
+                pre_research_meta["evidence_run_id"] = evidence_run_id
+                pre_research_meta["evidence_artifacts"] = evidence_artifacts
             sections.extend(pr_sections)
         else:
             # Non-literature node (e.g. L7 code_search): soft, not a hard gate.
@@ -459,19 +552,27 @@ def cmd_assemble_context(args):
     sections.append("")
 
     _script_dir = Path(__file__).resolve().parents[2]
-    ptpl = _script_dir / _persona_template_path(persona)
+    try:
+        persona_template = resolve_persona_template(profile, persona)
+    except PersonaCatalogError as exc:
+        print(f"ERROR: persona catalog validation failed: {exc}", file=sys.stderr)
+        return 2
+    ptpl = persona_template.path
     ltpl = _script_dir / _layer_template_path(node_id)
     full_templates_injected = False
     contract_hashes = {
         "contract": contract_hash,
-        "persona_template": _sha256(ptpl) or "missing",
+        "persona_template": persona_template.template_sha256,
+        "persona_body": persona_template.body_sha256,
+        "persona_catalog": persona_template.catalog_sha256,
+        "persona_catalog_entry": persona_template.entry_sha256,
         "layer_template": _sha256(ltpl) or "missing",
     }
     if template_mode == "full":
         for label, tpl in (("persona", ptpl), ("layer", ltpl)):
             sections.append(f"--- [full] {label} template ({tpl.name}) "
                             f"sha256:{_sha256(tpl) or 'missing'} ---")
-            sections.append(tpl.read_text(encoding="utf-8") if tpl.exists()
+            sections.append((persona_template.markdown_body if label == "persona" else tpl.read_text(encoding="utf-8")) if tpl.exists()
                             else "(template file not found on disk)")
             sections.append("")
             full_templates_injected = True
@@ -496,7 +597,12 @@ def cmd_assemble_context(args):
 
     # --- audit: context_manifest declaring template_mode + every injected
     # artifact (emit-delta --receipt verifies the injected_deltas hashes). ---
-    project_id = project_dir.name
+    try:
+        project_id = str(json.loads(binding_path(project_dir).read_text(encoding="utf-8"))["project_id"])
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        print(f"ERROR: project ledger binding is required for context provenance: {exc}",
+              file=sys.stderr)
+        return 2
     workspaces = sorted(project_dir.glob("_turing_workspace_*"))
     manifest_id = _stamp()
     context_text = "\n".join(sections)
@@ -510,15 +616,25 @@ def cmd_assemble_context(args):
               f"Reduce injected context or raise --context-token-budget.",
               file=sys.stderr)
         return 2
+    rendered_context_path = (_audit_dir(project_dir)
+                             / f"rendered_context_{node_id}_{manifest_id}.txt")
+    rendered_context_path.write_text(context_text, encoding="utf-8")
     manifest = {
+        "schema_version": "ContextManifest/v2",
         "manifest_id": manifest_id,
+        "project_id": project_id,
         "candidate_id": args.cand_id,
+        "round_id": round_id,
         "node": node_id,
         "persona": persona,
         "profile_id": profile.profile_id,
-        "schema_version": profile.delta_schema_version,
+        "delta_schema_version": profile.delta_schema_version,
         "topology_version": profile.topology_version,
         "persona_catalog_version": profile.persona_catalog_version,
+        "persona_catalog_sha256": persona_template.catalog_sha256,
+        "persona_catalog_entry_sha256": persona_template.entry_sha256,
+        "persona_template_sha256": persona_template.template_sha256,
+        "persona_body_sha256": persona_template.body_sha256,
         "timestamp": _now(),
         "template_mode": template_mode,
         "contract_hash": contract_hash,
@@ -538,8 +654,11 @@ def cmd_assemble_context(args):
             "as_of_commit_seq": hypothesis_snapshot["as_of_commit_seq"],
             "projection_hash": hypothesis_snapshot["projection_hash"],
             "artifact_hash": hypothesis_snapshot["artifact_hash"],
+            "event_ids": hypothesis_snapshot["event_ids"],
         } if hypothesis_snapshot else None),
         "pitfalls_injected": pitfall_meta,
+        "rendered_context_path": str(rendered_context_path),
+        "rendered_context_sha256": _sha256(rendered_context_path),
         **caveman_meta,
     }
     mpath = (_audit_dir(project_dir)

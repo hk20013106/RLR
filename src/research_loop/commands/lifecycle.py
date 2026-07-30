@@ -17,10 +17,13 @@ from research_loop.common import (
     _set_status, _sha256_file, _stamp,
 )
 from research_loop.delta import (
-    DELTA_SCHEMAS, artifact_key_for, _delta_belongs_to_candidate, _delta_for_candidate,
+    DELTA_SCHEMAS, artifact_for_node, artifact_key_for,
+    _delta_belongs_to_candidate, _delta_for_candidate,
 )
 from research_loop.hypothesis_ledger import LedgerError, binding_path
-from research_loop.compatibility import PROFILE_V20, PROFILE_V21, get_profile
+from research_loop.compatibility import (
+    DEFAULT_NATIVE_PROFILE, PROFILE_V20, get_profile,
+)
 from research_loop.paths import (
     _candidate_file, _layer_template_path, _persona_template_path,
 )
@@ -50,6 +53,27 @@ KNOWLEDGE_BASE_ACCESS = {
 }
 
 FINAL_STATUSES = {"KEEP", "REVISE", "DOWNGRADE", "DROP", "ARCHIVED"}
+
+
+def _candidate_l8_artifact(project_dir, knowledge_store=None):
+    """Resolve candidate-template L8 labels from the immutable project profile."""
+    project = Path(project_dir)
+    if binding_path(project).exists():
+        try:
+            binding = json.loads(
+                binding_path(project).read_text(encoding="utf-8")
+            )
+            profile_id = str(binding.get("profile_id") or PROFILE_V20)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise LedgerError(
+                f"cannot read project profile binding: {binding_path(project)}"
+            ) from exc
+    else:
+        profile_id = DEFAULT_NATIVE_PROFILE
+    try:
+        return artifact_for_node(get_profile(profile_id), "L8")
+    except ValueError as exc:
+        raise LedgerError(f"invalid project profile binding: {profile_id}") from exc
 
 PREFLIGHT_FILES = [
     "skill_use_plan.md", "input_manifest.md",
@@ -255,6 +279,11 @@ def cmd_new_project(args):
     name = args.name
     topic = args.topic or ""
     project_dir = Path(name)
+    profile_id = getattr(args, "profile", DEFAULT_NATIVE_PROFILE)
+    if profile_id == PROFILE_V20:
+        print("ERROR: v2.0-legacy is read-only and cannot be used for new projects.",
+              file=sys.stderr)
+        return 2
     store_path = getattr(args, "knowledge_store", None) or os.environ.get(
         "RLR_HYPOTHESIS_STORE"
     )
@@ -272,11 +301,11 @@ def cmd_new_project(args):
     pl.init_ledger(project_dir)
     try:
         _ledger_for(project_dir, store_path, require_binding=False).bind_project(
-            project_dir, profile_id=PROFILE_V21)
+            project_dir, profile_id=profile_id)
     except LedgerError as exc:
         print(f"ERROR: hypothesis ledger project binding failed: {exc}", file=sys.stderr)
         return 2
-    print(f"Created V0.7 project: {project_dir.resolve()}")
+    print(f"Created v0.9-preview native project: {project_dir.resolve()}")
     print("Next: run `preflight` (Linnaeus L0) before any candidate work.")
     return 0
 
@@ -433,7 +462,7 @@ def cmd_new_candidate(args):
     mem_fields.update({
         "input_contract_path": ic_rel,
         "input_contract_hash": ic_hash,
-        "schema_version": l0_contract.L0_CONTRACT_SCHEMA_VERSION,
+        "schema_version": contract["schema_version"],
         "round_type": round_type,
         "round_id": round_id,
         "parent_round_id": (parent_rid if parent_rid is not None else ""),
@@ -441,10 +470,20 @@ def cmd_new_candidate(args):
                                   if round_type == "continuation" else ""),
     })
 
-    body = _candidate_template(cand_id, args.title, args.input,
-                                   args.question, args.claim,
-                                   input_alias=getattr(args, "input_alias", "") or "",
-                                   extra_front=mem_fields)
+    try:
+        l8_artifact = _candidate_l8_artifact(
+            project_dir, getattr(args, "knowledge_store", None)
+        )
+    except LedgerError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    body = _candidate_template(
+        cand_id, args.title, args.input, args.question, args.claim,
+        input_alias=getattr(args, "input_alias", "") or "",
+        extra_front=mem_fields,
+        l8_persona=l8_artifact.display_persona,
+        l8_storage_key=l8_artifact.storage_key,
+    )
     cf = _candidate_file(project_dir, cand_id)
     if cf.exists() and from_memory:
         existing = _load_yaml_front(cf)
@@ -529,7 +568,7 @@ def cmd_normalize_l0_input(args):
     contract = result["contract"]
     round_type = contract["round_type"]
     mem_fields = {
-        "schema_version": l0_contract.L0_CONTRACT_SCHEMA_VERSION,
+        "schema_version": contract["schema_version"],
         "round_type": round_type,
         "round_id": contract["round_id"],
         "parent_round_id": contract.get("parent_round_id") or "",
@@ -565,10 +604,20 @@ def cmd_normalize_l0_input(args):
         print(l0_contract.serialize_contract(contract).decode("utf-8"), end="")
         return 0
 
+    try:
+        l8_artifact = _candidate_l8_artifact(
+            project_dir, getattr(args, "knowledge_store", None)
+        )
+    except LedgerError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     body = _candidate_template(
         cand_id, contract["scientific_question"], source["description"],
         contract["scientific_question"], contract["current_round"]["hypothesis"],
-        extra_front=mem_fields)
+        extra_front=mem_fields,
+        l8_persona=l8_artifact.display_persona,
+        l8_storage_key=l8_artifact.storage_key,
+    )
     _candidate_file(project_dir, cand_id).write_text(body, encoding="utf-8")
     artifact_path, _ = l0_contract.write_contract(project_dir, cand_id, contract)
     _append_decision(project_dir, cand_id, "-", "NEW", "candidate created",
@@ -775,7 +824,7 @@ def cmd_demo(args):
         ("L5", "Tukey", "L5_tukey"),
         ("L6", "Oppenheimer", "L6_oppenheimer"),
         ("L7", "Turing", "L7_turing"),
-        ("L8", "Curie", "L8_curie"),
+        ("L8", "Tukey", "L8_tukey"),
         ("L9a", "Feynman", "L9a_feynman"),
         ("L9b", "Darwin", "L9b_darwin"),
         ("L10a", "Jobs", "L10a_jobs"),
@@ -803,9 +852,9 @@ def cmd_demo(args):
     print("  L5  Tukey      -> next-step, assemble-context --node L5")
     print("  L6  Oppenheimer-> triage-method --decision approve --reason ...")
     print("  L7  Turing     -> execution-gate, then assemble-context --node L7")
-    print("  L8  Curie      -> next-step, assemble-context --node L8")
-    print("  L9a Feynman    -> next-step (parallel), assemble-context --node L9a")
-    print("  L9b Darwin     -> next-step (parallel), assemble-context --node L9b")
+    print("  L8  Tukey      -> next-step, assemble-context --node L8")
+    print("  L9a Feynman    -> next-step, assemble-context --node L9a")
+    print("  L9b Darwin     -> after finalized L9a, assemble-context --node L9b")
     print("  L10a Jobs      -> next-step, assemble-context --node L10a")
     print("  L10b Oppenheimer-> decision --status KEEP --reason ...")
     print("  L10c Linnaeus  -> aggregate-report")

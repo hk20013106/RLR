@@ -7,16 +7,52 @@ that is v0.8). research_loop_v04 imports these back via inward shim.
 import json
 import os
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
 from research_loop.paths import _sha256
+from research_loop.compatibility import CompatibilityProfile, PROFILE_V20
+
+
+@dataclass(frozen=True)
+class ArtifactDescriptor:
+    """Profile-bound description of a node's durable delta artifact."""
+
+    node: str
+    display_persona: str
+    storage_key: str
+    storage_persona: str
+    schema_key: str
+
+
+def artifact_for_node(profile: CompatibilityProfile, node: str) -> ArtifactDescriptor:
+    """Resolve one artifact identity without guessing from schema version."""
+    if node == "L8":
+        storage_key = ("L8_tukey" if profile.artifact_naming_version == "native-l8-tukey-1"
+                       else "L8_curie")
+        display_persona = "Curie" if profile.profile_id == PROFILE_V20 else "Tukey"
+        return ArtifactDescriptor(node, display_persona, storage_key,
+                                  storage_key.split("_", 1)[1].title(), storage_key)
+    persona = DELTA_PERSONA.get(f"{node}_{'curie' if node == 'L8.5' else ''}".rstrip("_"))
+    if not persona:
+        matches = [key for key in DELTA_PERSONA if key.split("_", 1)[0] == node]
+        if len(matches) != 1:
+            raise ValueError(f"unknown or ambiguous artifact node: {node}")
+        key = matches[0]
+        persona = DELTA_PERSONA[key]
+    else:
+        key = f"{node}_{persona.lower()}"
+    return ArtifactDescriptor(node, persona, key, persona, key)
 
 
 def artifact_key_for(node: str, persona: str, *, profile_id: str | None = None) -> str:
     """Resolve stable artifact keys independently of profile display persona."""
-    # L8_curie is a durable artifact identifier, not an authority statement.
-    # Native v2.1 displays Tukey while preserving this key for all readers.
+    # L8_curie is the durable key for historical v2.0 and the original v2.1
+    # profile.  Only v2.1-catalog-1 stores new L8 artifacts as L8_tukey.
     if node == "L8":
+        if profile_id:
+            from research_loop.compatibility import get_profile
+            return artifact_for_node(get_profile(profile_id), node).storage_key
         return "L8_curie"
     return f"{node}_{persona.lower()}"
 
@@ -129,6 +165,12 @@ DELTA_SCHEMAS = {
         "evidence_verified": [{"file": str, "check": str, "result": str}],
         "evidence_level": str, "caveats": list
     },
+    # v2.1-catalog-1 stores L8 under Tukey while retaining the same audit
+    # payload contract.  The key is a profile-bound artifact identity.
+    "L8_tukey": {
+        "evidence_verified": [{"file": str, "check": str, "result": str}],
+        "evidence_level": str, "caveats": list
+    },
     "L8.5_curie": {
         "searched_keywords": list,
         "papers": [{"pmid": str, "title": str, "abstract": str, "comparison": str, "relevance": str}],
@@ -159,6 +201,7 @@ DELTA_PERSONA = {
     "L4_fisher": "Fisher", "L5_tukey": "Tukey",
     "L6_oppenheimer": "Oppenheimer", "L7_turing": "Turing",
     "L8_curie": "Curie", "L8.5_curie": "Curie", "L9a_feynman": "Feynman",
+    "L8_tukey": "Tukey",
     "L9b_darwin": "Darwin", "L10a_jobs": "Jobs",
     "L10b_oppenheimer": "Oppenheimer",
 }
@@ -183,6 +226,12 @@ def _delta_for_candidate(project_dir, delta_key, cand_id):
     if _v2_commit_valid(project_dir, delta_key, cand_id, v2):
         return v2
     return None
+
+
+def resolve_candidate_delta(project_dir, cand_id: str, profile: CompatibilityProfile,
+                            node: str) -> Path | None:
+    """Resolve only the profile-authorized committed artifact for one node."""
+    return _delta_for_candidate(project_dir, artifact_for_node(profile, node).storage_key, cand_id)
 
 def _delta_belongs_to_candidate(project_dir, delta_key, cand_id):
     """True only when a delta is unambiguously linked to ``cand_id``."""

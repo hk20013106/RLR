@@ -7,7 +7,7 @@ DAGTopology is a thin namespace over the constants for the future EngineAPI.
 
 import copy
 
-from research_loop.compatibility import PROFILE_V20, PROFILE_V21, get_profile
+from research_loop.compatibility import PROFILE_V20, get_profile
 
 AGENTS = ["Linnaeus", "Einstein", "Feynman", "Oppenheimer", "Fisher",
           "Tukey", "Turing", "Curie", "Darwin", "Jobs"]
@@ -55,6 +55,7 @@ DAG_NODES = [
         "context_inputs": ["candidate_frontmatter", "L0"],
         "is_parallel": False, "is_execution": False,
         "pre_research": "deep_research",
+        "research_persona": "Curie", "research_required": True,
         "action_hint": "Generate scientific hypotheses about the research question",
         "must": ["Generate testable scientific hypotheses from candidate question and pre-research results", "Each proposal must include statement, operationalization, and at least one predeclared falsification criterion; IDs are engine-assigned"],
         "must_not": ["Execute code", "Change candidate status", "Design analysis methods"],
@@ -92,6 +93,7 @@ DAG_NODES = [
         "context_inputs": ["L1", "L3", "L2"],
         "is_parallel": False, "is_execution": False,
         "pre_research": "literature_review",
+        "research_persona": "Curie", "research_required": True,
         "action_hint": "Design experimental/analysis strategies",
         "must": ["Design experimental strategies for selected hypotheses", "Reuse existing skills and code patterns", "Define scripts_needed list with purpose"],
         "must_not": ["Execute code", "Change candidate status", "Design without reading L1/L3"],
@@ -153,6 +155,7 @@ DAG_NODES = [
         "advance_status": "UNDER_REVIEW", "advance_reason": "L8.5 literature verification complete, route to review",
         "context_inputs": ["L7", "L8", "candidate_frontmatter"],
         "is_parallel": False, "is_execution": False,
+        "research_persona": "Curie", "research_required": True,
         "action_hint": "Search PubMed/EuropePMC based on L7/L8 actual results to verify findings",
         "must": ["Search PubMed based on L7/L8 results", "Assess every active hypothesis exactly once using source-located deep-research evidence IDs and the completed run receipt", "Cite real PMIDs/DOIs"],
         "must_not": ["Fabricate citations", "Change status"],
@@ -238,7 +241,7 @@ def topology_for_profile(profile_id: str) -> tuple[list[dict], dict[str, dict], 
     """Return the DAG view selected by an immutable compatibility profile."""
     profile = get_profile(profile_id)
     nodes = copy.deepcopy(DAG_NODES)
-    if profile.profile_id == PROFILE_V21:
+    if not profile.l9_parallel:
         by_node = {item["node"]: item for item in nodes}
         by_node["L8"]["persona"] = "Tukey"
         by_node["L9a"]["is_parallel"] = False
@@ -252,7 +255,7 @@ def topology_for_profile(profile_id: str) -> tuple[list[dict], dict[str, dict], 
         })
         sequence = [item for item in DAG_SEQUENCE if item != "L9_parallel"]
         sequence[sequence.index("L10a"):sequence.index("L10a")] = ["L9a", "L9b"]
-    elif profile.profile_id == PROFILE_V20:
+    elif profile.l9_parallel:
         sequence = list(DAG_SEQUENCE)
     else:
         raise ValueError(f"unsupported topology profile: {profile.profile_id}")

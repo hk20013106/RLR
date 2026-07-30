@@ -13,6 +13,7 @@ from pathlib import Path
 from native_v2_helpers import (
     commit_finalized,
     seed_revise_continuation,
+    write_native_emission_receipts,
 )
 from research_loop.hypothesis_ledger import HypothesisLedger
 from research_loop.yamlio import _load_yaml_front
@@ -25,7 +26,7 @@ def _run(*args, cwd=None):
 
 
 def _new_project(tmp_path):
-    r = _run("new-project", str(tmp_path / "P"), "Test")
+    r = _run("new-project", str(tmp_path / "P"), "Test", "--profile", "v2.1")
     assert r.returncode == 0, r.stderr
     return tmp_path / "P"
 
@@ -49,6 +50,13 @@ def _new_from_memory(proj, seed, loop_type="divergent"):
              "--input", "in", "--from-memory", str(seed), "--loop-type", loop_type)
     assert r.returncode == 0, r.stderr
     return r.stdout.strip().splitlines()[0]
+
+
+def _emit_native(proj, cand, node, persona, source):
+    manifest, receipt = write_native_emission_receipts(proj, cand, node, persona, source)
+    return _run("emit-delta", str(proj), cand, "--node", node, "--persona", persona,
+                "--file", str(source), "--context-manifest", str(manifest),
+                "--provider-receipt", str(receipt))
 
 
 def _seed_candidate_with_deltas(proj):
@@ -231,7 +239,7 @@ def _emit_l4(proj, cand, scripts):
     }
     f = proj / f"l4_{cand}.json"
     f.write_text(json.dumps(obj), encoding="utf-8")
-    return _run("emit-delta", str(proj), cand, "--node", "L4", "--persona", "Fisher", "--file", str(f))
+    return _emit_native(proj, cand, "L4", "Fisher", f)
 
 
 def _emit_l6(proj, cand, scripts):
@@ -272,7 +280,7 @@ def _emit_l6(proj, cand, scripts):
     }
     f = proj / f"l6_{cand}.json"
     f.write_text(json.dumps(obj), encoding="utf-8")
-    return _run("emit-delta", str(proj), cand, "--node", "L6", "--persona", "Oppenheimer", "--file", str(f))
+    return _emit_native(proj, cand, "L6", "Oppenheimer", f)
 
 
 def _emit_l6_ok(proj, cand):
@@ -318,8 +326,7 @@ def _emit_l6_ok(proj, cand):
     }
     f = proj / f"l6_{cand}.json"
     f.write_text(json.dumps(obj), encoding="utf-8")
-    return _run("emit-delta", str(proj), cand, "--node", "L6",
-                "--persona", "Oppenheimer", "--file", str(f))
+    return _emit_native(proj, cand, "L6", "Oppenheimer", f)
 
 
 def _emit_l10b(proj, cand, obj):
@@ -333,7 +340,7 @@ def _emit_l10b(proj, cand, obj):
     }
     f = proj / f"l10b_{cand}.json"
     f.write_text(json.dumps(obj), encoding="utf-8")
-    return _run("emit-delta", str(proj), cand, "--node", "L10b", "--persona", "Oppenheimer", "--file", str(f))
+    return _emit_native(proj, cand, "L10b", "Oppenheimer", f)
 
 
 # --- Task 1 -----------------------------------------------------------------
@@ -591,7 +598,7 @@ def test_l7_manifest_gate_requires_branch_and_l6_map(tmp_path):
     }
     f = proj / "l7bad.json"
     f.write_text(json.dumps(bad), encoding="utf-8")
-    r2 = _run("emit-delta", str(proj), cand, "--node", "L7", "--persona", "Turing", "--file", str(f))
+    r2 = _emit_native(proj, cand, "L7", "Turing", f)
     assert r2.returncode != 0
     assert "missing branch_id" in (r2.stderr + r2.stdout)
     assert _finalization_count(cand, "L7") == 0
@@ -618,7 +625,7 @@ def test_l7_manifest_written_on_valid(tmp_path):
     }
     f = proj / "l7ok.json"
     f.write_text(json.dumps(good), encoding="utf-8")
-    r2 = _run("emit-delta", str(proj), cand, "--node", "L7", "--persona", "Turing", "--file", str(f))
+    r2 = _emit_native(proj, cand, "L7", "Turing", f)
     assert r2.returncode == 0, r2.stderr
     _assert_finalized(proj, cand, "L7", "Turing")
     manifest = json.loads(

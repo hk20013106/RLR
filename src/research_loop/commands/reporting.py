@@ -16,9 +16,24 @@ from research_loop.delta_render import (
 from research_loop.paths import _candidate_file
 from research_loop.topology import DELTA_DAG_ORDER
 from research_loop.delta import DELTA_PERSONA
+from research_loop.compatibility import PROFILE_V20, get_profile
+from research_loop.hypothesis_ledger import binding_path
+from research_loop.delta import artifact_for_node
 from research_loop.yamlio import _load_yaml_front
+from research_loop.version import VERSION
 
-__version__ = "0.8.0"
+__version__ = VERSION
+
+
+def _profile_for_project(project_dir: Path):
+    """Read the immutable project binding without inventing a schema profile."""
+    path = binding_path(project_dir)
+    if not path.is_file():
+        return get_profile(PROFILE_V20)
+    try:
+        return get_profile(str(json.loads(path.read_text(encoding="utf-8"))["profile_id"]))
+    except (KeyError, OSError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid project profile binding: {exc}") from exc
 
 
 def cmd_list(args):
@@ -87,12 +102,19 @@ def cmd_aggregate_report(args):
         print(f"ERROR: no candidate {args.cand_id}", file=sys.stderr)
         return 2
     fm = _load_yaml_front(cf)
+    try:
+        profile = _profile_for_project(project_dir)
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
     # Read all deltas in DAG order
     deltas = {}
     for delta_key in DELTA_DAG_ORDER:
         persona = DELTA_PERSONA[delta_key]
-        delta_path = _delta_for_candidate(project_dir, delta_key, args.cand_id)
+        storage_key = (artifact_for_node(profile, "L8").storage_key
+                       if delta_key == "L8_curie" else delta_key)
+        delta_path = _delta_for_candidate(project_dir, storage_key, args.cand_id)
         if delta_path and delta_path.exists():
             try:
                 deltas[delta_key] = json.loads(delta_path.read_text(encoding="utf-8"))
@@ -119,6 +141,11 @@ def cmd_aggregate_report(args):
 
     for delta_key in DELTA_DAG_ORDER:
         title_en = SECTION_TITLES_EN.get(delta_key, delta_key)
+        if delta_key == "L8_curie":
+            title_en = (
+                f"L8 - Evidence Audit "
+                f"({artifact_for_node(profile, 'L8').display_persona})"
+            )
         en.append(f"## {title_en}\n")
         en.append(_format_delta_body(delta_key, deltas.get(delta_key)))
         en.append("")
@@ -146,6 +173,11 @@ def cmd_aggregate_report(args):
 
     for delta_key in DELTA_DAG_ORDER:
         title_cn = SECTION_TITLES_CN.get(delta_key, delta_key)
+        if delta_key == "L8_curie":
+            title_cn = (
+                f"L8 - 证据审查 "
+                f"({artifact_for_node(profile, 'L8').display_persona})"
+            )
         cn.append(f"## {title_cn}\n")
         cn.append(_translate_delta_body_cn(
             _format_delta_body(delta_key, deltas.get(delta_key), lang="cn")))

@@ -248,8 +248,19 @@ def _run_paths(project_dir: Path) -> tuple[Path, Path, Path]:
     return base / "runs", base / "papers", base / "sources"
 
 
-def persist_run(project_dir: str | Path, candidate_id: str, node: str, payload: dict,
-                receipt: dict, result_context: str = "") -> dict:
+def persist_run(
+    project_dir: str | Path,
+    candidate_id: str,
+    node: str,
+    payload: dict,
+    receipt: dict,
+    result_context: str = "",
+    *,
+    project_id: str = "",
+    round_id: str = "",
+    profile_id: str = "",
+    research_persona: str = "Curie",
+) -> dict:
     """Persist immutable paper records and a run artifact from a validated payload."""
     if node not in _STAGES:
         raise DeepResearchError(f"unsupported Deep Research stage {node!r}")
@@ -303,20 +314,38 @@ def persist_run(project_dir: str | Path, candidate_id: str, node: str, payload: 
                         "doi": record["doi"], "pmid": record["pmid"], "url": record["url"],
                         "evidence_ids": [e["evidence_id"] for e in extracts]})
     artifact = {
-        "schema_version": SCHEMA_VERSION, "kind": "deep_research_run", "run_id": run_id,
+        "schema_version": SCHEMA_VERSION, "evidence_receipt_schema": "EvidenceRunReceipt/v1.1",
+        "kind": "deep_research_run", "research_phase": "pre_research",
+        "research_persona": research_persona, "run_id": run_id,
+        "project_id": project_id, "round_id": str(round_id),
+        "profile_id": profile_id,
         "status": "completed", "candidate_id": candidate_id, "node": node, "created_at": _now(),
         "queries": payload["queries"], "skill_receipt": receipt, "papers": records,
         "review_search": payload.get("review_search", {}), "verification": payload.get("verification", []),
         "result_context_hash": _sha(result_context) if result_context else "",
     }
     run_file = runs_dir / f"{run_id}.json"
-    run_file.write_text(json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    summary_file = runs_dir / f"{run_id}.md"
     artifact["path"] = str(run_file.relative_to(project_dir)).replace("\\", "/")
+    artifact["summary_path"] = str(summary_file.relative_to(project_dir)).replace("\\", "/")
+    run_file.write_text(json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    summary_file.write_text(render_pre_research_markdown(artifact), encoding="utf-8")
     return artifact
 
 
-def _latest_artifact(project_dir: str | Path, candidate_id: str, node: str) -> dict | None:
+def _artifact(project_dir: str | Path, candidate_id: str, node: str,
+              *, run_id: str | None = None) -> dict | None:
+    """Load an exact evidence run when requested; legacy callers use latest."""
     runs_dir, _, _ = _run_paths(Path(project_dir))
+    if run_id:
+        path = runs_dir / f"{_safe_id(run_id)}.json"
+        try:
+            artifact = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if artifact.get("run_id") != run_id or artifact.get("candidate_id") != candidate_id or artifact.get("node") != node:
+            return None
+        return artifact
     matches = []
     for path in runs_dir.glob(f"{_safe_id(candidate_id)}_{node.replace('.', '_')}_*.json"):
         try:
@@ -326,8 +355,134 @@ def _latest_artifact(project_dir: str | Path, candidate_id: str, node: str) -> d
     return max(matches, default=(0, None), key=lambda item: item[0])[1]
 
 
-def audit_evidence_pack(project_dir: str | Path, candidate_id: str, node: str) -> tuple[bool, str]:
-    artifact = _latest_artifact(project_dir, candidate_id, node)
+def _latest_artifact(project_dir: str | Path, candidate_id: str, node: str) -> dict | None:
+    """Compatibility helper; new context assembly must supply an exact run ID."""
+    return _artifact(project_dir, candidate_id, node)
+
+
+def run_ids_for_stage(
+    project_dir: str | Path, candidate_id: str, node: str
+) -> list[str]:
+    """Return stable evidence run IDs without consulting filesystem mtimes."""
+    runs_dir, _, _ = _run_paths(Path(project_dir))
+    found = []
+    for path in sorted(
+        runs_dir.glob(
+            f"{_safe_id(candidate_id)}_{node.replace('.', '_')}_*.json"
+        ),
+        key=lambda item: item.name,
+    ):
+        try:
+            artifact = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if artifact.get("candidate_id") == candidate_id and artifact.get("node") == node:
+            run_id = str(artifact.get("run_id") or "")
+            if run_id:
+                found.append(run_id)
+    return found
+
+
+def unique_run_id(project_dir: str | Path, candidate_id: str, node: str) -> str | None:
+    """Return an unambiguous run ID without selecting by mtime.
+
+    A native context may infer the ID only while there is exactly one valid run
+    for the candidate/stage; once a retry creates multiple runs, callers must
+    supply --evidence-run-id explicitly.
+    """
+    found = run_ids_for_stage(project_dir, candidate_id, node)
+    return found[0] if len(found) == 1 else None
+
+
+def evidence_artifact_manifest(
+    project_dir: str | Path,
+    candidate_id: str,
+    node: str,
+    run_id: str,
+) -> dict:
+    """Return the exact immutable evidence files consumed by one context."""
+    root = Path(project_dir)
+    artifact = _artifact(root, candidate_id, node, run_id=run_id)
+    if artifact is None:
+        raise DeepResearchError(
+            f"evidence pack missing for {candidate_id} {node} run {run_id}"
+        )
+    root_resolved = root.resolve()
+
+    def bound_path(value: str, label: str) -> Path:
+        path = (root / value).resolve()
+        try:
+            path.relative_to(root_resolved)
+        except ValueError as exc:
+            raise DeepResearchError(
+                f"evidence {label} path escapes the project"
+            ) from exc
+        return path
+
+    run_path = bound_path(
+        str((_run_paths(root)[0] / f"{_safe_id(run_id)}.json").relative_to(root)),
+        "run",
+    )
+    summary_value = artifact.get("summary_path")
+    summary_path = (
+        bound_path(str(summary_value), "summary")
+        if summary_value
+        else bound_path(
+            f"02_Agent_Notes/_pre_research/{node}_research.md", "summary"
+        )
+    )
+    if not summary_path.is_file():
+        raise DeepResearchError("exact evidence-run summary is missing")
+    summary_text = summary_path.read_text(encoding="utf-8")
+    if f"`{run_id}`" not in summary_text:
+        raise DeepResearchError("pre-research summary does not match the selected evidence run")
+    files = [{
+        "kind": "run",
+        "path": str(run_path.relative_to(root)).replace("\\", "/"),
+        "sha256": _sha(run_path.read_bytes()),
+    }, {
+        "kind": "summary",
+        "path": str(summary_path.relative_to(root)).replace("\\", "/"),
+        "sha256": _sha(summary_path.read_bytes()),
+    }]
+    for ref in artifact.get("papers", []):
+        try:
+            paper_path = bound_path(str(ref["path"]), "paper")
+            paper = json.loads(paper_path.read_text(encoding="utf-8"))
+        except (KeyError, OSError, json.JSONDecodeError) as exc:
+            raise DeepResearchError("evidence run references an unreadable paper record") from exc
+        files.append({
+            "kind": "paper",
+            "path": str(paper_path.relative_to(root)).replace("\\", "/"),
+            "sha256": _sha(paper_path.read_bytes()),
+        })
+        source_value = paper.get("source_payload_path")
+        if source_value:
+            source_path = bound_path(str(source_value), "source")
+            if not source_path.is_file():
+                raise DeepResearchError("evidence paper source payload is missing")
+            files.append({
+                "kind": "source",
+                "path": str(source_path.relative_to(root)).replace("\\", "/"),
+                "sha256": _sha(source_path.read_bytes()),
+            })
+    return {
+        "run_id": run_id,
+        "project_id": str(artifact.get("project_id") or ""),
+        "candidate_id": str(artifact.get("candidate_id") or ""),
+        "round_id": str(artifact.get("round_id") or ""),
+        "profile_id": str(artifact.get("profile_id") or ""),
+        "target_node": str(artifact.get("node") or ""),
+        "research_phase": str(artifact.get("research_phase") or ""),
+        "research_persona": str(artifact.get("research_persona") or ""),
+        "receipt_schema": str(artifact.get("evidence_receipt_schema") or ""),
+        "files": sorted(files, key=lambda item: (item["kind"], item["path"])),
+    }
+
+
+def audit_evidence_pack(project_dir: str | Path, candidate_id: str, node: str,
+                        *, run_id: str | None = None) -> tuple[bool, str]:
+    artifact = _artifact(project_dir, candidate_id, node, run_id=run_id)
     if not artifact:
         return False, f"evidence pack missing for {candidate_id} {node}"
     receipt = artifact.get("skill_receipt") or {}
@@ -383,12 +538,15 @@ def audit_evidence_pack(project_dir: str | Path, candidate_id: str, node: str) -
     return True, ""
 
 
-def render_evidence_digest(project_dir: str | Path, candidate_id: str, nodes: list[str]) -> str:
+def render_evidence_digest(project_dir: str | Path, candidate_id: str, nodes: list[str],
+                           *, run_ids: dict[str, str] | None = None) -> str:
     """Render compact, source-located evidence for a cognitive-node context."""
     root = Path(project_dir)
     lines = ["=== DEEP RESEARCH EVIDENCE ==="]
     for node in nodes:
-        artifact = _latest_artifact(root, candidate_id, node)
+        if run_ids is not None and node not in run_ids:
+            continue
+        artifact = _artifact(root, candidate_id, node, run_id=(run_ids or {}).get(node))
         if not artifact:
             continue
         lines.append(f"## {node} Evidence IDs")
@@ -403,12 +561,15 @@ def render_evidence_digest(project_dir: str | Path, candidate_id: str, nodes: li
     return "\n".join(lines) + "\n"
 
 
-def evidence_ids(project_dir: str | Path, candidate_id: str, nodes: list[str]) -> list[str]:
+def evidence_ids(project_dir: str | Path, candidate_id: str, nodes: list[str],
+                 *, run_ids: dict[str, str] | None = None) -> list[str]:
     """Return IDs present in persisted, source-located evidence records."""
     root = Path(project_dir)
     found = []
     for node in nodes:
-        artifact = _latest_artifact(root, candidate_id, node)
+        if run_ids is not None and node not in run_ids:
+            continue
+        artifact = _artifact(root, candidate_id, node, run_id=(run_ids or {}).get(node))
         if not artifact:
             continue
         for ref in artifact.get("papers", []):
@@ -422,13 +583,13 @@ def evidence_ids(project_dir: str | Path, candidate_id: str, nodes: list[str]) -
 
 
 def evidence_pack_details(project_dir: str | Path, candidate_id: str,
-                          node: str = "L8.5") -> dict:
+                          node: str = "L8.5", *, run_id: str | None = None) -> dict:
     """Return hash-bound, source-located records for ledger import."""
-    ok, reason = audit_evidence_pack(project_dir, candidate_id, node)
+    ok, reason = audit_evidence_pack(project_dir, candidate_id, node, run_id=run_id)
     if not ok:
         raise DeepResearchError(reason)
     root = Path(project_dir)
-    artifact = _latest_artifact(root, candidate_id, node)
+    artifact = _artifact(root, candidate_id, node, run_id=run_id)
     if artifact is None:  # guarded by audit; keeps the return type explicit
         raise DeepResearchError("evidence pack missing")
     records = {}
@@ -468,9 +629,22 @@ def render_pre_research_markdown(artifact: dict) -> str:
     return f"""# Pre-Research: {artifact['node']}\n\n## Runtime digest\nVerified Academic Research evidence pack `{artifact['run_id']}` with paper IDs: {', '.join(identifiers)}.\n\n## Evidence pack\n- {artifact['path']}\n\n## Query log\n{queries}\n\n## Tool receipt\n- {receipt['backend']} / {receipt['skill']} {receipt.get('skill_version', '')}; command_hash={receipt['command_hash']}; prompt_hash={receipt['prompt_hash']}\n\n## Source count\n{len(artifact.get('papers', []))}\n"""
 
 
-def run_and_persist(project_dir: str | Path, candidate_id: str, node: str, question: str,
-                    claim: str, spec: RuntimeSpec, work_dir: str | Path,
-                    skill_version: str = "unknown", result_context: str = "") -> dict:
+def run_and_persist(
+    project_dir: str | Path,
+    candidate_id: str,
+    node: str,
+    question: str,
+    claim: str,
+    spec: RuntimeSpec,
+    work_dir: str | Path,
+    skill_version: str = "unknown",
+    result_context: str = "",
+    *,
+    project_id: str = "",
+    round_id: str = "",
+    profile_id: str = "",
+    research_persona: str = "Curie",
+) -> dict:
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     schema_path = work_dir / "deep_research_output.schema.json"
@@ -486,8 +660,11 @@ def run_and_persist(project_dir: str | Path, candidate_id: str, node: str, quest
                             model=spec.model)
     if completed.returncode != 0:
         raise DeepResearchError(f"Academic Research CLI exited {completed.returncode}: {completed.stderr.strip()}")
-    artifact = persist_run(project_dir, candidate_id, node, _parse_cli_output(completed.stdout), receipt,
-                            result_context)
+    artifact = persist_run(
+        project_dir, candidate_id, node, _parse_cli_output(completed.stdout),
+        receipt, result_context, project_id=project_id, round_id=round_id,
+        profile_id=profile_id, research_persona=research_persona,
+    )
     target = Path(project_dir) / "02_Agent_Notes" / "_pre_research" / f"{node}_research.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(render_pre_research_markdown(artifact), encoding="utf-8")

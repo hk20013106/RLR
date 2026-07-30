@@ -1,15 +1,15 @@
-# DAG Topology — RLR V0.7
+# DAG Topology — RLR V0.9
 
 `research_loop/topology.py` is the executable source of truth for node order,
 allowed inputs, personas, state transitions, and delta schemas. This document
 is a reader-facing overview; it does not define commands or schemas.
 
-RLR has 15 nodes. L9a and L9b run in parallel; L7 is the only execution node.
-The current sequence is:
+RLR has 15 nodes and L7 is the only execution node. Native v2.1 projects use
+the current sequence below; historical v2.0 projects retain parallel L9a/L9b.
 
 ```
 L0 -> L1 -> L2 -> L3 -> L4 -> L5 -> L6 -> L7 -> L8 -> L8.5
-   -> { L9a || L9b } -> L10a -> L10b -> L10c
+   -> L9a -> finalized L9a snapshot -> L9b -> L10a -> L10b -> L10c
 ```
 
 | Node | Persona | Responsibility | Formal effect |
@@ -22,10 +22,10 @@ L0 -> L1 -> L2 -> L3 -> L4 -> L5 -> L6 -> L7 -> L8 -> L8.5
 | L5 | Tukey | Falsify method assumptions and QC plan | Method critique |
 | L6 | Oppenheimer | Approve, revise, or reject the analysis plan | `triage-method` |
 | L7 | Turing | Execute only the approved plan in an isolated workspace | Execution artifact |
-| L8 | Curie | Audit execution evidence and reproducibility | Evidence audit |
+| L8 | Tukey (native v2.1) / Curie (historical) | Audit execution evidence and reproducibility | Evidence audit |
 | L8.5 | Curie | Verify audited results against located literature evidence | Literature verification |
-| L9a | Feynman | Falsify result-level claims | Parallel result critique |
-| L9b | Darwin | Produce bounded biological interpretation | Parallel interpretation |
+| L9a | Feynman | Falsify result-level claims | Native serial first stage |
+| L9b | Darwin | Produce bounded biological interpretation | Native serial stage; authorized finalized L9a snapshot only |
 | L10a | Jobs | Assess scientific and practical value | Value assessment |
 | L10b | Oppenheimer | Make the final formal decision | `KEEP` / `REVISE` / `DOWNGRADE` / `DROP`; optional advisory ranking afterward |
 | L10c | Linnaeus | Aggregate the audit trail into final reports | Aggregate report |

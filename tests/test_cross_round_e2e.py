@@ -25,6 +25,8 @@ import sys
 from pathlib import Path
 
 from deep_research_fixtures import persist_synthetic_evidence
+from native_v2_helpers import write_catalog_emission_receipts
+from research_loop import deep_research
 
 RL = str(Path(__file__).resolve().parent.parent / "research_loop_v04.py")
 
@@ -65,8 +67,11 @@ def _seed_terminal_candidate(proj, loop_type="divergent"):
     def emit(node, persona, obj):
         source = source_dir / f"{cand}_{node}.json"
         source.write_text(json.dumps({"schema_version": "2.1", **obj}), encoding="utf-8")
+        manifest, receipt = write_catalog_emission_receipts(proj, cand, node, persona, source)
         result = _run("emit-delta", str(proj), cand, "--node", node,
-                      "--persona", persona, "--file", str(source))
+                      "--persona", persona, "--file", str(source),
+                      "--context-manifest", str(manifest),
+                      "--provider-receipt", str(receipt))
         assert result.returncode == 0, result.stderr
 
     emit("L1", "Einstein", {
@@ -146,11 +151,15 @@ def _seed_terminal_candidate(proj, loop_type="divergent"):
     emit("L9a", "Feynman", {"assessments": [{"hypothesis_id": hid,
          "epistemic_status": "PROVISIONALLY_SUPPORTED", "reason": "r",
          "evidence_ids": [evidence_id]}]})
+    # L10b is authorized to cite hypothesis-stage (L1) and result-verification
+    # (L8.5) evidence, not method-design (L4) evidence.
+    literature_ids = deep_research.evidence_ids(proj, cand, ["L1"])
     emit("L10b", "Oppenheimer", {
         "decision": "REVISE", "reason": "because",
         "next_steps": ["explore atrial chamber", "add Hi-C contact data"],
         "hypothesis_decisions": [{"hypothesis_id": hid,
              "disposition": "REVISE", "reason": "r"}],
+        "literature_evidence_ids": literature_ids,
         "next_round_proposal": {"proposal_key": "H2", "statement": "H_next",
              "operationalization": "measure next", "falsification_criteria": ["next absent"],
              "relationship": "DERIVED_FROM", "parent_hypothesis_ids": [hid],

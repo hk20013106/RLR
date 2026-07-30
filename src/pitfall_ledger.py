@@ -267,7 +267,7 @@ def hard_stop_check(project_dir, node=None, category=None, provider=None):
 
 
 def confirm_pitfall(project_dir, pitfall_id, status, confirmed_by="Curie"):
-    """L8 Curie: confirm/deny a pitfall. Searches the project ledger first, then
+    """Profile-bound L8 auditor: confirm/deny a pitfall. Searches the project ledger first, then
     the global ledger, and updates whichever holds the pitfall."""
     if status not in ("confirmed", "false_positive", "obsolete"):
         raise ValueError(f"invalid confirmation status: {status}")
@@ -393,7 +393,7 @@ def init_ledger(project_dir):
 
     Creates the directory structure and an empty pitfalls.jsonl so the ledger
     exists from the start. Also writes a README explaining how pitfalls flow:
-    error -> draft (auto) -> confirmed (L8 Curie) -> promoted (structural rule).
+    error -> draft (auto) -> confirmed (L8 audit) -> promoted (structural rule).
     """
     lp = ledger_path(project_dir)
     jsonl = lp / JSONL_FILE
@@ -407,8 +407,8 @@ def init_ledger(project_dir):
             "during RLR runs. Each pitfall has:\n\n"
             "- **error_class**: `agent` (model/LLM issue) or `system` (platform/toolchain)\n"
             "- **severity**: `info` | `warn` | `hard_stop`\n"
-            "- **status**: `draft` (auto-recorded) -> `confirmed` (L8 Curie) -> `promoted` (structural rule)\n\n"
-            "Lifecycle: error occurs -> auto-recorded as draft -> L8 Curie confirms ->\n"
+            "- **status**: `draft` (auto-recorded) -> `confirmed` (L8 audit) -> `promoted` (structural rule)\n\n"
+            "Lifecycle: error occurs -> auto-recorded as draft -> L8 audit confirms ->\n"
             "promote to preflight_gate / regression_test / template_rule / provider_rule.\n\n"
             "Confirmed pitfalls are injected into assemble-context for the relevant node,\n"
             "so the agent avoids repeating the same mistake in the next round.\n",

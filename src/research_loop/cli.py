@@ -36,30 +36,36 @@ from research_loop.commands.pitfall import (
     cmd_promote_pitfall, cmd_record_pitfall,
 )
 from research_loop.commands.ranking import cmd_ranking_benchmark, cmd_ranking_report, cmd_ranking_shadow
+from research_loop.compatibility import DEFAULT_NATIVE_PROFILE, PROFILES
+from research_loop.version import VERSION
 
-__version__ = "0.8.0"
+__version__ = VERSION
 
 _ledger_commands._write_exec_manifest = _write_exec_manifest
 
 def build_parser():
     p = argparse.ArgumentParser(
         prog="research_loop_v04.py",
-        description="Research Loop Room V0.7 - canonical gated runtime engine "
+        description="Research Loop v0.9 preview - canonical gated runtime engine "
                     "(DAG-driven subagent architecture; assemble-context "
-                    "enforces the V0.7 deep-research gate).")
+                    "enforces the v0.9 deep-research and provenance gates).")
     p.add_argument("--version", action="version", version=f"v{__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # demo
-    sp = sub.add_parser("demo", help="generate a v0.4 demo project with DAG structure")
+    sp = sub.add_parser("demo", help="generate a demo project with DAG structure")
     sp.set_defaults(func=cmd_demo)
 
     # new-project
-    sp = sub.add_parser("new-project", help="create a new v0.4 project folder")
+    sp = sub.add_parser("new-project", help="create a new native v0.9-preview project folder")
     sp.add_argument("name")
     sp.add_argument("topic", nargs="?", default="")
     sp.add_argument("--knowledge-store", dest="knowledge_store",
                     help="shared HypothesisLedger SQLite store; binds this project")
+    sp.add_argument("--profile", choices=tuple(PROFILES),
+                    default=DEFAULT_NATIVE_PROFILE,
+                    help=("explicit compatibility profile; new projects default to "
+                          f"{DEFAULT_NATIVE_PROFILE}"))
     sp.set_defaults(func=cmd_new_project)
 
     # preflight
@@ -182,6 +188,8 @@ def build_parser():
                     help="max estimated tokens for assembled context (default: 8000; 0 disables)")
     sp.add_argument("--authorization-id",
                     help="fixed hypothesis context authorization to inject")
+    sp.add_argument("--evidence-run-id",
+                    help="exact pre-research evidence run to bind into ContextManifest/v2")
     sp.add_argument("--knowledge-store", dest="knowledge_store")
     sp.set_defaults(func=cmd_assemble_context)
 
@@ -192,8 +200,9 @@ def build_parser():
     sp.add_argument("--node", required=True)
     sp.add_argument("--persona", required=True)
     sp.add_argument("--file", required=True, help="delta JSON file to import")
-    sp.add_argument("--receipt", help="context_manifest JSON from assemble-context; "
-                    "verifies upstream delta hashes if provided")
+    sp.add_argument("--context-manifest", help="ContextManifest/v2 from assemble-context")
+    sp.add_argument("--provider-receipt", help="RunReceipt/v1 proving the provider used that context")
+    sp.add_argument("--receipt", help="deprecated alias for --context-manifest")
     sp.add_argument("--knowledge-store", dest="knowledge_store",
                     help="shared HypothesisLedger SQLite store (or RLR_HYPOTHESIS_STORE)")
     sp.set_defaults(func=cmd_emit_delta)
@@ -459,7 +468,7 @@ def build_parser():
     sp.add_argument("--evidence", default="", help="path to log/trace/file")
     sp.add_argument("--provider", default="unknown")
     sp.add_argument("--status", default="draft", choices=pl.VALID_STATUSES,
-                    help="default draft; only L8 Curie confirms")
+                    help="default draft; only the profile-bound L8 auditor confirms")
     sp.add_argument("--scope", default="project", choices=["project", "global"],
                     help="project ledger (default) or the shared global ledger")
     sp.add_argument("--error-class", dest="error_class", default="agent",
@@ -490,7 +499,7 @@ def build_parser():
     sp.set_defaults(func=cmd_pitfall_scan)
 
     sp = sub.add_parser("pitfall-status",
-                        help="L8 Curie: confirm / false_positive / obsolete a pitfall")
+                        help="L8 auditor: confirm / false_positive / obsolete a pitfall")
     sp.add_argument("project_dir")
     sp.add_argument("id")
     sp.add_argument("--status", required=True,

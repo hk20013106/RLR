@@ -255,6 +255,72 @@ class HypothesisLedger:
         finally:
             con.close()
 
+    def finalized_commit_receipt(
+        self,
+        project_dir: str | Path,
+        candidate_id: str,
+        round_id: str,
+        node: str,
+    ) -> dict[str, Any] | None:
+        """Load the single hash-bound commit receipt for a finalized node."""
+        project = Path(project_dir)
+        binding = self.require_activated_project(project)
+        con = self._connect(readonly=True)
+        try:
+            rows = con.execute(
+                "SELECT m.delta_hash,m.commit_seq,c.receipt_sha256 "
+                "FROM emissions m JOIN committed_emissions c "
+                "ON c.delta_hash=m.delta_hash "
+                "WHERE m.project_id=? AND m.candidate_id=? "
+                "AND m.round_id=? AND m.node=? ORDER BY m.commit_seq",
+                (
+                    binding["project_id"],
+                    str(candidate_id),
+                    str(round_id),
+                    str(node),
+                ),
+            ).fetchall()
+        finally:
+            con.close()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise LedgerError(
+                f"ambiguous finalized emissions for {candidate_id} round "
+                f"{round_id} node {node}"
+            )
+        delta_hash, commit_seq, receipt_sha256 = rows[0]
+        receipt_path = (
+            project
+            / "08_Audit"
+            / "hypothesis_commits"
+            / f"H{int(commit_seq):08d}_{candidate_id}_{node}.json"
+        )
+        try:
+            raw = receipt_path.read_bytes()
+            receipt = json.loads(raw.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LedgerError(
+                f"finalized commit receipt is unreadable: {receipt_path}"
+            ) from exc
+        if hashlib.sha256(raw).hexdigest() != receipt_sha256:
+            raise LedgerError(
+                f"finalized commit receipt hash mismatch: {receipt_path}"
+            )
+        expected = {
+            "project_id": str(binding["project_id"]),
+            "candidate_id": str(candidate_id),
+            "round_id": str(round_id),
+            "node": str(node),
+            "delta_hash": str(delta_hash),
+        }
+        for field, value in expected.items():
+            if str(receipt.get(field) or "") != value:
+                raise LedgerError(
+                    f"finalized commit receipt {field} mismatch: {receipt_path}"
+                )
+        return receipt
+
     @staticmethod
     def _project_profile_in_connection(con: sqlite3.Connection,
                                        binding: dict[str, Any]) -> str:
@@ -834,12 +900,15 @@ class HypothesisLedger:
 
     def commit_delta(self, *, project_dir: str | Path, candidate_id: str, round_id: str,
                      node: str, persona: str, delta: dict[str, Any], delta_path: str | Path,
-                     _allow_unactivated_migration: bool = False) -> CommitResult:
+                     _allow_unactivated_migration: bool = False,
+                     _finalize_callback=None) -> CommitResult:
         """Validate and record one v2 delta atomically with its lifecycle events.
 
-        The caller writes the normalized returned object only after this method
-        succeeds.  The emission records the expected hash/path; consumers must
-        verify both before treating the artifact as authoritative.
+        Public native emission supplies a finalize callback that durably writes
+        and hashes the canonical artifact and commit receipt before this SQLite
+        transaction is committed. Low-level compatibility callers may omit the
+        callback and explicitly finalize later; consumers still require the
+        finalized marker and matching on-disk hashes.
         """
         binding = (self.require_binding(project_dir) if _allow_unactivated_migration
                    else self.require_activated_project(project_dir))
@@ -865,6 +934,7 @@ class HypothesisLedger:
             raise LedgerError("delta v2 schema rejected: " + "; ".join(errors))
         delta_hash = content_hash(normalized)
         con = self._connect()
+        cleanup_callback = None
         try:
             con.execute("BEGIN IMMEDIATE")
             transaction_profile = get_profile(
@@ -877,6 +947,33 @@ class HypothesisLedger:
             self._require_profile_persona(
                 transaction_profile.profile_id, node, persona
             )
+
+            def finalize_in_transaction(result: CommitResult) -> None:
+                nonlocal cleanup_callback
+                if _finalize_callback is None:
+                    return
+                artifact_hash, receipt_hash, cleanup_callback = (
+                    _finalize_callback(result)
+                )
+                if artifact_hash != result.delta_hash:
+                    raise LedgerError(
+                        "emission artifact hash does not match delta hash"
+                    )
+                con.execute(
+                    "INSERT OR IGNORE INTO committed_emissions"
+                    "(delta_hash,artifact_sha256,receipt_sha256,finalized_at) "
+                    "VALUES (?,?,?,?)",
+                    (result.delta_hash, artifact_hash, receipt_hash, _now()),
+                )
+                row = con.execute(
+                    "SELECT artifact_sha256,receipt_sha256 "
+                    "FROM committed_emissions WHERE delta_hash=?",
+                    (result.delta_hash,),
+                ).fetchone()
+                if not row or tuple(row) != (artifact_hash, receipt_hash):
+                    raise LedgerError(
+                        "emission finalization conflicts with immutable marker"
+                    )
             # Validate the submission again inside the write transaction.  The
             # profile/schema check and all cross-delta reads therefore share
             # one immutable finalized-upstream view with the ensuing write.
@@ -893,8 +990,14 @@ class HypothesisLedger:
             if prior:
                 rows = con.execute("SELECT event_id FROM events WHERE commit_seq=? ORDER BY rowid", (prior["commit_seq"],)).fetchall()
                 receipt = self._receipt(project_id, candidate_id, round_id, node, str(prior["persona"]), delta_hash, int(prior["commit_seq"]), [r[0] for r in rows], profile=transaction_profile)
+                result = CommitResult(
+                    normalized, delta_hash, int(prior["commit_seq"]),
+                    tuple(r[0] for r in rows), receipt,
+                )
+                finalize_in_transaction(result)
                 con.commit()
-                return CommitResult(normalized, delta_hash, int(prior["commit_seq"]), tuple(r[0] for r in rows), receipt)
+                cleanup_callback = None
+                return result
             try:
                 validate_finalized_upstream(
                     con=con, profile=transaction_profile, node=node, delta=normalized,
@@ -1035,7 +1138,8 @@ class HypothesisLedger:
                     from research_loop import deep_research
                     try:
                         pack = deep_research.evidence_pack_details(
-                            project_dir, candidate_id, "L8.5"
+                            project_dir, candidate_id, "L8.5",
+                            run_id=normalized["deep_research_run_id"],
                         )
                     except deep_research.DeepResearchError as exc:
                         raise LedgerError(f"L8.5 deep-research evidence rejected: {exc}") from exc
@@ -1232,20 +1336,38 @@ class HypothesisLedger:
                 seq0 = int(final_prior["commit_seq"])
                 rows = con.execute("SELECT event_id FROM events WHERE commit_seq=? ORDER BY rowid", (seq0,)).fetchall()
                 con.rollback()
+                con.execute("BEGIN IMMEDIATE")
                 receipt = self._receipt(project_id, candidate_id, str(round_id), node, str(final_prior["persona"]),
                                         delta_hash, seq0, [row[0] for row in rows], profile=transaction_profile)
-                return CommitResult(normalized, delta_hash, seq0, tuple(row[0] for row in rows), receipt)
+                result = CommitResult(
+                    normalized, delta_hash, seq0, tuple(row[0] for row in rows),
+                    receipt,
+                )
+                finalize_in_transaction(result)
+                con.commit()
+                cleanup_callback = None
+                return result
             con.execute("INSERT INTO emissions(delta_hash,project_id,candidate_id,round_id,node,persona,delta_path,committed_at,commit_seq) VALUES (?,?,?,?,?,?,?,?,?)", (delta_hash, project_id, candidate_id, str(round_id), node, persona, str(relative_delta_path).replace("\\", "/"), _now(), seq))
             for event in events:
                 self._insert_event(con, event)
-            con.commit()
             receipt = self._receipt(project_id, candidate_id, str(round_id), node, persona, delta_hash, seq, [event["event_id"] for event in events], profile=transaction_profile)
-            return CommitResult(normalized, delta_hash, seq, tuple(event["event_id"] for event in events), receipt)
+            result = CommitResult(
+                normalized, delta_hash, seq,
+                tuple(event["event_id"] for event in events), receipt,
+            )
+            finalize_in_transaction(result)
+            con.commit()
+            cleanup_callback = None
+            return result
         except sqlite3.Error as exc:
             con.rollback()
+            if cleanup_callback:
+                cleanup_callback()
             raise LedgerError(f"hypothesis ledger transaction failed: {exc}") from exc
         except Exception:
             con.rollback()
+            if cleanup_callback:
+                cleanup_callback()
             raise
         finally:
             con.close()

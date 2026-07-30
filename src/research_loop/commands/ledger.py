@@ -7,10 +7,11 @@ from pathlib import Path
 
 import pitfall_ledger as pl
 
-from research_loop import hypothesis_migration
+from research_loop import deep_research, hypothesis_migration
 from research_loop.common import _append_decision, _now, _set_status, _stamp
 from research_loop.delta import (
     DELTA_PERSONA,
+    artifact_for_node,
     artifact_key_for,
     DELTA_SCHEMAS,
     _candidate_delta_file,
@@ -34,6 +35,9 @@ from research_loop.hypothesis_ledger import (
     binding_path,
     canonical_json,
 )
+from research_loop.compatibility import PROFILE_V20, get_profile
+from research_loop.persona_catalog import PersonaCatalogError, resolve_persona_template
+from research_loop.providers.base import RunReceipt
 from research_loop.paths import (
     _audit_dir,
     _candidate_file,
@@ -79,6 +83,172 @@ def _write_hypothesis_commit_receipt(project_dir, receipt):
     return target
 
 
+def _validate_native_receipts(
+    args,
+    profile,
+    *,
+    source_file: Path,
+    project_id: str,
+    round_id: str,
+    ledger: HypothesisLedger,
+) -> dict:
+    """Validate context/provider provenance before every native v2.1 write."""
+    if profile.delta_schema_version != "2.1":
+        return {}
+    if (
+        not getattr(args, "context_manifest", None)
+        and getattr(args, "receipt", None)
+    ):
+        print(
+            "WARNING: --receipt is deprecated; use --context-manifest.",
+            file=sys.stderr,
+        )
+    manifest_arg = (getattr(args, "context_manifest", None)
+                    or getattr(args, "receipt", None))
+    provider_arg = getattr(args, "provider_receipt", None)
+    if not manifest_arg or not provider_arg:
+        raise LedgerError(
+            "native v2.1 emission requires --context-manifest and --provider-receipt"
+        )
+    manifest_path = Path(manifest_arg)
+    receipt_path = Path(provider_arg)
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LedgerError(f"invalid context manifest: {exc}") from exc
+    if manifest.get("schema_version") != "ContextManifest/v2":
+        raise LedgerError("context manifest must use ContextManifest/v2")
+    expected = {
+        "project_id": project_id,
+        "candidate_id": str(args.cand_id),
+        "round_id": str(round_id),
+        "node": str(args.node),
+        "persona": str(args.persona),
+        "profile_id": profile.profile_id,
+    }
+    for field, value in expected.items():
+        if manifest.get(field) != value:
+            raise LedgerError(f"context manifest {field} does not match emission")
+    rendered_path = Path(str(manifest.get("rendered_context_path") or ""))
+    rendered_hash = str(manifest.get("rendered_context_sha256") or "")
+    if not rendered_path.is_file() or _sha256(rendered_path) != rendered_hash:
+        raise LedgerError("rendered context is missing or changed since assemble-context")
+    try:
+        resolved = resolve_persona_template(profile, str(args.persona))
+    except PersonaCatalogError as exc:
+        raise LedgerError(f"persona catalog validation failed: {exc}") from exc
+    for field, value in {
+        "persona_catalog_sha256": resolved.catalog_sha256,
+        "persona_catalog_entry_sha256": resolved.entry_sha256,
+        "persona_template_sha256": resolved.template_sha256,
+        "persona_body_sha256": resolved.body_sha256,
+    }.items():
+        if manifest.get(field) != value:
+            raise LedgerError(f"context manifest {field} changed since assemble-context")
+    for injected in manifest.get("injected_deltas") or []:
+        injected_path = Path(str(injected.get("path") or ""))
+        expected_hash = str(injected.get("sha256") or "")
+        try:
+            injected_path.resolve().relative_to(Path(args.project_dir).resolve())
+        except ValueError as exc:
+            raise LedgerError(
+                "context manifest injected delta path escapes the project"
+            ) from exc
+        if not injected_path.is_file() or _sha256(injected_path) != expected_hash:
+            raise LedgerError(
+                "context manifest injected delta is missing or changed"
+            )
+    authorization = manifest.get("hypothesis_authorization")
+    if not isinstance(authorization, dict):
+        raise LedgerError(
+            "native v2.1 context manifest requires hypothesis authorization"
+        )
+    snapshot = ledger.load_authorized_context(
+        args.project_dir, str(authorization.get("authorization_id") or "")
+    )
+    authorization_expected = {
+        "candidate_id": str(args.cand_id),
+        "round_id": str(round_id),
+        "node": str(args.node),
+        "as_of_commit_seq": authorization.get("as_of_commit_seq"),
+        "projection_hash": authorization.get("projection_hash"),
+        "artifact_hash": authorization.get("artifact_hash"),
+        "event_ids": authorization.get("event_ids"),
+    }
+    for field, value in authorization_expected.items():
+        if snapshot.get(field) != value:
+            raise LedgerError(
+                f"context authorization {field} does not match its snapshot"
+            )
+    if (
+        args.node == "L9b"
+        and not profile.l9_parallel
+        and not any(event.get("node") == "L9a" for event in snapshot.get("events", []))
+    ):
+        raise LedgerError(
+            "native L9b receipt requires finalized L9a in the authorized snapshot"
+        )
+    recorded_evidence = (manifest.get("pre_research") or {}).get(
+        "evidence_artifacts"
+    )
+    if recorded_evidence:
+        run_id = str(recorded_evidence.get("run_id") or "")
+        try:
+            current_evidence = deep_research.evidence_artifact_manifest(
+                args.project_dir, str(args.cand_id), str(args.node), run_id
+            )
+        except deep_research.DeepResearchError as exc:
+            raise LedgerError(f"exact evidence run is invalid: {exc}") from exc
+        if current_evidence != recorded_evidence:
+            raise LedgerError(
+                "evidence artifacts changed since context assembly"
+            )
+        ok, reason = deep_research.audit_evidence_pack(
+            args.project_dir, str(args.cand_id), str(args.node), run_id=run_id
+        )
+        if not ok:
+            raise LedgerError(f"exact evidence run failed revalidation: {reason}")
+    elif args.node in {"L1", "L4", "L8.5"}:
+        raise LedgerError(
+            f"native {args.node} emission requires exact evidence artifact hashes"
+        )
+    try:
+        provider = RunReceipt.read(receipt_path)
+    except ValueError as exc:
+        raise LedgerError(f"invalid provider receipt: {exc}") from exc
+    for field, value in expected.items():
+        if getattr(provider, field) != value:
+            raise LedgerError(f"provider receipt {field} does not match emission")
+    if (provider.context_manifest_hash != _sha256(manifest_path)
+            or provider.rendered_context_hash != rendered_hash
+            or provider.context_hash != rendered_hash):
+        raise LedgerError("provider receipt does not bind the exact context manifest and rendered context")
+    source_hash = _sha256(source_file)
+    provider_delta_path = Path(str(provider.provider_delta_path or ""))
+    if (
+        not provider_delta_path.is_file()
+        or provider_delta_path.resolve() != source_file.resolve()
+        or provider.provider_delta_hash != source_hash
+        or _sha256(provider_delta_path) != provider.provider_delta_hash
+    ):
+        raise LedgerError("provider receipt delta hash does not match emitted source file")
+    prompt_path = Path(str(provider.prompt_file or ""))
+    if not prompt_path.is_file() or _sha256(prompt_path) != provider.prompt_hash:
+        raise LedgerError("provider receipt prompt file is missing or changed")
+    return {
+        "context_manifest_path": str(manifest_path),
+        "context_manifest_sha256": _sha256(manifest_path),
+        "provider_receipt_path": str(receipt_path),
+        "provider_receipt_sha256": _sha256(receipt_path),
+        "rendered_context_sha256": rendered_hash,
+        "provider_prompt_sha256": provider.prompt_hash,
+        "provider_delta_sha256": provider.provider_delta_hash,
+        "evidence_artifacts": recorded_evidence,
+        "authorization_id": snapshot["authorization_id"],
+        "authorization_artifact_sha256": snapshot["artifact_hash"],
+    }
+
+
 def _emit_delta_v2(args, data):
     """Persist a v2 delta and its ledger events as one fail-closed boundary."""
     project_dir = Path(args.project_dir)
@@ -86,17 +256,91 @@ def _emit_delta_v2(args, data):
     if not cf.exists():
         print(f"ERROR: no candidate {args.cand_id}", file=sys.stderr)
         return 2
-    delta_key = artifact_key_for(args.node, args.persona)
+    try:
+        ledger = _ledger_for(project_dir, getattr(args, "knowledge_store", None))
+        project_id = str(ledger.require_binding(project_dir)["project_id"])
+        profile_id = ledger.project_profile(project_dir)
+        if profile_id == PROFILE_V20:
+            raise LedgerError(
+                "v2.0-legacy projects are read-only; public emit-delta is disabled"
+            )
+        descriptor = artifact_for_node(get_profile(profile_id), args.node)
+        if args.persona != descriptor.display_persona:
+            raise LedgerError(
+                f"{args.node} persona {args.persona} conflicts with profile {profile_id}; "
+                f"expected {descriptor.display_persona}"
+            )
+        delta_key = descriptor.storage_key
+        fm = _load_yaml_front(cf)
+        round_id = str(fm.get("round_id") or "1")
+        provenance = _validate_native_receipts(
+            args, get_profile(profile_id), source_file=Path(args.file),
+            project_id=project_id, round_id=round_id, ledger=ledger,
+        )
+    except LedgerError as exc:
+        print(f"DELTA V2 VALIDATION: REJECT\n  {exc}", file=sys.stderr)
+        return 1
     if delta_key not in DELTA_PERSONA:
-        print(f"ERROR: no schema for {delta_key}", file=sys.stderr)
+        print(f"ERROR: no schema for profile artifact {delta_key}", file=sys.stderr)
         return 2
-    fm = _load_yaml_front(cf)
-    round_id = str(fm.get("round_id") or "1")
     out_file = _v2_candidate_delta_file(project_dir, delta_key, args.cand_id)
     if out_file is None:
         print(f"ERROR: cannot resolve v2 artifact path for {delta_key}", file=sys.stderr)
         return 2
-    out_file.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path = None
+
+    def persist_finalized_artifacts(result):
+        nonlocal receipt_path
+        created = []
+        temporary = out_file.with_suffix(out_file.suffix + ".tmp")
+
+        def cleanup():
+            for path in reversed(created):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        try:
+            raw = canonical_json(result.normalized_delta)
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            if out_file.exists() and out_file.read_text(encoding="utf-8") != raw:
+                raise LedgerError(
+                    f"refusing to overwrite a different v2 delta: {out_file}"
+                )
+            if not out_file.exists():
+                temporary.write_text(raw, encoding="utf-8")
+                os.replace(temporary, out_file)
+                created.append(out_file)
+            actual = _sha256(out_file)
+            if actual != result.delta_hash:
+                raise LedgerError(
+                    "persisted v2 delta hash differs from ledger emission hash"
+                )
+            expected_receipt = (
+                project_dir / "08_Audit" / "hypothesis_commits"
+                / f"H{int(result.receipt['commit_seq']):08d}_"
+                  f"{result.receipt['candidate_id']}_{result.receipt['node']}.json"
+            )
+            receipt_existed = expected_receipt.exists()
+            receipt_path = _write_hypothesis_commit_receipt(
+                project_dir, {**result.receipt, "provenance": provenance}
+            )
+            if not receipt_existed:
+                created.append(receipt_path)
+            return actual, _sha256(receipt_path), cleanup
+        except Exception as exc:
+            cleanup()
+            if isinstance(exc, LedgerError):
+                raise
+            raise LedgerError(
+                f"atomic artifact persistence failed: {exc}"
+            ) from exc
+
     try:
         # Filesystem/provider checks remain at their actual use boundary, but
         # must complete before the ledger persistence transaction.  Pure
@@ -132,28 +376,11 @@ def _emit_delta_v2(args, data):
             for e in _errors:
                 print(f"  {e}", file=sys.stderr)
             return 1
-        ledger = _ledger_for(project_dir, getattr(args, "knowledge_store", None))
         result = ledger.commit_delta(project_dir=project_dir, candidate_id=args.cand_id,
                                      round_id=round_id, node=args.node,
                                      persona=args.persona, delta=data,
-                                     delta_path=out_file)
-        # The ledger hashes canonical bytes.  Persist exactly those bytes so the
-        # runtime resolver can revalidate the artifact instead of trusting text.
-        raw = canonical_json(result.normalized_delta)
-        if out_file.exists() and out_file.read_text(encoding="utf-8") != raw:
-            raise LedgerError(f"refusing to overwrite a different v2 delta: {out_file}")
-        if not out_file.exists():
-            temporary = out_file.with_suffix(out_file.suffix + ".tmp")
-            temporary.write_text(raw, encoding="utf-8")
-            os.replace(temporary, out_file)
-        actual = _sha256(out_file)
-        if actual != result.delta_hash:
-            raise LedgerError("persisted v2 delta hash differs from ledger emission hash")
-        receipt_path = _write_hypothesis_commit_receipt(project_dir, result.receipt)
-        ledger.finalize_emission(
-            result.delta_hash, artifact_sha256=actual,
-            receipt_sha256=_sha256(receipt_path),
-        )
+                                     delta_path=out_file,
+                                     _finalize_callback=persist_finalized_artifacts)
         if args.node == "L7":
             try:
                 _write_exec_manifest(project_dir, args.cand_id, data)

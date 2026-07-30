@@ -6,12 +6,33 @@ from pathlib import Path
 
 from research_loop import deep_research
 from research_loop.common import _now
-from research_loop.delta import _delta_for_candidate
+from research_loop.compatibility import PROFILE_V20, get_profile
+from research_loop.delta import _delta_for_candidate, artifact_for_node
+from research_loop.hypothesis_ledger import binding_path
 from research_loop.paths import _candidate_file, _pre_research_file
 from research_loop.preresearch import (
     PRE_RESEARCH_MAP, _LIT_PRE_RESEARCH_TYPES, _validate_pre_research_content,
 )
 from research_loop.yamlio import _load_yaml_front
+from research_loop.topology import topology_for_profile
+
+
+def _bound_profile(project_dir):
+    path = binding_path(project_dir)
+    if not path.is_file():
+        return get_profile(PROFILE_V20), {"project_id": Path(project_dir).name}
+    try:
+        binding = json.loads(path.read_text(encoding="utf-8"))
+        return get_profile(str(binding["profile_id"])), binding
+    except (OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
+        raise deep_research.DeepResearchError(
+            f"invalid project profile binding: {exc}"
+        ) from exc
+
+
+def _l8_storage_key(project_dir):
+    profile, _ = _bound_profile(project_dir)
+    return artifact_for_node(profile, "L8").storage_key
 
 def cmd_pre_research(args):
     """Output a pre-research prompt for the orchestrator to execute before a node.
@@ -150,10 +171,19 @@ NOT YET RUN
             synthetic_payload["review_search"] = {
                 "query": "synthetic review query", "status": "none_found",
                 "receipt": "synthetic-test 0"}
+        profile, binding = _bound_profile(project_dir)
+        _, node_map, _ = topology_for_profile(profile.profile_id)
         deep_research.persist_run(
             project_dir, args.cand_id, node, synthetic_payload,
             deep_research.skill_receipt("codex", ["synthetic-test"],
-                                         "synthetic-test", "test-only"))
+                                         "synthetic-test", "test-only"),
+            project_id=str(binding["project_id"]),
+            round_id=str(round_id),
+            profile_id=profile.profile_id,
+            research_persona=str(
+                node_map[node].get("research_persona") or "Curie"
+            ),
+        )
 
     focus = research_config.get("description", "")
     grounding = (f"## This study\n"
@@ -340,10 +370,16 @@ This summary will be injected into the {node} assemble-context as additional inp
                     return None
             return None
         l7 = _ld("L7_turing") or {}
-        l8 = _ld("L8_curie") or {}
+        try:
+            l8_key = _l8_storage_key(project_dir)
+        except deep_research.DeepResearchError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        l8 = _ld(l8_key) or {}
         findings = json.dumps({"L7_key_results": l7.get("key_results"),
                                "L8_evidence_level": l8.get("evidence_level"),
-                               "L8_evidence_verified": l8.get("evidence_verified")},
+                               "L8_evidence_verified": l8.get("evidence_verified"),
+                               "L8_evidence_assessments": l8.get("evidence_assessments")},
                               ensure_ascii=False, indent=2)
         prompt = f"""# Pre-Research: Literature Verification (before {node})
 
@@ -457,6 +493,19 @@ def cmd_deep_research_run(args):
         print(f"ERROR: Deep Research runtime is not ready: {reason}", file=sys.stderr)
         return 3
     fm = _load_yaml_front(cf)
+    try:
+        profile, binding = _bound_profile(project_dir)
+        _, node_map, _ = topology_for_profile(profile.profile_id)
+        research_persona = str(
+            node_map[args.node].get("research_persona") or ""
+        )
+        if not node_map[args.node].get("research_required") or not research_persona:
+            raise deep_research.DeepResearchError(
+                f"{args.node} has no declared research persona"
+            )
+    except (deep_research.DeepResearchError, KeyError, ValueError) as exc:
+        print(f"ERROR: Deep Research identity is invalid: {exc}", file=sys.stderr)
+        return 3
     run_dir = project_dir / "08_Audit" / "deep_research_runtime" / args.cand_id / args.node.replace(".", "_")
     result_context = ""
     if args.node == "L8.5":
@@ -468,16 +517,27 @@ def cmd_deep_research_run(args):
                 return json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 return {}
+        l8_key = artifact_for_node(profile, "L8").storage_key
         result_context = json.dumps({
             "L7_key_results": _result_delta("L7_turing").get("key_results", {}),
-            "L8_evidence_verified": _result_delta("L8_curie").get("evidence_verified", []),
-            "L8_evidence_level": _result_delta("L8_curie").get("evidence_level", ""),
+            "L8_evidence_verified": _result_delta(l8_key).get("evidence_verified", []),
+            "L8_evidence_level": _result_delta(l8_key).get("evidence_level", ""),
+            "L8_evidence_assessments": _result_delta(l8_key).get(
+                "evidence_assessments", []
+            ),
         }, ensure_ascii=False, sort_keys=True)
     try:
         artifact = deep_research.run_and_persist(
             project_dir, args.cand_id, args.node, fm.get("question", ""), fm.get("claim", ""),
-            spec, run_dir, skill_version, result_context)
-        ok, reason = deep_research.audit_evidence_pack(project_dir, args.cand_id, args.node)
+            spec, run_dir, skill_version, result_context,
+            project_id=str(binding["project_id"]),
+            round_id=str(fm.get("round_id") or "1"),
+            profile_id=profile.profile_id,
+            research_persona=research_persona,
+        )
+        ok, reason = deep_research.audit_evidence_pack(
+            project_dir, args.cand_id, args.node, run_id=artifact["run_id"]
+        )
     except deep_research.DeepResearchError as exc:
         print(f"ERROR: Deep Research failed: {exc}", file=sys.stderr)
         return 3

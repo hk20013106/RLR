@@ -10,11 +10,13 @@ L1, L4, and L8.5 run a verifiable Academic Research Skills (ARS) pass before the
 
 > **Core principle:** cognitive agents are isolated by information invisibility (Path B). The execution agent (Turing) is isolated by a controlled workspace + command allowlist (Path A). We do not pretend `spawn_agent` is an OS sandbox.
 
-**Current version: V0.8** (modular architecture)
+**Stable version: V0.8.** The V0.9 native-v2.1 closeout is implemented in
+this worktree but is not yet released because its 80% coverage gate is still
+open.
 
-**Canonical runtime path:** `python run_loop.py run PROJECT CAND` drives the V0.8
+**Canonical runtime path:** `python run_loop.py run PROJECT CAND` drives the V0.9 candidate
 engine (`research_loop_v04.py`, filename retained for import stability). As of
-V0.7, `assemble-context` **enforces the deep-research gate** on the literature
+v0.9, `assemble-context` **enforces the deep-research gate** on the literature
 deep-research stages **L1, L4, and L8.5**: they **fail closed (rc=3)** unless a
 successful ARS CLI receipt, source-database metadata record, and required
 located evidence sections are persisted under `09_Literature_Database/evidence_packs/`.
@@ -51,7 +53,19 @@ run with an actionable error instead of being silently skipped.
 
 ## Version history
 
-### V0.8 — CURRENT (modular architecture)
+### V0.9 — IN DEVELOPMENT (native v2.1 closeout)
+
+- **Native profile binding.** New projects bind `v2.1-catalog-1`; existing
+  `v2.1` and `v2.0-legacy` projects retain their original contract meanings.
+- **Serial review and provenance.** Native L9 is L9a → finalized L9a → L9b;
+  `ContextManifest/v2`, `RunReceipt/v1`, and `EvidenceRunReceipt/v1.1` bind
+  visible context, provider output, persona catalog, and evidence runs.
+- **YAML persona catalog.** New projects use the validated `persona-catalog-1`
+  metadata while preserving the legacy body-only templates for old projects.
+- **Deferred work.** Literature-source MCP, PaSa, full AI4AI governance,
+  dashboard work, and v2.0 removal are separate post-v0.9 phases.
+
+### V0.8 — CURRENT STABLE (modular architecture)
 
 - **Engine modular extraction.** `engine.py` reduced from 4768 lines to 477 lines. All 42 `cmd_*` handlers extracted into 8 dedicated command modules under `src/research_loop/commands/`: continuation, execution, ledger, lifecycle, pitfall, ranking, reporting, research. `cli.py` now owns `build_parser` and `main`. All backward-compatible imports preserved via inward shims.
 - **Hypothesis ledger read-boundary correctness.** Finalized emission predicate (`FINALIZED_EMISSION_PREDICATE`) applied to `ranking_inputs`, `materialize_authorized_context`, `verify`, and `snapshot_candidate`. Orphan emissions (from crashes between `commit_delta` and `finalize_emission`) are now invisible to consumptive reads and flagged by `verify`.
@@ -87,10 +101,11 @@ runtime paths or active template specifications.
    └─►  L4   Fisher  ──►  L5   Tukey  ──►  L6   Oppenheimer  ──►  L7   Turing
         (method)          (QC)            (approve)             (execute)
                                                          │
-   L8   Curie  ──►  L8.5 Curie  ──►  ┌─ L9a  Feynman  ──┐  ──►  L10a  Jobs
-   (audit)          (lit-verify)     │   (falsify)        │       (value)
-                                     └─ L9b  Darwin  ────┘  ──►  L10b  Oppenheimer
-                                        (biology)                 (decide)
+   L8   Tukey  ──►  L8.5 Curie  ──►  L9a  Feynman  ──►  L9b  Darwin  ──►  L10a Jobs
+   (audit)          (lit-verify)        (falsify)             (biology)      (value)
+                                                                                │
+                                                                         L10b Oppenheimer
+                                                                             (decide)
                                                                    │
                                                                    └─► L10c Linnaeus
                                                                        (report)
@@ -99,7 +114,8 @@ runtime paths or active template specifications.
 - **L0** is a boot gate + dependency gate. If a required dependency is missing, the loop STOPS.
 - **L7 (Turing)** is the only node that runs code. All others are cognitive.
 - **L8.5** verifies computed results against published literature.
-- **L9a and L9b** run in parallel and cannot see each other.
+- **L9a and L9b** are serial in native v2.1: L9b sees only the finalized,
+  ledger-authorized L9a snapshot. Historical v2.0 remains read-only.
 - **L10c** aggregates everything into a final report.
 
 ### L0 dependency contract (V0.7)
@@ -142,15 +158,15 @@ The key insight: **Path B isolates by making information invisible; Path A isola
 | L5 | Tukey | Critique method design from EDA/QC perspective | Path B |
 | L6 | Oppenheimer | Approve or reject the analysis plan | Path B |
 | L7 | Turing | Execute approved scripts in a controlled workspace | **Path A** |
-| L8 | Curie | Audit execution results, verify reproducibility | Path B |
+| L8 | Tukey | Audit execution results, verify reproducibility | Path B |
 | L8.5 | Curie | Verify L7/L8 results against PubMed/EuropePMC | Path B |
-| L9a | Feynman | Hard falsification of results (statistical/logical) | Path B (parallel) |
-| L9b | Darwin | Biological interpretation of results | Path B (parallel) |
+| L9a | Feynman | Hard falsification of results (statistical/logical) | Path B |
+| L9b | Darwin | Biological interpretation of results after finalized L9a | Path B |
 | L10a | Jobs | Assess value, frame manuscript direction | Path B |
 | L10b | Oppenheimer | Final decision: KEEP / REVISE / DOWNGRADE / DROP | Path B |
 | L10c | Linnaeus | Aggregate all deltas into FINAL_REPORT | Reads all deltas |
 
-### V0.7 node-by-node contract
+### v0.9 node-by-node contract
 
 | Node | Reads | Produces | Formal effect |
 |------|-------|----------|---------------|
@@ -162,10 +178,10 @@ The key insight: **Path B isolates by making information invisible; Path A isola
 | L5 Tukey | L4 + L2 | QC checkpoints, failure rules, method attacks | No status change |
 | L6 Oppenheimer | L4 + L5 | Approved/rejected method plan and modifications | `triage-method`; not a ranking hook |
 | L7 Turing | L6 + L0 + prepared allowlisted workspace | Script exit codes, output files, key results | Only node allowed to execute code; `execution-gate` precedes it |
-| L8 Curie | L7 + L6 + frontmatter | Evidence audit, reproducibility checks, evidence level | Advances to `AUDITED` |
+| L8 Tukey | L7 + L6 + frontmatter | Evidence audit, reproducibility checks, evidence level | Advances to `AUDITED` |
 | L8.5 Curie | L7 + L8 + paper-based verification evidence | Confirmation/contradiction audit and literature records | Advances to review |
-| L9a Feynman | L1 + L7 + L8 + L8.5 | Statistical/logical falsification | Parallel; cannot read L9b |
-| L9b Darwin | L1 + L7 + L8 + L8.5 | Biological interpretation and limitations | Parallel; cannot read L9a |
+| L9a Feynman | L1 + L7 + L8 + L8.5 | Statistical/logical falsification | Finalized before L9b |
+| L9b Darwin | L1 + L7 + L8 + L8.5 + authorized L9a | Biological interpretation and limitations | Cannot run before finalized L9a |
 | L10a Jobs | Frontmatter + L8/L8.5/L9a/L9b + located L1/L8.5 evidence | Value assessment and manuscript framing | No status change |
 | L10b Oppenheimer | L10a + L8/L8.5/L9a/L9b + located evidence | Final decision and cited evidence IDs | `KEEP/REVISE/DOWNGRADE/DROP`; optional shadow ranking runs after delta write |
 | L10c Linnaeus | All permitted deltas | English/Chinese FINAL_REPORT and sync inputs | Aggregates; does not execute code or choose a new winner |
@@ -376,5 +392,7 @@ Live research projects are gitignored (generated output, not source).
 - Only Oppenheimer changes candidate status.
 - Only Turing executes code, only after the execution gate passes.
 - Candidate file is read-only; state flows only through delta JSON.
-- L9a and L9b are mutually invisible.
+- Native v2.1 runs finalize L9a before L9b; L9b reads only the
+  cursor-authorized L9a snapshot. Historical v2.0 verification remains
+  parallel and mutually invisible.
 - End-of-round Obsidian sync is required.

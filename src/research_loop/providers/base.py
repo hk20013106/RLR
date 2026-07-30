@@ -2,6 +2,7 @@
 
 Stdlib only -> pure leaf. No engine import."""
 import json
+import re
 import subprocess
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
@@ -96,27 +97,80 @@ def run_text_command(command, prompt, run_dir, tag, timeout=None):
     subprocess.run(cmd, shell=True, check=True, timeout=timeout)
     return of.read_text(encoding="utf-8")
 
+@dataclass
 class RunReceipt:
     node: str
     persona: str
     provider: str
     timestamp: str
     context_hash: str
-    prompt_file: str = None
-    delta_file: str = None
+    prompt_file: str | None = None
+    prompt_hash: str | None = None
+    delta_file: str | None = None
+    delta_hash: str | None = None
     workspace: str = None
-    allowed_tools: list = None
-    everos_scope: list = None
+    allowed_tools: list = field(default_factory=list)
+    everos_scope: list = field(default_factory=list)
     fresh_session: bool = None
+    project_id: str | None = None
     candidate_id: str = None
-    round_id: int = None
+    round_id: str | None = None
+    profile_id: str | None = None
+    context_manifest_path: str | None = None
+    context_manifest_hash: str | None = None
+    rendered_context_path: str | None = None
+    rendered_context_hash: str | None = None
+    provider_delta_path: str | None = None
+    provider_delta_hash: str | None = None
+    schema_version: str = "RunReceipt/v1"
+
+    def validate(self):
+        if self.schema_version != "RunReceipt/v1":
+            raise ValueError("RunReceipt schema_version must be 'RunReceipt/v1'")
+        for name in (
+            "node", "persona", "provider", "timestamp", "context_hash",
+            "project_id", "candidate_id", "round_id", "profile_id",
+            "context_manifest_path", "context_manifest_hash",
+            "rendered_context_path", "rendered_context_hash",
+            "prompt_file", "prompt_hash", "provider_delta_path",
+            "provider_delta_hash",
+        ):
+            if not str(getattr(self, name, "") or "").strip():
+                raise ValueError(f"RunReceipt {name} is required")
+        for name in (
+            "context_hash", "context_manifest_hash", "rendered_context_hash",
+            "prompt_hash", "delta_hash", "provider_delta_hash",
+        ):
+            value = getattr(self, name, None)
+            if value is not None and (
+                not isinstance(value, str)
+                or re.fullmatch(r"[0-9a-f]{64}", value) is None
+            ):
+                raise ValueError(f"RunReceipt {name} must be a SHA-256 hex digest")
+        if self.rendered_context_hash and self.rendered_context_hash != self.context_hash:
+            raise ValueError("RunReceipt rendered_context_hash must equal context_hash")
+        return self
 
     def write(self, path):
+        self.validate()
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(asdict(self), indent=2, ensure_ascii=False),
                      encoding="utf-8")
         return str(p)
+
+    @classmethod
+    def read(cls, path):
+        try:
+            value = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"invalid RunReceipt: {exc}") from exc
+        if not isinstance(value, dict):
+            raise ValueError("invalid RunReceipt: expected object")
+        try:
+            return cls(**value).validate()
+        except TypeError as exc:
+            raise ValueError(f"invalid RunReceipt fields: {exc}") from exc
 
 def now():
     return _dt.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")

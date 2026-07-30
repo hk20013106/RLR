@@ -29,7 +29,7 @@ import os  # noqa: E402
 import subprocess  # noqa: E402
 
 from research_loop.providers.command import CommandProvider  # noqa: E402
-from research_loop import deep_research as dr  # noqa: E402
+from deep_research_fixtures import persist_synthetic_evidence  # noqa: E402
 
 RL = str(HERE / "research_loop_v04.py")
 
@@ -90,28 +90,7 @@ def _seed_forbidden_l9b(proj, cand):
 
 def _write_l1_preresearch(proj, cand):
     """Create the verified evidence artifact now required before L1."""
-    payload = {
-        "schema_version": dr.SCHEMA_VERSION,
-        "queries": ["test hypothesis"],
-        "papers": [{
-            "doi": "10.1000/persona-test", "pmid": "123456", "url": "https://example.org/paper",
-            "title": "Persona context fixture", "source_database": "Europe PMC",
-            "metadata": {"year": 2026}, "source_metadata_response": {"id": "123456"},
-            "open_access": False,
-            "extracts": [
-                {"section": "Results", "text": "Observed result.", "locator": "Results 1"},
-                {"section": "Discussion", "text": "Discussed result.", "locator": "Discussion 1"},
-                {"section": "Conclusion", "text": "Concluded result.", "locator": "Conclusion 1"},
-            ],
-        }],
-    }
-    artifact = dr.persist_run(
-        proj, cand, "L1", payload,
-        dr.skill_receipt("codex", ["codex", "exec"], "fixture", "test"),
-    )
-    target = proj / "02_Agent_Notes" / "_pre_research" / "L1_research.md"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(dr.render_pre_research_markdown(artifact), encoding="utf-8")
+    persist_synthetic_evidence(proj, cand, "L1", ["test hypothesis"])
 
 
 def _prompt_via_provider(node, persona, ctx, run_dir):

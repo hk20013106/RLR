@@ -6,6 +6,7 @@ import pytest
 from research_loop.compatibility import (
     PROFILE_V20,
     PROFILE_V21,
+    PROFILE_V21_CATALOG_1,
     CompatibilityError,
     profile_for_schema,
 )
@@ -18,9 +19,12 @@ from research_loop.hypothesis_contracts import validate_submission
 
 def test_profile_registry_keeps_legacy_and_current_contracts_distinct():
     assert profile_for_schema("2.0").profile_id == PROFILE_V20
-    assert profile_for_schema("2.1").profile_id == PROFILE_V21
+    with pytest.raises(CompatibilityError, match="ambiguous"):
+        profile_for_schema("2.1")
+    assert profile_for_schema("2.1", profile_id=PROFILE_V21).profile_id == PROFILE_V21
+    assert profile_for_schema("2.1", profile_id=PROFILE_V21_CATALOG_1).profile_id == PROFILE_V21_CATALOG_1
     assert profile_for_schema("2.0").l9_parallel is True
-    assert profile_for_schema("2.1").l9_parallel is False
+    assert profile_for_schema("2.1", profile_id=PROFILE_V21).l9_parallel is False
 
 
 def test_unknown_schema_profile_fails_closed():

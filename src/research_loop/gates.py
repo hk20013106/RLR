@@ -17,7 +17,7 @@ from research_loop.preresearch import (
 from research_loop import deep_research
 
 
-def _audit_pre_research(project_dir, node_id, pr_cfg, cand_id=None):
+def _audit_pre_research(project_dir, node_id, pr_cfg, cand_id=None, *, evidence_run_id=None):
     """V0.7 deep-research gate. Returns (ok, reason).
 
     Fails closed when the pre-research artifact is missing, empty, a NOT YET RUN
@@ -33,7 +33,9 @@ def _audit_pre_research(project_dir, node_id, pr_cfg, cand_id=None):
     if not ok:
         return ok, reason
     if pr_cfg.get("type") in {"deep_research", "literature_review", "literature_verification"} and cand_id:
-        return deep_research.audit_evidence_pack(project_dir, cand_id, node_id)
+        return deep_research.audit_evidence_pack(
+            project_dir, cand_id, node_id, run_id=evidence_run_id
+        )
     return True, ""
 
 def _audit_branch_coverage(project_dir, cand_id):

@@ -6,6 +6,7 @@ import pytest
 from research_loop.delta import _v2_commit_valid
 from research_loop.hypothesis_ledger import HypothesisLedger, LedgerError, canonical_json
 from research_loop.engine import main
+from native_v2_helpers import write_catalog_emission_receipts
 
 
 def _commit(ledger, project, node, delta, *, candidate="C1", round_id="1",
@@ -280,7 +281,11 @@ def test_cli_v2_emission_requires_binding_and_writes_receipt(tmp_path):
         {"proposal_key": "two", "statement": "S2", "operationalization": "O", "falsification_criteria": ["F"], "rationale": "R"},
         {"proposal_key": "three", "statement": "S3", "operationalization": "O", "falsification_criteria": ["F"], "rationale": "R"},
     ], "primary_proposal_key": "one", "key_uncertainty": "U"}), encoding="utf-8")
-    assert main(["emit-delta", str(project), candidate, "--node", "L1", "--persona", "Einstein", "--file", str(source), "--knowledge-store", str(store)]) == 0
+    manifest, provider_receipt = write_catalog_emission_receipts(
+        project, candidate, "L1", "Einstein", source, store_path=store
+    )
+    assert main(["emit-delta", str(project), candidate, "--node", "L1", "--persona", "Einstein", "--file", str(source), "--knowledge-store", str(store),
+                 "--context-manifest", str(manifest), "--provider-receipt", str(provider_receipt)]) == 0
     delta = project / "02_Agent_Notes" / "Einstein" / f"{candidate}_L1_einstein_delta.v2.json"
     assert delta.exists()
     receipts = list((project / "08_Audit" / "hypothesis_commits").glob("*.json"))

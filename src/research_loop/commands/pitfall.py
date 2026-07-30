@@ -76,7 +76,7 @@ def cmd_pitfall_scan(args):
 
 
 def cmd_pitfall_status(args):
-    """L8 Curie: mark a draft pitfall confirmed / false_positive / obsolete."""
+    """Profile-bound L8 auditor: classify a draft pitfall."""
     try:
         pl.confirm_pitfall(args.project_dir, args.id, args.status,
                            confirmed_by=args.by)
