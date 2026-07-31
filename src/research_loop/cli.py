@@ -412,7 +412,8 @@ def build_parser():
     sp.add_argument("cand_id")
     sp.add_argument("--node", required=True, choices=["L1", "L4", "L8.5"])
     sp.add_argument("--backend", choices=list(SUPPORTED_BACKENDS),
-                    help="override configured backend")
+                    help=("override configured backend; also declares the agent host "
+                          "when it cannot be detected (or set RLR_HOST_BACKEND)"))
     sp.add_argument("--allow-host-mismatch", action="store_true",
                     help=("run a backend that differs from the detected agent host "
                           "(spends that provider's quota on purpose)"))

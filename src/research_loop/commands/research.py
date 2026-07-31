@@ -489,7 +489,12 @@ def cmd_deep_research_run(args):
         print(f"ERROR: Deep Research runtime is not configured: {exc}", file=sys.stderr)
         return 3
     if not getattr(args, "allow_host_mismatch", False):
-        same_host, host_reason = deep_research.host_matches(spec)
+        try:
+            same_host, host_reason = deep_research.host_matches(
+                spec, explicit=getattr(args, "backend", None) is not None)
+        except deep_research.DeepResearchError as exc:
+            print(f"ERROR: Deep Research host is not declarable: {exc}", file=sys.stderr)
+            return 3
         if not same_host:
             print(f"ERROR: Deep Research host mismatch: {host_reason}", file=sys.stderr)
             return 3

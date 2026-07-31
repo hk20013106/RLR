@@ -29,6 +29,10 @@ SUPPORTED_BACKENDS = ("codex", "claude")
 # providers/headless.py already depends on them. No Codex marker is listed
 # because none has been verified in this repository -- see detect_host_backend.
 _HOST_MARKERS = {"claude": ("CLAUDECODE", "CLAUDE_CODE")}
+
+# Operator escape hatch for hosts that expose no marker (Codex today). Checked
+# before the markers so a deliberate declaration always wins over sniffing.
+HOST_BACKEND_ENV = "RLR_HOST_BACKEND"
 _MAX_SOURCE_BYTES = 5 * 1024 * 1024
 
 
@@ -53,12 +57,21 @@ def runtime_config_path(project_dir: str | Path) -> Path:
 def detect_host_backend(env: dict | None = None) -> str | None:
     """Name the agent host running this process, or None when it is unknown.
 
-    Only the Claude Code markers are verified (providers/headless.py relies on
-    the same two variables). Codex exposes no marker this repository has
-    confirmed, so an unmarked host is reported as unknown -- never assumed to be
-    Codex. Guessing here is what let a Claude session spend Codex quota.
+    RLR_HOST_BACKEND is read first: it is the only way to name a host that
+    exposes no marker, and a declaration must not be overridden by sniffing.
+    Otherwise only the Claude Code markers are verified (providers/headless.py
+    relies on the same two variables). Codex exposes no marker this repository
+    has confirmed, so an unmarked host is reported as unknown -- never assumed
+    to be Codex. Guessing here is what let a Claude session spend Codex quota.
     """
     env = _os.environ if env is None else env
+    declared = str(env.get(HOST_BACKEND_ENV) or "").strip()
+    if declared:
+        if declared not in SUPPORTED_BACKENDS:
+            raise DeepResearchError(
+                f"{HOST_BACKEND_ENV}={declared!r} is not a supported host; use one of "
+                f"{', '.join(SUPPORTED_BACKENDS)}")
+        return declared
     for backend, markers in _HOST_MARKERS.items():
         if any(env.get(marker) for marker in markers):
             return backend
@@ -97,15 +110,27 @@ def default_runtime_config(backend: str | None = None,
     return config
 
 
-def host_matches(spec: RuntimeSpec, env: dict | None = None) -> tuple[bool, str]:
+def host_matches(spec: RuntimeSpec, env: dict | None = None, *,
+                 explicit: bool = False) -> tuple[bool, str]:
     """Reject a configured backend that contradicts the detected host.
 
-    An unknown host is permissive: a detection gap must not block every run.
-    Only a positive mismatch stops one, because that is the case that spends the
-    wrong provider's quota.
+    An unknown host is fail-closed unless the caller named the backend
+    explicitly. Being permissive there meant a Codex session -- which exposes no
+    marker -- silently inherited whatever backend the project file happened to
+    carry, which is the same quota mistake a positive mismatch causes, only
+    quieter. `explicit` says a human chose the backend for this run, so there is
+    nothing left to guess.
     """
     host = detect_host_backend(env)
-    if host is None or host == spec.backend:
+    if host is None:
+        if explicit:
+            return True, ""
+        return False, (
+            "cannot identify the current agent host; set "
+            f"{HOST_BACKEND_ENV}={'|'.join(SUPPORTED_BACKENDS)} or pass --backend to "
+            f"declare it explicitly (the project runtime asks for {spec.backend!r}, "
+            "which would be run on an unverified host)")
+    if host == spec.backend:
         return True, ""
     return False, (
         f"running inside the {host!r} host but the project runtime is configured "

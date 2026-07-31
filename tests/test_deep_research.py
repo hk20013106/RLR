@@ -1,4 +1,5 @@
 import json
+import os as _os
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -282,9 +283,23 @@ def test_emit_l10b_rejects_missing_literature_evidence_ids(tmp_path):
     assert "only committed delta v2" in (accepted.stderr + accepted.stdout)
 
 
-def test_deep_research_cli_executes_a_local_fake_codex(tmp_path):
-    project = tmp_path / "P"
+def _sentinel_codex_project(tmp_path, monkeypatch, runtime_extra=None):
+    """A real project wired to a fake Codex CLI that records its own launch.
+
+    The fake executable is the running interpreter itself: Deep Research always
+    passes ``exec`` as the first Codex argument, so a file named ``exec`` in the
+    working directory is the script Python ends up running. That keeps the
+    fixture free of ``.cmd`` wrappers, shebangs, and ``shell=True``, so it
+    behaves identically on Windows and Linux.
+
+    The script writes a sentinel file before printing anything, so the sentinel
+    proves the provider process actually started -- a returncode and a stderr
+    string cannot tell "refused before launch" apart from "launched and then
+    failed".
+    """
+    monkeypatch.chdir(tmp_path)
     cli = ROOT / "research_loop_v04.py"
+    project = tmp_path / "P"
     assert subprocess.run([sys.executable, str(cli), "new-project", str(project), "Topic"],
                           capture_output=True, text=True).returncode == 0
     new = subprocess.run([sys.executable, str(cli), "new-candidate", str(project), "--title", "T",
@@ -294,25 +309,96 @@ def test_deep_research_cli_executes_a_local_fake_codex(tmp_path):
     skill = tmp_path / "academic-research-suite"
     skill.mkdir()
     (skill / "manifest.json").write_text("{}", encoding="utf-8")
-    fake = tmp_path / "fake_codex.py"
-    fake.write_text("import json\nprint(json.dumps(" + repr(_payload()) + "))\n", encoding="utf-8")
-    command = tmp_path / "fake_codex.cmd"
-    command.write_text(f'@echo off\n"{sys.executable}" "{fake}" %*\n', encoding="utf-8")
+    sentinel = tmp_path / "codex_launched.sentinel"
+    (tmp_path / "exec").write_text(
+        "import json, pathlib\n"
+        f"pathlib.Path({str(sentinel)!r}).write_text('launched', encoding='utf-8')\n"
+        "print(json.dumps(" + repr(_payload()) + "))\n",
+        encoding="utf-8")
+    config = {"backend": "codex", "executable": sys.executable,
+              "skill_path": str(skill), "skill_version": "fixture"}
+    config.update(runtime_extra or {})
     runtime = project / "00_Preflight" / "deep_research_runtime.json"
     runtime.parent.mkdir(parents=True, exist_ok=True)
-    runtime.write_text(json.dumps({"backend": "codex", "executable": str(command),
-                                   "skill_path": str(skill), "skill_version": "fixture"}), encoding="utf-8")
+    runtime.write_text(json.dumps(config), encoding="utf-8")
+    return SimpleNamespace(cli=cli, project=project, cand_id=cand_id, sentinel=sentinel)
+
+
+def _deep_research_env(**overrides):
+    env = dict(_os.environ)
+    for marker in ("CLAUDECODE", "CLAUDE_CODE", "RLR_HOST_BACKEND"):
+        env.pop(marker, None)
+    env.update(overrides)
+    return env
+
+
+def _run_dir(project, cand_id, node="L1"):
+    return project / "08_Audit" / "deep_research_runtime" / cand_id / node.replace(".", "_")
+
+
+def test_deep_research_cli_executes_a_local_fake_codex(tmp_path, monkeypatch):
+    """Positive control for the sentinel: a permitted run does launch the CLI."""
+    fx = _sentinel_codex_project(tmp_path, monkeypatch)
     # The fake executable stands in for Codex whichever host runs the suite, so
     # the cross-host run is declared instead of left to the ambient environment
     # -- otherwise this test would pass or fail by session type.
-    result = subprocess.run([sys.executable, str(cli), "deep-research-run", str(project), cand_id,
-                             "--node", "L1", "--allow-host-mismatch"],
-                            capture_output=True, text=True)
+    result = subprocess.run([sys.executable, str(fx.cli), "deep-research-run", str(fx.project),
+                             fx.cand_id, "--node", "L1", "--allow-host-mismatch"],
+                            capture_output=True, text=True, env=_deep_research_env())
     assert result.returncode == 0, result.stderr
     assert "deep_research_run" in result.stdout
-    context = subprocess.run([sys.executable, str(cli), "assemble-context", str(project), cand_id,
-                              "--node", "L1"], capture_output=True, text=True)
+    assert fx.sentinel.exists(), "the fake Codex CLI never ran; the sentinel proves nothing"
+    context = subprocess.run([sys.executable, str(fx.cli), "assemble-context", str(fx.project),
+                              fx.cand_id, "--node", "L1"], capture_output=True, text=True)
     assert context.returncode == 0, context.stderr
+
+
+def test_host_mismatch_never_starts_the_provider_process(tmp_path, monkeypatch):
+    """A refused cross-host run must not spend quota, so nothing may launch."""
+    fx = _sentinel_codex_project(tmp_path, monkeypatch)
+    result = subprocess.run([sys.executable, str(fx.cli), "deep-research-run", str(fx.project),
+                             fx.cand_id, "--node", "L1"],
+                            capture_output=True, text=True,
+                            env=_deep_research_env(CLAUDECODE="1"))
+    assert result.returncode == 3, result.stdout
+    assert "host mismatch" in result.stderr
+    assert not fx.sentinel.exists(), "the Codex CLI was launched despite the host mismatch"
+    assert not _run_dir(fx.project, fx.cand_id).exists()
+
+
+def test_inconsistent_spec_never_starts_the_provider_process(tmp_path, monkeypatch):
+    """Same guarantee for a self-contradictory runtime spec (batch 1's guard)."""
+    fx = _sentinel_codex_project(tmp_path, monkeypatch,
+                                 runtime_extra={"plugin_dir": str(tmp_path / "claude-plugin")})
+    result = subprocess.run([sys.executable, str(fx.cli), "deep-research-run", str(fx.project),
+                             fx.cand_id, "--node", "L1", "--allow-host-mismatch"],
+                            capture_output=True, text=True, env=_deep_research_env())
+    assert result.returncode == 3, result.stdout
+    assert "plugin_dir" in result.stderr
+    assert not fx.sentinel.exists(), "the Codex CLI was launched despite the inconsistent spec"
+    assert not _run_dir(fx.project, fx.cand_id).exists()
+
+
+def test_unknown_host_never_starts_the_provider_process(tmp_path, monkeypatch):
+    """No marker and no explicit backend means no launch, on any platform."""
+    fx = _sentinel_codex_project(tmp_path, monkeypatch)
+    result = subprocess.run([sys.executable, str(fx.cli), "deep-research-run", str(fx.project),
+                             fx.cand_id, "--node", "L1"],
+                            capture_output=True, text=True, env=_deep_research_env())
+    assert result.returncode == 3, result.stdout
+    assert dr.HOST_BACKEND_ENV in result.stderr
+    assert not fx.sentinel.exists(), "the Codex CLI was launched on an unidentified host"
+    assert not _run_dir(fx.project, fx.cand_id).exists()
+
+
+def test_declared_host_lets_the_run_proceed(tmp_path, monkeypatch):
+    """RLR_HOST_BACKEND is the escape hatch for a host with no marker."""
+    fx = _sentinel_codex_project(tmp_path, monkeypatch)
+    result = subprocess.run([sys.executable, str(fx.cli), "deep-research-run", str(fx.project),
+                             fx.cand_id, "--node", "L1"], capture_output=True, text=True,
+                            env=_deep_research_env(**{dr.HOST_BACKEND_ENV: "codex"}))
+    assert result.returncode == 0, result.stderr
+    assert fx.sentinel.exists()
 
 
 def test_deep_research_cli_executes_a_local_fake_claude_plugin(tmp_path):
@@ -337,8 +423,12 @@ def test_deep_research_cli_executes_a_local_fake_claude_plugin(tmp_path):
     runtime.parent.mkdir(parents=True, exist_ok=True)
     runtime.write_text(json.dumps({"backend": "claude", "executable": str(command),
                                    "plugin_dir": str(plugin.parent), "skill_version": "fixture"}), encoding="utf-8")
+    # --backend names the host explicitly so the run does not depend on which
+    # agent happens to be running the suite; the assertion below is about the
+    # Claude plugin invocation, not about host detection.
     result = subprocess.run([sys.executable, str(cli), "deep-research-run", str(project), cand_id,
-                             "--node", "L4"], capture_output=True, text=True)
+                             "--node", "L4", "--backend", "claude"],
+                            capture_output=True, text=True, env=_deep_research_env())
     assert result.returncode == 0, result.stderr
     assert "deep_research_run" in result.stdout
 
@@ -394,10 +484,39 @@ def test_host_matches_accepts_a_backend_equal_to_the_detected_host():
     assert dr.host_matches(spec, {"CLAUDECODE": "1"}) == (True, "")
 
 
-def test_host_matches_stays_permissive_when_the_host_is_unknown():
-    """Detection gaps must not block every run -- only a positive mismatch does."""
+def test_host_matches_fails_closed_when_the_host_is_unknown():
+    """An unmarked host used to silently inherit whatever backend the project
+    file carried. That is the same quota mistake as a positive mismatch, only
+    quieter, and Codex is exactly the host with no marker."""
     spec = dr.RuntimeSpec(backend="codex", executable="codex")
-    assert dr.host_matches(spec, {}) == (True, "")
+    ok, reason = dr.host_matches(spec, {})
+    assert not ok
+    assert dr.HOST_BACKEND_ENV in reason and "--backend" in reason
+
+
+def test_host_matches_accepts_an_unknown_host_when_the_backend_is_explicit():
+    """A human naming the backend leaves nothing to guess, so the gate opens."""
+    spec = dr.RuntimeSpec(backend="codex", executable="codex")
+    assert dr.host_matches(spec, {}, explicit=True) == (True, "")
+
+
+def test_host_matches_honours_the_declared_host_env_var():
+    spec = dr.RuntimeSpec(backend="codex", executable="codex")
+    assert dr.host_matches(spec, {dr.HOST_BACKEND_ENV: "codex"}) == (True, "")
+    ok, reason = dr.host_matches(spec, {dr.HOST_BACKEND_ENV: "claude"})
+    assert not ok
+    assert "claude" in reason
+
+
+def test_declared_host_env_var_outranks_the_sniffed_markers():
+    assert dr.detect_host_backend(
+        {dr.HOST_BACKEND_ENV: "codex", "CLAUDECODE": "1"}) == "codex"
+
+
+def test_declared_host_env_var_rejects_an_unsupported_value():
+    with pytest.raises(dr.DeepResearchError) as exc:
+        dr.detect_host_backend({dr.HOST_BACKEND_ENV: "antigravity"})
+    assert dr.HOST_BACKEND_ENV in str(exc.value)
 
 
 def test_validate_spec_consistency_rejects_executable_naming_the_other_backend():
