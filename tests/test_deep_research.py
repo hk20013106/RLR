@@ -400,6 +400,33 @@ def test_host_matches_stays_permissive_when_the_host_is_unknown():
     assert dr.host_matches(spec, {}) == (True, "")
 
 
+def test_validate_spec_consistency_rejects_executable_naming_the_other_backend():
+    spec = dr.RuntimeSpec(backend="claude", executable="codex")
+    ok, reason = dr.validate_spec_consistency(spec)
+    assert not ok
+    assert "claude" in reason and "codex" in reason
+
+
+def test_validate_spec_consistency_rejects_claude_spec_with_codex_skill_path():
+    spec = dr.RuntimeSpec(backend="claude", executable="claude",
+                           skill_path="C:/Users/x/.codex/skills/academic-research-suite")
+    ok, reason = dr.validate_spec_consistency(spec)
+    assert not ok
+    assert "skill_path" in reason
+
+
+def test_validate_spec_consistency_rejects_codex_spec_with_claude_plugin_dir():
+    spec = dr.RuntimeSpec(backend="codex", executable="codex", plugin_dir="C:/claude-plugin")
+    ok, reason = dr.validate_spec_consistency(spec)
+    assert not ok
+    assert "plugin_dir" in reason
+
+
+def test_validate_spec_consistency_accepts_a_clean_spec():
+    spec = dr.RuntimeSpec(backend="claude", executable="claude", plugin_dir="C:/ars")
+    assert dr.validate_spec_consistency(spec) == (True, "")
+
+
 def _mismatch_project(tmp_path):
     (tmp_path / "01_Candidates").mkdir(parents=True)
     (tmp_path / "01_Candidates" / "C1.md").write_text("---\ntitle: t\n---\n", encoding="utf-8")

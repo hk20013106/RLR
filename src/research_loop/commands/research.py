@@ -493,6 +493,11 @@ def cmd_deep_research_run(args):
         if not same_host:
             print(f"ERROR: Deep Research host mismatch: {host_reason}", file=sys.stderr)
             return 3
+    consistent, consistency_reason = deep_research.validate_spec_consistency(spec)
+    if not consistent:
+        print(f"ERROR: Deep Research runtime spec is inconsistent: {consistency_reason}",
+              file=sys.stderr)
+        return 3
     ready, reason = deep_research.runtime_ready(spec)
     if not ready:
         print(f"ERROR: Deep Research runtime is not ready: {reason}", file=sys.stderr)

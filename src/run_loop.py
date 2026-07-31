@@ -39,6 +39,7 @@ import research_loop_v04 as rl       # noqa: E402  (controller: DAG metadata + h
 import orchestrator as orch          # noqa: E402
 from research_loop.api import EngineAPI  # noqa: E402  (in-process controller facade)
 from research_loop.compatibility import PROFILE_V20, get_profile
+from research_loop.deep_research import SUPPORTED_BACKENDS
 from research_loop.delta import artifact_for_node
 from research_loop.topology import topology_for_profile
 
@@ -65,8 +66,11 @@ headless:
   command: ""
 
 deep_research:
-  backend: codex
-  executable: codex
+  # Leave backend empty to use the project's own 00_Preflight/deep_research_runtime.json
+  # (set by `preflight`, which detects the current agent host). Only set an explicit
+  # backend here to force an override -- it takes precedence over the project runtime.
+  backend: ""
+  executable: ""
   skill_path: ""
   plugin_dir: ""
   skill_version: unknown
@@ -629,10 +633,13 @@ def ensure_pre_research(project, cand, node, cfg, args, run_dir):
             return True
         dr_cfg = _deep_research_config(cfg)
         backend = str(dr_cfg.get("backend", "")).strip()
-        if backend not in {"codex", "claude"}:
-            log(f"ERROR: Deep Research {node} requires deep_research.backend=codex|claude")
+        if backend and backend not in SUPPORTED_BACKENDS:
+            log(f"ERROR: Deep Research {node} runner override "
+                f"deep_research.backend={backend!r} must be one of {SUPPORTED_BACKENDS}")
             return False
-        command = ["deep-research-run", project, cand, "--node", node, "--backend", backend]
+        command = ["deep-research-run", project, cand, "--node", node]
+        if backend:
+            command.extend(["--backend", backend])
         for option, key in (("--executable", "executable"), ("--plugin-dir", "plugin_dir"),
                             ("--skill-path", "skill_path"), ("--skill-version", "skill_version"),
                             ("--model", "model"), ("--timeout", "timeout")):

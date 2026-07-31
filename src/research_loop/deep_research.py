@@ -114,6 +114,31 @@ def host_matches(spec: RuntimeSpec, env: dict | None = None) -> tuple[bool, str]
         f"cross-host run is intended, pass --allow-host-mismatch")
 
 
+def validate_spec_consistency(spec: RuntimeSpec) -> tuple[bool, str]:
+    """Reject a runtime spec whose fields contradict its own declared backend.
+
+    A spec can pass host_matches() (backend matches the detected host) while
+    still pointing at the wrong CLI or carrying the other backend's fields --
+    e.g. backend=claude with executable=codex, or a leftover Codex skill_path
+    on a Claude spec. Each of those would still launch the wrong provider.
+    """
+    other = "codex" if spec.backend == "claude" else "claude"
+    executable_name = Path(spec.executable or "").name.lower()
+    if other in executable_name:
+        return False, (
+            f"runtime backend is {spec.backend!r} but executable {spec.executable!r} "
+            f"names {other!r}")
+    if spec.backend == "claude" and spec.skill_path:
+        return False, (
+            f"runtime backend is 'claude' but skill_path={spec.skill_path!r} is set; "
+            "skill_path is a Codex-only field")
+    if spec.backend == "codex" and spec.plugin_dir:
+        return False, (
+            f"runtime backend is 'codex' but plugin_dir={spec.plugin_dir!r} is set; "
+            "plugin_dir is a Claude-only field")
+    return True, ""
+
+
 def load_runtime_spec(project_dir: str | Path, overrides: dict | None = None) -> tuple[RuntimeSpec, str]:
     path = runtime_config_path(project_dir)
     if not path.exists():
