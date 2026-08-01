@@ -201,17 +201,20 @@ def _safe_id(value: str) -> str:
 
 
 def resolve_subprocess_executable(executable: str) -> str:
-    """Prefer the native Codex executable over its lossy Windows CMD wrapper."""
+    """Resolve Windows command wrappers before passing them to CreateProcess."""
     if _os.name != "nt":
         return executable
     resolved = shutil.which(executable)
     if not resolved:
         raise DeepResearchError(f"executable not found: {executable}")
-    if Path(resolved).suffix.lower() == ".cmd":
-        native = shutil.which(f"{Path(executable).stem}.exe")
-        if native:
-            return native
     return resolved
+
+
+def subprocess_invocation(command: list[str], prompt: str) -> tuple[list[str], dict]:
+    """Keep multiline prompts out of the Windows CMD command line."""
+    if _os.name == "nt" and Path(command[0]).suffix.lower() == ".cmd":
+        return command, {"input": prompt}
+    return command + [prompt], {}
 
 
 def _runtime_schema() -> dict:
@@ -871,10 +874,11 @@ def run_and_persist(
     schema_path.write_text(json.dumps(_runtime_schema(), indent=2), encoding="utf-8")
     command, prompt = build_invocation(spec, node, question, claim, work_dir, result_context)
     command[0] = resolve_subprocess_executable(command[0])
+    execution_command, invocation_kwargs = subprocess_invocation(command, prompt)
     try:
-        completed = subprocess.run(command + [prompt], capture_output=True, text=True,
+        completed = subprocess.run(execution_command, capture_output=True, text=True,
                                    encoding="utf-8", errors="strict",
-                                   timeout=spec.timeout, check=False)
+                                   timeout=spec.timeout, check=False, **invocation_kwargs)
     except (OSError, subprocess.SubprocessError) as exc:
         raise DeepResearchError(f"Academic Research CLI invocation failed: {exc}") from exc
     receipt = skill_receipt(spec.backend, command, prompt, skill_version,
