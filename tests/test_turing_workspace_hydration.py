@@ -105,8 +105,11 @@ def test_hydrates_allowlisted_inputs_scripts_and_json_manifest():
         assert record["node"] == "L7"
         staged = Path(record["workspace_path"])
         assert record["sha256"] == hashlib.sha256(staged.read_bytes()).hexdigest()
-    assert any(r["workspace_path"] == str(staged_input) for r in records)
-    assert any(r["workspace_path"] == str(staged_script) for r in records)
+    # workspace_path is stored via .resolve() (execution.py); compare resolved
+    # here too, since GitHub Actions' Windows runners expose TEMP through an
+    # 8.3 short-name alias (RUNNER~1) that differs from the resolved long path.
+    assert any(r["workspace_path"] == str(staged_input.resolve()) for r in records)
+    assert any(r["workspace_path"] == str(staged_script.resolve()) for r in records)
 
 
 def test_missing_required_input_fails_cleanly():

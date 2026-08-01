@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+        python-version: ["3.11", "3.12"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Import check
+        run: python -c "import sys; sys.path.insert(0, 'src'); import research_loop"
+
+      - name: CLI help
+        run: python research_loop_v04.py --help
+
+      # research_loop_v04.py has no packaging metadata (no setup.py/pyproject.toml);
+      # it self-installs src/ onto sys.path, so pytest needs the same PYTHONPATH to
+      # import research_loop the same way the CLI does.
+      - name: Test suite with coverage
+        env:
+          PYTHONPATH: src
+        run: |
+          python -m pytest -q --no-header -p no:cacheprovider \
+            --cov=src --cov-report=term-missing | tee pytest-output.txt
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          {
+            echo "### Coverage — ${{ matrix.os }} / py${{ matrix.python-version }}"
+            echo '```'
+            grep -A 1000 "^Name " pytest-output.txt || echo "(coverage table not found)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

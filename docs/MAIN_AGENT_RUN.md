@@ -1,6 +1,6 @@
-# Main-Agent Run Protocol (RLR V0.7)
+# Main-Agent Run Protocol (RLR V0.9)
 
-> V0.7: before L1/L4/L8.5, run `deep-research-run`. It invokes the configured
+> v0.9: before L1/L4/L8.5, run `deep-research-run`. It invokes the configured
 > Academic Research Skills runtime and persists a validated evidence pack;
 > `assemble-context` fails closed without its receipt and located paper evidence.
 
@@ -31,7 +31,7 @@ is **MISSING, the command exits non-zero and you MUST HALT** — do not proceed 
 L1, do not skip. Install the missing dependency, re-run preflight, then continue.
 `run_loop.py` enforces this automatically before round 1.
 
-## Deep Research evidence (V0.7)
+## Deep Research evidence (v0.9)
 
 Deep Research runs automatically *before* L1, L4, and L8.5 — it does **not**
 change the 15-node DAG topology; their results are embedded into the node's
@@ -54,25 +54,25 @@ receipt, source metadata, permitted OA payload, and located extracts below
 ```
 while not terminal:
     1. step = python research_loop_v04.py next-step PROJECT CAND
-    1b. # V0.7 DEEP RESEARCH: before L1/L4/L8.5, acquire evidence FIRST
+    1b. # v0.9 DEEP RESEARCH: before L1/L4/L8.5, acquire evidence FIRST
         if step.node in (L1, L4, L8.5):
             python research_loop_v04.py deep-research-run PROJECT CAND --node step.node
-    2. if step.is_parallel:  # L9a + L9b
+    2. if step.is_parallel:  # historical v2.0 L9a + L9b only
          for sub in step.nodes:
              ctx = python research_loop_v04.py assemble-context PROJECT CAND --node sub.node
              delta = act_as(sub.persona, ctx)
              write delta to temp file
-             python research_loop_v04.py emit-delta PROJECT CAND --node sub.node --persona sub.persona --file temp.json
+             python research_loop_v04.py emit-delta PROJECT CAND --node sub.node --persona sub.persona --file temp.json --context-manifest MANIFEST --provider-receipt RECEIPT
     3. elif step.is_execution:  # L7 Turing
          python research_loop_v04.py prepare-turing-workspace PROJECT CAND
          run approved scripts in the workspace
          build L7 delta from results
-         python research_loop_v04.py emit-delta PROJECT CAND --node L7 --persona Turing --file delta.json
+         python research_loop_v04.py emit-delta PROJECT CAND --node L7 --persona Turing --file delta.json --context-manifest MANIFEST --provider-receipt RECEIPT
     4. else:  # cognitive node
          ctx = python research_loop_v04.py assemble-context PROJECT CAND --node step.node
          delta = act_as(step.persona, ctx)
          write delta to temp file
-         python research_loop_v04.py emit-delta PROJECT CAND --node step.node --persona step.persona --file temp.json
+         python research_loop_v04.py emit-delta PROJECT CAND --node step.node --persona step.persona --file temp.json --context-manifest MANIFEST --provider-receipt RECEIPT
     5. run step.advance_command (decision / triage-idea / triage-method / execution-gate)
     6. if step.node == L10c:
          python research_loop_v04.py aggregate-report PROJECT CAND
@@ -98,12 +98,13 @@ Turing is the only node with filesystem access (Path A). Use
 `prepare-turing-workspace` to create an isolated workspace. Run R/Python scripts
 only inside that workspace. Copy results out, build the L7 delta JSON, emit it.
 
-## L9a/L9b independence
+## L9a/L9b native sequence
 
-L9a (Feynman falsification) and L9b (Darwin biology) must be as independent as
-possible. Generate L9a's delta WITHOUT looking at L9b's output, and vice versa.
-The `assemble-context` command enforces this: L9a's context does not include
-L9b's delta, and L9b's context does not include L9a's delta.
+Native v2.1 runs are serial. Generate and finalize L9a first. Only then
+assemble L9b: its context contains the exact L9a snapshot authorized by the
+fixed ledger cursor, never arbitrary repository state. L9a never sees L9b.
+Historical v2.0 verification retains parallel, mutually invisible L9a/L9b and
+cannot create new emissions.
 
 ## StopPolicy
 

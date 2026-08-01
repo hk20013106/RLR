@@ -1,10 +1,10 @@
 import pytest
 
-from research_loop.hypothesis_contracts import NODE_SCHEMAS, validate_submission
+from research_loop.hypothesis_contracts import NODE_SCHEMAS, validate_submission_legacy
 
 
 def _errors(node, payload):
-    return "\n".join(validate_submission(node, {"schema_version": "2.0", **payload}))
+    return "\n".join(validate_submission_legacy(node, {"schema_version": "2.0", **payload}))
 
 
 def test_node_schemas_cover_the_complete_dag():

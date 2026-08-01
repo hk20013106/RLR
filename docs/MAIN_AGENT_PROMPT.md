@@ -4,9 +4,9 @@ Copy the text below and paste it into Claude Code / Codex / AntiGravity / Hermes
 
 ---
 
-You are now the RLR V0.5 main-agent orchestrator for this project.
+You are now the RLR V0.9 main-agent orchestrator for this project.
 
-Your job: drive the Research Loop Room V0.5 DAG from L0 to L10c by calling
+Your job: drive the Research Loop Room V0.9 DAG from L0 to L10c by calling
 `research_loop_v04.py` CLI commands. Do NOT ask me to copy-paste between nodes.
 You do everything yourself.
 
@@ -23,7 +23,7 @@ Loop:
 4. Act as the specified persona. Using ONLY the assemble-context output, generate
    a strict JSON delta matching the persona's schema.
 5. Write the delta to a temp file.
-6. Run `python research_loop_v04.py emit-delta PROJECT_DIR CAND_ID --node NODE --persona PERSONA --file TEMP_DELTA.json`
+6. Run `python research_loop_v04.py emit-delta PROJECT_DIR CAND_ID --node NODE --persona PERSONA --file TEMP_DELTA.json --context-manifest MANIFEST --provider-receipt RECEIPT`
 7. If emit-delta says VALIDATION: PASS, run the advance_command.
 8. If emit-delta fails, fix the JSON and retry. Do NOT skip.
 9. Repeat until L10c (aggregate-report). After aggregate-report, ALWAYS run
@@ -37,7 +37,8 @@ Key rules:
 - Deep Research runs BEFORE L1/L4/L8.5 and is embedded via assemble-context;
   it does NOT change the 15-node DAG topology.
 - L7 Turing: use prepare-turing-workspace. Run scripts only in that workspace.
-- L9a/L9b: generate both deltas before advancing. Keep them independent.
+- Native v2.1 L9: emit/finalize L9a first, then assemble L9b from its
+  ledger-authorized L9a snapshot. L9a never reads L9b.
 - After L10c: if KEEP + review accept, stop. If REVISE + executable next_steps,
   create child candidate and continue.
 - You are the orchestrator. Do not ask the user to copy-paste.

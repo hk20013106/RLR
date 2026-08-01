@@ -12,14 +12,19 @@ import pitfall_ledger as pl
 from research_loop import deep_research, l0_contract, l0_intake
 from research_loop.commands.ledger import _ledger_for
 from research_loop.common import (
+    REQUIRED_DEPENDENCIES,
     _append_decision, _check_dependencies, _dep_fix_hint, _empty_value_for_schema,
     _everos_scopes_for, _load_loop_memory, _mkdirs, _now, _require_status,
     _set_status, _sha256_file, _stamp,
 )
 from research_loop.delta import (
-    DELTA_SCHEMAS, _delta_belongs_to_candidate, _delta_for_candidate,
+    DELTA_SCHEMAS, artifact_for_node, artifact_key_for,
+    _delta_belongs_to_candidate, _delta_for_candidate,
 )
 from research_loop.hypothesis_ledger import LedgerError, binding_path
+from research_loop.compatibility import (
+    DEFAULT_NATIVE_PROFILE, PROFILE_V20, get_profile,
+)
 from research_loop.paths import (
     _candidate_file, _layer_template_path, _persona_template_path,
 )
@@ -28,7 +33,7 @@ from research_loop.templates import (
     _handoff_template, _index_template, _knowledge_base_md, _note_template,
     _preflight_template,
 )
-from research_loop.topology import AGENTS, DECISION_TRANSITIONS, NODE_MAP
+from research_loop.topology import AGENTS, DECISION_TRANSITIONS, NODE_MAP, topology_for_profile
 from research_loop.yamlio import _load_yaml_front, _replace_field
 
 # Preserve repository-relative lookup semantics from the former engine owner.
@@ -50,21 +55,32 @@ KNOWLEDGE_BASE_ACCESS = {
 
 FINAL_STATUSES = {"KEEP", "REVISE", "DOWNGRADE", "DROP", "ARCHIVED"}
 
+
+def _candidate_l8_artifact(project_dir, knowledge_store=None):
+    """Resolve candidate-template L8 labels from the immutable project profile."""
+    project = Path(project_dir)
+    if binding_path(project).exists():
+        try:
+            binding = json.loads(
+                binding_path(project).read_text(encoding="utf-8")
+            )
+            profile_id = str(binding.get("profile_id") or PROFILE_V20)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise LedgerError(
+                f"cannot read project profile binding: {binding_path(project)}"
+            ) from exc
+    else:
+        profile_id = DEFAULT_NATIVE_PROFILE
+    try:
+        return artifact_for_node(get_profile(profile_id), "L8")
+    except ValueError as exc:
+        raise LedgerError(f"invalid project profile binding: {profile_id}") from exc
+
 PREFLIGHT_FILES = [
     "skill_use_plan.md", "input_manifest.md",
     "output_manifest.md", "forbidden_shortcuts.md",
 ]
 
-REQUIRED_DEPENDENCIES = [
-    {"kind": "python", "name": "yaml", "label": "PyYAML", "pip": "PyYAML",
-     "needed_for": "manage_literature_db.py (growable literature DB; L1/L4/L8.5)"},
-    {"kind": "port", "name": "zotero", "label": "Zotero", "addr": "127.0.0.1:23119",
-     "attest_env": "RLR_ZOTERO",
-     "needed_for": "reference manager / citation source for the literature DB"},
-    {"kind": "env", "name": "obsidian", "label": "Obsidian vault", "env": "OBSIDIAN_VAULT",
-     "check_path": True, "attest_env": "RLR_OBSIDIAN",
-     "needed_for": "end-of-round human-readable sync (sync_to_obsidian.py)"},
-]
 
 def _pitfall_warnings_for_node(project_dir, node_id):
     """Return a list of relevant confirmed pitfall summaries for a DAG node.
@@ -94,10 +110,27 @@ def cmd_next_step(args):
         return 1
     fm = _load_yaml_front(cf)
     status = fm.get("current_status", "NEW")
+    # Unbound directories are legacy read-only inputs.  Bound projects always
+    # select the topology from their immutable ledger profile.
+    profile_id = PROFILE_V20
+    if binding_path(project_dir).exists():
+        try:
+            profile_id = _ledger_for(project_dir, getattr(args, "knowledge_store", None)).project_profile(project_dir)
+        except LedgerError as exc:
+            print(json.dumps({"error": str(exc)}))
+            return 1
+    _, node_map, _ = topology_for_profile(profile_id)
+    profile = get_profile(profile_id)
+    profile_metadata = {
+        "profile_id": profile.profile_id,
+        "schema_version": profile.delta_schema_version,
+        "topology_version": profile.topology_version,
+        "persona_catalog_version": profile.persona_catalog_version,
+    }
 
     if status in FINAL_STATUSES:
         if status == "KEEP":
-            node_info = NODE_MAP.get("L10c")
+            node_info = node_map.get("L10c")
             if node_info:
                 result = {
                     "node": "L10c",
@@ -119,6 +152,7 @@ def cmd_next_step(args):
                 _warnings = pl.scan_pitfalls(project_dir, node="L10c")
                 if _warnings:
                     result["pitfall_warnings"] = _warnings
+                result.update(profile_metadata)
                 print(json.dumps(result, indent=2))
                 return 0
         print(json.dumps({"terminal": True, "status": status}))
@@ -133,7 +167,8 @@ def cmd_next_step(args):
         "NEEDS_EXECUTION": ["L7"],
         "EXECUTED": ["L8"],
         "AUDITED": ["L8.5"],
-        "UNDER_REVIEW": ["L9_parallel", "L10a", "L10b"],
+        "UNDER_REVIEW": (["L9_parallel", "L10a", "L10b"]
+                         if profile_id == PROFILE_V20 else ["L9a", "L9b", "L10a", "L10b"]),
     }
 
     node_candidates = status_to_nodes.get(status, [])
@@ -148,9 +183,9 @@ def cmd_next_step(args):
                     continue
                 node_id = "L9_parallel"
                 break
-            ni = NODE_MAP.get(cand_node)
+            ni = node_map.get(cand_node)
             if ni:
-                delta_key = f"{cand_node}_{ni['persona'].lower()}"
+                delta_key = artifact_key_for(cand_node, ni["persona"], profile_id=profile_id)
                 if _delta_belongs_to_candidate(
                         project_dir, delta_key, args.cand_id):
                     continue
@@ -166,7 +201,7 @@ def cmd_next_step(args):
     if node_id == "L9_parallel":
         nodes = []
         for nid in ["L9a", "L9b"]:
-            ni = NODE_MAP[nid]
+            ni = node_map[nid]
             nodes.append({
                 "node": nid,
                 "persona": ni["persona"],
@@ -183,6 +218,7 @@ def cmd_next_step(args):
             "is_parallel": True,
             "nodes": nodes,
         }
+        result.update(profile_metadata)
         result["pitfall_warnings"] = {
             "L9a": _pitfall_warnings_for_node(project_dir, "L9a"),
             "L9b": _pitfall_warnings_for_node(project_dir, "L9b"),
@@ -190,7 +226,7 @@ def cmd_next_step(args):
         print(json.dumps(result, indent=2))
         return 0
 
-    node_info = NODE_MAP[node_id]
+    node_info = node_map[node_id]
     result = {
         "node": node_id,
         "persona": node_info["persona"],
@@ -207,6 +243,7 @@ def cmd_next_step(args):
         "everos_read_scopes": _everos_scopes_for(node_info, project_dir.name),
         "knowledge_base": node_info.get("knowledge_base"),
     }
+    result.update(profile_metadata)
     # L7 is reused under both METHOD_APPROVED and NEEDS_EXECUTION. Its DAG
     # advance_command (execution-gate) only applies at METHOD_APPROVED -- that
     # gate is what opens NEEDS_EXECUTION. Once the gate is open, Turing runs
@@ -233,6 +270,11 @@ def cmd_new_project(args):
     name = args.name
     topic = args.topic or ""
     project_dir = Path(name)
+    profile_id = getattr(args, "profile", DEFAULT_NATIVE_PROFILE)
+    if profile_id == PROFILE_V20:
+        print("ERROR: v2.0-legacy is read-only and cannot be used for new projects.",
+              file=sys.stderr)
+        return 2
     store_path = getattr(args, "knowledge_store", None) or os.environ.get(
         "RLR_HYPOTHESIS_STORE"
     )
@@ -249,11 +291,12 @@ def cmd_new_project(args):
         _index_template(name, topic), encoding="utf-8")
     pl.init_ledger(project_dir)
     try:
-        _ledger_for(project_dir, store_path, require_binding=False).bind_project(project_dir)
+        _ledger_for(project_dir, store_path, require_binding=False).bind_project(
+            project_dir, profile_id=profile_id)
     except LedgerError as exc:
         print(f"ERROR: hypothesis ledger project binding failed: {exc}", file=sys.stderr)
         return 2
-    print(f"Created V0.7 project: {project_dir.resolve()}")
+    print(f"Created v0.9-preview native project: {project_dir.resolve()}")
     print("Next: run `preflight` (Linnaeus L0) before any candidate work.")
     return 0
 
@@ -410,7 +453,7 @@ def cmd_new_candidate(args):
     mem_fields.update({
         "input_contract_path": ic_rel,
         "input_contract_hash": ic_hash,
-        "schema_version": l0_contract.L0_CONTRACT_SCHEMA_VERSION,
+        "schema_version": contract["schema_version"],
         "round_type": round_type,
         "round_id": round_id,
         "parent_round_id": (parent_rid if parent_rid is not None else ""),
@@ -418,10 +461,20 @@ def cmd_new_candidate(args):
                                   if round_type == "continuation" else ""),
     })
 
-    body = _candidate_template(cand_id, args.title, args.input,
-                                   args.question, args.claim,
-                                   input_alias=getattr(args, "input_alias", "") or "",
-                                   extra_front=mem_fields)
+    try:
+        l8_artifact = _candidate_l8_artifact(
+            project_dir, getattr(args, "knowledge_store", None)
+        )
+    except LedgerError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    body = _candidate_template(
+        cand_id, args.title, args.input, args.question, args.claim,
+        input_alias=getattr(args, "input_alias", "") or "",
+        extra_front=mem_fields,
+        l8_persona=l8_artifact.display_persona,
+        l8_storage_key=l8_artifact.storage_key,
+    )
     cf = _candidate_file(project_dir, cand_id)
     if cf.exists() and from_memory:
         existing = _load_yaml_front(cf)
@@ -506,7 +559,7 @@ def cmd_normalize_l0_input(args):
     contract = result["contract"]
     round_type = contract["round_type"]
     mem_fields = {
-        "schema_version": l0_contract.L0_CONTRACT_SCHEMA_VERSION,
+        "schema_version": contract["schema_version"],
         "round_type": round_type,
         "round_id": contract["round_id"],
         "parent_round_id": contract.get("parent_round_id") or "",
@@ -542,12 +595,70 @@ def cmd_normalize_l0_input(args):
         print(l0_contract.serialize_contract(contract).decode("utf-8"), end="")
         return 0
 
+    try:
+        l8_artifact = _candidate_l8_artifact(
+            project_dir, getattr(args, "knowledge_store", None)
+        )
+    except LedgerError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     body = _candidate_template(
         cand_id, contract["scientific_question"], source["description"],
         contract["scientific_question"], contract["current_round"]["hypothesis"],
-        extra_front=mem_fields)
-    _candidate_file(project_dir, cand_id).write_text(body, encoding="utf-8")
-    artifact_path, _ = l0_contract.write_contract(project_dir, cand_id, contract)
+        extra_front=mem_fields,
+        l8_persona=l8_artifact.display_persona,
+        l8_storage_key=l8_artifact.storage_key,
+    )
+    plans_dir = project_dir / "01_Candidates" / "_research_plans"
+    plans_dir_existed_before = plans_dir.exists()
+
+    cand_path = _candidate_file(project_dir, cand_id)
+    sidecar_path = project_dir / mem_fields["input_contract_path"]
+    snapshot_path = None
+    prov = contract.get("provenance", {})
+    if isinstance(prov, dict) and prov.get("parser_mode") == "plan-v1":
+        snapshot_rel = prov.get("research_plan_snapshot_path")
+        if snapshot_rel:
+            snapshot_path = project_dir / snapshot_rel
+
+    for target in (cand_path, sidecar_path, snapshot_path):
+        if target and target.exists():
+            print(f"ERROR: target file already exists: {target}", file=sys.stderr)
+            return 2
+
+    created_paths = []
+    try:
+        cand_path.write_text(body, encoding="utf-8")
+        created_paths.append(cand_path)
+
+        artifact_path, _ = l0_contract.write_contract(project_dir, cand_id, contract)
+        created_paths.append(artifact_path)
+
+        if snapshot_path:
+            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            snapshot_path.write_bytes(request_path.read_bytes())
+            created_paths.append(snapshot_path)
+    except Exception as exc:
+        cleanup_errors = []
+        for path in reversed(created_paths):
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError as cleanup_exc:
+                cleanup_errors.append(f"{path.name}: {cleanup_exc}")
+
+        if not plans_dir_existed_before and plans_dir.exists():
+            try:
+                plans_dir.rmdir()
+            except OSError:
+                pass
+
+        err_msg = f"structured intake write failed: {exc}; created candidate artifacts were rolled back"
+        if cleanup_errors:
+            err_msg += f" (cleanup errors: {'; '.join(cleanup_errors)})"
+        print(f"ERROR: {err_msg}", file=sys.stderr)
+        return 2
+
     _append_decision(project_dir, cand_id, "-", "NEW", "candidate created",
                      agent="Oppenheimer", kind="seed")
     print(f"Written to: 01_Candidates/{artifact_path.name}")
@@ -570,9 +681,18 @@ def cmd_preflight(args):
     created, skipped = [], []
     runtime_file = deep_research.runtime_config_path(project_dir)
     if not runtime_file.exists() or args.force:
-        runtime_file.write_text(json.dumps(deep_research.default_runtime_config(), indent=2),
-                                encoding="utf-8")
+        try:
+            runtime_config = deep_research.default_runtime_config(
+                getattr(args, "backend", None))
+        except deep_research.DeepResearchError as exc:
+            print(f"ERROR: cannot pick a Deep Research backend: {exc}", file=sys.stderr)
+            return 2
+        runtime_file.write_text(json.dumps(runtime_config, indent=2), encoding="utf-8")
         created.append(runtime_file.name)
+        if runtime_config["backend"] == "claude":
+            print("NOTE: set plugin_dir in "
+                  f"{runtime_file.name} to the academic-research-skills plugin path; "
+                  "deep-research-run stays blocked until it is set.", file=sys.stderr)
     else:
         skipped.append(runtime_file.name)
     for fname in PREFLIGHT_FILES:
@@ -752,7 +872,7 @@ def cmd_demo(args):
         ("L5", "Tukey", "L5_tukey"),
         ("L6", "Oppenheimer", "L6_oppenheimer"),
         ("L7", "Turing", "L7_turing"),
-        ("L8", "Curie", "L8_curie"),
+        ("L8", "Tukey", "L8_tukey"),
         ("L9a", "Feynman", "L9a_feynman"),
         ("L9b", "Darwin", "L9b_darwin"),
         ("L10a", "Jobs", "L10a_jobs"),
@@ -780,9 +900,9 @@ def cmd_demo(args):
     print("  L5  Tukey      -> next-step, assemble-context --node L5")
     print("  L6  Oppenheimer-> triage-method --decision approve --reason ...")
     print("  L7  Turing     -> execution-gate, then assemble-context --node L7")
-    print("  L8  Curie      -> next-step, assemble-context --node L8")
-    print("  L9a Feynman    -> next-step (parallel), assemble-context --node L9a")
-    print("  L9b Darwin     -> next-step (parallel), assemble-context --node L9b")
+    print("  L8  Tukey      -> next-step, assemble-context --node L8")
+    print("  L9a Feynman    -> next-step, assemble-context --node L9a")
+    print("  L9b Darwin     -> after finalized L9a, assemble-context --node L9b")
     print("  L10a Jobs      -> next-step, assemble-context --node L10a")
     print("  L10b Oppenheimer-> decision --status KEEP --reason ...")
     print("  L10c Linnaeus  -> aggregate-report")

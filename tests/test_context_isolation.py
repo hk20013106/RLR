@@ -80,9 +80,20 @@ def context_project(tmp_path):
 ])
 def test_parallel_nodes_mutually_invisible(node, forbidden, context_project):
     rc, manifest = _assemble(node, *context_project)
+    if node == "L9b":
+        assert rc == 2
+        assert manifest is None
+        return
     assert rc == 0, f"{node} assemble should succeed (rc=0), got {rc}"
     assert manifest is not None, f"{node} must write a context manifest"
     allowed = manifest.get("allowed_inputs", [])
+    if manifest.get("topology_version") == "2.1" and node == "L9b":
+        assert "L9a" in allowed
+        assert not any(
+            item["delta_key"].startswith("L9a_")
+            for item in manifest.get("injected_deltas", [])
+        )
+        return
     assert forbidden not in allowed, (
         f"ISOLATION VIOLATION: {node}.allowed_inputs={allowed} must not contain {forbidden}"
     )
@@ -95,9 +106,18 @@ def test_l9a_allowed_inputs_exact(context_project):
     assert set(manifest["allowed_inputs"]) == {"L1", "L7", "L8", "L8.5"}
 
 
+def test_native_v21_context_identifies_tukey_for_l8(context_project):
+    rc, manifest = _assemble("L8", *context_project)
+    assert rc == 0 and manifest is not None
+    assert manifest["profile_id"] == "v2.1-catalog-1"
+    assert manifest["persona"] == "Tukey"
+    assert manifest["schema_version"] == "ContextManifest/v2"
+    assert manifest["delta_schema_version"] == "2.1"
+
+
 def test_injected_deltas_subset_of_allowed(context_project):
     """Whatever is actually injected must be within the declared allow-set."""
-    for node in ("L5", "L9a", "L9b"):
+    for node in ("L5", "L9a"):
         rc, manifest = _assemble(node, *context_project)
         assert rc == 0 and manifest is not None
         allowed = set(manifest.get("allowed_inputs", []))
@@ -150,6 +170,9 @@ def test_all_wildcard_is_l10c_only(node, tmp_path, context_project):
     """No node other than L10c may carry the `ALL` read wildcard."""
     project, candidate = _l85_fixture_project(tmp_path) if node == "L8.5" else context_project
     rc, manifest = _assemble(node, project, candidate)
+    if node == "L9b":
+        assert rc == 2 and manifest is None
+        return
     assert rc == 0 and manifest is not None
     assert "ALL" not in manifest["allowed_inputs"], (
         f"ISOLATION VIOLATION: {node} must not be an ALL-reader; "

@@ -3,7 +3,7 @@ import hashlib
 import re
 from pathlib import Path
 
-from research_loop import l0_contract
+from research_loop import l0_contract, l0_plan_intake
 
 
 PARSER_MODE = "rules-v1"
@@ -14,20 +14,59 @@ _HYPOTHESIS_LABELS = ("本轮新假说", "当前假说", "新假说", "current h
 _PREVIOUS_LABELS = ("上一轮假说", "上一轮 decision", "上一轮 conclusion",
                     "previous hypothesis", "previous decision", "previous conclusion")
 
+# A bare YAML block-scalar indicator (">-", "|", "|+2", ...) is frontmatter
+# syntax leaking through as a "value", never a real answer. Treat it as no
+# match so the field hard-fails instead of silently carrying `>-` forward.
+_BLOCK_SCALAR_RESIDUE = re.compile(r"^[|>][+-]?\d*$")
+
+
+def _split_frontmatter(text):
+    """Split leading closed YAML frontmatter block (--- ... ---) from body text.
+
+    Returns (frontmatter_text, body_text).
+    If there is no leading '---' or if the frontmatter block is unclosed,
+    frontmatter_text is None and body_text is the original text.
+    """
+    if not text.startswith("---"):
+        return None, text
+    end = text.find("\n---", 4)
+    if end < 0:
+        return None, text
+    frontmatter_text = text[:end + 4]
+    rest = text[end + 4:]
+    body_text = rest.split("\n", 1)[1] if "\n" in rest else ""
+    return frontmatter_text, body_text
+
+
+def _strip_frontmatter(text):
+    """Remove a closed leading YAML frontmatter block (--- ... ---).
+
+    Uses the same boundary rule as yamlio._load_yaml_front: only a *closed*
+    block is frontmatter. An opening "---" with no closing "---" is treated
+    as ordinary body text (stripping it would silently eat real content)."""
+    _, body = _split_frontmatter(text)
+    return body
+
 
 def _label_value(text, labels):
     wanted = "|".join(re.escape(label) for label in labels)
     match = re.search(rf"^\s*(?:{wanted})\s*[:：]\s*(.+?)\s*$", text,
                       flags=re.IGNORECASE | re.MULTILINE)
-    return match.group(1).strip() if match else ""
+    if not match:
+        return ""
+    value = match.group(1).strip()
+    if _BLOCK_SCALAR_RESIDUE.match(value):
+        return ""
+    return value
 
 
 def extract_request(text):
     """Extract only explicitly labelled fields; no prose guessing."""
+    body = _strip_frontmatter(text)
     return {
-        "scientific_question": _label_value(text, _QUESTION_LABELS),
-        "hypothesis": _label_value(text, _HYPOTHESIS_LABELS),
-        "mentions_previous_round": any(_label_value(text, (label,))
+        "scientific_question": _label_value(body, _QUESTION_LABELS),
+        "hypothesis": _label_value(body, _HYPOTHESIS_LABELS),
+        "mentions_previous_round": any(_label_value(body, (label,))
                                        for label in _PREVIOUS_LABELS),
     }
 
@@ -84,6 +123,27 @@ def _provenance(request_path, request_text, inventory):
 def normalize_request(request_path, request_text, candidate_id, *, data=None,
                       dataset=None, memory=None, memory_hash=""):
     """Build an in-memory contract or report explicit missing/error fields."""
+    frontmatter_text, body_text = _split_frontmatter(request_text)
+    if frontmatter_text is not None and l0_plan_intake.detect_intake_schema(frontmatter_text):
+        body_fields = {
+            "scientific_question": _label_value(body_text, _QUESTION_LABELS),
+            "hypothesis": _label_value(body_text, _HYPOTHESIS_LABELS),
+            "mentions_previous_round": any(_label_value(body_text, (label,))
+                                           for label in _PREVIOUS_LABELS),
+        }
+        return l0_plan_intake.normalize_frontmatter(
+            frontmatter_text=frontmatter_text,
+            body_text=body_text,
+            body_fields=body_fields,
+            request_path=request_path,
+            candidate_id=candidate_id,
+            data=data,
+            dataset=dataset,
+            memory=memory,
+            memory_hash=memory_hash,
+            request_text=request_text,
+        )
+
     extracted = extract_request(request_text)
     missing, errors = [], []
     if not extracted["scientific_question"]:

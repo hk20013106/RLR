@@ -25,6 +25,8 @@ import sys
 from pathlib import Path
 
 from deep_research_fixtures import persist_synthetic_evidence
+from native_v2_helpers import write_catalog_emission_receipts
+from research_loop import deep_research
 
 RL = str(Path(__file__).resolve().parent.parent / "research_loop_v04.py")
 
@@ -64,27 +66,78 @@ def _seed_terminal_candidate(proj, loop_type="divergent"):
 
     def emit(node, persona, obj):
         source = source_dir / f"{cand}_{node}.json"
-        source.write_text(json.dumps({"schema_version": "2.0", **obj}), encoding="utf-8")
+        source.write_text(json.dumps({"schema_version": "2.1", **obj}), encoding="utf-8")
+        manifest, receipt = write_catalog_emission_receipts(proj, cand, node, persona, source)
         result = _run("emit-delta", str(proj), cand, "--node", node,
-                      "--persona", persona, "--file", str(source))
+                      "--persona", persona, "--file", str(source),
+                      "--context-manifest", str(manifest),
+                      "--provider-receipt", str(receipt))
         assert result.returncode == 0, result.stderr
 
     emit("L1", "Einstein", {
-        "hypotheses": [{"proposal_key": "H1", "statement": "h",
-                         "operationalization": "measure h",
-                         "falsification_criteria": ["h absent"], "rationale": "r"}],
+        "hypotheses": [
+            {"proposal_key": "H1", "statement": "h",
+             "operationalization": "measure h",
+             "falsification_criteria": ["h absent"], "rationale": "r"},
+            {"proposal_key": "H2", "statement": "alternative h 1",
+             "operationalization": "measure alternative 1",
+             "falsification_criteria": ["alternative 1 absent"], "rationale": "r"},
+            {"proposal_key": "H3", "statement": "alternative h 2",
+             "operationalization": "measure alternative 2",
+             "falsification_criteria": ["alternative 2 absent"], "rationale": "r"},
+        ],
         "primary_proposal_key": "H1", "key_uncertainty": "u",
         "candidate_branches": [{"id": "b1", "description": "d"}],
     })
     l1_path = next((proj / "02_Agent_Notes" / "Einstein").glob(f"{cand}_*_delta.v2.json"))
-    hid = json.loads(l1_path.read_text(encoding="utf-8"))["primary_hypothesis_id"]
-    emit("L3", "Oppenheimer", {"triage": [{"hypothesis_id": hid,
-         "disposition": "SELECTED", "reason_code": "R", "reason": "r"}],
-         "route_to": "Fisher"})
+    l1 = json.loads(l1_path.read_text(encoding="utf-8"))
+    hid = l1["primary_hypothesis_id"]
+    emit("L2", "Feynman", {
+        "attacks": [], "confounders": [], "diagnostic_tests": [],
+        "verdicts": [{
+            "hypothesis_id": item["hypothesis_id"],
+            "outcome": "SURVIVES" if item["hypothesis_id"] == hid else "REJECT",
+            "reason": "r",
+        } for item in l1["hypotheses"]],
+    })
+    emit("L3", "Oppenheimer", {
+        "triage": [{
+            "hypothesis_id": item["hypothesis_id"],
+            "disposition": (
+                "SELECTED" if item["hypothesis_id"] == hid else "REJECTED"
+            ),
+            "reason_code": (
+                "TESTABLE" if item["hypothesis_id"] == hid else "LOW_IMPACT"
+            ),
+            "reason": "r",
+            "assessments": {
+                criterion: {
+                    "verdict": (
+                        "PASS" if item["hypothesis_id"] == hid else "FAIL"
+                    ),
+                    "evidence": "fixture",
+                }
+                for criterion in (
+                    "testability", "novelty", "feasibility", "impact"
+                )
+            },
+        } for item in l1["hypotheses"]],
+        "route_to": "Fisher",
+    })
     emit("L4", "Fisher", {"strategies": [{"strategy_id": "S1",
          "hypothesis_ids": [hid], "name": "m", "steps": ["measure"]}]})
+    emit("L5", "Tukey", {
+         "attacks": [{"attack_id": "A1", "strategy_id": "S1", "hypothesis_ids": [hid],
+                      "severity": "HIGH", "text": "attack"}],
+         "qc_checkpoints": [{"strategy_id": "S1", "hypothesis_ids": [hid],
+                             "name": "QC", "criterion": "pass"}],
+         "failure_stop_rules": [{"strategy_id": "S1", "hypothesis_ids": [hid],
+                                 "name": "Stop", "condition": "failure", "reason": "r"}],
+    })
     emit("L6", "Oppenheimer", {"analysis_plan": [{"strategy_id": "S1",
-         "hypothesis_ids": [hid], "scripts": [], "parameters": {}, "outputs": []}],
+         "hypothesis_ids": [hid], "scripts": [], "parameters": {}, "outputs": [],
+         "feasibility_assessment": {"verdict": "PASS", "evidence": "fixture"},
+         "attack_resolutions": [{"attack_id": "A1", "verdict": "RESOLVED", "evidence": "fixture"}]}],
          "method_decision": "APPROVE", "reason": "r"})
     emit("L7", "Turing", {"results": [{"result_key": "R1",
          "hypothesis_ids": [hid], "summary": "result", "artifact_refs": [{
@@ -92,17 +145,21 @@ def _seed_terminal_candidate(proj, loop_type="divergent"):
          "scripts_run": [], "warnings": [], "failures": []})
     l7_path = next((proj / "02_Agent_Notes" / "Turing").glob(f"{cand}_*_delta.v2.json"))
     evidence_id = json.loads(l7_path.read_text(encoding="utf-8"))["results"][0]["evidence_id"]
-    emit("L8", "Curie", {"evidence_assessments": [{"evidence_id": evidence_id,
+    emit("L8", "Tukey", {"evidence_assessments": [{"evidence_id": evidence_id,
          "verification": "VERIFIED", "relations": [{"hypothesis_id": hid,
              "outcome": "SUPPORTS", "reason": "r"}]}]})
     emit("L9a", "Feynman", {"assessments": [{"hypothesis_id": hid,
          "epistemic_status": "PROVISIONALLY_SUPPORTED", "reason": "r",
          "evidence_ids": [evidence_id]}]})
+    # L10b is authorized to cite hypothesis-stage (L1) and result-verification
+    # (L8.5) evidence, not method-design (L4) evidence.
+    literature_ids = deep_research.evidence_ids(proj, cand, ["L1"])
     emit("L10b", "Oppenheimer", {
         "decision": "REVISE", "reason": "because",
         "next_steps": ["explore atrial chamber", "add Hi-C contact data"],
         "hypothesis_decisions": [{"hypothesis_id": hid,
              "disposition": "REVISE", "reason": "r"}],
+        "literature_evidence_ids": literature_ids,
         "next_round_proposal": {"proposal_key": "H2", "statement": "H_next",
              "operationalization": "measure next", "falsification_criteria": ["next absent"],
              "relationship": "DERIVED_FROM", "parent_hypothesis_ids": [hid],

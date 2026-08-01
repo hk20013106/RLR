@@ -41,7 +41,7 @@ def _assemble(proj, cand, node, *extra):
 
 
 def _new_project(tmp_path):
-    r = _run("new-project", str(tmp_path / "P"), "T")
+    r = _run("new-project", str(tmp_path / "P"), "T", "--profile", "v2.1")
     assert r.returncode == 0, r.stderr
     return tmp_path / "P"
 

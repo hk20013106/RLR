@@ -30,7 +30,7 @@ src/research_loop/context.py scoped cognitive-context assembly
 src/research_loop/delta.py  committed-v2 artifact resolution (no v1 runtime fallback)
 src/research_loop/hypothesis_contracts.py Draft 2020-12 node delta v2 schemas
 src/research_loop/hypothesis_ledger.py append-only SQLite facts, projections, queries
-src/research_loop/hypothesis_migration.py project-atomic v1 migration workflow
+src/research_loop/hypothesis_migration.py temporary historical compatibility code
 src/research_loop/gates.py  boundary gates and traceability checks
 src/research_loop/l0_contract.py strict L0 contract and authoritative validator
 src/research_loop/deep_research.py ARS evidence receipts/packs
@@ -57,10 +57,7 @@ The executable source of truth is
 
 ```text
 L0 → L1 → L2 → L3 → L4 → L5 → L6 → L7 → L8 → L8.5
-                                               ↓
-                                      { L9a ∥ L9b }
-                                               ↓
-                                      L10a → L10b → L10c
+  → L9a → finalized L9a snapshot → L9b → L10a → L10b → L10c
 ```
 
 | Node(s) | Authority |
@@ -71,8 +68,8 @@ L0 → L1 → L2 → L3 → L4 → L5 → L6 → L7 → L8 → L8.5
 | L4 Fisher / L5 Tukey | Method design and QC/falsification. |
 | L6 Oppenheimer | Formal method approval/rejection through `triage-method`. |
 | L7 Turing | Only node allowed to execute the approved analysis plan. |
-| L8 Curie / L8.5 Curie | Audit outputs/reproducibility, then literature verification. |
-| L9a Feynman / L9b Darwin | Parallel result falsification and biological interpretation. |
+| L8 Tukey / L8.5 Curie | Audit outputs/reproducibility, then literature verification. |
+| L9a Feynman / L9b Darwin | Serial result falsification, then bounded biological interpretation. |
 | L10a Jobs / L10b Oppenheimer | Value assessment, then formal final decision. |
 | L10c Linnaeus | Aggregate final reports; never chooses a new winner. |
 
@@ -87,8 +84,10 @@ uses the node's `context_inputs` in `topology.py`. Do not read a disallowed
 delta file directly, manually merge contexts, or carry private reasoning from
 one persona to another.
 
-L9a and L9b are mutually invisible while they run. Both must be emitted before
-downstream nodes combine their outputs.
+For native v2.1, L9a cannot see L9b. L9b may run only after L9a is finalized
+and receives only the L9a snapshot authorized by the fixed ledger cursor.
+Historical v2.0 verification retains parallel, mutually invisible L9a/L9b;
+v2.0 cannot create new emissions.
 
 ### Path A: controlled execution
 
@@ -114,21 +113,21 @@ edits.
   boundary, especially provider dispatch.
 
 Every production project is bound to an activated shared hypothesis store.
-Create native projects with `new-project --knowledge-store STORE`. Legacy
-projects must first run `hypothesis-migrate PROJECT --knowledge-store STORE
---dry-run`, resolve every reported ambiguity, then commit with `--resolution`
-and `--resolved-by`. Runtime commands never read v1 deltas.
+Create native projects with `new-project --knowledge-store STORE`; new projects
+bind `v2.1-catalog-1`. v2.0 is historical read/verification compatibility only:
+do not create new runs, emissions, or migrations from it. Runtime commands
+never admit legacy data into a native v2.1 run.
 
 `HypothesisLedger` is the sole hypothesis-fact writer. Occurrence workflow and
 hypothesis epistemic state remain distinct; only L9a may alter epistemic state.
 `assemble-context` injects a hash-bound `AUTHORIZED HYPOTHESIS SNAPSHOT` derived
-from the DAG. L9a and L9b receive the same pre-parallel cursor and neither
-snapshot contains sibling events.
+from the DAG. Native L9a is finalized first; L9b then receives a cursor-bound
+snapshot containing that exact L9a event and no undeclared event.
 
 L0 is strict. `research_loop.l0_contract.validate_l0_input_contract` is the
 single authoritative validator. It requires explicit `round_type`, verifiable
 input provenance, existing local paths, and stable/verified remote locators.
-Legacy data may be read but must be explicitly migrated before entering L0.
+Legacy data may be read for verification but may not enter a new L0 run.
 
 Never bypass a gate with a sentinel, `verified: false`, inferred lineage,
 weakened validation, swallowed error, or a fixture change made only to hide a
@@ -167,7 +166,7 @@ repeat until terminal:
     emit-delta
     execute the declared advance command
 L7: prepare workspace → execute approved scripts → emit L7 delta
-L9: emit L9a and L9b independently
+L9: emit/finalize L9a → assemble L9b from its authorized snapshot → emit L9b
 L10c: aggregate-report → human-readable sync → StopPolicy
 ```
 

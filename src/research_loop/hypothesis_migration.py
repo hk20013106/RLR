@@ -1,6 +1,7 @@
 """Project-atomic legacy delta migration into the hypothesis ledger."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -10,11 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from research_loop.delta import DELTA_PERSONA
-from research_loop.hypothesis_contracts import validate_submission
+from research_loop.compatibility import PROFILE_V20, PROFILE_V21, get_profile
+from research_loop.hypothesis_contracts import validate_persisted, validate_submission
 from research_loop.hypothesis_ledger import (
     HypothesisLedger,
     LedgerError,
     _uuid,
+    binding_path,
     canonical_json,
     content_hash,
 )
@@ -100,7 +103,7 @@ def _legacy_sources(project_dir: Path) -> list[dict[str, Any]]:
             reasons.append("candidate ownership cannot be proven")
         if not item["round_id"]:
             reasons.append("round ownership cannot be proven")
-        if node and not validate_submission(node, data):
+        if node and not validate_submission(node, data, schema_version="2.0"):
             item["v2_delta"] = data
         else:
             reasons.append("legacy payload requires explicit v2 attribution")
@@ -184,7 +187,8 @@ def _resolved_deltas(project: Path, resolution: dict[str, Any],
         if not source.is_file() or _sha256_file(source) != expected["source_sha256"]:
             raise LedgerError(f"migration source hash changed: {source_path}")
         delta = entry.get("v2_delta")
-        errors = validate_submission(expected["node"], delta) if isinstance(delta, dict) else ["not an object"]
+        errors = (validate_submission(expected["node"], delta, schema_version="2.0")
+                  if isinstance(delta, dict) else ["not an object"])
         if errors:
             raise LedgerError(f"resolved v2 delta rejected for {source_path}: {'; '.join(errors)}")
         resolved.append({**expected, "v2_delta": delta})
@@ -228,6 +232,281 @@ def _write_exclusive(path: Path, raw: str) -> None:
         return
     with path.open("x", encoding="utf-8") as handle:
         handle.write(raw)
+
+
+_TERMINAL_STATUSES = {"KEEP", "REVISE", "DOWNGRADE", "DROP", "ARCHIVED"}
+
+
+def _profile_upgrade_findings(project: Path, con: sqlite3.Connection,
+                              project_id: str) -> list[dict[str, Any]]:
+    rows = con.execute(
+        "SELECT m.delta_hash,m.node,m.delta_path,c.artifact_sha256 "
+        "FROM emissions m JOIN committed_emissions c "
+        "ON c.delta_hash=m.delta_hash "
+        "WHERE m.project_id=? AND m.node IN ('L1','L2','L3','L4','L5','L6') "
+        "ORDER BY m.commit_seq",
+        (project_id,),
+    ).fetchall()
+    findings = []
+    for row in rows:
+        relative = Path(str(row["delta_path"]))
+        artifact = project / relative
+        issues: list[str] = []
+        delta = None
+        if not artifact.is_file():
+            issues.append("finalized legacy artifact is missing")
+        elif _sha256_file(artifact) != str(row["artifact_sha256"]):
+            issues.append("finalized legacy artifact hash does not match ledger")
+        else:
+            try:
+                delta = json.loads(artifact.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                issues.append(f"finalized legacy artifact is invalid JSON: {exc}")
+        if isinstance(delta, dict):
+            target = json.loads(json.dumps(delta))
+            target["schema_version"] = "2.1"
+            issues.extend(validate_persisted(
+                str(row["node"]), target, schema_version="2.1"
+            ))
+        if not issues:
+            continue
+        material = {
+            "kind": "STRUCTURING_REQUIRED",
+            "node": str(row["node"]),
+            "delta_hash": str(row["delta_hash"]),
+            "artifact_path": relative.as_posix(),
+            "issues": issues,
+        }
+        findings.append({
+            "finding_id": f"PF:{content_hash(material)}",
+            **material,
+        })
+    return findings
+
+
+def dry_run_profile_upgrade(project_dir: str | Path, ledger: HypothesisLedger) -> dict[str, Any]:
+    """Assess a v2.0 project upgrade without writing ledger or project state."""
+    project = Path(project_dir)
+    wal_path = Path(f"{ledger.path}-wal")
+    if wal_path.is_file() and wal_path.stat().st_size:
+        raise LedgerError(
+            "profile upgrade dry-run requires a checkpointed store with no active WAL"
+        )
+    target = binding_path(project)
+    try:
+        binding = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LedgerError(f"invalid hypothesis ledger binding: {target}") from exc
+    con = ledger._connect(readonly=True, immutable=True)
+    try:
+        store_id_row = con.execute(
+            "SELECT value FROM ledger_meta WHERE key='store_id'"
+        ).fetchone()
+        store_id = str(store_id_row[0]) if store_id_row else ""
+        if (binding.get("store_id") != store_id
+                or not binding.get("project_id")):
+            raise LedgerError(
+                "hypothesis ledger binding does not match configured store"
+            )
+        if not con.execute(
+            "SELECT 1 FROM project_activations WHERE project_id=?",
+            (binding["project_id"],),
+        ).fetchone():
+            raise LedgerError("profile upgrade requires an activated project")
+        has_transitions = con.execute(
+            "SELECT 1 FROM sqlite_schema WHERE type='table' "
+            "AND name='profile_transitions'"
+        ).fetchone()
+        latest = None
+        if has_transitions:
+            columns = {
+                str(row[1]) for row in con.execute(
+                    "PRAGMA table_info(profile_transitions)"
+                )
+            }
+            complete_columns = {
+                "target_profile_id", "source_ledger_state_hash",
+                "destination_ledger_state_hash", "receipt_json",
+            }
+            if complete_columns <= columns:
+                latest = con.execute(
+                    "SELECT target_profile_id,source_ledger_state_hash,"
+                    "destination_ledger_state_hash,receipt_json "
+                    "FROM profile_transitions WHERE project_id=? "
+                    "ORDER BY rowid DESC LIMIT 1",
+                    (binding["project_id"],),
+                ).fetchone()
+            elif con.execute(
+                "SELECT 1 FROM profile_transitions WHERE project_id=? LIMIT 1",
+                (binding["project_id"],),
+            ).fetchone():
+                raise LedgerError(
+                    "incomplete profile transition blocks profile upgrade"
+                )
+        if latest and (not latest[1] or not latest[2] or not latest[3]):
+            raise LedgerError(
+                "incomplete profile transition blocks profile upgrade"
+            )
+        source_profile = str(
+            latest[0] if latest else binding.get("profile_id", PROFILE_V20)
+        )
+        get_profile(source_profile)
+        source_through_commit_seq = int(con.execute(
+            "SELECT COALESCE(MAX(commit_seq),0) FROM emissions WHERE project_id=?",
+            (binding["project_id"],),
+        ).fetchone()[0])
+        source_ledger_state_hash = ledger._profile_state_hash(
+            con, str(binding["project_id"]),
+            through_commit_seq=source_through_commit_seq,
+        )
+        unfinalized = [
+            {
+                "finding_id": f"PF:{content_hash({'kind': 'UNFINALIZED_EMISSION', 'delta_hash': str(row[0])})}",
+                "kind": "UNFINALIZED_EMISSION",
+                "delta_hash": str(row[0]),
+                "node": str(row[1]),
+                "reason": "profile upgrade cannot proceed while an emission is not finalized",
+            }
+            for row in con.execute(
+                "SELECT e.delta_hash,e.node FROM emissions e "
+                "WHERE e.project_id=? AND NOT EXISTS ("
+                "SELECT 1 FROM committed_emissions c WHERE c.delta_hash=e.delta_hash"
+                ") ORDER BY e.commit_seq",
+                (binding["project_id"],),
+            ).fetchall()
+        ]
+        artifact_findings = _profile_upgrade_findings(
+            project, con, str(binding["project_id"])
+        )
+    finally:
+        con.close()
+    candidate_paths = sorted((project / "01_Candidates").glob("C*.md"))
+    candidate_state_hash = content_hash({
+        path.relative_to(project).as_posix():
+            hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in candidate_paths
+    })
+    candidates = []
+    for path in candidate_paths:
+        text = path.read_text(encoding="utf-8")
+        candidate = re.search(r"(?m)^candidate_id:\s*['\"]?([^'\"\r\n]+)", text)
+        status = re.search(r"(?m)^current_status:\s*['\"]?([^'\"\r\n]+)", text)
+        candidates.append({"candidate_id": candidate.group(1).strip() if candidate else path.stem,
+                           "status": status.group(1).strip() if status else "UNKNOWN"})
+    nonterminal = [item for item in candidates if item["status"] not in _TERMINAL_STATUSES]
+    findings = [
+        {
+            "finding_id": f"PF:{content_hash({'kind': 'NONTERMINAL_CANDIDATE', **item})}",
+            "kind": "NONTERMINAL_CANDIDATE",
+            **item,
+            "reason": "project-wide upgrade requires every candidate to be terminal",
+        }
+        for item in nonterminal
+    ]
+    findings.extend(artifact_findings)
+    report = {
+        "schema_version": MIGRATION_SCHEMA_VERSION,
+        "project_id": binding["project_id"], "store_id": store_id,
+        "source_profile_id": source_profile, "target_profile_id": PROFILE_V21,
+        "source_through_commit_seq": source_through_commit_seq,
+        "source_ledger_state_hash": source_ledger_state_hash,
+        "candidate_state_hash": candidate_state_hash,
+        "candidates": candidates, "nonterminal": nonterminal,
+        "blocking_findings": unfinalized,
+        "resolution_required": findings,
+    }
+    report["dry_run_report_hash"] = content_hash(report)
+    return report
+
+
+def _validate_profile_resolution(path: Path, report: dict[str, Any]) -> str:
+    try:
+        resolution = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LedgerError(f"profile upgrade resolution is invalid JSON: {exc}") from exc
+    if resolution.get("schema_version") != MIGRATION_SCHEMA_VERSION:
+        raise LedgerError("unsupported profile upgrade resolution schema_version")
+    if resolution.get("dry_run_report_hash") != report["dry_run_report_hash"]:
+        raise LedgerError(
+            "profile upgrade resolution dry_run_report_hash is stale or mismatched"
+        )
+    entries = resolution.get("entries")
+    if not isinstance(entries, list):
+        raise LedgerError("profile upgrade resolution entries must be a list")
+    required = {
+        str(item["finding_id"]): item for item in report["resolution_required"]
+    }
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise LedgerError("profile upgrade resolution entry must be an object")
+        finding_id = str(entry.get("finding_id") or "")
+        if finding_id in seen:
+            raise LedgerError(
+                f"duplicate profile upgrade resolution finding: {finding_id}"
+            )
+        seen.add(finding_id)
+        if finding_id not in required:
+            raise LedgerError(
+                f"profile upgrade resolution references unknown finding: {finding_id}"
+            )
+        if entry.get("resolution") != "retain-under-source-profile":
+            raise LedgerError(
+                "profile upgrade resolution must retain terminal history "
+                "under its source profile"
+            )
+        if not isinstance(entry.get("reason"), str) or not entry["reason"].strip():
+            raise LedgerError("profile upgrade resolution reason must be non-empty")
+    missing = sorted(set(required) - seen)
+    if missing:
+        raise LedgerError(
+            f"profile upgrade resolution is incomplete; missing findings: {missing}"
+        )
+    return _sha256_file(path)
+
+
+def upgrade_profile(project_dir: str | Path, ledger: HypothesisLedger, *,
+                    resolution_path: str | Path, resolved_by: str) -> dict[str, Any]:
+    """Append a completed v2.0 -> v2.1 transition after a no-write assessment.
+
+    This deliberately never invents missing scientific facts.  Projects with
+    nonterminal candidates fail closed instead of mixing topology within a
+    candidate lifecycle.
+    """
+    if not resolved_by.strip():
+        raise LedgerError("--resolved-by must be non-empty")
+    project = Path(project_dir)
+    report = dry_run_profile_upgrade(project, ledger)
+    if report["source_profile_id"] != PROFILE_V20:
+        raise LedgerError("profile upgrade source must be v2.0-legacy")
+    if report["nonterminal"]:
+        raise LedgerError("profile upgrade requires no nonterminal candidate")
+    if report["blocking_findings"]:
+        raise LedgerError("profile upgrade requires every source emission to be finalized")
+    resolution = Path(resolution_path)
+    if not resolution.is_file():
+        raise LedgerError("profile upgrade resolution manifest is required")
+    resolution_hash = _validate_profile_resolution(resolution, report)
+    manifest = {
+        "schema_version": MIGRATION_SCHEMA_VERSION,
+        "project_id": report["project_id"], "store_id": ledger.store_id,
+        "source_profile_id": PROFILE_V20, "target_profile_id": PROFILE_V21,
+        "dry_run_report_hash": report["dry_run_report_hash"],
+        "resolution_sha256": resolution_hash, "resolved_by": resolved_by,
+        "finding_ids": [
+            item["finding_id"] for item in report["resolution_required"]
+        ],
+    }
+    manifest_hash = content_hash(manifest)
+    return ledger.record_profile_transition(
+        project_dir=project, source_profile_id=PROFILE_V20,
+        target_profile_id=PROFILE_V21,
+        dry_run_report_hash=report["dry_run_report_hash"], resolution_hash=resolution_hash,
+        manifest_hash=manifest_hash, resolved_by=resolved_by,
+        candidate_state_hash=report["candidate_state_hash"],
+        expected_source_ledger_state_hash=report["source_ledger_state_hash"],
+        expected_through_commit_seq=report["source_through_commit_seq"],
+    )
 
 
 def commit(project_dir: str | Path, ledger: HypothesisLedger,

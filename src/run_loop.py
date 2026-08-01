@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""RLR V0.7 loop runner — the canonical active runtime entry point.
+"""RLR v0.9 preview loop runner — the canonical active runtime entry point.
 
 `python run_loop.py run PROJECT CAND` is the one documented way to drive the
-loop. It drives the V0.7 engine (research_loop_v04.py) whose `assemble-context`
+loop. It drives the v0.9 engine (research_loop_v04.py) whose `assemble-context`
 enforces the V0.7 Deep Research gate: L1/L4/L8.5 fail closed (rc=3) without a
 successful ARS receipt and a valid evidence pack; `assemble_context()` here
 re-raises that as a hard stop.
@@ -38,6 +38,10 @@ sys.path.insert(0, str(HERE))
 import research_loop_v04 as rl       # noqa: E402  (controller: DAG metadata + helpers)
 import orchestrator as orch          # noqa: E402
 from research_loop.api import EngineAPI  # noqa: E402  (in-process controller facade)
+from research_loop.compatibility import PROFILE_V20, get_profile
+from research_loop.deep_research import SUPPORTED_BACKENDS
+from research_loop.delta import artifact_for_node
+from research_loop.topology import topology_for_profile
 
 # In-process engine facade — replaces the subprocess `_ctl()` transport (Phase 5).
 # Byte-for-byte equivalent to spawning `python research_loop_v04.py <cmd>`, but
@@ -62,8 +66,11 @@ headless:
   command: ""
 
 deep_research:
-  backend: codex
-  executable: codex
+  # Leave backend empty to use the project's own 00_Preflight/deep_research_runtime.json
+  # (set by `preflight`, which detects the current agent host). Only set an explicit
+  # backend here to force an override -- it takes precedence over the project runtime.
+  backend: ""
+  executable: ""
   skill_path: ""
   plugin_dir: ""
   skill_version: unknown
@@ -150,7 +157,8 @@ def _ctl(*args):
 def auto_pitfall(project, cand, node, category, symptom, provider="unknown",
                  evidence=""):
     """Auto-record a status=draft pitfall when the loop hits a failure. Drafts
-    are NOT scanned/enforced until L8 Curie confirms them -- this just makes the
+    are NOT scanned/enforced until the profile-bound L8 audit confirms them --
+    this just makes the
     failure durable so a human can triage it. Never fatal: a ledger write must
     not take down the run."""
     try:
@@ -190,17 +198,29 @@ def load_delta(project, cand, delta_key):
     return None
 
 
-def assemble_context(project, cand, node, authorization_id=None):
-    return ENGINE.assemble_context(project, cand, node, authorization_id)
+def assemble_context(project, cand, node, authorization_id=None, evidence_run_id=None):
+    return ENGINE.assemble_context(project, cand, node, authorization_id,
+                                   evidence_run_id)
 
 
-def emit_delta(project, cand, node, persona, delta, run_dir, receipt=None):
+def _write_provider_delta(run_dir, node, persona, delta):
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     tmp = run_dir / f"{node}_{persona}_emit.json"
     tmp.write_text(json.dumps(delta, indent=2, ensure_ascii=False),
                    encoding="utf-8")
-    r = ENGINE.emit_delta(project, cand, node, persona, tmp, receipt=receipt)
+    return tmp
+
+
+def emit_delta(project, cand, node, persona, delta, run_dir, receipt=None,
+               provider_receipt=None):
+    tmp = delta if isinstance(delta, Path) else _write_provider_delta(
+        run_dir, node, persona, delta
+    )
+    r = ENGINE.emit_delta(
+        project, cand, node, persona, tmp,
+        context_manifest=receipt, provider_receipt=provider_receipt,
+    )
     if r.returncode != 0:
         log(f"emit-delta {node} failed: {r.stdout.strip()} {r.stderr.strip()}")
     return r.returncode == 0
@@ -273,21 +293,44 @@ def preflight_providers(cfg, args):
 
 
 def write_receipt(run_dir, node, persona, prov, context, step, cand, round_id,
-                  workspace=None):
+                  *, manifest=None, provider_delta_file=None, workspace=None):
+    manifest_data = {}
+    if manifest:
+        manifest_data = json.loads(Path(manifest).read_text(encoding="utf-8"))
+    prompt_file = getattr(prov, "last_prompt_file", None)
+    delta_file = getattr(prov, "last_delta_file", None)
+    provider_delta_file = Path(provider_delta_file) if provider_delta_file else None
     rec = orch.RunReceipt(
         node=node, persona=persona,
         provider=getattr(prov, "name", getattr(prov, "type", "?")),
         timestamp=orch.now(),
         context_hash=hashlib.sha256(context.encode("utf-8")).hexdigest(),
-        prompt_file=getattr(prov, "last_prompt_file", None),
-        delta_file=getattr(prov, "last_delta_file", None),
+        prompt_file=prompt_file,
+        prompt_hash=(hashlib.sha256(Path(prompt_file).read_bytes()).hexdigest()
+                     if prompt_file and Path(prompt_file).is_file() else None),
+        delta_file=delta_file,
+        delta_hash=(hashlib.sha256(Path(delta_file).read_bytes()).hexdigest()
+                    if delta_file and Path(delta_file).is_file() else None),
         workspace=workspace,
         allowed_tools=([step.get("tools_policy")] if step.get("tools_policy")
                        else None),
         everos_scope=step.get("everos_read_scopes"),
         fresh_session=getattr(prov, "last_fresh_session", None),
-        candidate_id=cand, round_id=round_id)
-    rec.write(Path(run_dir) / f"{node}_{persona}_receipt.json")
+        project_id=manifest_data.get("project_id"),
+        candidate_id=cand, round_id=str(round_id),
+        profile_id=step.get("profile_id", "v2.0-legacy"),
+        context_manifest_path=str(manifest or ""),
+        context_manifest_hash=(hashlib.sha256(Path(manifest).read_bytes()).hexdigest()
+                               if manifest else None),
+        rendered_context_path=manifest_data.get("rendered_context_path"),
+        rendered_context_hash=manifest_data.get("rendered_context_sha256"),
+        provider_delta_path=str(provider_delta_file or ""),
+        provider_delta_hash=(hashlib.sha256(provider_delta_file.read_bytes()).hexdigest()
+                             if provider_delta_file else None),
+    )
+    path = Path(run_dir) / f"{node}_{persona}_receipt.json"
+    rec.write(path)
+    return str(path)
 
 
 def _shadow_run_id(node, cand, round_id, candidates, seed, match_budget):
@@ -469,7 +512,9 @@ def run_shadow_ranking(project, cand, node, args, round_id):
 def exec_cognitive(project, cand, step, cfg, args, run_dir, round_id,
                    do_advance=True, authorization_id=None):
     node, persona = step["node"], step["persona"]
-    ctx, manifest = assemble_context(project, cand, node, authorization_id)
+    evidence_run_id = getattr(args, "evidence_run_ids", {}).get(node)
+    ctx, manifest = assemble_context(project, cand, node, authorization_id,
+                                     evidence_run_id)
     # Fail-closed re-gate at the dispatch boundary: for L0, run the SAME unified
     # validator (l0_contract.validate_l0_input_contract, via _audit_l0_contract)
     # immediately before the provider writes its prompt. assemble_context above
@@ -496,12 +541,17 @@ def exec_cognitive(project, cand, step, cfg, args, run_dir, round_id,
                      f"{persona} provider raised: {e}", provider=pname,
                      evidence=str(run_dir))
         raise
-    ok = emit_delta(project, cand, node, persona, delta, run_dir, receipt=manifest)
+    emitted = _write_provider_delta(run_dir, node, persona, delta)
+    provider_receipt = write_receipt(
+        run_dir, node, persona, prov, ctx, step, cand, round_id,
+        manifest=manifest, provider_delta_file=emitted,
+    )
+    ok = emit_delta(project, cand, node, persona, emitted, run_dir,
+                    receipt=manifest, provider_receipt=provider_receipt)
     if not ok:
         auto_pitfall(project, cand, node, "emit_delta_failure",
                      f"{persona} delta rejected by emit-delta (schema/validation)",
                      provider=pname, evidence=str(run_dir))
-    write_receipt(run_dir, node, persona, prov, ctx, step, cand, round_id)
     if ok and do_advance:
         run_shadow_ranking(project, cand, node, args, round_id)
         advance(project, cand, step)
@@ -545,9 +595,13 @@ def exec_turing(project, cand, step, cfg, args, run_dir, round_id, exec_state):
                      f"Turing execution provider failed: {e}", provider=pname,
                      evidence=workspace or str(run_dir))
         return False
-    ok = emit_delta(project, cand, "L7", "Turing", delta, run_dir, receipt=manifest)
-    write_receipt(run_dir, "L7", "Turing", prov, ctx, step, cand, round_id,
-                  workspace=workspace)
+    emitted = _write_provider_delta(run_dir, "L7", "Turing", delta)
+    provider_receipt = write_receipt(
+        run_dir, "L7", "Turing", prov, ctx, step, cand, round_id,
+        manifest=manifest, provider_delta_file=emitted, workspace=workspace,
+    )
+    ok = emit_delta(project, cand, "L7", "Turing", emitted, run_dir,
+                    receipt=manifest, provider_receipt=provider_receipt)
     if not ok:
         exec_state["l7_failures"] += 1
         log(f"L7 emit failed; failures={exec_state['l7_failures']}")
@@ -579,10 +633,13 @@ def ensure_pre_research(project, cand, node, cfg, args, run_dir):
             return True
         dr_cfg = _deep_research_config(cfg)
         backend = str(dr_cfg.get("backend", "")).strip()
-        if backend not in {"codex", "claude"}:
-            log(f"ERROR: Deep Research {node} requires deep_research.backend=codex|claude")
+        if backend and backend not in SUPPORTED_BACKENDS:
+            log(f"ERROR: Deep Research {node} runner override "
+                f"deep_research.backend={backend!r} must be one of {SUPPORTED_BACKENDS}")
             return False
-        command = ["deep-research-run", project, cand, "--node", node, "--backend", backend]
+        command = ["deep-research-run", project, cand, "--node", node]
+        if backend:
+            command.extend(["--backend", backend])
         for option, key in (("--executable", "executable"), ("--plugin-dir", "plugin_dir"),
                             ("--skill-path", "skill_path"), ("--skill-version", "skill_version"),
                             ("--model", "model"), ("--timeout", "timeout")):
@@ -594,7 +651,14 @@ def ensure_pre_research(project, cand, node, cfg, args, run_dir):
             log(f"ERROR: Deep Research {node} failed closed: "
                 f"{(result.stderr or result.stdout).strip()}")
             return False
-        log(f"Deep Research {node}: persisted verified evidence pack")
+        try:
+            artifact = json.loads(result.stdout)
+            args.evidence_run_ids = getattr(args, "evidence_run_ids", {})
+            args.evidence_run_ids[node] = artifact["run_id"]
+        except (KeyError, json.JSONDecodeError):
+            log(f"ERROR: Deep Research {node} did not return a run_id")
+            return False
+        log(f"Deep Research {node}: persisted verified evidence pack {artifact['run_id']}")
         return True
     if target.exists():
         log(f"pre-research {node}: already present")
@@ -717,7 +781,11 @@ def run_review_gate(project, cand, cfg, args, run_dir):
     cn = Path(project) / "FINAL_REPORT_CN.md"
     if cn.exists():
         parts += ["=== FINAL_REPORT_CN.md ===", cn.read_text(encoding="utf-8")]
-    for dk in ("L8_curie", "L9a_feynman", "L9b_darwin", "L10b_oppenheimer"):
+    profile_id = next_step(project, cand).get("profile_id")
+    if not profile_id:
+        raise RuntimeError("review gate cannot resolve the bound project profile")
+    l8_key = artifact_for_node(get_profile(profile_id), "L8").storage_key
+    for dk in (l8_key, "L9a_feynman", "L9b_darwin", "L10b_oppenheimer"):
         d = load_delta(project, cand, dk)
         if d is not None:
             parts += [f"=== {dk} ===", json.dumps(d, indent=2, ensure_ascii=False)]
@@ -834,7 +902,11 @@ class StopPolicy:
 
 
 def evidence_sig(project, cand):
-    l8 = load_delta(project, cand, "L8_curie") or {}
+    profile_id = next_step(project, cand).get("profile_id")
+    if not profile_id:
+        raise RuntimeError("evidence signature cannot resolve project profile")
+    l8_key = artifact_for_node(get_profile(profile_id), "L8").storage_key
+    l8 = load_delta(project, cand, l8_key) or {}
     l9a = load_delta(project, cand, "L9a_feynman") or {}
     basis = json.dumps({"lvl": l8.get("evidence_level"),
                         "ev": l8.get("evidence_verified"),
@@ -886,8 +958,8 @@ def create_child(project, parent_cand, decision, new_round):
 
 # --- dry run ----------------------------------------------------------------
 
-def _plan_line(nid, cfg, is_l10c=False):
-    ni = rl.NODE_MAP[nid]
+def _plan_line(nid, cfg, node_map, is_l10c=False):
+    ni = node_map[nid]
     if is_l10c:
         return (f"  {nid:5} {ni['persona']:11} provider=-          "
                 f"advance=aggregate-report (controller -- no agent call)")
@@ -906,19 +978,19 @@ def dry_run_plan(project, cand, cfg, max_rounds, review_on):
         log(f"candidate is terminal ({step.get('status')}); nothing to plan")
         return 0
     start = step["nodes"][0]["node"] if step.get("is_parallel") else step["node"]
-    key = "L9_parallel" if start in ("L9a", "L9b") else start
-    seq = rl.DAG_SEQUENCE
-    i = seq.index(key) if key in seq else 0
+    profile_id = step.get("profile_id", PROFILE_V20)
+    _, node_map, seq = topology_for_profile(profile_id)
+    i = seq.index(start) if start in seq else 0
     log(f"current status={status_of(project, cand)}  next node={start}")
     print("planned nodes this round:")
     for nid in seq[i:]:
         if nid == "L9_parallel":
             for sub in ("L9a", "L9b"):
-                print(_plan_line(sub, cfg))
+                print(_plan_line(sub, cfg, node_map))
         elif nid == "L10c":
-            print(_plan_line(nid, cfg, is_l10c=True))
+            print(_plan_line(nid, cfg, node_map, is_l10c=True))
         else:
-            print(_plan_line(nid, cfg))
+            print(_plan_line(nid, cfg, node_map))
     print()
     tail = "review gate -> " if review_on else ""
     log(f"after L10c: {tail}StopPolicy(max_rounds={max_rounds}) decides stop/continue")
@@ -1032,7 +1104,7 @@ def cmd_run(args):
     return 0
 
 
-MAIN_AGENT_PROMPT_TEMPLATE = """You are now the RLR V0.7 main-agent orchestrator.
+MAIN_AGENT_PROMPT_TEMPLATE = """You are now the RLR v0.9 main-agent orchestrator.
 
 Project: {project}
 Candidate: {cand_id}
@@ -1064,7 +1136,7 @@ Key rules:
 - Deep Research runs BEFORE L1/L4/L8.5 and is embedded via assemble-context; it does NOT
   change the 15-node DAG topology.
 - L7 Turing: use prepare-turing-workspace, run scripts only in that workspace.
-- L9a/L9b: run both before advancing. They must be independent.
+- {l9_rule}
 - If emit-delta fails validation, fix the JSON and retry. Do NOT skip.
 - You are the orchestrator. Do not ask the user to copy-paste between nodes.
 """
@@ -1076,8 +1148,18 @@ def cmd_print_main_agent_prompt(args):
     if Path(cfg_path).exists():
         cfg = orch.ProviderConfig.load(cfg_path)
         max_rounds = cfg.max_rounds or 3
+    try:
+        profile_id = next_step(project, cand).get("profile_id", PROFILE_V20)
+    except Exception:
+        profile_id = PROFILE_V20
+    l9_rule = (
+        "Historical v2.0 L9a/L9b are parallel and mutually invisible."
+        if profile_id == PROFILE_V20 else
+        "L9: emit and finalize L9a, then assemble and emit L9b, then permit L10a."
+    )
     prompt = MAIN_AGENT_PROMPT_TEMPLATE.format(
-        project=project, cand_id=cand, max_rounds=max_rounds)
+        project=project, cand_id=cand, max_rounds=max_rounds,
+        l9_rule=l9_rule)
     prompt, meta = rl._caveman_lite(
         prompt, required_literals=[project, cand, "main-agent", "Do NOT"])
     print(prompt)
@@ -1087,7 +1169,7 @@ def cmd_print_main_agent_prompt(args):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="run_loop.py",
-        description="RLR V0.7 loop runner — canonical runtime entry point "
+        description="RLR v0.9 preview loop runner — canonical runtime entry point "
                     "(main-agent / headless / manual).")
     sub = p.add_subparsers(dest="cmd", required=True)
 

@@ -13,37 +13,37 @@ bug fixes. 323 tests pass, 0 failures.
 
 ## Completed tasks
 
-| Task | Commit(s) | Description |
-| --- | --- | --- |
-| P2-PRE-TEST | `94886d9` | Fix test_no_cycles.py scan path (2->32 modules) |
-| P2-RANKING-BOUNDARY | `9b00c7c` | Audit _SyntheticPositionBiasedJudge ownership |
-| Baseline freeze | `6780b04` | Commit dirty working tree as clean baseline |
-| P1A | `192271f` | Finalized read-boundary predicate in 4 consumptive APIs |
-| P2-BATCH-A | `cf8410f`,`89a2dc1`,`97f803a` | Extract helpers, templates, delta rendering |
-| P1C | `bb4d3e7` | Wire v2 gates into _emit_delta_v2 |
-| P1B | `31ba98f` | Restore native-v2 gate test coverage |
-| P2-BATCH-B | `face0ea`,`f453456`,`2089e94` | Extract ranking, pitfall, reporting CLI |
-| FIX-1 | `f1a9119` | delta_render.py v2 list analysis_plan support |
-| FIX-2 | `de49acf` | v2 _emit_delta_v2 execution manifest write |
-| P2-C1 | `ec4aeb6` | Extract ledger CLI to commands/ledger.py |
-| P2-C2 | `8e7950e` | Extract continuation CLI to commands/continuation.py |
-| P2-BATCH-D | `affe3a4`,`f3ce1e6`,`e96ae6e` | Extract lifecycle, research, execution CLI |
-| P2-E1 | `8f35d68` | Move build_parser and main to cli.py |
+| Task                | Commit(s)                     | Description                                             |
+| ------------------- | ----------------------------- | ------------------------------------------------------- |
+| P2-PRE-TEST         | `94886d9`                     | Fix test_no_cycles.py scan path (2->32 modules)         |
+| P2-RANKING-BOUNDARY | `9b00c7c`                     | Audit _SyntheticPositionBiasedJudge ownership           |
+| Baseline freeze     | `6780b04`                     | Commit dirty working tree as clean baseline             |
+| P1A                 | `192271f`                     | Finalized read-boundary predicate in 4 consumptive APIs |
+| P2-BATCH-A          | `cf8410f`,`89a2dc1`,`97f803a` | Extract helpers, templates, delta rendering             |
+| P1C                 | `bb4d3e7`                     | Wire v2 gates into _emit_delta_v2                       |
+| P1B                 | `31ba98f`                     | Restore native-v2 gate test coverage                    |
+| P2-BATCH-B          | `face0ea`,`f453456`,`2089e94` | Extract ranking, pitfall, reporting CLI                 |
+| FIX-1               | `f1a9119`                     | delta_render.py v2 list analysis_plan support           |
+| FIX-2               | `de49acf`                     | v2 _emit_delta_v2 execution manifest write              |
+| P2-C1               | `ec4aeb6`                     | Extract ledger CLI to commands/ledger.py                |
+| P2-C2               | `8e7950e`                     | Extract continuation CLI to commands/continuation.py    |
+| P2-BATCH-D          | `affe3a4`,`f3ce1e6`,`e96ae6e` | Extract lifecycle, research, execution CLI              |
+| P2-E1               | `8f35d68`                     | Move build_parser and main to cli.py                    |
 
 ## Final metrics
 
-| Metric | Value |
-| --- | --- |
-| engine.py lines | 477 (was 4768) |
-| cli.py lines | 542 (was 12) |
-| Command modules | 8 (continuation, execution, ledger, lifecycle, pitfall, ranking, reporting, research) |
-| cmd_* in engine.py | 0 |
-| Tests | 323 passed, 0 failed |
-| CLI --help | OK |
-| run_loop --help | OK |
-| Smoke test | OK (new-project, new-candidate, L1+L3 finalize, verify PASS, next-step OK) |
-| git diff --check | clean |
-| Working tree | clean |
+| Metric             | Value                                                                                 |
+| ------------------ | ------------------------------------------------------------------------------------- |
+| engine.py lines    | 477 (was 4768)                                                                        |
+| cli.py lines       | 542 (was 12)                                                                          |
+| Command modules    | 8 (continuation, execution, ledger, lifecycle, pitfall, ranking, reporting, research) |
+| cmd_* in engine.py | 0                                                                                     |
+| Tests              | 323 passed, 0 failed                                                                  |
+| CLI --help         | OK                                                                                    |
+| run_loop --help    | OK                                                                                    |
+| Smoke test         | OK (new-project, new-candidate, L1+L3 finalize, verify PASS, next-step OK)            |
+| git diff --check   | clean                                                                                 |
+| Working tree       | clean                                                                                 |
 
 ## Architecture (final state)
 

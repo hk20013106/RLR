@@ -1,7 +1,8 @@
 """Markdown templates extracted from the runtime engine."""
 
 from research_loop.common import (
-    PERSONA_TITLE, _dep_fix_hint, _input_alias, _now, _render_extra_front,
+    PERSONA_TITLE, REQUIRED_DEPENDENCIES, _dep_fix_hint, _input_alias, _now,
+    _render_extra_front,
 )
 from research_loop.topology import AGENTS, DAG_NODES
 from research_loop.yamlio import _yaml_value
@@ -101,7 +102,7 @@ LAYERS = [
     ("L5",  "Method Falsification / Skill Match",   "Tukey"),
     ("L6",  "Analysis Plan Decision",               "Oppenheimer"),
     ("L7",  "Execution",                            "Turing"),
-    ("L8",  "Evidence Audit",                       "Curie"),
+    ("L8",  "Evidence Audit",                       "Tukey"),
     ("L9a", "Result Falsification",                 "Feynman"),
     ("L9b", "Biology Interpretation",               "Darwin"),
     ("L10a","Value Assessment",                     "Jobs"),
@@ -111,7 +112,8 @@ LAYERS = [
 
 
 def _candidate_template(cand_id, title, source_input, question, claim,
-                        input_alias="", extra_front=None):
+                        input_alias="", extra_front=None, *,
+                        l8_persona="Tukey", l8_storage_key="L8_tukey"):
     claim_or_question = f"{question} | {claim}"
     alias = input_alias or _input_alias(source_input)
     extra = _render_extra_front(extra_front)
@@ -156,9 +158,9 @@ _append via delta JSON (L1_einstein_delta, L2_feynman_delta)_
 
 _append via delta JSON (L4_fisher_delta, L5_tukey_delta)_
 
-## Evidence Summary (L8 Curie)
+## Evidence Summary (L8 {l8_persona})
 
-_append via delta JSON (L8_curie_delta); level = STRONG | MODERATE | WEAK | INVALID_
+_append via delta JSON ({l8_storage_key}_delta); level = STRONG | MODERATE | WEAK | INVALID_
 
 ## Weakness Summary (L2 / L9a Feynman)
 
@@ -202,7 +204,7 @@ framework: gated-multi-loop-council-v07
 created_at: {_yaml_value(_now())}
 ---
 
-# {name} - Research Loop Room V0.7 Index
+# {name} - Research Loop v0.9 Preview Index
 
 Topic: {topic}
 
@@ -224,14 +226,14 @@ Topic: {topic}
 - Only **Turing** executes code, and only after the Execution Gate passes.
 - Execution Gate requires: `00_Preflight/skill_use_plan.md`,
   `00_Preflight/input_manifest.md`, and an approved plan (status METHOD_APPROVED).
-- Each persona runs as an isolated subagent under the V0.7 topology.
+- Each persona runs as an isolated subagent under the v0.9 preview topology.
 - State flows between subagents via delta JSON files only.
 
 ## DAG Node Flow
 
 L0 Linnaeus -> L1 Einstein -> L2 Feynman -> L3 Oppenheimer
 -> L4 Fisher -> L5 Tukey -> L6 Oppenheimer -> L7 Turing
--> L8 Curie -> L9a Feynman || L9b Darwin -> L10a Jobs
+-> L8 Tukey -> L8.5 Curie -> L9a Feynman -> L9b Darwin -> L10a Jobs
 -> L10b Oppenheimer -> L10c Linnaeus (FINAL_REPORT)
 
 ## Boot Gate (00_Preflight/)

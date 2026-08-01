@@ -5,7 +5,10 @@ import json
 from pathlib import Path
 
 from research_loop import deep_research
+from research_loop.hypothesis_ledger import binding_path
 from research_loop.paths import _pre_research_file
+from research_loop.topology import topology_for_profile
+from research_loop.yamlio import _load_yaml_front
 
 
 def persist_synthetic_evidence(project_dir, candidate_id, node, queries, *, result_context=""):
@@ -27,10 +30,20 @@ def persist_synthetic_evidence(project_dir, candidate_id, node, queries, *, resu
             ],
         }],
     }
+    binding = json.loads(binding_path(project_dir).read_text(encoding="utf-8"))
+    profile_id = str(binding["profile_id"])
+    candidate = _load_yaml_front(
+        Path(project_dir) / "01_Candidates" / f"{candidate_id}.md"
+    )
+    _, node_map, _ = topology_for_profile(profile_id)
     artifact = deep_research.persist_run(
         project_dir, candidate_id, node, payload,
         deep_research.skill_receipt("codex", ["codex", "exec"], "synthetic fixture", "test"),
         result_context=result_context,
+        project_id=str(binding["project_id"]),
+        round_id=str(candidate.get("round_id") or "1"),
+        profile_id=profile_id,
+        research_persona=str(node_map[node].get("research_persona") or "Curie"),
     )
     if node == "L8.5":
         artifact["verification"] = [{

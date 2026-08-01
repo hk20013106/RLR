@@ -40,4 +40,3 @@ README 还定义了 AlphaGenome、Boltz、Open Targets、DepMap、AlphaMissense 
 ## 不宜照搬的部分
 
 `proximity` 目前只提示重复而不实际去重，`embed()` 是 SHA-256 hash placeholder；graph 注释也确认没有生产级并行。加上单文件非原子持久化、没有完整的 run provenance/输入快照，以及仓库树中未见常规测试工作流，这些都不应视为可直接复用的生产能力。[proximity/embedding](https://github.com/nataliegits/Benchmate/blob/28cfbf754eed36f57d33e113393a5eb4636dd963/co_scientist/tools.py) [顺序图执行](https://github.com/nataliegits/Benchmate/blob/28cfbf754eed36f57d33e113393a5eb4636dd963/co_scientist/graph.py) [工作流目录](https://github.com/nataliegits/Benchmate/tree/28cfbf754eed36f57d33e113393a5eb4636dd963/.github/workflows)
-

@@ -12,6 +12,19 @@ from research_loop.delta import _delta_for_candidate
 from research_loop.paths import _candidate_file, _sha256
 from research_loop.yamlio import _load_yaml_front, _yaml_value
 
+# Literal marker left in the unfilled input_manifest.md template
+# (see templates.py's input_manifest.md body). Its presence, or a table with
+# no data rows, means Linnaeus never catalogued any input for this project --
+# existence of the file alone must not be read as "inputs registered".
+_MANIFEST_TEMPLATE_MARKER = "Do NOT leave template rows"
+
+
+def _manifest_data_row_count(text):
+    """Count '|'-prefixed table rows after the header + separator rows."""
+    rows = [ln for ln in text.splitlines() if ln.strip().startswith("|")]
+    return max(0, len(rows) - 2)
+
+
 def cmd_execution_gate(args):
     project_dir = Path(args.project_dir)
     cf = _candidate_file(project_dir, args.cand_id)
@@ -22,8 +35,23 @@ def cmd_execution_gate(args):
     missing = []
     if not (pf / "skill_use_plan.md").exists():
         missing.append("00_Preflight/skill_use_plan.md")
-    if not (pf / "input_manifest.md").exists():
+    manifest_path = pf / "input_manifest.md"
+    registered_count = 0
+    if not manifest_path.exists():
         missing.append("00_Preflight/input_manifest.md")
+    else:
+        manifest_text = manifest_path.read_text(encoding="utf-8")
+        if (_MANIFEST_TEMPLATE_MARKER in manifest_text
+                or _manifest_data_row_count(manifest_text) == 0):
+            missing.append(
+                "00_Preflight/input_manifest.md is still the unfilled "
+                "template (no input rows registered); Linnaeus must catalog "
+                "every input alias before Turing may execute")
+        else:
+            registered, input_missing = _registered_candidate_inputs(
+                project_dir, args.cand_id)
+            registered_count = len(registered)
+            missing.extend(input_missing)
     fm = _load_yaml_front(cf)
     status = fm.get("current_status", "?")
     if status != "METHOD_APPROVED":
@@ -43,7 +71,7 @@ def cmd_execution_gate(args):
     _set_status(project_dir, args.cand_id, "NEEDS_EXECUTION", "Turing")
     print("EXECUTION GATE: PASS")
     print("  skill_use_plan.md ........ OK")
-    print("  input_manifest.md ........ OK")
+    print(f"  input_manifest.md ........ OK ({registered_count} input(s) registered)")
     print("  approved analysis plan ... OK (METHOD_APPROVED)")
     print(f"  {args.cand_id} -> NEEDS_EXECUTION (route: Turing)")
     return 0

@@ -94,13 +94,16 @@ class EngineAPI:
             raise RuntimeError(f"next-step did not return JSON: "
                                f"{r.stdout!r} {r.stderr!r}")
 
-    def assemble_context(self, project, cand, node, authorization_id=None):
+    def assemble_context(self, project, cand, node, authorization_id=None,
+                         evidence_run_id=None):
         """cmd_assemble_context: return (context_text, manifest_or_None). Raises
         RuntimeError (same message) on the fail-closed gate (rc != 0), preserving
         the hard-stop semantics — the runner never continues without context."""
         args = ["assemble-context", project, cand, "--node", node]
         if authorization_id:
             args.extend(["--authorization-id", authorization_id])
+        if evidence_run_id:
+            args.extend(["--evidence-run-id", evidence_run_id])
         r = self.run_cli(*args)
         if r.returncode != 0:
             raise RuntimeError(f"assemble-context {node} failed: "
@@ -111,13 +114,18 @@ class EngineAPI:
                 manifest = line.split("context manifest:", 1)[1].strip()
         return r.stdout, manifest
 
-    def emit_delta(self, project, cand, node, persona, file, receipt=None) -> CtlResult:
+    def emit_delta(self, project, cand, node, persona, file, receipt=None,
+                   context_manifest=None, provider_receipt=None) -> CtlResult:
         """cmd_emit_delta: validate+save a delta JSON file. Returns the raw
         CtlResult; the caller decides success by `returncode == 0` as before."""
         args = ["emit-delta", project, cand, "--node", node, "--persona", persona,
                 "--file", str(file)]
-        if receipt:
+        if context_manifest:
+            args += ["--context-manifest", context_manifest]
+        elif receipt:
             args += ["--receipt", receipt]
+        if provider_receipt:
+            args += ["--provider-receipt", provider_receipt]
         return self.run_cli(*args)
 
     def decision(self, project, cand, status, reason, route=None) -> CtlResult:

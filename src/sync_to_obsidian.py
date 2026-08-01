@@ -20,6 +20,10 @@ import re
 import sys
 from pathlib import Path
 
+from research_loop.compatibility import PROFILE_V20, get_profile
+from research_loop.delta import _delta_for_candidate, artifact_for_node
+from research_loop.hypothesis_ledger import binding_path
+
 # --- config (no hard-coded local paths) ---
 # Vault comes from --vault or $OBSIDIAN_VAULT (validated at runtime). Results
 # come from --results or $RLR_RESULTS_DIR, defaulting to the project's own
@@ -82,9 +86,23 @@ LAYER_TITLES_EN = {
 }
 
 
-def load_delta(project_dir, delta_key):
-    persona = DELTA_PERSONA[delta_key]
-    p = Path(project_dir) / "02_Agent_Notes" / persona / f"{delta_key}_delta.json"
+def _project_profile(project_dir):
+    path = binding_path(project_dir)
+    if not path.is_file():
+        return get_profile(PROFILE_V20)
+    try:
+        return get_profile(str(json.loads(path.read_text(encoding="utf-8"))["profile_id"]))
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid project profile binding: {exc}") from exc
+
+
+def load_delta(project_dir, delta_key, cand_id):
+    profile = _project_profile(project_dir)
+    storage_key = (artifact_for_node(profile, "L8").storage_key
+                   if delta_key == "L8_curie" else delta_key)
+    p = _delta_for_candidate(project_dir, storage_key, cand_id)
+    if p is None:
+        return None
     if p.exists():
         try:
             return json.loads(p.read_text(encoding="utf-8"))
@@ -92,6 +110,15 @@ def load_delta(project_dir, delta_key):
             print(f"WARNING: corrupted delta {p}: {e}", file=sys.stderr)
             return None
     return None
+
+
+def _display_artifact(profile, delta_key):
+    node = delta_key.split("_", 1)[0]
+    descriptor = artifact_for_node(profile, node)
+    title = LAYER_TITLES_EN.get(delta_key, delta_key)
+    if node == "L8":
+        title = f"L8 - Evidence Audit ({descriptor.display_persona})"
+    return descriptor.display_persona, descriptor.storage_key, title
 
 
 def fmt_list(lst):
@@ -294,6 +321,7 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
     if not candidates:
         print("No candidates found")
         return 1
+    profile = _project_profile(project_dir)
 
     # --- 01_Candidates: rename with readable title ---
     new_cand_dir = vault_project / "01_Candidates"
@@ -313,21 +341,21 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
     if notes_dir.exists():
         for old in notes_dir.glob("**/*.json"):
             old.unlink()
-    for delta_key in DAG_ORDER:
-        persona = DELTA_PERSONA[delta_key]
-        delta = load_delta(project_dir, delta_key)
-        if delta is None:
-            continue
-        pdir = notes_dir / persona
-        pdir.mkdir(parents=True, exist_ok=True)
-        note_name = f"{delta_key}_NOTE.md"
-        note_path = pdir / note_name
-        title = LAYER_TITLES_EN.get(delta_key, delta_key)
-        body = f"# {title}\n\n"
-        body += fmt_delta_note(delta_key, delta)
-        body += f"\n\n---\n_Source: `{delta_key}.json` (machine-readable)_\n"
-        note_path.write_text(body, encoding="utf-8")
-        print(f"  note: {persona}/{note_name}")
+    for c in candidates:
+        for delta_key in DAG_ORDER:
+            persona, storage_key, title = _display_artifact(profile, delta_key)
+            delta = load_delta(project_dir, delta_key, c["id"])
+            if delta is None:
+                continue
+            pdir = notes_dir / persona
+            pdir.mkdir(parents=True, exist_ok=True)
+            note_name = f"{c['id']}_{storage_key}_NOTE.md"
+            note_path = pdir / note_name
+            body = f"# {title}\n\n"
+            body += fmt_delta_note(delta_key, delta)
+            body += f"\n\n---\n_Source: `{c['id']}_{storage_key}.json` (machine-readable)_\n"
+            note_path.write_text(body, encoding="utf-8")
+            print(f"  note: {persona}/{note_name}")
 
     # --- 03_Figures: convert PDFs to PNG, copy PNGs ---
     fig_dir = vault_project / "03_Figures"
@@ -375,10 +403,10 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
 
     for c in candidates:
         summary_path = log_dir / f"ROUND_SUMMARY_R{c['round']}.md"
-        l10b = load_delta(project_dir, "L10b_oppenheimer")
-        l8 = load_delta(project_dir, "L8_curie")
-        l8_5 = load_delta(project_dir, "L8.5_curie")
-        l7 = load_delta(project_dir, "L7_turing")
+        l10b = load_delta(project_dir, "L10b_oppenheimer", c["id"])
+        l8 = load_delta(project_dir, "L8_curie", c["id"])
+        l8_5 = load_delta(project_dir, "L8.5_curie", c["id"])
+        l7 = load_delta(project_dir, "L7_turing", c["id"])
 
         # Auto-register papers from L8.5 literature verification into the growable
         # DB. Only papers with a verifiable identifier (PMID/DOI/URL) are
@@ -515,11 +543,15 @@ def sync_project(project_dir, vault_dir=None, results_dir=None, cand_id=None):
         round_tag = f"R{c['round']}"
         lines.append(f"- [[01_Candidates/{round_tag}_{slug}|Round {c['round']}: {c['title']}]]")
     lines.append(f"\n## DAG Notes (L0-L10c)\n")
-    for delta_key in DAG_ORDER:
-        persona = DELTA_PERSONA[delta_key]
-        title = LAYER_TITLES_EN.get(delta_key, delta_key)
-        note_path = f"02_Agent_Notes/{persona}/{delta_key}_NOTE"
-        lines.append(f"- [[{note_path}|{title}]]")
+    for c in candidates:
+        lines.append(f"\n### Candidate {c['id']}\n")
+        for delta_key in DAG_ORDER:
+            persona, storage_key, title = _display_artifact(profile, delta_key)
+            note_path = (
+                f"02_Agent_Notes/{persona}/"
+                f"{c['id']}_{storage_key}_NOTE"
+            )
+            lines.append(f"- [[{note_path}|{title}]]")
     lines.append(f"\n## Round Summaries\n")
     for c in candidates:
         lines.append(f"- [[05_Decision_Log/ROUND_SUMMARY_R{c['round']}|Round {c['round']} Summary]]")

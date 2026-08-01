@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import json
+import os as _os
 import re
 import shutil
 import subprocess
@@ -18,6 +19,20 @@ from pathlib import Path
 
 SCHEMA_VERSION = "1.0"
 _STAGES = {"L1", "L4", "L8.5"}
+
+# Deep Research backends. Deliberately closed: every backend needs a verified
+# invocation shape, a skill/plugin layout, and evidence-gate coverage, so a name
+# is only added once those exist.
+SUPPORTED_BACKENDS = ("codex", "claude")
+
+# Environment markers that identify the agent host. Claude Code sets these and
+# providers/headless.py already depends on them. No Codex marker is listed
+# because none has been verified in this repository -- see detect_host_backend.
+_HOST_MARKERS = {"claude": ("CLAUDECODE", "CLAUDE_CODE")}
+
+# Operator escape hatch for hosts that expose no marker (Codex today). Checked
+# before the markers so a deliberate declaration always wins over sniffing.
+HOST_BACKEND_ENV = "RLR_HOST_BACKEND"
 _MAX_SOURCE_BYTES = 5 * 1024 * 1024
 
 
@@ -39,16 +54,114 @@ def runtime_config_path(project_dir: str | Path) -> Path:
     return Path(project_dir) / "00_Preflight" / "deep_research_runtime.json"
 
 
-def default_runtime_config() -> dict:
-    return {
+def detect_host_backend(env: dict | None = None) -> str | None:
+    """Name the agent host running this process, or None when it is unknown.
+
+    RLR_HOST_BACKEND is read first: it is the only way to name a host that
+    exposes no marker, and a declaration must not be overridden by sniffing.
+    Otherwise only the Claude Code markers are verified (providers/headless.py
+    relies on the same two variables). Codex exposes no marker this repository
+    has confirmed, so an unmarked host is reported as unknown -- never assumed
+    to be Codex. Guessing here is what let a Claude session spend Codex quota.
+    """
+    env = _os.environ if env is None else env
+    declared = str(env.get(HOST_BACKEND_ENV) or "").strip()
+    if declared:
+        if declared not in SUPPORTED_BACKENDS:
+            raise DeepResearchError(
+                f"{HOST_BACKEND_ENV}={declared!r} is not a supported host; use one of "
+                f"{', '.join(SUPPORTED_BACKENDS)}")
+        return declared
+    for backend, markers in _HOST_MARKERS.items():
+        if any(env.get(marker) for marker in markers):
+            return backend
+    return None
+
+
+def default_runtime_config(backend: str | None = None,
+                           env: dict | None = None) -> dict:
+    """Runtime config for an explicit backend, or for the detected host.
+
+    Fails loud when the host cannot be detected: silently defaulting to one
+    backend is what sent Claude-hosted runs to the Codex CLI.
+    """
+    backend = backend or detect_host_backend(env)
+    if backend is None:
+        raise DeepResearchError(
+            "cannot detect the current agent host; pass --backend "
+            f"{'|'.join(SUPPORTED_BACKENDS)} to name the runtime explicitly")
+    if backend not in SUPPORTED_BACKENDS:
+        raise DeepResearchError(
+            f"backend must be one of {', '.join(SUPPORTED_BACKENDS)}, got {backend!r}")
+    config = {
         "schema_version": SCHEMA_VERSION,
-        "backend": "codex",
-        "executable": "codex",
-        "skill_path": str(Path.home() / ".codex" / "skills" / "academic-research-suite"),
+        "backend": backend,
+        "executable": backend,
+        "skill_path": "",
         "plugin_dir": "",
         "skill_version": "unknown",
         "timeout": 900,
     }
+    if backend == "codex":
+        config["skill_path"] = str(
+            Path.home() / ".codex" / "skills" / "academic-research-suite")
+    # The Claude plugin directory is installation-specific and is left empty
+    # rather than guessed; runtime_ready() reports it as missing.
+    return config
+
+
+def host_matches(spec: RuntimeSpec, env: dict | None = None, *,
+                 explicit: bool = False) -> tuple[bool, str]:
+    """Reject a configured backend that contradicts the detected host.
+
+    An unknown host is fail-closed unless the caller named the backend
+    explicitly. Being permissive there meant a Codex session -- which exposes no
+    marker -- silently inherited whatever backend the project file happened to
+    carry, which is the same quota mistake a positive mismatch causes, only
+    quieter. `explicit` says a human chose the backend for this run, so there is
+    nothing left to guess.
+    """
+    host = detect_host_backend(env)
+    if host is None:
+        if explicit:
+            return True, ""
+        return False, (
+            "cannot identify the current agent host; set "
+            f"{HOST_BACKEND_ENV}={'|'.join(SUPPORTED_BACKENDS)} or pass --backend to "
+            f"declare it explicitly (the project runtime asks for {spec.backend!r}, "
+            "which would be run on an unverified host)")
+    if host == spec.backend:
+        return True, ""
+    return False, (
+        f"running inside the {host!r} host but the project runtime is configured "
+        f"for backend {spec.backend!r}. This would spend {spec.backend!r} quota "
+        f"from a {host!r} session. Either re-run with --backend {host} or, if the "
+        f"cross-host run is intended, pass --allow-host-mismatch")
+
+
+def validate_spec_consistency(spec: RuntimeSpec) -> tuple[bool, str]:
+    """Reject a runtime spec whose fields contradict its own declared backend.
+
+    A spec can pass host_matches() (backend matches the detected host) while
+    still pointing at the wrong CLI or carrying the other backend's fields --
+    e.g. backend=claude with executable=codex, or a leftover Codex skill_path
+    on a Claude spec. Each of those would still launch the wrong provider.
+    """
+    other = "codex" if spec.backend == "claude" else "claude"
+    executable_name = Path(spec.executable or "").name.lower()
+    if other in executable_name:
+        return False, (
+            f"runtime backend is {spec.backend!r} but executable {spec.executable!r} "
+            f"names {other!r}")
+    if spec.backend == "claude" and spec.skill_path:
+        return False, (
+            f"runtime backend is 'claude' but skill_path={spec.skill_path!r} is set; "
+            "skill_path is a Codex-only field")
+    if spec.backend == "codex" and spec.plugin_dir:
+        return False, (
+            f"runtime backend is 'codex' but plugin_dir={spec.plugin_dir!r} is set; "
+            "plugin_dir is a Claude-only field")
+    return True, ""
 
 
 def load_runtime_spec(project_dir: str | Path, overrides: dict | None = None) -> tuple[RuntimeSpec, str]:
@@ -88,15 +201,77 @@ def _safe_id(value: str) -> str:
 
 
 def _runtime_schema() -> dict:
+    extract = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "section": {"type": "string"},
+            "text": {"type": "string"},
+            "locator": {"type": "string"},
+            "extraction_method": {"type": "string"},
+            "verification_status": {"type": "string"},
+        },
+        "required": ["section", "text", "locator", "extraction_method", "verification_status"],
+    }
+    paper = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "doi": {"type": "string"},
+            "pmid": {"type": "string"},
+            "url": {"type": "string"},
+            "title": {"type": "string"},
+            "source_database": {"type": "string"},
+            "metadata": {
+                "type": "object", "additionalProperties": False,
+                "properties": {"year": {"type": "integer"}, "journal": {"type": "string"}},
+                "required": ["year", "journal"],
+            },
+            "source_metadata_response": {
+                "type": "object", "additionalProperties": False,
+                "properties": {"id": {"type": "string"}, "title": {"type": "string"}},
+                "required": ["id", "title"],
+            },
+            "open_access": {"type": "boolean"},
+            "content_type": {"type": "string"},
+            "source_payload": {"type": "string"},
+            "paper_type": {"type": "string"},
+            "extracts": {"type": "array", "items": extract},
+        },
+        "required": [
+            "doi", "pmid", "url", "title", "source_database", "metadata",
+            "source_metadata_response", "open_access", "content_type",
+            "source_payload", "paper_type", "extracts",
+        ],
+    }
+    review_search = {
+        "type": "object", "additionalProperties": False,
+        "properties": {
+            "query": {"type": "string"},
+            "status": {"type": "string"},
+            "receipt": {"type": "string"},
+        },
+        "required": ["query", "status", "receipt"],
+    }
+    verification = {
+        "type": "object", "additionalProperties": False,
+        "properties": {
+            "finding": {"type": "string"},
+            "verdict": {"type": "string"},
+            "evidence_ids": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["finding", "verdict", "evidence_ids"],
+    }
     return {
         "type": "object",
-        "required": ["schema_version", "queries", "papers"],
+        "additionalProperties": False,
+        "required": ["schema_version", "queries", "papers", "review_search", "verification"],
         "properties": {
-            "schema_version": {"const": SCHEMA_VERSION},
-            "queries": {"type": "array", "items": {"type": "string"}},
-            "papers": {"type": "array", "items": {"type": "object"}},
-            "review_search": {"type": "object"},
-            "verification": {"type": "array", "items": {"type": "object"}},
+            "schema_version": {"type": "string", "const": SCHEMA_VERSION},
+            "queries": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+            "papers": {"type": "array", "minItems": 1, "items": paper},
+            "review_search": review_search,
+            "verification": {"type": "array", "items": verification},
         },
     }
 
@@ -126,8 +301,9 @@ def build_invocation(spec: RuntimeSpec, node: str, question: str, claim: str,
     """
     if node not in _STAGES:
         raise DeepResearchError(f"unsupported Deep Research stage {node!r}")
-    if spec.backend not in {"codex", "claude"}:
-        raise DeepResearchError("backend must be 'codex' or 'claude'")
+    if spec.backend not in SUPPORTED_BACKENDS:
+        raise DeepResearchError(
+            f"backend must be one of {', '.join(SUPPORTED_BACKENDS)}")
     if not spec.executable:
         raise DeepResearchError("executable is required")
     work_dir = Path(work_dir)
@@ -141,7 +317,7 @@ def build_invocation(spec: RuntimeSpec, node: str, question: str, claim: str,
         if not spec.plugin_dir:
             raise DeepResearchError("Claude backend requires plugin_dir for academic-research-skills")
         command = [spec.executable, "-p", "--plugin-dir", str(spec.plugin_dir),
-                   "--json-schema", str(schema_path)]
+                   "--json-schema", str(schema_path), "--output-format", "json"]
         if spec.model:
             command.extend(["--model", spec.model])
         invocation = "/ars-lit-review" if node == "L4" else "/ars-full"
@@ -204,6 +380,34 @@ def _parse_cli_output(stdout: str) -> dict:
     return value
 
 
+def _filter_unidentifiable_papers(payload: dict) -> tuple[dict, list[dict]]:
+    """Keep citable records and return an auditable list of rejected records."""
+    papers = payload.get("papers") if isinstance(payload, dict) else None
+    if not isinstance(papers, list):
+        return payload, []
+    accepted, rejected = [], []
+    for index, paper in enumerate(papers):
+        if isinstance(paper, dict) and any(
+                str(paper.get(key, "")).strip() for key in ("doi", "pmid", "url")):
+            accepted.append(paper)
+            continue
+        rejected.append({
+            "index": index,
+            "title": str(paper.get("title", "")) if isinstance(paper, dict) else "",
+            "doi": str(paper.get("doi", "")) if isinstance(paper, dict) else "",
+            "pmid": str(paper.get("pmid", "")) if isinstance(paper, dict) else "",
+            "url": str(paper.get("url", "")) if isinstance(paper, dict) else "",
+            "reason": "missing DOI, PMID, or stable URL",
+        })
+    if not accepted:
+        raise DeepResearchError("no retrievable papers remain after identifier filtering")
+    if not rejected:
+        return payload, []
+    filtered = dict(payload)
+    filtered["papers"] = accepted
+    return filtered, rejected
+
+
 def validate_payload(payload: dict) -> None:
     if payload.get("schema_version") != SCHEMA_VERSION:
         raise DeepResearchError("payload schema_version is missing or unsupported")
@@ -248,11 +452,23 @@ def _run_paths(project_dir: Path) -> tuple[Path, Path, Path]:
     return base / "runs", base / "papers", base / "sources"
 
 
-def persist_run(project_dir: str | Path, candidate_id: str, node: str, payload: dict,
-                receipt: dict, result_context: str = "") -> dict:
+def persist_run(
+    project_dir: str | Path,
+    candidate_id: str,
+    node: str,
+    payload: dict,
+    receipt: dict,
+    result_context: str = "",
+    *,
+    project_id: str = "",
+    round_id: str = "",
+    profile_id: str = "",
+    research_persona: str = "Curie",
+) -> dict:
     """Persist immutable paper records and a run artifact from a validated payload."""
     if node not in _STAGES:
         raise DeepResearchError(f"unsupported Deep Research stage {node!r}")
+    payload, rejected_papers = _filter_unidentifiable_papers(payload)
     validate_payload(payload)
     if receipt.get("exit_code") != 0 or not receipt.get("command_hash") or not receipt.get("prompt_hash"):
         raise DeepResearchError("skill receipt is incomplete or records a failed invocation")
@@ -303,20 +519,39 @@ def persist_run(project_dir: str | Path, candidate_id: str, node: str, payload: 
                         "doi": record["doi"], "pmid": record["pmid"], "url": record["url"],
                         "evidence_ids": [e["evidence_id"] for e in extracts]})
     artifact = {
-        "schema_version": SCHEMA_VERSION, "kind": "deep_research_run", "run_id": run_id,
+        "schema_version": SCHEMA_VERSION, "evidence_receipt_schema": "EvidenceRunReceipt/v1.1",
+        "kind": "deep_research_run", "research_phase": "pre_research",
+        "research_persona": research_persona, "run_id": run_id,
+        "project_id": project_id, "round_id": str(round_id),
+        "profile_id": profile_id,
         "status": "completed", "candidate_id": candidate_id, "node": node, "created_at": _now(),
         "queries": payload["queries"], "skill_receipt": receipt, "papers": records,
+        "rejected_papers": rejected_papers,
         "review_search": payload.get("review_search", {}), "verification": payload.get("verification", []),
         "result_context_hash": _sha(result_context) if result_context else "",
     }
     run_file = runs_dir / f"{run_id}.json"
-    run_file.write_text(json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    summary_file = runs_dir / f"{run_id}.md"
     artifact["path"] = str(run_file.relative_to(project_dir)).replace("\\", "/")
+    artifact["summary_path"] = str(summary_file.relative_to(project_dir)).replace("\\", "/")
+    run_file.write_text(json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    summary_file.write_text(render_pre_research_markdown(artifact), encoding="utf-8")
     return artifact
 
 
-def _latest_artifact(project_dir: str | Path, candidate_id: str, node: str) -> dict | None:
+def _artifact(project_dir: str | Path, candidate_id: str, node: str,
+              *, run_id: str | None = None) -> dict | None:
+    """Load an exact evidence run when requested; legacy callers use latest."""
     runs_dir, _, _ = _run_paths(Path(project_dir))
+    if run_id:
+        path = runs_dir / f"{_safe_id(run_id)}.json"
+        try:
+            artifact = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if artifact.get("run_id") != run_id or artifact.get("candidate_id") != candidate_id or artifact.get("node") != node:
+            return None
+        return artifact
     matches = []
     for path in runs_dir.glob(f"{_safe_id(candidate_id)}_{node.replace('.', '_')}_*.json"):
         try:
@@ -326,8 +561,134 @@ def _latest_artifact(project_dir: str | Path, candidate_id: str, node: str) -> d
     return max(matches, default=(0, None), key=lambda item: item[0])[1]
 
 
-def audit_evidence_pack(project_dir: str | Path, candidate_id: str, node: str) -> tuple[bool, str]:
-    artifact = _latest_artifact(project_dir, candidate_id, node)
+def _latest_artifact(project_dir: str | Path, candidate_id: str, node: str) -> dict | None:
+    """Compatibility helper; new context assembly must supply an exact run ID."""
+    return _artifact(project_dir, candidate_id, node)
+
+
+def run_ids_for_stage(
+    project_dir: str | Path, candidate_id: str, node: str
+) -> list[str]:
+    """Return stable evidence run IDs without consulting filesystem mtimes."""
+    runs_dir, _, _ = _run_paths(Path(project_dir))
+    found = []
+    for path in sorted(
+        runs_dir.glob(
+            f"{_safe_id(candidate_id)}_{node.replace('.', '_')}_*.json"
+        ),
+        key=lambda item: item.name,
+    ):
+        try:
+            artifact = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if artifact.get("candidate_id") == candidate_id and artifact.get("node") == node:
+            run_id = str(artifact.get("run_id") or "")
+            if run_id:
+                found.append(run_id)
+    return found
+
+
+def unique_run_id(project_dir: str | Path, candidate_id: str, node: str) -> str | None:
+    """Return an unambiguous run ID without selecting by mtime.
+
+    A native context may infer the ID only while there is exactly one valid run
+    for the candidate/stage; once a retry creates multiple runs, callers must
+    supply --evidence-run-id explicitly.
+    """
+    found = run_ids_for_stage(project_dir, candidate_id, node)
+    return found[0] if len(found) == 1 else None
+
+
+def evidence_artifact_manifest(
+    project_dir: str | Path,
+    candidate_id: str,
+    node: str,
+    run_id: str,
+) -> dict:
+    """Return the exact immutable evidence files consumed by one context."""
+    root = Path(project_dir)
+    artifact = _artifact(root, candidate_id, node, run_id=run_id)
+    if artifact is None:
+        raise DeepResearchError(
+            f"evidence pack missing for {candidate_id} {node} run {run_id}"
+        )
+    root_resolved = root.resolve()
+
+    def bound_path(value: str, label: str) -> Path:
+        path = (root / value).resolve()
+        try:
+            path.relative_to(root_resolved)
+        except ValueError as exc:
+            raise DeepResearchError(
+                f"evidence {label} path escapes the project"
+            ) from exc
+        return path
+
+    run_path = bound_path(
+        str((_run_paths(root)[0] / f"{_safe_id(run_id)}.json").relative_to(root)),
+        "run",
+    )
+    summary_value = artifact.get("summary_path")
+    summary_path = (
+        bound_path(str(summary_value), "summary")
+        if summary_value
+        else bound_path(
+            f"02_Agent_Notes/_pre_research/{node}_research.md", "summary"
+        )
+    )
+    if not summary_path.is_file():
+        raise DeepResearchError("exact evidence-run summary is missing")
+    summary_text = summary_path.read_text(encoding="utf-8")
+    if f"`{run_id}`" not in summary_text:
+        raise DeepResearchError("pre-research summary does not match the selected evidence run")
+    files = [{
+        "kind": "run",
+        "path": str(run_path.relative_to(root)).replace("\\", "/"),
+        "sha256": _sha(run_path.read_bytes()),
+    }, {
+        "kind": "summary",
+        "path": str(summary_path.relative_to(root)).replace("\\", "/"),
+        "sha256": _sha(summary_path.read_bytes()),
+    }]
+    for ref in artifact.get("papers", []):
+        try:
+            paper_path = bound_path(str(ref["path"]), "paper")
+            paper = json.loads(paper_path.read_text(encoding="utf-8"))
+        except (KeyError, OSError, json.JSONDecodeError) as exc:
+            raise DeepResearchError("evidence run references an unreadable paper record") from exc
+        files.append({
+            "kind": "paper",
+            "path": str(paper_path.relative_to(root)).replace("\\", "/"),
+            "sha256": _sha(paper_path.read_bytes()),
+        })
+        source_value = paper.get("source_payload_path")
+        if source_value:
+            source_path = bound_path(str(source_value), "source")
+            if not source_path.is_file():
+                raise DeepResearchError("evidence paper source payload is missing")
+            files.append({
+                "kind": "source",
+                "path": str(source_path.relative_to(root)).replace("\\", "/"),
+                "sha256": _sha(source_path.read_bytes()),
+            })
+    return {
+        "run_id": run_id,
+        "project_id": str(artifact.get("project_id") or ""),
+        "candidate_id": str(artifact.get("candidate_id") or ""),
+        "round_id": str(artifact.get("round_id") or ""),
+        "profile_id": str(artifact.get("profile_id") or ""),
+        "target_node": str(artifact.get("node") or ""),
+        "research_phase": str(artifact.get("research_phase") or ""),
+        "research_persona": str(artifact.get("research_persona") or ""),
+        "receipt_schema": str(artifact.get("evidence_receipt_schema") or ""),
+        "files": sorted(files, key=lambda item: (item["kind"], item["path"])),
+    }
+
+
+def audit_evidence_pack(project_dir: str | Path, candidate_id: str, node: str,
+                        *, run_id: str | None = None) -> tuple[bool, str]:
+    artifact = _artifact(project_dir, candidate_id, node, run_id=run_id)
     if not artifact:
         return False, f"evidence pack missing for {candidate_id} {node}"
     receipt = artifact.get("skill_receipt") or {}
@@ -383,12 +744,15 @@ def audit_evidence_pack(project_dir: str | Path, candidate_id: str, node: str) -
     return True, ""
 
 
-def render_evidence_digest(project_dir: str | Path, candidate_id: str, nodes: list[str]) -> str:
+def render_evidence_digest(project_dir: str | Path, candidate_id: str, nodes: list[str],
+                           *, run_ids: dict[str, str] | None = None) -> str:
     """Render compact, source-located evidence for a cognitive-node context."""
     root = Path(project_dir)
     lines = ["=== DEEP RESEARCH EVIDENCE ==="]
     for node in nodes:
-        artifact = _latest_artifact(root, candidate_id, node)
+        if run_ids is not None and node not in run_ids:
+            continue
+        artifact = _artifact(root, candidate_id, node, run_id=(run_ids or {}).get(node))
         if not artifact:
             continue
         lines.append(f"## {node} Evidence IDs")
@@ -403,12 +767,15 @@ def render_evidence_digest(project_dir: str | Path, candidate_id: str, nodes: li
     return "\n".join(lines) + "\n"
 
 
-def evidence_ids(project_dir: str | Path, candidate_id: str, nodes: list[str]) -> list[str]:
+def evidence_ids(project_dir: str | Path, candidate_id: str, nodes: list[str],
+                 *, run_ids: dict[str, str] | None = None) -> list[str]:
     """Return IDs present in persisted, source-located evidence records."""
     root = Path(project_dir)
     found = []
     for node in nodes:
-        artifact = _latest_artifact(root, candidate_id, node)
+        if run_ids is not None and node not in run_ids:
+            continue
+        artifact = _artifact(root, candidate_id, node, run_id=(run_ids or {}).get(node))
         if not artifact:
             continue
         for ref in artifact.get("papers", []):
@@ -422,13 +789,13 @@ def evidence_ids(project_dir: str | Path, candidate_id: str, nodes: list[str]) -
 
 
 def evidence_pack_details(project_dir: str | Path, candidate_id: str,
-                          node: str = "L8.5") -> dict:
+                          node: str = "L8.5", *, run_id: str | None = None) -> dict:
     """Return hash-bound, source-located records for ledger import."""
-    ok, reason = audit_evidence_pack(project_dir, candidate_id, node)
+    ok, reason = audit_evidence_pack(project_dir, candidate_id, node, run_id=run_id)
     if not ok:
         raise DeepResearchError(reason)
     root = Path(project_dir)
-    artifact = _latest_artifact(root, candidate_id, node)
+    artifact = _artifact(root, candidate_id, node, run_id=run_id)
     if artifact is None:  # guarded by audit; keeps the return type explicit
         raise DeepResearchError("evidence pack missing")
     records = {}
@@ -468,9 +835,22 @@ def render_pre_research_markdown(artifact: dict) -> str:
     return f"""# Pre-Research: {artifact['node']}\n\n## Runtime digest\nVerified Academic Research evidence pack `{artifact['run_id']}` with paper IDs: {', '.join(identifiers)}.\n\n## Evidence pack\n- {artifact['path']}\n\n## Query log\n{queries}\n\n## Tool receipt\n- {receipt['backend']} / {receipt['skill']} {receipt.get('skill_version', '')}; command_hash={receipt['command_hash']}; prompt_hash={receipt['prompt_hash']}\n\n## Source count\n{len(artifact.get('papers', []))}\n"""
 
 
-def run_and_persist(project_dir: str | Path, candidate_id: str, node: str, question: str,
-                    claim: str, spec: RuntimeSpec, work_dir: str | Path,
-                    skill_version: str = "unknown", result_context: str = "") -> dict:
+def run_and_persist(
+    project_dir: str | Path,
+    candidate_id: str,
+    node: str,
+    question: str,
+    claim: str,
+    spec: RuntimeSpec,
+    work_dir: str | Path,
+    skill_version: str = "unknown",
+    result_context: str = "",
+    *,
+    project_id: str = "",
+    round_id: str = "",
+    profile_id: str = "",
+    research_persona: str = "Curie",
+) -> dict:
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     schema_path = work_dir / "deep_research_output.schema.json"
@@ -478,6 +858,7 @@ def run_and_persist(project_dir: str | Path, candidate_id: str, node: str, quest
     command, prompt = build_invocation(spec, node, question, claim, work_dir, result_context)
     try:
         completed = subprocess.run(command + [prompt], capture_output=True, text=True,
+                                   encoding="utf-8", errors="strict",
                                    timeout=spec.timeout, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         raise DeepResearchError(f"Academic Research CLI invocation failed: {exc}") from exc
@@ -486,8 +867,11 @@ def run_and_persist(project_dir: str | Path, candidate_id: str, node: str, quest
                             model=spec.model)
     if completed.returncode != 0:
         raise DeepResearchError(f"Academic Research CLI exited {completed.returncode}: {completed.stderr.strip()}")
-    artifact = persist_run(project_dir, candidate_id, node, _parse_cli_output(completed.stdout), receipt,
-                            result_context)
+    artifact = persist_run(
+        project_dir, candidate_id, node, _parse_cli_output(completed.stdout),
+        receipt, result_context, project_id=project_id, round_id=round_id,
+        profile_id=profile_id, research_persona=research_persona,
+    )
     target = Path(project_dir) / "02_Agent_Notes" / "_pre_research" / f"{node}_research.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(render_pre_research_markdown(artifact), encoding="utf-8")
@@ -495,8 +879,8 @@ def run_and_persist(project_dir: str | Path, candidate_id: str, node: str, quest
 
 
 def runtime_ready(spec: RuntimeSpec) -> tuple[bool, str]:
-    if spec.backend not in {"codex", "claude"}:
-        return False, "backend must be codex or claude"
+    if spec.backend not in SUPPORTED_BACKENDS:
+        return False, f"backend must be one of {', '.join(SUPPORTED_BACKENDS)}"
     if not shutil.which(spec.executable):
         return False, f"executable not found: {spec.executable}"
     if spec.backend == "claude":
