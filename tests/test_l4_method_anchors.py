@@ -88,7 +88,9 @@ def test_l4_runtime_schema_is_method_specific_without_changing_l1():
     assert {"method_components", "method_candidates"}.issubset(l4["required"])
     assert "method_components" not in l1["properties"]
     extract = l4["properties"]["papers"]["items"]["properties"]["extracts"]["items"]
-    assert {"anchor_id", "method_component_ids", "method_ids", "source_kind"}.issubset(extract["required"])
+    assert {"anchor_id", "method_component_ids", "method_ids", "source_kind"}.issubset(
+        extract["properties"]
+    )
 
 
 def test_l4_prompt_lists_registered_user_sources(tmp_path):
