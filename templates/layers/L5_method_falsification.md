@@ -1,18 +1,37 @@
-# L5 — Method Falsification
+# L5 — Method Candidate Falsification
 
 ## Purpose
 
-Find threats to validity, implementation failure modes, and simpler alternatives in the proposed methods.
+Critique every eligible L4 method candidate before any final method is selected. L5 must preserve the candidate catalog and bind each critique to a stable `method_id` and `component_id`.
 
-## Reasoning boundary
+## Required review for each candidate
 
-- Examine controls, sample structure, measurement limits, leakage, and statistical assumptions.
-- Prefer specific remedies or rejection criteria over generic caution.
-- Keep scientific plausibility separate from operational feasibility.
+Record:
+
+- `method_id` and `component_id`;
+- verdict: `ACCEPT`, `MODIFY`, or `REJECT`;
+- compatibility with the actual input type and data representation;
+- violated or fragile assumptions;
+- threats from sample structure, measurement limits, leakage, confounding, and implementation choices;
+- required EDA/QC diagnostics;
+- failure modes and explicit stop rules;
+- required modifications;
+- whether a proposed alternative should replace or supplement the candidate.
+
+Do not silently omit, merge, or delete an L4 candidate. An ineligible L4 candidate may be acknowledged briefly with its existing rejection reason; every eligible candidate requires an explicit critique.
+
+## Evidence boundary
+
+Use L4 method-anchor IDs to verify what the source actually supports. Do not treat a citation as proof that the method fits this project. Distinguish:
+
+- evidence that a method exists or has been used;
+- evidence that it is reproducible;
+- evidence that its assumptions fit the current data;
+- evidence that it is preferable to alternatives.
 
 ## Handoff
 
-Return method critiques, required revisions, and residual risks. Do not approve execution or alter formal candidate state.
+Return `method_critiques`, QC checkpoints, failure stop rules, and recommended modifications for L6. Do not approve execution, change candidate state, or claim an analysis result.
 
 ## Full-mode role
 
