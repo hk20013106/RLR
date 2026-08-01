@@ -6,6 +6,7 @@ from research_loop import deep_research as deep_research
 from research_loop.method_evidence import install as _install_method_evidence
 from research_loop.method_evidence_compat import install as _install_method_evidence_compat
 from research_loop import method_review_navigation as _review_navigation
+from research_loop.method_navigation_compat import install as _install_navigation_compat
 from research_loop.review_status_compat import install as _install_review_status_compat
 from research_loop.user_sources import registered_sources as _registered_sources
 
@@ -15,6 +16,7 @@ deep_research.registered_sources = _registered_sources
 _review_navigation._REVIEW_TYPES.update({
     "systematic review", "meta-analysis", "meta analysis", "review/meta-analysis",
 })
+_install_navigation_compat(_review_navigation)
 _review_navigation.install(deep_research)
 _install_review_status_compat(deep_research)
 
@@ -35,6 +37,7 @@ from research_loop.conditional_routing import install as _install_conditional_ro
 _install_conditional_routing(_lifecycle, _context)
 
 del _install_method_evidence, _install_method_evidence_compat
-del _review_navigation, _install_review_status_compat, _registered_sources
+del _review_navigation, _install_navigation_compat
+del _install_review_status_compat, _registered_sources
 del _install_method_contracts, _install_topology_extensions
 del _install_conditional_routing, _lifecycle, _context
