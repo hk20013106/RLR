@@ -201,12 +201,16 @@ def _safe_id(value: str) -> str:
 
 
 def resolve_subprocess_executable(executable: str) -> str:
-    """Resolve Windows command wrappers before passing them to CreateProcess."""
+    """Prefer the native Codex executable over its lossy Windows CMD wrapper."""
     if _os.name != "nt":
         return executable
     resolved = shutil.which(executable)
     if not resolved:
         raise DeepResearchError(f"executable not found: {executable}")
+    if Path(resolved).suffix.lower() == ".cmd":
+        native = shutil.which(f"{Path(executable).stem}.exe")
+        if native:
+            return native
     return resolved
 
 
