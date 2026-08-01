@@ -1,6 +1,5 @@
 import hashlib
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -45,13 +44,14 @@ def _project(tmp_path: Path, monkeypatch, hypothesis_count: int):
         }
         for i in range(1, hypothesis_count + 1)
     ]
-    result = commit_v2(project, "C1", "L1", "Einstein", {
+    commit_v2(project, "C1", "L1", "Einstein", {
         "schema_version": "2.1",
         "hypotheses": hypotheses,
         "primary_proposal_key": "p1",
         "key_uncertainty": "effect size",
     })
-    return project, result
+    l1_path = project / "02_Agent_Notes" / "Einstein" / "C1_L1_einstein_delta.v2.json"
+    return project, l1_path
 
 
 def test_l2_skip_decision_has_inclusive_four_hypothesis_threshold():
@@ -65,7 +65,7 @@ def test_l2_skip_decision_has_inclusive_four_hypothesis_threshold():
 def test_next_step_routes_small_valid_hypothesis_sets_directly_to_l3(
     tmp_path, monkeypatch, capsys, hypothesis_count
 ):
-    project, result = _project(tmp_path, monkeypatch, hypothesis_count)
+    project, l1_path = _project(tmp_path, monkeypatch, hypothesis_count)
 
     assert rl.main(["next-step", str(project), "C1"]) == 0
     packet = json.loads(capsys.readouterr().out)
@@ -78,7 +78,6 @@ def test_next_step_routes_small_valid_hypothesis_sets_directly_to_l3(
     }]
     receipt = project / "08_Audit" / "node_skips" / "C1_L2.json"
     saved = json.loads(receipt.read_text(encoding="utf-8"))
-    l1_path = Path(result.delta_path)
     assert saved["l1_delta_sha256"] == hashlib.sha256(l1_path.read_bytes()).hexdigest()
     assert saved["threshold"] == 4
 
@@ -96,7 +95,7 @@ def test_next_step_runs_l2_for_five_hypotheses(tmp_path, monkeypatch, capsys):
 def test_l3_context_injects_verified_skip_instead_of_fake_l2_delta(
     tmp_path, monkeypatch, capsys
 ):
-    project, result = _project(tmp_path, monkeypatch, 4)
+    project, l1_path = _project(tmp_path, monkeypatch, 4)
     assert rl.main(["next-step", str(project), "C1"]) == 0
     capsys.readouterr()
 
@@ -107,7 +106,7 @@ def test_l3_context_injects_verified_skip_instead_of_fake_l2_delta(
     assert "hypothesis_count_lte_4" in output
     assert "L2 (not yet emitted)" not in output
     assert "No Feynman attack occurred" in output
-    ok, detail = validate_l2_skip_receipt(project, "C1", Path(result.delta_path))
+    ok, detail = validate_l2_skip_receipt(project, "C1", l1_path)
     assert ok is True, detail
 
 
