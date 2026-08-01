@@ -703,6 +703,16 @@ def evidence_artifact_manifest(
     }
 
 
+def _is_methods_section(section: object) -> bool:
+    """Return whether a located section is an accepted Methods heading."""
+    normalized = str(section or "").strip().casefold()
+    normalized = normalized.translate(str.maketrans({
+        "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-", "―": "-", "−": "-",
+    }))
+    normalized = "-".join(part.strip() for part in normalized.split("-"))
+    return normalized in {"methods", "materials and methods"} or normalized.startswith("methods-")
+
+
 def audit_evidence_pack(project_dir: str | Path, candidate_id: str, node: str,
                         *, run_id: str | None = None) -> tuple[bool, str]:
     artifact = _artifact(project_dir, candidate_id, node, run_id=run_id)
@@ -720,14 +730,17 @@ def audit_evidence_pack(project_dir: str | Path, candidate_id: str, node: str,
             records.append(json.loads((root / ref["path"]).read_text(encoding="utf-8")))
         except (KeyError, OSError, json.JSONDecodeError):
             return False, "evidence pack references an unreadable paper record"
-    sections = {str(e.get("section", "")).lower() for r in records for e in r.get("evidence_extracts", [])
-                if e.get("verification_status") == "located" and e.get("locator")}
+    located_extracts = [
+        e for r in records for e in r.get("evidence_extracts", [])
+        if e.get("verification_status") == "located" and e.get("locator")
+    ]
+    sections = {str(e.get("section", "")).lower() for e in located_extracts}
     if node == "L1":
         for required in ("results", "discussion", "conclusion"):
             if required not in sections:
                 return False, f"L1 evidence lacks located {required.title()} extract"
     elif node == "L4":
-        if "methods" not in sections:
+        if not any(_is_methods_section(e.get("section")) for e in located_extracts):
             return False, "L4 evidence lacks located Methods extract"
         review = artifact.get("review_search") or {}
         if review.get("status") not in {"completed", "none_found"} or not review.get("receipt"):
