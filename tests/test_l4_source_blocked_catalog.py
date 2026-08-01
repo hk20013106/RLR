@@ -84,4 +84,4 @@ def test_navigation_only_l4_run_persists_precise_user_source_blocker(tmp_path):
     assert "user-supplied source" in reason
     summary = (project / artifact["summary_path"]).read_text(encoding="utf-8")
     assert "python scripts/import_literature_pdf.py" in summary
-    assert "registration alone does not satisfy L4" in summary
+    assert "registration alone does not satisfy l4" in summary.casefold()
