@@ -13,7 +13,9 @@ if str(ROOT / "tests") not in sys.path:
     sys.path.insert(0, str(ROOT / "tests"))
 
 import research_loop_v04 as rl
-from native_v2_helpers import activate_native_project, commit_v2
+from native_v2_helpers import commit_v2
+from research_loop.compatibility import PROFILE_V21
+from research_loop.hypothesis_ledger import HypothesisLedger
 from research_loop.node_skips import l2_skip_decision, validate_l2_skip_receipt
 
 
@@ -33,7 +35,7 @@ def _project(tmp_path: Path, monkeypatch, hypothesis_count: int):
         "current_status: IDEA_PROPOSED\ncurrent_owner: Einstein\nround_id: 1\n---\n",
         encoding="utf-8",
     )
-    activate_native_project(project)
+    HypothesisLedger(store).bind_project(project, profile_id=PROFILE_V21)
     hypotheses = [
         {
             "proposal_key": f"p{i}",
@@ -50,7 +52,12 @@ def _project(tmp_path: Path, monkeypatch, hypothesis_count: int):
         "primary_proposal_key": "p1",
         "key_uncertainty": "effect size",
     })
-    l1_path = project / "02_Agent_Notes" / "Einstein" / "C1_L1_einstein_delta.v2.json"
+    l1_path = (
+        project
+        / "02_Agent_Notes"
+        / "Einstein"
+        / "C1_L1_einstein_delta.v2.json"
+    )
     return project, l1_path
 
 
@@ -78,7 +85,9 @@ def test_next_step_routes_small_valid_hypothesis_sets_directly_to_l3(
     }]
     receipt = project / "08_Audit" / "node_skips" / "C1_L2.json"
     saved = json.loads(receipt.read_text(encoding="utf-8"))
-    assert saved["l1_delta_sha256"] == hashlib.sha256(l1_path.read_bytes()).hexdigest()
+    assert saved["l1_delta_sha256"] == hashlib.sha256(
+        l1_path.read_bytes()
+    ).hexdigest()
     assert saved["threshold"] == 4
 
 
@@ -89,7 +98,9 @@ def test_next_step_runs_l2_for_five_hypotheses(tmp_path, monkeypatch, capsys):
     packet = json.loads(capsys.readouterr().out)
 
     assert packet["node"] == "L2"
-    assert not (project / "08_Audit" / "node_skips" / "C1_L2.json").exists()
+    assert not (
+        project / "08_Audit" / "node_skips" / "C1_L2.json"
+    ).exists()
 
 
 def test_l3_context_injects_verified_skip_instead_of_fake_l2_delta(
@@ -99,7 +110,9 @@ def test_l3_context_injects_verified_skip_instead_of_fake_l2_delta(
     assert rl.main(["next-step", str(project), "C1"]) == 0
     capsys.readouterr()
 
-    assert rl.main(["assemble-context", str(project), "C1", "--node", "L3"]) == 0
+    assert rl.main(
+        ["assemble-context", str(project), "C1", "--node", "L3"]
+    ) == 0
     output = capsys.readouterr().out
 
     assert "=== NODE SKIP: L2 ===" in output
@@ -110,7 +123,9 @@ def test_l3_context_injects_verified_skip_instead_of_fake_l2_delta(
     assert ok is True, detail
 
 
-def test_l3_context_rejects_tampered_skip_receipt(tmp_path, monkeypatch, capsys):
+def test_l3_context_rejects_tampered_skip_receipt(
+    tmp_path, monkeypatch, capsys
+):
     project, _ = _project(tmp_path, monkeypatch, 4)
     assert rl.main(["next-step", str(project), "C1"]) == 0
     capsys.readouterr()
