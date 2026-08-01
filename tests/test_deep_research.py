@@ -48,15 +48,13 @@ def test_codex_command_explicitly_invokes_academic_research_suite(tmp_path):
     assert "Results" in prompt and "Conclusion" in prompt
 
 
-def test_subprocess_executable_prefers_windows_native_codex(monkeypatch):
+def test_windows_command_wrapper_receives_multiline_prompt_on_standard_input(monkeypatch):
     command_wrapper = r"C:\\Users\\operator\\AppData\\Roaming\\npm\\codex.CMD"
-    native_executable = r"C:\\Program Files\\WindowsApps\\OpenAI.Codex\\codex.exe"
     monkeypatch.setattr(dr._os, "name", "nt")
-    monkeypatch.setattr(
-        dr.shutil, "which",
-        lambda executable: native_executable if executable == "codex.exe" else command_wrapper,
-    )
-    assert dr.resolve_subprocess_executable("codex") == native_executable
+    monkeypatch.setattr(dr.shutil, "which", lambda executable: command_wrapper)
+    command, kwargs = dr.subprocess_invocation([command_wrapper, "exec"], "one\ntwo")
+    assert command == [command_wrapper, "exec"]
+    assert kwargs == {"input": "one\ntwo"}
 
 
 def test_claude_command_requires_plugin_dir_and_ars_alias(tmp_path):
