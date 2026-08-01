@@ -165,6 +165,42 @@ def test_l4_contract_accepts_primary_methods_and_review_search_miss(tmp_path):
     assert ok is True, reason
 
 
+@pytest.mark.parametrize("section", [
+    "methods",
+    "Materials and Methods",
+    "Methods—Total RNA extraction",
+    "Methods–Data analysis",
+    "Methods-Bioinformatic analysis",
+])
+def test_l4_contract_accepts_normalized_methods_section_variants(tmp_path, section):
+    payload = _payload()
+    payload["papers"][0]["extracts"][-1]["section"] = section
+    payload["review_search"] = {
+        "query": "systematic review network analysis",
+        "status": "none_found",
+        "receipt": "Europe PMC 0",
+    }
+    dr.persist_run(tmp_path, "C1", "L4", payload,
+                   dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"))
+
+    assert dr.audit_evidence_pack(tmp_path, "C1", "L4") == (True, "")
+
+
+def test_l4_contract_rejects_unrelated_section_containing_methods_word(tmp_path):
+    payload = _payload()
+    payload["papers"][0]["extracts"][-1]["section"] = "Results: comparison of methods"
+    payload["review_search"] = {
+        "query": "systematic review network analysis",
+        "status": "none_found",
+        "receipt": "Europe PMC 0",
+    }
+    dr.persist_run(tmp_path, "C1", "L4", payload,
+                   dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"))
+
+    ok, reason = dr.audit_evidence_pack(tmp_path, "C1", "L4")
+    assert ok is False and "Methods" in reason
+
+
 def test_l4_contract_requires_results_and_conclusion_when_review_was_found(tmp_path):
     payload = _payload()
     payload["review_search"] = {"query": "review network analysis", "status": "completed", "receipt": "Europe PMC 1"}
