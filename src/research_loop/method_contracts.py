@@ -10,7 +10,7 @@ def _string_array(*, min_items=0):
 
 
 def install(contracts_module) -> None:
-    """Extend only native schema 2.1; legacy 2.0 remains byte-compatible."""
+    """Add an atomic optional extension to v2.1; legacy deltas remain readable."""
     hc = contracts_module
     if getattr(hc, "_METHOD_CONTRACTS_INSTALLED", False):
         return
@@ -65,6 +65,9 @@ def install(contracts_module) -> None:
     ]
 
     l4 = schemas["L4"]
+    method_fields = (
+        "deep_research_run_id", "method_components", "method_candidates"
+    )
     l4["properties"].update({
         "deep_research_run_id": hc._ID,
         "method_components": {
@@ -74,9 +77,11 @@ def install(contracts_module) -> None:
             "type": "array", "minItems": 1, "items": candidate,
         },
     })
-    for field in ("deep_research_run_id", "method_components", "method_candidates"):
-        if field not in l4["required"]:
-            l4["required"].append(field)
+    # Compatibility cutover: an old v2.1 L4 delta may omit the extension.
+    # Once any extension field is present, all three become mandatory.
+    dependencies = l4.setdefault("dependentRequired", {})
+    for field in method_fields:
+        dependencies[field] = [other for other in method_fields if other != field]
 
     critique = hc._object({
         "method_id": hc._ID,
@@ -90,12 +95,9 @@ def install(contracts_module) -> None:
         "method_id", "component_id", "verdict", "assumption_risks",
         "required_diagnostics", "failure_modes", "recommended_modifications",
     ])
-    l5 = schemas["L5"]
-    l5["properties"]["method_critiques"] = {
+    schemas["L5"]["properties"]["method_critiques"] = {
         "type": "array", "minItems": 1, "items": critique,
     }
-    if "method_critiques" not in l5["required"]:
-        l5["required"].append("method_critiques")
 
     rejected = hc._object({
         "method_id": hc._ID,
@@ -116,12 +118,9 @@ def install(contracts_module) -> None:
         "rejected_alternatives", "parameters", "software_requirements",
         "scripts", "method_anchor_ids", "l5_qc_requirements",
     ])
-    l6 = schemas["L6"]
-    l6["properties"]["selected_methods"] = {
+    schemas["L6"]["properties"]["selected_methods"] = {
         "type": "array", "minItems": 1, "items": selection,
     }
-    if "selected_methods" not in l6["required"]:
-        l6["required"].append("selected_methods")
 
     # Rebuild the persisted v2.1 contracts from the extended submission schemas.
     hc.PERSISTED_SCHEMA_REGISTRY["2.1"] = {
