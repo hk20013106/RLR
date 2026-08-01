@@ -84,6 +84,8 @@ def test_l85_invocation_includes_actual_l7_l8_results(tmp_path):
 def test_codex_output_schema_is_closed_for_structured_outputs():
     schema = dr._runtime_schema()
     assert schema["additionalProperties"] is False
+    extract = schema["properties"]["papers"]["items"]["properties"]["extracts"]["items"]
+    assert extract["properties"]["verification_status"] == {"type": "string", "const": "located"}
 
 
 def test_persisted_open_access_paper_keeps_source_and_extracts(tmp_path):
