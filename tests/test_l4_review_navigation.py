@@ -70,7 +70,8 @@ def _payload():
             },
         ],
         "review_search": {
-            "query": "transcriptome method review", "status": "completed",
+            "query": "transcriptome method review",
+            "status": "relevant_review_located",
             "receipt": "PubMed PMID 12345",
         },
         "verification": [],
@@ -91,6 +92,8 @@ def test_structured_l4_keeps_review_navigation_but_does_not_count_it_as_anchor(t
         dr.skill_receipt("codex", ["codex", "exec"], "prompt", "test"),
     )
 
+    assert artifact["review_search"]["status"] == "completed"
+    assert artifact["review_search"]["reported_status"] == "relevant_review_located"
     assert len(artifact["papers"]) == 2
     assert [anchor["anchor_id"] for anchor in artifact["method_anchors"]] == ["A1"]
     assert dr.audit_evidence_pack(
