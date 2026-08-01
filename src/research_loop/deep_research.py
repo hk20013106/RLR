@@ -200,6 +200,16 @@ def _safe_id(value: str) -> str:
     return value or "record"
 
 
+def resolve_subprocess_executable(executable: str) -> str:
+    """Resolve Windows command wrappers before passing them to CreateProcess."""
+    if _os.name != "nt":
+        return executable
+    resolved = shutil.which(executable)
+    if not resolved:
+        raise DeepResearchError(f"executable not found: {executable}")
+    return resolved
+
+
 def _runtime_schema() -> dict:
     extract = {
         "type": "object",
@@ -856,6 +866,7 @@ def run_and_persist(
     schema_path = work_dir / "deep_research_output.schema.json"
     schema_path.write_text(json.dumps(_runtime_schema(), indent=2), encoding="utf-8")
     command, prompt = build_invocation(spec, node, question, claim, work_dir, result_context)
+    command[0] = resolve_subprocess_executable(command[0])
     try:
         completed = subprocess.run(command + [prompt], capture_output=True, text=True,
                                    encoding="utf-8", errors="strict",
