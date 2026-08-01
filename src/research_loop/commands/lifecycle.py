@@ -609,8 +609,56 @@ def cmd_normalize_l0_input(args):
         l8_persona=l8_artifact.display_persona,
         l8_storage_key=l8_artifact.storage_key,
     )
-    _candidate_file(project_dir, cand_id).write_text(body, encoding="utf-8")
-    artifact_path, _ = l0_contract.write_contract(project_dir, cand_id, contract)
+    plans_dir = project_dir / "01_Candidates" / "_research_plans"
+    plans_dir_existed_before = plans_dir.exists()
+
+    cand_path = _candidate_file(project_dir, cand_id)
+    sidecar_path = project_dir / mem_fields["input_contract_path"]
+    snapshot_path = None
+    prov = contract.get("provenance", {})
+    if isinstance(prov, dict) and prov.get("parser_mode") == "plan-v1":
+        snapshot_rel = prov.get("research_plan_snapshot_path")
+        if snapshot_rel:
+            snapshot_path = project_dir / snapshot_rel
+
+    for target in (cand_path, sidecar_path, snapshot_path):
+        if target and target.exists():
+            print(f"ERROR: target file already exists: {target}", file=sys.stderr)
+            return 2
+
+    created_paths = []
+    try:
+        cand_path.write_text(body, encoding="utf-8")
+        created_paths.append(cand_path)
+
+        artifact_path, _ = l0_contract.write_contract(project_dir, cand_id, contract)
+        created_paths.append(artifact_path)
+
+        if snapshot_path:
+            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            snapshot_path.write_bytes(request_path.read_bytes())
+            created_paths.append(snapshot_path)
+    except Exception as exc:
+        cleanup_errors = []
+        for path in reversed(created_paths):
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError as cleanup_exc:
+                cleanup_errors.append(f"{path.name}: {cleanup_exc}")
+
+        if not plans_dir_existed_before and plans_dir.exists():
+            try:
+                plans_dir.rmdir()
+            except OSError:
+                pass
+
+        err_msg = f"structured intake write failed: {exc}; created candidate artifacts were rolled back"
+        if cleanup_errors:
+            err_msg += f" (cleanup errors: {'; '.join(cleanup_errors)})"
+        print(f"ERROR: {err_msg}", file=sys.stderr)
+        return 2
+
     _append_decision(project_dir, cand_id, "-", "NEW", "candidate created",
                      agent="Oppenheimer", kind="seed")
     print(f"Written to: 01_Candidates/{artifact_path.name}")

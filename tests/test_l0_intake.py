@@ -198,6 +198,72 @@ def test_validator_rejects_missing_continuation_memory_hash(tmp_path):
     assert any("previous_round.memory_hash" in error for error in errors), errors
 
 
+def test_frontmatter_hypothesis_key_does_not_shadow_body_label(tmp_path):
+    project = _new_project(tmp_path)
+    data_file = project / "data.tsv"
+    data_file.write_text("x\n", encoding="utf-8")
+    request = tmp_path / "preplan.md"
+    request.write_text(
+        "---\n"
+        "title: 'preplan test'\n"
+        "current_round:\n"
+        "  hypothesis: >-\n"
+        "    frontmatter block-scalar residue, must not leak into the contract\n"
+        "---\n"
+        "\n"
+        "科学问题：真实假说会不会被 frontmatter 的 hypothesis 键吞掉？\n"
+        "本轮新假说：真实假说文本，来自正文，不是 frontmatter 残留。\n",
+        encoding="utf-8")
+
+    result = _run("normalize-l0-input", "--project", str(project),
+                  "--input", str(request), "--data", str(data_file))
+
+    assert result.returncode == 0, result.stderr
+    artifact = next((project / "01_Candidates").glob("*.l0_input.yaml"))
+    contract = yaml.safe_load(artifact.read_text(encoding="utf-8"))
+    assert contract["current_round"]["hypothesis"] == "真实假说文本，来自正文，不是 frontmatter 残留。"
+    assert ">-" not in contract["current_round"]["hypothesis"]
+
+
+def test_unclosed_leading_dashes_is_not_treated_as_frontmatter(tmp_path):
+    project = _new_project(tmp_path)
+    data_file = project / "data.tsv"
+    data_file.write_text("x\n", encoding="utf-8")
+    request = tmp_path / "request.md"
+    request.write_text(
+        "---\n"
+        "Scientific question: Q with an unclosed leading dash block?\n"
+        "Current hypothesis: H still findable in the body.\n",
+        encoding="utf-8")
+
+    result = _run("normalize-l0-input", "--project", str(project),
+                  "--input", str(request), "--data", str(data_file))
+
+    assert result.returncode == 0, result.stderr
+    artifact = next((project / "01_Candidates").glob("*.l0_input.yaml"))
+    contract = yaml.safe_load(artifact.read_text(encoding="utf-8"))
+    assert contract["scientific_question"] == "Q with an unclosed leading dash block?"
+    assert contract["current_round"]["hypothesis"] == "H still findable in the body."
+
+
+def test_block_scalar_only_hypothesis_hard_fails(tmp_path):
+    project = _new_project(tmp_path)
+    data_file = project / "data.tsv"
+    data_file.write_text("x\n", encoding="utf-8")
+    request = tmp_path / "request.md"
+    request.write_text(
+        "Scientific question: Q?\n"
+        "hypothesis: >-\n",
+        encoding="utf-8")
+
+    result = _run("normalize-l0-input", "--project", str(project),
+                  "--input", str(request), "--data", str(data_file))
+
+    assert result.returncode == 2
+    assert "- current_round.hypothesis" in result.stderr
+    assert not list((project / "01_Candidates").glob("*.l0_input.yaml"))
+
+
 def test_run_l0_invokes_canonical_runner_with_l0_stop(tmp_path):
     from research_loop import engine
 
