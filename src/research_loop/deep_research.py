@@ -226,7 +226,7 @@ def _runtime_schema() -> dict:
             "text": {"type": "string"},
             "locator": {"type": "string"},
             "extraction_method": {"type": "string"},
-            "verification_status": {"type": "string"},
+            "verification_status": {"type": "string", "const": "located"},
         },
         "required": ["section", "text", "locator", "extraction_method", "verification_status"],
     }
