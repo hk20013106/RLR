@@ -195,6 +195,10 @@ def _set_status(project_dir, cand_id, new_status, owner=None):
 
 def _append_decision(project_dir, cand_id, frm, to, reason, route_to="",
                      agent="Oppenheimer", kind="decision"):
+    # Import at use time: templates imports shared formatting helpers from this
+    # module, so a module-level import would create a circular dependency.
+    from research_loop.templates import _decision_log_template
+
     seq = _next_seq(project_dir, "D")
     body = _decision_log_template(seq, cand_id, frm, to, reason, route_to,
                                   agent=agent, kind=kind)

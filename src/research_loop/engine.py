@@ -200,7 +200,6 @@ from research_loop.templates import (  # inward shim (Phase 7a)
 )
 _templates.VALID_STATUSES = VALID_STATUSES
 _templates.__version__ = __version__
-_common._decision_log_template = _decision_log_template
 
 # --- small helpers ----------------------------------------------------------
 
