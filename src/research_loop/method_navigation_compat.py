@@ -2,20 +2,22 @@
 from __future__ import annotations
 
 import copy
+import json
+from pathlib import Path
 
 
 def install(navigation_module) -> None:
-    """Allow a source-blocked catalog to persist without fabricating an anchor.
+    """Allow source-blocked catalogs without fabricating durable anchors.
 
-    The underlying legacy evidence persister requires at least one paper record.
-    When the raw L4 result contains only navigation evidence, provide a
-    metadata-only carrier with no extracts and no source payload. The real
-    navigation extracts are persisted separately and never count as anchors.
+    The legacy evidence persister requires one paper record. A metadata-only
+    carrier satisfies that internal precondition, then is removed before the
+    final run artifact and Markdown are written. Real navigation records remain.
     """
     module = navigation_module
     if getattr(module, "_NAVIGATION_CARRIER_INSTALLED", False):
         return
     original_split = module._split
+    original_persist_navigation = module._persist_navigation
 
     def split(payload: dict):
         method_payload, navigation = original_split(payload)
@@ -28,5 +30,31 @@ def install(navigation_module) -> None:
             method_payload["papers"] = [carrier]
         return method_payload, navigation
 
+    def persist_navigation(dr, project: Path, artifact: dict, navigation: list[dict]):
+        retained = []
+        for ref in artifact.get("papers", []):
+            try:
+                paper_path = project / ref["path"]
+                record = json.loads(paper_path.read_text(encoding="utf-8"))
+            except (KeyError, OSError, json.JSONDecodeError):
+                retained.append(ref)
+                continue
+            if record.get("paper_type") != "navigation_carrier":
+                retained.append(ref)
+                continue
+            source_path = str(record.get("source_payload_path") or "")
+            if source_path:
+                try:
+                    (project / source_path).unlink()
+                except OSError:
+                    pass
+            try:
+                paper_path.unlink()
+            except OSError:
+                pass
+        artifact["papers"] = retained
+        original_persist_navigation(dr, project, artifact, navigation)
+
     module._split = split
+    module._persist_navigation = persist_navigation
     module._NAVIGATION_CARRIER_INSTALLED = True
