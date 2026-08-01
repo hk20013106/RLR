@@ -1,6 +1,6 @@
 """Immutable registration of user-supplied literature PDFs.
 
-Registration proves file identity and candidate ownership only.  It never
+Registration proves file identity and candidate ownership only. It never
 converts a PDF into accepted L4 evidence; extraction and evidence validation
 remain separate fail-closed steps.
 """
@@ -45,6 +45,22 @@ def _load_record(path: Path) -> dict:
     return value
 
 
+def _verified_record(project: Path, sidecar: Path, candidate_id: str) -> dict:
+    record = _load_record(sidecar)
+    if record.get("candidate_id") != candidate_id:
+        raise UserSourceError(f"user-source sidecar belongs to another candidate: {sidecar}")
+    stored = project / str(record.get("stored_path") or "")
+    if not stored.is_file():
+        raise UserSourceError(f"registered PDF is missing: {stored}")
+    try:
+        digest = hashlib.sha256(stored.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise UserSourceError(f"registered PDF is unreadable: {stored}") from exc
+    if digest != record.get("sha256"):
+        raise UserSourceError(f"registered PDF bytes do not match sidecar: {stored}")
+    return record
+
+
 def register_pdf(
     project_dir: str | Path,
     candidate_id: str,
@@ -56,8 +72,8 @@ def register_pdf(
 ) -> dict:
     """Copy a readable PDF into candidate-scoped immutable storage.
 
-    Re-registering the same bytes for the same candidate is idempotent and
-    returns the original sidecar record.
+    Re-registering identical bytes for the same candidate is idempotent even
+    when the operator supplies a different local filename.
     """
     project = Path(project_dir)
     candidate_id = str(candidate_id).strip()
@@ -78,25 +94,23 @@ def register_pdf(
     user_source_id = f"USR_{digest[:16]}"
     target_dir = _candidate_dir(project, candidate_id)
     target_dir.mkdir(parents=True, exist_ok=True)
+
+    # Identity is candidate + complete content hash, not the incoming filename.
+    # This prevents duplicate registrations when the same PDF is renamed.
+    for existing_sidecar in sorted(target_dir.glob("*.json")):
+        try:
+            record = _verified_record(project, existing_sidecar, candidate_id)
+        except UserSourceError:
+            continue
+        if (record.get("sha256") == digest
+                and record.get("user_source_id") == user_source_id):
+            return record
+
     target = target_dir / f"{digest[:16]}_{_safe_filename(source.name)}"
     sidecar = target.with_suffix(".json")
-
-    if sidecar.is_file():
-        record = _load_record(sidecar)
-        if (record.get("candidate_id") != candidate_id
-                or record.get("sha256") != digest
-                or record.get("user_source_id") != user_source_id):
-            raise UserSourceError(f"existing user-source registration conflicts: {sidecar}")
-        if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != digest:
-            raise UserSourceError(f"registered PDF bytes do not match sidecar: {target}")
-        return record
-
-    if target.exists():
-        existing_hash = hashlib.sha256(target.read_bytes()).hexdigest()
-        if existing_hash != digest:
-            raise UserSourceError(f"refusing to overwrite a different registered PDF: {target}")
-    else:
-        target.write_bytes(data)
+    if target.exists() or sidecar.exists():
+        raise UserSourceError(f"user-source target already exists unexpectedly: {target}")
+    target.write_bytes(data)
 
     record = {
         "schema_version": "UserLiteratureSource/v1",
@@ -125,26 +139,21 @@ def register_pdf(
 def registered_sources(project_dir: str | Path, candidate_id: str) -> list[dict]:
     """Return valid sidecar records registered for one candidate."""
     project = Path(project_dir)
-    directory = _candidate_dir(project, str(candidate_id))
+    candidate_id = str(candidate_id)
+    directory = _candidate_dir(project, candidate_id)
     if not directory.is_dir():
         return []
     records = []
+    seen_hashes = set()
     for sidecar in sorted(directory.glob("*.json")):
         try:
-            record = _load_record(sidecar)
+            record = _verified_record(project, sidecar, candidate_id)
         except UserSourceError:
             continue
-        if record.get("candidate_id") != str(candidate_id):
+        digest = str(record.get("sha256") or "")
+        if not digest or digest in seen_hashes:
             continue
-        stored = project / str(record.get("stored_path") or "")
-        if not stored.is_file():
-            continue
-        try:
-            digest = hashlib.sha256(stored.read_bytes()).hexdigest()
-        except OSError:
-            continue
-        if digest != record.get("sha256"):
-            continue
+        seen_hashes.add(digest)
         records.append(record)
     return records
 
