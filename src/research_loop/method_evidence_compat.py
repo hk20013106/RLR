@@ -12,9 +12,13 @@ def _normalized_payload(payload: dict, node: str | None) -> dict:
     normalized = copy.deepcopy(payload)
     for paper in normalized.get("papers", []):
         user_source_id = str(paper.get("user_source_id") or "").strip()
-        if (user_source_id
-                and not any(str(paper.get(key) or "").strip()
-                            for key in ("doi", "pmid", "url"))):
+        if (
+            user_source_id
+            and not any(
+                str(paper.get(key) or "").strip()
+                for key in ("doi", "pmid", "url")
+            )
+        ):
             # The registered source ID is a stable, candidate-scoped local
             # identifier. It is not an internet URL and never bypasses the
             # subsequent candidate/SHA256 verification.
@@ -47,29 +51,77 @@ def install(deep_research_module) -> None:
     original_run = dr.run_and_persist
 
     def validate_payload(payload, *, node=None, project_dir=None, candidate_id=""):
+        normalized = _normalized_payload(payload, node)
+        if node == "L4" and normalized.get("method_components"):
+            for paper in normalized.get("papers", []):
+                source_payload = str(paper.get("source_payload") or "")
+                if len(source_payload.encode("utf-8")) > dr._MAX_SOURCE_BYTES:
+                    raise dr.DeepResearchError(
+                        "L4 retained source payload exceeds 5 MiB limit"
+                    )
         return original_validate(
-            _normalized_payload(payload, node),
-            node=node, project_dir=project_dir, candidate_id=candidate_id,
+            normalized,
+            node=node,
+            project_dir=project_dir,
+            candidate_id=candidate_id,
         )
 
-    def persist_run(project_dir, candidate_id, node, payload, receipt,
-                    result_context="", *, project_id="", round_id="",
-                    profile_id="", research_persona="Curie"):
+    def persist_run(
+        project_dir,
+        candidate_id,
+        node,
+        payload,
+        receipt,
+        result_context="",
+        *,
+        project_id="",
+        round_id="",
+        profile_id="",
+        research_persona="Curie",
+    ):
         artifact = original_persist(
-            project_dir, candidate_id, node, _normalized_payload(payload, node),
-            receipt, result_context, project_id=project_id, round_id=round_id,
-            profile_id=profile_id, research_persona=research_persona,
+            project_dir,
+            candidate_id,
+            node,
+            _normalized_payload(payload, node),
+            receipt,
+            result_context,
+            project_id=project_id,
+            round_id=round_id,
+            profile_id=profile_id,
+            research_persona=research_persona,
         )
         return _normalize_receipt_schema(project_dir, artifact)
 
-    def run_and_persist(project_dir, candidate_id, node, question, claim, spec,
-                        work_dir, skill_version="unknown", result_context="", *,
-                        project_id="", round_id="", profile_id="",
-                        research_persona="Curie"):
+    def run_and_persist(
+        project_dir,
+        candidate_id,
+        node,
+        question,
+        claim,
+        spec,
+        work_dir,
+        skill_version="unknown",
+        result_context="",
+        *,
+        project_id="",
+        round_id="",
+        profile_id="",
+        research_persona="Curie",
+    ):
         artifact = original_run(
-            project_dir, candidate_id, node, question, claim, spec, work_dir,
-            skill_version, result_context, project_id=project_id,
-            round_id=round_id, profile_id=profile_id,
+            project_dir,
+            candidate_id,
+            node,
+            question,
+            claim,
+            spec,
+            work_dir,
+            skill_version,
+            result_context,
+            project_id=project_id,
+            round_id=round_id,
+            profile_id=profile_id,
             research_persona=research_persona,
         )
         return _normalize_receipt_schema(project_dir, artifact)
