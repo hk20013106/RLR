@@ -19,13 +19,22 @@ def test_l1_retry_returns_original_receipt_after_clock_advances(tmp_path, monkey
     ledger.bind_project(project, profile_id=PROFILE_V21)
     delta = {
         "schema_version": "2.1",
-        "hypotheses": [{
-            "proposal_key": "p1",
-            "statement": "A testable hypothesis",
-            "operationalization": "Measure the outcome.",
-            "falsification_criteria": ["The outcome is absent."],
-            "rationale": "Deterministic retry fixture.",
-        }],
+        "hypotheses": [
+            {
+                "proposal_key": "p1",
+                "statement": "A testable hypothesis",
+                "operationalization": "Measure the first outcome.",
+                "falsification_criteria": ["The first outcome is absent."],
+                "rationale": "Deterministic retry fixture.",
+            },
+            {
+                "proposal_key": "p2",
+                "statement": "A second testable hypothesis",
+                "operationalization": "Measure the second outcome.",
+                "falsification_criteria": ["The second outcome is absent."],
+                "rationale": "Satisfies the native L1 minimum candidate set.",
+            },
+        ],
         "primary_proposal_key": "p1",
         "key_uncertainty": "effect size",
     }
