@@ -10,7 +10,7 @@ if str(SRC) not in sys.path:
 from research_loop.hypothesis_contracts import validate_submission
 
 
-def test_v21_l4_requires_evidence_backed_method_candidates():
+def test_v21_l4_method_extension_is_atomic():
     delta = {
         "schema_version": "2.1",
         "deep_research_run_id": "C1_L4_abc",
@@ -45,7 +45,7 @@ def test_v21_l4_requires_evidence_backed_method_candidates():
     assert any("method_candidates" in error for error in errors)
 
 
-def test_v21_l5_critiques_each_method_candidate_by_method_id():
+def test_v21_l5_validates_candidate_level_critiques_when_present():
     delta = {
         "schema_version": "2.1",
         "attacks": [{
@@ -71,12 +71,12 @@ def test_v21_l5_critiques_each_method_candidate_by_method_id():
         }],
     }
     assert validate_submission("L5", delta, schema_version="2.1") == []
-    delta.pop("method_critiques")
-    assert any("method_critiques" in error
+    delta["method_critiques"][0].pop("method_id")
+    assert any("method_id" in error
                for error in validate_submission("L5", delta, schema_version="2.1"))
 
 
-def test_v21_l6_selects_final_methods_without_erasing_alternatives():
+def test_v21_l6_validates_selected_methods_when_present():
     delta = {
         "schema_version": "2.1",
         "analysis_plan": [{
@@ -100,17 +100,26 @@ def test_v21_l6_selects_final_methods_without_erasing_alternatives():
         }],
     }
     assert validate_submission("L6", delta, schema_version="2.1") == []
-    delta.pop("selected_methods")
-    assert any("selected_methods" in error
+    delta["selected_methods"][0]["selected_method_ids"] = []
+    assert any("selected_method_ids" in error
                for error in validate_submission("L6", delta, schema_version="2.1"))
 
 
-def test_v20_contracts_do_not_require_new_method_fields():
-    delta = {
+def test_legacy_v21_and_v20_deltas_remain_readable():
+    v21 = {
+        "schema_version": "2.1",
+        "strategies": [{
+            "strategy_id": "S1", "hypothesis_ids": ["H1"],
+            "name": "Legacy v2.1 strategy", "steps": ["step"],
+        }],
+    }
+    assert validate_submission("L4", v21, schema_version="2.1") == []
+
+    v20 = {
         "schema_version": "2.0",
         "strategies": [{
             "strategy_id": "S1", "hypothesis_ids": ["H1"],
             "name": "Legacy strategy", "steps": ["step"],
         }],
     }
-    assert validate_submission("L4", delta, schema_version="2.0") == []
+    assert validate_submission("L4", v20, schema_version="2.0") == []
