@@ -49,18 +49,22 @@ def test_register_pdf_copies_bytes_and_records_sha256(tmp_path):
     assert json.loads(sidecar.read_text(encoding="utf-8"))["user_source_id"] == record["user_source_id"]
 
 
-def test_register_pdf_is_idempotent_for_same_candidate_and_hash(tmp_path):
+def test_register_pdf_is_idempotent_for_same_candidate_and_hash_even_if_renamed(tmp_path):
     from research_loop.user_sources import register_pdf
 
     project, candidate_id = _project(tmp_path)
     source = tmp_path / "paper.pdf"
-    _pdf(source)
+    data = _pdf(source)
+    renamed = tmp_path / "renamed-copy.pdf"
+    renamed.write_bytes(data)
 
     first = register_pdf(project, candidate_id, source)
-    second = register_pdf(project, candidate_id, source)
+    second = register_pdf(project, candidate_id, renamed)
 
     assert second == first
-    assert len(list((project / "09_Literature_Database" / "user_sources" / candidate_id).glob("*.pdf"))) == 1
+    directory = project / "09_Literature_Database" / "user_sources" / candidate_id
+    assert len(list(directory.glob("*.pdf"))) == 1
+    assert len(list(directory.glob("*.json"))) == 1
 
 
 def test_register_pdf_rejects_non_pdf_and_unknown_candidate(tmp_path):
