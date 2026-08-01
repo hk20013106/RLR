@@ -48,6 +48,13 @@ def test_codex_command_explicitly_invokes_academic_research_suite(tmp_path):
     assert "Results" in prompt and "Conclusion" in prompt
 
 
+def test_subprocess_executable_resolves_windows_command_wrapper(monkeypatch):
+    resolved = r"C:\\Users\\operator\\AppData\\Roaming\\npm\\codex.CMD"
+    monkeypatch.setattr(dr._os, "name", "nt")
+    monkeypatch.setattr(dr.shutil, "which", lambda executable: resolved)
+    assert dr.resolve_subprocess_executable("codex") == resolved
+
+
 def test_claude_command_requires_plugin_dir_and_ars_alias(tmp_path):
     spec = dr.RuntimeSpec(backend="claude", executable="claude", plugin_dir="C:/ars")
     command, prompt = dr.build_invocation(spec, "L4", "Q", "H", tmp_path)
