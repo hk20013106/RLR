@@ -326,7 +326,12 @@ def build_invocation(spec: RuntimeSpec, node: str, question: str, claim: str,
     work_dir = Path(work_dir)
     schema_path = work_dir / "deep_research_output.schema.json"
     if spec.backend == "codex":
-        command = [spec.executable, "exec", "--output-schema", str(schema_path)]
+        # A deep-research run is a disposable child process.  Do not inherit
+        # the interactive user's MCP fleet: initializing those servers makes
+        # one-shot evidence acquisition slow and can leave it waiting on
+        # unrelated local services.
+        command = [spec.executable, "exec", "--ephemeral", "--ignore-user-config",
+                   "--output-schema", str(schema_path)]
         if spec.model:
             command.extend(["--model", spec.model])
         invocation = "$academic-research-suite"

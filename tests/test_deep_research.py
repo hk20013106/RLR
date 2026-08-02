@@ -44,6 +44,8 @@ def test_codex_command_explicitly_invokes_academic_research_suite(tmp_path):
     spec = dr.RuntimeSpec(backend="codex", executable="codex")
     command, prompt = dr.build_invocation(spec, "L1", "Q", "H", tmp_path)
     assert command[:2] == ["codex", "exec"]
+    assert "--ephemeral" in command
+    assert "--ignore-user-config" in command
     assert "$academic-research-suite" in prompt
     assert "Results" in prompt and "Conclusion" in prompt
 
