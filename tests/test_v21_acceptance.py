@@ -565,16 +565,22 @@ def test_profile_upgrade_blocks_unfinalized_or_stale_ledger_state(tmp_path):
     _resolution(resolution, report)
     con = ledger._connect(readonly=True)
     try:
-        hypothesis_id = str(con.execute("SELECT hypothesis_id FROM occurrences").fetchone()[0])
+        hypothesis_ids = [
+            str(row[0])
+            for row in con.execute(
+                "SELECT hypothesis_id FROM occurrences ORDER BY rowid"
+            ).fetchall()
+        ]
     finally:
         con.close()
     ledger.commit_delta(
         project_dir=project, candidate_id="C1", round_id="1", node="L2",
         persona="Feynman", delta={
             "schema_version": "2.0", "attacks": [], "confounders": [],
-            "diagnostic_tests": [], "verdicts": [{
-                "hypothesis_id": hypothesis_id, "outcome": "REJECT", "reason": "fixture",
-            }],
+            "diagnostic_tests": [], "verdicts": [
+                {"hypothesis_id": hypothesis_id, "outcome": "REJECT", "reason": "fixture"}
+                for hypothesis_id in hypothesis_ids
+            ],
         }, delta_path=project / "02_Agent_Notes" / "Feynman" / "C1_L2.json",
     )
     next_report = dry_run_profile_upgrade(project, ledger)
