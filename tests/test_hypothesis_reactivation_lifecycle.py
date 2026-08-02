@@ -2,14 +2,24 @@ import json
 
 import pytest
 
-from research_loop.hypothesis_ledger import LedgerError, canonical_json
+from research_loop.hypothesis_ledger import LedgerError
 from research_loop.hypothesis_pool import build_pool
 from research_loop.hypothesis_recall import create_recall
 from research_loop.node_skips import ensure_l2_skip_receipt
+from tests.native_v2_helpers import commit_v2
 from tests.test_hypothesis_pool import _seed_rejected_hypothesis
 
 
 def _finalize(ledger, result):
+    con = ledger._connect(readonly=True)
+    try:
+        if con.execute(
+            "SELECT 1 FROM committed_emissions WHERE delta_hash=?",
+            (result.delta_hash,),
+        ).fetchone():
+            return
+    finally:
+        con.close()
     ledger.finalize_emission(
         result.delta_hash,
         artifact_sha256=result.delta_hash,
@@ -17,13 +27,12 @@ def _finalize(ledger, result):
     )
 
 
-def _write_l1_and_skip(project, result):
+def _write_l1_and_skip(project, _result):
     path = (
         project / "02_Agent_Notes" / "Einstein"
         / "C2_L1_einstein_delta.v2.json"
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(canonical_json(result.normalized_delta), encoding="utf-8")
+    assert path.is_file()
     ensure_l2_skip_receipt(project, "C2", path)
 
 
@@ -47,19 +56,18 @@ def _source(project, ledger, hypothesis_id):
 
 
 def _commit_l1(ledger, project, hypothesis):
-    return ledger.commit_delta(
-        project_dir=project,
-        candidate_id="C2",
-        round_id="2",
-        node="L1",
-        persona="Einstein",
-        delta={
+    return commit_v2(
+        project,
+        "C2",
+        "L1",
+        "Einstein",
+        {
             "schema_version": "2.1",
             "hypotheses": [hypothesis],
             "primary_proposal_key": hypothesis["proposal_key"],
             "key_uncertainty": "whether the new basis resolves the old blocker",
         },
-        delta_path=project / "02_Agent_Notes" / "Einstein" / "C2_L1.json",
+        round_id="2",
     )
 
 
