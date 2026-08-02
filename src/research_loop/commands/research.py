@@ -4,7 +4,7 @@ import json
 import sys
 from pathlib import Path
 
-from research_loop import deep_research
+from research_loop import deep_research, deep_research_task
 from research_loop.common import _now
 from research_loop.compatibility import PROFILE_V20, get_profile
 from research_loop.delta import _delta_for_candidate, artifact_for_node
@@ -561,6 +561,48 @@ def cmd_deep_research_run(args):
         return 3
     print(json.dumps(artifact, ensure_ascii=False, indent=2))
     return 0
+
+
+def cmd_deep_research_start(args):
+    """Start the existing Deep Research command in a detached worker."""
+    try:
+        artifact = deep_research_task.start_task(args)
+    except deep_research_task.DetachedTaskError as exc:
+        print(f"ERROR: Deep Research task could not start: {exc}", file=sys.stderr)
+        return 3
+    print(json.dumps(artifact, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_deep_research_status(args):
+    """Read the last status written by a detached Deep Research worker."""
+    try:
+        artifact = deep_research_task.get_status(args.project_dir, args.task_id)
+    except deep_research_task.DetachedTaskError as exc:
+        print(f"ERROR: Deep Research task status failed: {exc}", file=sys.stderr)
+        return 3
+    print(json.dumps(artifact, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_deep_research_collect(args):
+    """Collect a detached result after repeating the existing exact-run audit."""
+    try:
+        artifact = deep_research_task.collect_task(
+            args.project_dir, args.task_id, deep_research.audit_evidence_pack
+        )
+    except deep_research_task.DetachedTaskError as exc:
+        print(f"ERROR: Deep Research task collection failed: {exc}", file=sys.stderr)
+        return 3
+    print(json.dumps(artifact, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_deep_research_worker(args):
+    """Hidden detached entry point; reuse the full synchronous handler."""
+    return deep_research_task.run_worker(
+        args.project_dir, args.task_id, cmd_deep_research_run
+    )
 
 def cmd_audit_literature_evidence(args):
     ok, reason = deep_research.audit_evidence_pack(args.project_dir, args.cand_id, args.node)

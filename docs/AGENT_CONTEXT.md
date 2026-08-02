@@ -141,6 +141,21 @@ Before L1, L4, and L8.5, run:
 python research_loop_v04.py deep-research-run PROJECT CANDIDATE --node NODE
 ```
 
+When the caller cannot wait for a long nested Codex run, use the detached
+wrapper around that same command:
+
+```powershell
+python research_loop_v04.py deep-research-start PROJECT CANDIDATE --node NODE
+python research_loop_v04.py deep-research-status PROJECT TASK_ID
+python research_loop_v04.py deep-research-collect PROJECT TASK_ID
+```
+
+The task logs are under
+`08_Audit/deep_research_runtime/tasks/TASK_ID/`. The wrapper deliberately has
+no crash-recovery scheduler: if an operating-system termination leaves a task
+at `running` indefinitely, inspect `stdout.log` and `stderr.log`, then start a
+new task.
+
 The Academic Research Skills path persists source-located evidence, receipts,
 metadata, and an evidence pack. `assemble-context` fails closed when required
 evidence is missing or invalid. L7 instead has its own code-search step for

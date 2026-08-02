@@ -493,6 +493,28 @@ def test_detached_start_records_failed_when_worker_cannot_launch(tmp_path, monke
     assert "worker launch denied" in status["error"]
 
 
+def test_detached_worker_rejects_invalid_success_output(tmp_path):
+    task_id = "task-invalid-json"
+    task_dir = _task_dir(tmp_path, task_id)
+    task_dir.mkdir(parents=True)
+    (task_dir / "request.json").write_text(json.dumps({
+        "handler_args": {"project_dir": str(tmp_path), "cand_id": "C1", "node": "L1"}
+    }), encoding="utf-8")
+    (task_dir / "status.json").write_text(json.dumps({
+        "task_id": task_id, "state": "running"
+    }), encoding="utf-8")
+
+    def invalid_handler(_args):
+        print("not JSON")
+        return 0
+
+    assert dr_task.run_worker(tmp_path, task_id, invalid_handler) == 3
+    status = json.loads((task_dir / "status.json").read_text(encoding="utf-8"))
+    assert status["state"] == "failed"
+    assert "cannot read" in status["error"]
+    assert not (task_dir / "result.json").exists()
+
+
 def test_deep_research_cli_executes_a_local_fake_codex(tmp_path, monkeypatch):
     """Positive control for the sentinel: a permitted run does launch the CLI."""
     fx = _sentinel_codex_project(tmp_path, monkeypatch)
