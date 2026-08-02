@@ -85,7 +85,9 @@ def test_native_l1_context_requires_recall(tmp_path, capsys):
 
 
 def test_native_l1_context_binds_zero_result_recall(tmp_path, capsys):
-    project, store, candidate, *_ = _native_l1_boundary(tmp_path)
+    project, store, candidate, *_ = _native_l1_boundary(
+        tmp_path, include_recall=False
+    )
     ledger = HypothesisLedger(store)
     create_recall(
         ledger,
