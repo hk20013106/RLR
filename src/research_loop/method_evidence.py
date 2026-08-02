@@ -373,9 +373,6 @@ the actual search receipt; never omit or invent this receipt.
 The `method_components` array MUST contain at least one component with
 `required: true`; every required component must have an eligible candidate
 with a real accepted method anchor, or a truthful source-blocked candidate.
-Primary studies are navigation-only for L4 method anchoring; use method papers,
-protocols, supplementary methods, official documentation, or versioned code for
-the actual method anchor whenever possible.
 """
             prompt += _registered_source_prompt(list(user_sources or []))
         return command, prompt

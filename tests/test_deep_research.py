@@ -97,7 +97,6 @@ def test_l4_prompt_requires_full_source_payload_for_method_anchors(tmp_path):
     assert "MUST NOT use" in prompt
     assert "review_search" in prompt and "receipt" in prompt
     assert "required: true" in prompt
-    assert "primary studies are navigation-only" in prompt.lower()
 
 
 def test_codex_output_schema_is_closed_for_structured_outputs():
