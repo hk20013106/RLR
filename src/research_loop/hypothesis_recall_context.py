@@ -12,6 +12,7 @@ from typing import Any
 from research_loop.compatibility import get_profile
 from research_loop.hypothesis_ledger import HypothesisLedger, LedgerError, canonical_json
 from research_loop.hypothesis_recall import (
+    create_recall,
     load_recall,
     recall_manifest_entry,
     recall_path,
@@ -22,9 +23,10 @@ from research_loop.yamlio import _load_yaml_front
 
 
 _SECTION = "=== HISTORICAL HYPOTHESIS RECALL ==="
+_AUTO_RECALL_ENV = "RLR_AUTO_HYPOTHESIS_RECALL"
 
 
-def _bound_recall(args) -> tuple[HypothesisLedger, dict[str, Any], str] | None:
+def _native_l1_identity(args) -> tuple[HypothesisLedger, dict[str, Any], str] | None:
     if str(getattr(args, "node", "")) != "L1":
         return None
     project = Path(args.project_dir)
@@ -46,7 +48,32 @@ def _bound_recall(args) -> tuple[HypothesisLedger, dict[str, Any], str] | None:
         project / "01_Candidates" / f"{args.cand_id}.md"
     )
     round_id = str(candidate.get("round_id") or "1")
-    artifact = load_recall(project, str(args.cand_id), round_id)
+    return ledger, candidate, round_id
+
+
+def _load_bound_recall(
+    args,
+    ledger: HypothesisLedger,
+    candidate: dict[str, Any],
+    round_id: str,
+) -> dict[str, Any]:
+    project = Path(args.project_dir)
+    try:
+        artifact = load_recall(project, str(args.cand_id), round_id)
+    except LedgerError:
+        if os.environ.get(_AUTO_RECALL_ENV) != "1":
+            raise
+        query_text = " ".join(
+            str(candidate.get(field) or "")
+            for field in ("question", "claim")
+        ).strip()
+        artifact = create_recall(
+            ledger,
+            project,
+            str(args.cand_id),
+            round_id,
+            query_text=query_text,
+        )
     validate_recall(
         ledger,
         project,
@@ -54,7 +81,7 @@ def _bound_recall(args) -> tuple[HypothesisLedger, dict[str, Any], str] | None:
         expected_candidate_id=str(args.cand_id),
         expected_round_id=round_id,
     )
-    return ledger, artifact, round_id
+    return artifact
 
 
 def _concise_recall(artifact: dict[str, Any]) -> dict[str, Any]:
@@ -94,19 +121,26 @@ def _manifest_path(stderr_text: str) -> Path:
     return Path(matches[0])
 
 
+def _remove_generated_context(manifest_path: Path | None) -> None:
+    if manifest_path is None:
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        rendered = Path(str(manifest.get("rendered_context_path") or ""))
+        if rendered.is_file():
+            rendered.unlink()
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
+    manifest_path.unlink(missing_ok=True)
+
+
 def _install_context_gate(context_module) -> None:
     original = context_module.cmd_assemble_context
 
     def cmd_assemble_context(args):
-        try:
-            bound = _bound_recall(args)
-        except LedgerError as exc:
-            print(f"ERROR: hypothesis recall gate -- {exc}", file=sys.stderr)
-            return 2
-        if bound is None:
-            return original(args)
-        _ledger, artifact, round_id = bound
-
+        # Preserve all existing gate precedence. Literature, divergence, and
+        # upstream provenance failures must remain visible before recall is
+        # required for an otherwise-valid L1 context.
         stdout = io.StringIO()
         stderr = io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
@@ -118,10 +152,24 @@ def _install_context_gate(context_module) -> None:
             sys.stderr.write(original_stderr)
             return rc
 
+        try:
+            identity = _native_l1_identity(args)
+        except LedgerError as exc:
+            print(f"ERROR: hypothesis recall gate -- {exc}", file=sys.stderr)
+            return 2
+        if identity is None:
+            sys.stdout.write(original_stdout)
+            sys.stderr.write(original_stderr)
+            return 0
+        ledger, candidate, round_id = identity
+
         manifest_path: Path | None = None
         rendered_path: Path | None = None
         try:
             manifest_path = _manifest_path(original_stderr)
+            artifact = _load_bound_recall(
+                args, ledger, candidate, round_id
+            )
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             rendered_path = Path(str(manifest["rendered_context_path"]))
             context_text = rendered_path.read_text(encoding="utf-8")
@@ -145,12 +193,8 @@ def _install_context_gate(context_module) -> None:
             )
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError,
                 LedgerError) as exc:
-            if rendered_path is not None:
-                rendered_path.unlink(missing_ok=True)
-            if manifest_path is not None:
-                manifest_path.unlink(missing_ok=True)
-            print(f"ERROR: hypothesis recall context binding failed: {exc}",
-                  file=sys.stderr)
+            _remove_generated_context(manifest_path)
+            print(f"ERROR: hypothesis recall gate -- {exc}", file=sys.stderr)
             return 2
 
         print(context_text)
