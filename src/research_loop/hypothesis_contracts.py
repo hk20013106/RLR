@@ -215,7 +215,7 @@ _LEDGER_NODES = (
 )
 NODE_SCHEMAS = {node: _node_schema(node, "2.0") for node in _LEDGER_NODES}
 _V21_NODE_SCHEMAS = {node: _node_schema(node, "2.1") for node in _LEDGER_NODES}
-_V21_NODE_SCHEMAS["L1"]["properties"]["hypotheses"].update({"minItems": 3, "maxItems": 12})
+_V21_NODE_SCHEMAS["L1"]["properties"]["hypotheses"].update({"minItems": 1, "maxItems": 12})
 # 2.1 is intentionally additive: historic 2.0 payloads retain their exact
 # contract while native projects get the auditable fields required by v0.9.
 _V21_NODE_SCHEMAS["L2"]["properties"]["verdicts"]["items"]["properties"].update({
