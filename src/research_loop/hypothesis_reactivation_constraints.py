@@ -1,4 +1,4 @@
-"""Narrow lineage checks for L3 historical-hypothesis review."""
+"""Narrow preflight and lineage checks for hypothesis reactivation."""
 from __future__ import annotations
 
 import json
@@ -25,8 +25,25 @@ def _lineage_by_hypothesis(ledger, project_dir, candidate_id: str, round_id: str
     }
 
 
+def _normalize_l1_origins(ledger_module, delta: dict) -> dict:
+    normalized = json.loads(json.dumps(delta))
+    hypotheses = normalized.get("hypotheses")
+    if isinstance(hypotheses, list):
+        for item in hypotheses:
+            if isinstance(item, dict):
+                item.setdefault("origin", "NEW")
+    errors = ledger_module.validate_submission(
+        "L1", normalized, schema_version="2.1"
+    )
+    if errors:
+        raise ledger_module.LedgerError(
+            "delta v2 schema rejected: " + "; ".join(errors)
+        )
+    return normalized
+
+
 def install(ledger_module) -> None:
-    """Require each L3 assessment to name an actual L1 historical source."""
+    """Prevalidate L1 and bind each L3 review to its actual L1 lineage."""
     if getattr(ledger_module, "_REACTIVATION_CONSTRAINTS_INSTALLED", False):
         return
 
@@ -35,8 +52,16 @@ def install(ledger_module) -> None:
 
     def commit_delta(self, *args, **kwargs):
         delta = kwargs.get("delta")
+        node = str(kwargs.get("node") or "")
         if (
-            str(kwargs.get("node") or "") == "L3"
+            node == "L1"
+            and isinstance(delta, dict)
+            and str(delta.get("schema_version") or "") == "2.1"
+        ):
+            kwargs["delta"] = _normalize_l1_origins(ledger_module, delta)
+            delta = kwargs["delta"]
+        if (
+            node == "L3"
             and isinstance(delta, dict)
             and str(delta.get("schema_version") or "") == "2.1"
         ):
