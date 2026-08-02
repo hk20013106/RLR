@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches-ignore:
+      - feat/hypothesis-pool-reactivation
   pull_request:
 
 jobs:
