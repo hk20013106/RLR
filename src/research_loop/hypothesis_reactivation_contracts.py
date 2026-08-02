@@ -237,14 +237,9 @@ def install(contracts_module) -> None:
     )
 
     # method_contracts may already have rebuilt these schemas. Rebuild once more
-    # after the reactivation extension, then tighten only the persisted L1 form.
+    # after the reactivation extension. Persisted legacy v2.1 artifacts may omit
+    # origin; new commits normalize it before persistence.
     hc.PERSISTED_SCHEMA_REGISTRY["2.1"] = {
         node: hc._persisted_schema(node, "2.1") for node in schemas
     }
-    persisted_item = hc.PERSISTED_SCHEMA_REGISTRY["2.1"]["L1"][
-        "properties"
-    ]["hypotheses"]["items"]
-    if "origin" not in persisted_item["required"]:
-        persisted_item["required"].append("origin")
-
     hc._REACTIVATION_CONTRACTS_INSTALLED = True
