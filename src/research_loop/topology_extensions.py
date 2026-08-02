@@ -21,16 +21,34 @@ def install(topology_module) -> None:
         },
     ]
     nodes["L1"]["action_hint"] = (
-        "Generate testable hypotheses; after commit, route directly to L3 when "
-        "there are four or fewer, otherwise route to L2 falsification"
+        "Generate or recall testable hypotheses; label each as NEW, REACTIVATE, "
+        "REVISE, or DERIVE. After commit, route directly to L3 when there are "
+        "four or fewer, otherwise route to L2 falsification"
     )
-    nodes["L3"]["must"].append(
+    nodes["L1"]["must"].extend([
+        "Inspect the bound historical-hypothesis recall before proposing L1 items",
+        "Use REACTIVATE only for an unchanged recalled definition; use REVISE for "
+        "a changed operationalization or falsification criterion within the same "
+        "statement; use DERIVE when the statement changes",
+        "Cite the recalled hypothesis and occurrence IDs, and provide an explicit "
+        "reactivation basis whenever historical blockers or rejection exist",
+    ])
+    nodes["L1"]["must_not"].append(
+        "Silently copy a historical hypothesis as NEW or reuse a FALSIFIED "
+        "hypothesis without formal reopening"
+    )
+    nodes["L3"]["must"].extend([
         "When a verified L2 skip receipt is present, independently triage the L1 "
-        "hypotheses and explicitly acknowledge that no Feynman attack occurred"
-    )
-    nodes["L3"]["must_not"].append(
-        "Treat an L2 skip as evidence that the hypotheses survived falsification"
-    )
+        "hypotheses and explicitly acknowledge that no Feynman attack occurred",
+        "For every REACTIVATE, REVISE, or DERIVE item, review every historical "
+        "blocking event and record RESOLVED, PARTIALLY_RESOLVED, or UNRESOLVED",
+        "Attach explicit QC, stop-rule, or data obligations before selecting a "
+        "partially resolved historical hypothesis",
+    ])
+    nodes["L3"]["must_not"].extend([
+        "Treat an L2 skip as evidence that the hypotheses survived falsification",
+        "Select an historical hypothesis whose prior blockers remain UNRESOLVED",
+    ])
 
     nodes["L4"]["action_hint"] = (
         "Build an evidence-backed method candidate catalog for every required "
