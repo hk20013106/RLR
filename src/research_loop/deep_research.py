@@ -326,7 +326,12 @@ def build_invocation(spec: RuntimeSpec, node: str, question: str, claim: str,
     work_dir = Path(work_dir)
     schema_path = work_dir / "deep_research_output.schema.json"
     if spec.backend == "codex":
-        command = [spec.executable, "exec", "--output-schema", str(schema_path)]
+        # A deep-research run is a disposable child process.  Do not inherit
+        # the interactive user's MCP fleet: initializing those servers makes
+        # one-shot evidence acquisition slow and can leave it waiting on
+        # unrelated local services.
+        command = [spec.executable, "exec", "--ephemeral", "--ignore-user-config",
+                   "--output-schema", str(schema_path)]
         if spec.model:
             command.extend(["--model", spec.model])
         invocation = "$academic-research-suite"
@@ -713,6 +718,19 @@ def _is_methods_section(section: object) -> bool:
     return normalized in {"methods", "materials and methods"} or normalized.startswith("methods-")
 
 
+def _is_conclusion_section(section: object) -> bool:
+    """Return whether a located section is a Conclusion heading or its qualifier."""
+    normalized = str(section or "").strip().casefold()
+    normalized = normalized.translate(str.maketrans({
+        "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-", "―": "-", "−": "-",
+    }))
+    normalized = "-".join(part.strip() for part in normalized.split("-"))
+    return (normalized == "conclusion"
+            or normalized.startswith("conclusion-")
+            or normalized.startswith("conclusion (")
+            or normalized.startswith("conclusion:"))
+
+
 def audit_evidence_pack(project_dir: str | Path, candidate_id: str, node: str,
                         *, run_id: str | None = None) -> tuple[bool, str]:
     artifact = _artifact(project_dir, candidate_id, node, run_id=run_id)
@@ -736,9 +754,11 @@ def audit_evidence_pack(project_dir: str | Path, candidate_id: str, node: str,
     ]
     sections = {str(e.get("section", "")).lower() for e in located_extracts}
     if node == "L1":
-        for required in ("results", "discussion", "conclusion"):
+        for required in ("results", "discussion"):
             if required not in sections:
                 return False, f"L1 evidence lacks located {required.title()} extract"
+        if not any(_is_conclusion_section(e.get("section")) for e in located_extracts):
+            return False, "L1 evidence lacks located Conclusion extract"
     elif node == "L4":
         if not any(_is_methods_section(e.get("section")) for e in located_extracts):
             return False, "L4 evidence lacks located Methods extract"

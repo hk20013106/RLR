@@ -17,7 +17,9 @@ from research_loop.commands.lifecycle import (
 )
 from research_loop.commands.research import (
     cmd_audit_literature_evidence, cmd_audit_pre_research,
-    cmd_deep_research_run, cmd_literature_report, cmd_pre_research,
+    cmd_deep_research_collect, cmd_deep_research_run, cmd_deep_research_start,
+    cmd_deep_research_status, cmd_deep_research_worker, cmd_literature_report,
+    cmd_pre_research,
 )
 from research_loop.commands.execution import cmd_execution_gate, cmd_prepare_turing_workspace
 from research_loop.commands.reporting import cmd_aggregate_report, cmd_list, cmd_obsidian_sync, cmd_show
@@ -43,6 +45,27 @@ from research_loop.version import VERSION
 __version__ = VERSION
 
 _ledger_commands._write_exec_manifest = _write_exec_manifest
+
+
+def _add_deep_research_run_arguments(parser):
+    parser.add_argument("project_dir")
+    parser.add_argument("cand_id")
+    parser.add_argument("--node", required=True, choices=["L1", "L4", "L8.5"])
+    parser.add_argument("--backend", choices=list(SUPPORTED_BACKENDS),
+                        help=("override configured backend; also declares the agent host "
+                              "when it cannot be detected (or set RLR_HOST_BACKEND)"))
+    parser.add_argument("--allow-host-mismatch", action="store_true",
+                        help=("run a backend that differs from the detected agent host "
+                              "(spends that provider's quota on purpose)"))
+    parser.add_argument("--executable", help="override configured CLI executable")
+    parser.add_argument("--plugin-dir",
+                        help="required Academic Research Skills plugin path for Claude")
+    parser.add_argument("--skill-path",
+                        help="Codex academic-research-suite installation path")
+    parser.add_argument("--skill-version",
+                        help="override configured ARS package version")
+    parser.add_argument("--model")
+    parser.add_argument("--timeout", type=int)
 
 def build_parser():
     p = argparse.ArgumentParser(
@@ -408,22 +431,32 @@ def build_parser():
 
     sp = sub.add_parser("deep-research-run",
                         help="invoke Academic Research Skills and persist verified paper evidence")
-    sp.add_argument("project_dir")
-    sp.add_argument("cand_id")
-    sp.add_argument("--node", required=True, choices=["L1", "L4", "L8.5"])
-    sp.add_argument("--backend", choices=list(SUPPORTED_BACKENDS),
-                    help=("override configured backend; also declares the agent host "
-                          "when it cannot be detected (or set RLR_HOST_BACKEND)"))
-    sp.add_argument("--allow-host-mismatch", action="store_true",
-                    help=("run a backend that differs from the detected agent host "
-                          "(spends that provider's quota on purpose)"))
-    sp.add_argument("--executable", help="override configured CLI executable")
-    sp.add_argument("--plugin-dir", help="required Academic Research Skills plugin path for Claude")
-    sp.add_argument("--skill-path", help="Codex academic-research-suite installation path")
-    sp.add_argument("--skill-version", help="override configured ARS package version")
-    sp.add_argument("--model")
-    sp.add_argument("--timeout", type=int)
+    _add_deep_research_run_arguments(sp)
     sp.set_defaults(func=cmd_deep_research_run)
+
+    sp = sub.add_parser(
+        "deep-research-start",
+        help="start the existing Deep Research command in a detached worker",
+    )
+    _add_deep_research_run_arguments(sp)
+    sp.set_defaults(func=cmd_deep_research_start)
+
+    sp = sub.add_parser("deep-research-status",
+                        help="read a detached Deep Research task status")
+    sp.add_argument("project_dir")
+    sp.add_argument("task_id")
+    sp.set_defaults(func=cmd_deep_research_status)
+
+    sp = sub.add_parser("deep-research-collect",
+                        help="collect a completed detached Deep Research result")
+    sp.add_argument("project_dir")
+    sp.add_argument("task_id")
+    sp.set_defaults(func=cmd_deep_research_collect)
+
+    sp = sub.add_parser("_deep-research-worker", help=argparse.SUPPRESS)
+    sp.add_argument("project_dir")
+    sp.add_argument("task_id")
+    sp.set_defaults(func=cmd_deep_research_worker)
 
     sp = sub.add_parser("audit-literature-evidence",
                         help="fail closed unless a node has a valid Academic Research evidence pack")

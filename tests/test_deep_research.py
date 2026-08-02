@@ -2,6 +2,7 @@ import json
 import os as _os
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -13,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from research_loop import deep_research as dr
+from research_loop import deep_research_task as dr_task
 from research_loop import gates
 from research_loop import engine
 from research_loop.preresearch import PRE_RESEARCH_MAP
@@ -44,6 +46,8 @@ def test_codex_command_explicitly_invokes_academic_research_suite(tmp_path):
     spec = dr.RuntimeSpec(backend="codex", executable="codex")
     command, prompt = dr.build_invocation(spec, "L1", "Q", "H", tmp_path)
     assert command[:2] == ["codex", "exec"]
+    assert "--ephemeral" in command
+    assert "--ignore-user-config" in command
     assert "$academic-research-suite" in prompt
     assert "Results" in prompt and "Conclusion" in prompt
 
@@ -156,6 +160,30 @@ def test_l1_contract_rejects_missing_results_discussion_or_conclusion(tmp_path):
     assert ok is False and "Conclusion" in reason
 
 
+@pytest.mark.parametrize("section", [
+    "Conclusion",
+    "Conclusion (abstract concluding statement)",
+    "Conclusion—summary statement",
+])
+def test_l1_contract_accepts_located_conclusion_heading_variants(tmp_path, section):
+    payload = _payload()
+    payload["papers"][0]["extracts"][2]["section"] = section
+    dr.persist_run(tmp_path, "C1", "L1", payload,
+                   dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"))
+
+    assert dr.audit_evidence_pack(tmp_path, "C1", "L1") == (True, "")
+
+
+def test_l1_contract_rejects_non_heading_conclusion_text(tmp_path):
+    payload = _payload()
+    payload["papers"][0]["extracts"][2]["section"] = "Discussion conclusion"
+    dr.persist_run(tmp_path, "C1", "L1", payload,
+                   dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"))
+
+    ok, reason = dr.audit_evidence_pack(tmp_path, "C1", "L1")
+    assert ok is False and "Conclusion" in reason
+
+
 def test_l4_contract_accepts_primary_methods_and_review_search_miss(tmp_path):
     payload = _payload()
     payload["review_search"] = {"query": "systematic review network analysis", "status": "none_found", "receipt": "Europe PMC 0"}
@@ -247,6 +275,9 @@ def test_gate_rejects_a_handwritten_legacy_research_note(tmp_path):
 def test_engine_exposes_deep_research_audit_and_report_commands():
     parser = engine.build_parser()
     assert parser.parse_args(["deep-research-run", "P", "C1", "--node", "L1", "--backend", "codex"]).cmd == "deep-research-run"
+    assert parser.parse_args(["deep-research-start", "P", "C1", "--node", "L1"]).cmd == "deep-research-start"
+    assert parser.parse_args(["deep-research-status", "P", "task-1"]).cmd == "deep-research-status"
+    assert parser.parse_args(["deep-research-collect", "P", "task-1"]).cmd == "deep-research-collect"
     assert parser.parse_args(["audit-literature-evidence", "P", "C1", "--node", "L8.5"]).cmd == "audit-literature-evidence"
     assert parser.parse_args(["literature-report", "P", "C1"]).cmd == "literature-report"
 
@@ -381,6 +412,156 @@ def _deep_research_env(**overrides):
 
 def _run_dir(project, cand_id, node="L1"):
     return project / "08_Audit" / "deep_research_runtime" / cand_id / node.replace(".", "_")
+
+
+def _task_dir(project, task_id):
+    return project / "08_Audit" / "deep_research_runtime" / "tasks" / task_id
+
+
+def test_detached_deep_research_survives_start_process_exit_and_collects(
+        tmp_path, monkeypatch):
+    """The short-lived start CLI must not own the nested provider lifecycle."""
+    fx = _sentinel_codex_project(tmp_path, monkeypatch)
+    finished = tmp_path / "codex_finished.sentinel"
+    fx.sentinel.unlink(missing_ok=True)
+    (tmp_path / "exec").write_text(
+        "import json, pathlib, time\n"
+        f"with pathlib.Path({str(fx.sentinel)!r}).open('a', encoding='utf-8') as stream:\n"
+        "    stream.write('launched\\n')\n"
+        "time.sleep(3)\n"
+        f"pathlib.Path({str(finished)!r}).write_text('finished', encoding='utf-8')\n"
+        "print(json.dumps(" + repr(_payload()) + "))\n",
+        encoding="utf-8")
+
+    started_at = time.monotonic()
+    started = subprocess.run(
+        [sys.executable, str(fx.cli), "deep-research-start", str(fx.project),
+         fx.cand_id, "--node", "L1", "--allow-host-mismatch"],
+        capture_output=True, text=True, env=_deep_research_env(), timeout=10)
+    elapsed = time.monotonic() - started_at
+    assert started.returncode == 0, started.stderr
+    start_artifact = json.loads(started.stdout)
+    task_id = start_artifact["task_id"]
+    assert elapsed < 2
+    assert start_artifact["state"] == "running"
+    assert not finished.exists(), "start waited for the provider instead of detaching"
+
+    deadline = time.monotonic() + 15
+    status_artifact = None
+    while time.monotonic() < deadline:
+        status = subprocess.run(
+            [sys.executable, str(fx.cli), "deep-research-status", str(fx.project), task_id],
+            capture_output=True, text=True, env=_deep_research_env(), timeout=10)
+        assert status.returncode == 0, status.stderr
+        status_artifact = json.loads(status.stdout)
+        if status_artifact["state"] == "succeeded":
+            break
+        time.sleep(0.2)
+
+    assert status_artifact is not None
+    assert status_artifact["state"] == "succeeded", status_artifact
+    assert fx.sentinel.read_text(encoding="utf-8").splitlines() == ["launched"]
+    assert finished.exists()
+    assert (_task_dir(fx.project, task_id) / "result.json").is_file()
+
+    collected = subprocess.run(
+        [sys.executable, str(fx.cli), "deep-research-collect", str(fx.project), task_id],
+        capture_output=True, text=True, env=_deep_research_env(), timeout=10)
+    assert collected.returncode == 0, collected.stderr
+    artifact = json.loads(collected.stdout)
+    assert artifact["run_id"] == status_artifact["run_id"]
+    assert dr.audit_evidence_pack(
+        fx.project, fx.cand_id, "L1", run_id=artifact["run_id"]
+    ) == (True, "")
+    assert (fx.project / "02_Agent_Notes" / "_pre_research" / "L1_research.md").is_file()
+    context = subprocess.run(
+        [sys.executable, str(fx.cli), "assemble-context", str(fx.project),
+         fx.cand_id, "--node", "L1"],
+        capture_output=True, text=True, env=_deep_research_env(), timeout=10)
+    assert context.returncode == 0, context.stderr
+
+    artifact["queries"] = ["tampered task output"]
+    (_task_dir(fx.project, task_id) / "result.json").write_text(
+        json.dumps(artifact), encoding="utf-8")
+    rejected = subprocess.run(
+        [sys.executable, str(fx.cli), "deep-research-collect", str(fx.project), task_id],
+        capture_output=True, text=True, env=_deep_research_env(), timeout=10)
+    assert rejected.returncode == 3
+    assert "differs from the persisted evidence run" in rejected.stderr
+
+
+def test_detached_start_records_failed_when_worker_cannot_launch(tmp_path, monkeypatch):
+    def fail_to_launch(*_args, **_kwargs):
+        raise OSError("worker launch denied")
+
+    monkeypatch.setattr(dr_task.subprocess, "Popen", fail_to_launch)
+    args = SimpleNamespace(
+        project_dir=str(tmp_path), cand_id="C1", node="L1", backend=None,
+        allow_host_mismatch=False, executable=None, plugin_dir=None,
+        skill_path=None, skill_version=None, model=None, timeout=None,
+    )
+    with pytest.raises(dr_task.DetachedTaskError, match="worker launch denied"):
+        dr_task.start_task(args)
+    task_dirs = list((tmp_path / "08_Audit" / "deep_research_runtime" / "tasks").iterdir())
+    assert len(task_dirs) == 1
+    status = json.loads((task_dirs[0] / "status.json").read_text(encoding="utf-8"))
+    assert status["state"] == "failed"
+    assert "worker launch denied" in status["error"]
+
+
+def test_detached_start_rejects_candidate_path_traversal(tmp_path):
+    project = tmp_path / "P"
+    (project / "01_Candidates").mkdir(parents=True)
+    (project / "escape.md").write_text("---\nquestion: q\nclaim: c\n---\n", encoding="utf-8")
+    cli = ROOT / "research_loop_v04.py"
+    result = subprocess.run(
+        [sys.executable, str(cli), "deep-research-start", str(project),
+         "../escape", "--node", "L1"],
+        capture_output=True, text=True, env=_deep_research_env(), timeout=10)
+    assert result.returncode == 2
+    assert "invalid candidate ID" in result.stderr
+    assert not (project / "08_Audit" / "deep_research_runtime" / "tasks").exists()
+
+
+def test_detached_worker_rejects_invalid_success_output(tmp_path):
+    task_id = "task-invalid-json"
+    task_dir = _task_dir(tmp_path, task_id)
+    task_dir.mkdir(parents=True)
+    (task_dir / "request.json").write_text(json.dumps({
+        "schema_version": dr_task.TASK_SCHEMA_VERSION,
+        "task_id": task_id,
+        "handler_args": {"project_dir": str(tmp_path), "cand_id": "C1", "node": "L1"}
+    }), encoding="utf-8")
+    (task_dir / "status.json").write_text(json.dumps({
+        "task_id": task_id, "state": "running"
+    }), encoding="utf-8")
+
+    def invalid_handler(_args):
+        print("not JSON")
+        return 0
+
+    assert dr_task.run_worker(tmp_path, task_id, invalid_handler) == 3
+    status = json.loads((task_dir / "status.json").read_text(encoding="utf-8"))
+    assert status["state"] == "failed"
+    assert "cannot read" in status["error"]
+    assert not (task_dir / "result.json").exists()
+
+
+def test_detached_worker_marks_a_malformed_request_failed(tmp_path):
+    task_id = "task-malformed-request"
+    task_dir = _task_dir(tmp_path, task_id)
+    task_dir.mkdir(parents=True)
+    (task_dir / "request.json").write_text("{", encoding="utf-8")
+    (task_dir / "status.json").write_text(json.dumps({
+        "schema_version": dr_task.TASK_SCHEMA_VERSION,
+        "task_id": task_id,
+        "state": "running",
+    }), encoding="utf-8")
+
+    assert dr_task.run_worker(tmp_path, task_id, lambda _args: 0) == 3
+    status = json.loads((task_dir / "status.json").read_text(encoding="utf-8"))
+    assert status["state"] == "failed"
+    assert "cannot read" in status["error"]
 
 
 def test_deep_research_cli_executes_a_local_fake_codex(tmp_path, monkeypatch):
