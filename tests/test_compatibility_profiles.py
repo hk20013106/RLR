@@ -58,15 +58,16 @@ def test_failed_rebind_does_not_create_an_orphan_project(tmp_path: Path):
         con.close()
 
 
-def test_v21_l1_contract_requires_three_to_twelve_hypotheses():
+def test_v21_l1_contract_requires_one_to_twelve_hypotheses():
     def payload(count):
         return {"schema_version": "2.1", "hypotheses": [
             {"proposal_key": str(i), "statement": f"S{i}", "operationalization": "O",
              "falsification_criteria": ["F"], "rationale": "R"}
             for i in range(count)
         ], "primary_proposal_key": "0", "key_uncertainty": "U"}
-    assert validate_submission("L1", payload(2), schema_version="2.1")
-    assert not validate_submission("L1", payload(3), schema_version="2.1")
+    assert validate_submission("L1", payload(0), schema_version="2.1")
+    assert not validate_submission("L1", payload(1), schema_version="2.1")
+    assert not validate_submission("L1", payload(2), schema_version="2.1")
     assert not validate_submission("L1", payload(12), schema_version="2.1")
     assert validate_submission("L1", payload(13), schema_version="2.1")
 
