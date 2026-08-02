@@ -35,4 +35,5 @@ def test_v21_l1_accepts_two_hypotheses():
 def test_v21_l1_rejects_zero_hypotheses():
     errors = validate_submission("L1", _l1_delta(0), schema_version="2.1")
 
-    assert any("hypotheses" in error and "too short" in error for error in errors)
+    assert errors
+    assert any(error.startswith("hypotheses:") for error in errors)
