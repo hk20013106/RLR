@@ -43,11 +43,15 @@ from research_loop.hypothesis_reactivation_constraints import (
 from research_loop.conditional_skip_constraints import (
     install as _install_conditional_skip_constraints,
 )
+from research_loop.hypothesis_reactivation_compat import (
+    install as _install_reactivation_compat,
+)
 
 _install_receipt_idempotency(hypothesis_ledger)
 _install_hypothesis_reactivation(hypothesis_ledger)
 _install_reactivation_constraints(hypothesis_ledger)
 _install_conditional_skip_constraints(hypothesis_ledger, _constraint_validation)
+_install_reactivation_compat(hypothesis_ledger, _constraint_validation)
 
 from research_loop import topology as topology
 from research_loop.topology_extensions import install as _install_topology_extensions
@@ -79,6 +83,7 @@ del _install_review_status_compat, _registered_sources
 del _install_method_contracts, _install_reactivation_contracts
 del _install_receipt_idempotency, _install_hypothesis_reactivation
 del _install_reactivation_constraints, _install_conditional_skip_constraints
+del _install_reactivation_compat
 del _install_topology_extensions, _install_conditional_routing
 del _install_hypothesis_recall_context, _install_hypothesis_pool_cli
 del _constraint_validation, _lifecycle, _ledger_commands, _context, _cli
