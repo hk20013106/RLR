@@ -38,10 +38,15 @@ from research_loop.topology_extensions import install as _install_topology_exten
 _install_topology_extensions(topology)
 
 from research_loop.commands import lifecycle as _lifecycle
+from research_loop.commands import ledger as _ledger_commands
 from research_loop import context as _context
 from research_loop.conditional_routing import install as _install_conditional_routing
+from research_loop.hypothesis_recall_context import (
+    install as _install_hypothesis_recall_context,
+)
 
 _install_conditional_routing(_lifecycle, _context)
+_install_hypothesis_recall_context(_context, _ledger_commands)
 
 # CLI extensions are installed only after the canonical CLI module has defined
 # its parser and main entry point. Importing research_loop.cli therefore returns
@@ -56,5 +61,5 @@ del _review_navigation, _install_navigation_compat
 del _install_review_status_compat, _registered_sources
 del _install_method_contracts, _install_receipt_idempotency
 del _install_topology_extensions, _install_conditional_routing
-del _install_hypothesis_pool_cli
-del _lifecycle, _context, _cli
+del _install_hypothesis_recall_context, _install_hypothesis_pool_cli
+del _lifecycle, _ledger_commands, _context, _cli
