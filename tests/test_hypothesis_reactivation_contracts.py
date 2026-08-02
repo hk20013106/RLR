@@ -80,7 +80,7 @@ def test_l1_omitted_origin_remains_submission_compatible():
     ) == []
 
 
-def test_persisted_l1_requires_normalized_origin():
+def test_persisted_l1_without_origin_remains_compatible():
     item = _hypothesis(
         hypothesis_id="H:new",
         hypothesis_family_id="HF:new",
@@ -92,9 +92,7 @@ def test_persisted_l1_requires_normalized_origin():
         "primary_hypothesis_id": "H:new",
     }
 
-    errors = validate_persisted("L1", delta, schema_version="2.1")
-
-    assert any("origin" in error for error in errors)
+    assert validate_persisted("L1", delta, schema_version="2.1") == []
 
 
 def _l3_item(**updates):
