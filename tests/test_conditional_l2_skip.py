@@ -68,7 +68,7 @@ def test_l2_skip_decision_has_inclusive_four_hypothesis_threshold():
     assert l2_skip_decision(5) == "run"
 
 
-@pytest.mark.parametrize("hypothesis_count", [3, 4])
+@pytest.mark.parametrize("hypothesis_count", [1, 2, 3, 4])
 def test_next_step_routes_small_valid_hypothesis_sets_directly_to_l3(
     tmp_path, monkeypatch, capsys, hypothesis_count
 ):
