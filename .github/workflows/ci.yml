@@ -4,7 +4,9 @@ on: [push, pull_request]
 
 jobs:
   targeted-reactivation:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/feat/hypothesis-pool-reactivation'
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/feat/hypothesis-pool-reactivation') ||
+      (github.event_name == 'pull_request' && github.head_ref == 'feat/hypothesis-pool-reactivation')
     runs-on: windows-latest
     defaults:
       run:
@@ -45,7 +47,9 @@ jobs:
           python -m pytest -q --no-header -p no:cacheprovider $FILES
 
   test:
-    if: github.event_name == 'pull_request' || github.ref != 'refs/heads/feat/hypothesis-pool-reactivation'
+    if: >-
+      !((github.event_name == 'push' && github.ref == 'refs/heads/feat/hypothesis-pool-reactivation') ||
+      (github.event_name == 'pull_request' && github.head_ref == 'feat/hypothesis-pool-reactivation'))
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
