@@ -43,9 +43,18 @@ from research_loop.conditional_routing import install as _install_conditional_ro
 
 _install_conditional_routing(_lifecycle, _context)
 
+# CLI extensions are installed only after the canonical CLI module has defined
+# its parser and main entry point. Importing research_loop.cli therefore returns
+# the same stable module object with additive commands registered.
+from research_loop import cli as _cli
+from research_loop.hypothesis_pool_cli import install as _install_hypothesis_pool_cli
+
+_install_hypothesis_pool_cli(_cli)
+
 del _install_method_evidence, _install_method_evidence_compat
 del _review_navigation, _install_navigation_compat
 del _install_review_status_compat, _registered_sources
 del _install_method_contracts, _install_receipt_idempotency
 del _install_topology_extensions, _install_conditional_routing
-del _lifecycle, _context
+del _install_hypothesis_pool_cli
+del _lifecycle, _context, _cli
