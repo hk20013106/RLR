@@ -257,7 +257,7 @@ def recall_manifest_entry(
     round_id: str,
 ) -> dict[str, Any]:
     """Return exact file and content bindings for ContextManifest/v2."""
-    target = recall_path(project_dir, candidate_id, round_id)
+    target = recall_path(project_dir, candidate_id, round_id).resolve()
     artifact = load_recall(project_dir, candidate_id, round_id)
     return {
         "artifact_path": str(target),

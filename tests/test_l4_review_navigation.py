@@ -145,6 +145,18 @@ def test_l4_schema_allows_navigation_extracts_without_anchor_fields():
     assert "anchor_id" not in extract["required"]
 
 
+def test_navigation_only_marker_is_not_a_method_anchor_claim():
+    payload = _payload()
+    for extract in payload["papers"][2]["extracts"]:
+        extract.update({
+            "anchor_id": "",
+            "method_component_ids": [],
+            "method_ids": [],
+            "source_kind": "navigation_only",
+        })
+    dr.validate_payload(payload, node="L4", project_dir=Path("."), candidate_id="C1")
+
+
 def test_structured_l4_keeps_navigation_but_does_not_count_it_as_anchor(tmp_path):
     project = tmp_path / "P"
     artifact = dr.persist_run(
