@@ -31,7 +31,11 @@ def _canonical_paper_type(paper: dict) -> str:
 
 
 def _has_anchor_fields(extract: dict) -> bool:
-    return any(bool(extract.get(field)) for field in _ANCHOR_FIELDS)
+    return any(
+        bool(extract.get(field))
+        and not (field == "source_kind" and extract.get(field) == "navigation_only")
+        for field in _ANCHOR_FIELDS
+    )
 
 
 def _split(payload: dict) -> tuple[dict, list[dict]]:
@@ -350,8 +354,17 @@ def install(deep_research_module) -> None:
         work_dir = Path(work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
         schema_path = work_dir / "deep_research_output.schema.json"
+        schema = runtime_schema(node)
+        if node == "L4":
+            # The compatibility schema permits navigation-only extracts, but
+            # the provider-facing OpenAI strict schema must require every
+            # declared property.
+            extract = schema["properties"]["papers"]["items"]["properties"][
+                "extracts"
+            ]["items"]
+            extract["required"] = list(extract["properties"])
         schema_path.write_text(
-            json.dumps(runtime_schema(node), indent=2), encoding="utf-8"
+            json.dumps(schema, indent=2), encoding="utf-8"
         )
         local_sources = (
             dr.registered_sources(project_dir, candidate_id)

@@ -85,11 +85,64 @@ def test_l85_invocation_includes_actual_l7_l8_results(tmp_path):
     assert "ACTC1" in prompt
 
 
+def test_l4_prompt_requires_full_source_payload_for_method_anchors(tmp_path):
+    _, prompt = dr.build_invocation(
+        dr.RuntimeSpec(backend="codex", executable="codex"),
+        "L4", "Q", "H", tmp_path,
+    )
+    assert "at least 500" in prompt
+    assert "source-blocked" in prompt
+    assert "primary_study" in prompt and "Methods" in prompt
+    assert "contiguous" in prompt
+    assert "MUST NOT use" in prompt
+    assert "review_search" in prompt and "receipt" in prompt
+    assert "required: true" in prompt
+    assert "primary studies are navigation-only" in prompt.lower()
+
+
 def test_codex_output_schema_is_closed_for_structured_outputs():
     schema = dr._runtime_schema()
     assert schema["additionalProperties"] is False
     extract = schema["properties"]["papers"]["items"]["properties"]["extracts"]["items"]
     assert extract["properties"]["verification_status"] == {"type": "string", "const": "located"}
+
+
+def test_codex_output_schema_omits_unsupported_unique_items_keyword():
+    schema = dr._runtime_schema("L4")
+
+    def walk(value):
+        if isinstance(value, dict):
+            if "uniqueItems" in value:
+                yield value
+            for child in value.values():
+                yield from walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from walk(child)
+
+    assert list(walk(schema)) == []
+
+
+def test_run_and_persist_writes_l4_extended_schema(monkeypatch, tmp_path):
+    class _Completed:
+        returncode = 1
+        stdout = ""
+        stderr = "schema rejected"
+
+    monkeypatch.setattr(dr, "resolve_subprocess_executable", lambda value: value)
+    monkeypatch.setattr(dr.subprocess, "run", lambda *args, **kwargs: _Completed())
+
+    with pytest.raises(dr.DeepResearchError, match="exited 1"):
+        dr.run_and_persist(
+            tmp_path, "C1", "L4", "question", "claim",
+            dr.RuntimeSpec(backend="codex", executable="codex", timeout=1),
+            tmp_path / "work",
+        )
+
+    written = json.loads((tmp_path / "work" / "deep_research_output.schema.json").read_text())
+    extract = written["properties"]["papers"]["items"]["properties"]["extracts"]["items"]
+    assert "anchor_id" in extract["required"]
+    assert "method_components" in written["required"]
 
 
 def test_persisted_open_access_paper_keeps_source_and_extracts(tmp_path):
@@ -109,6 +162,19 @@ def test_persisted_open_access_paper_keeps_source_and_extracts(tmp_path):
     assert saved["source_metadata_response"]["id"] == "123456"
     assert {x["section"] for x in saved["evidence_extracts"]} >= {"Results", "Discussion", "Conclusion"}
     assert (tmp_path / saved["source_payload_path"]).exists()
+
+
+def test_evidence_artifact_manifest_resolves_relative_project_path(tmp_path, monkeypatch):
+    artifact = dr.persist_run(
+        tmp_path, "C1", "L1", _payload(),
+        dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"),
+    )
+    monkeypatch.chdir(tmp_path.parent)
+
+    manifest = dr.evidence_artifact_manifest(tmp_path.name, "C1", "L1", artifact["run_id"])
+
+    assert manifest["run_id"]
+    assert all(not Path(item["path"]).is_absolute() for item in manifest["files"])
 
 
 def test_persist_run_keeps_valid_papers_and_audits_unidentifiable_ones(tmp_path):
@@ -689,6 +755,18 @@ def test_default_runtime_config_accepts_an_explicit_backend():
     assert "academic-research-suite" in config["skill_path"]
 
 
+def test_default_runtime_config_finds_relocated_codex_skill(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    relocated = home / ".codex" / "skill-library" / "sources" / "codex-user" / "academic-research-suite"
+    relocated.mkdir(parents=True)
+    (relocated / "manifest.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(dr.Path, "home", classmethod(lambda cls: home))
+
+    config = dr.default_runtime_config("codex", env={})
+
+    assert Path(config["skill_path"]) == relocated
+
+
 def test_default_runtime_config_fails_loud_when_the_host_is_unknown():
     with pytest.raises(dr.DeepResearchError) as exc:
         dr.default_runtime_config(env={})
@@ -778,8 +856,12 @@ def _mismatch_project(tmp_path):
     (tmp_path / "01_Candidates").mkdir(parents=True)
     (tmp_path / "01_Candidates" / "C1.md").write_text("---\ntitle: t\n---\n", encoding="utf-8")
     dr.runtime_config_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
-    dr.runtime_config_path(tmp_path).write_text(
-        json.dumps(dr.default_runtime_config("codex", env={})), encoding="utf-8")
+    config = dr.default_runtime_config("codex", env={})
+    # This fixture tests host-mismatch handling, not a real literature launch.
+    # Keep readiness explicitly false instead of depending on the developer's
+    # installed Codex skill layout.
+    config["skill_path"] = str(tmp_path / "missing-academic-research-suite")
+    dr.runtime_config_path(tmp_path).write_text(json.dumps(config), encoding="utf-8")
     return SimpleNamespace(
         project_dir=str(tmp_path), cand_id="C1", node="L1", backend=None,
         executable=None, plugin_dir=None, skill_path=None, skill_version=None,

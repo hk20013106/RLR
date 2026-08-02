@@ -19,6 +19,7 @@ _ACCEPTED_SOURCE_KINDS = {
     "primary_study", "method_paper", "protocol", "supplementary_methods",
     "official_documentation", "versioned_code", "user_supplied_pdf",
 }
+_NAVIGATION_SOURCE_KIND = "navigation_only"
 _METHODS_HEADING_KINDS = {
     "primary_study", "supplementary_methods", "user_supplied_pdf",
 }
@@ -32,7 +33,7 @@ _MIN_SOURCE_BYTES = 500
 
 def _string_array_schema(*, min_items=0):
     return {
-        "type": "array", "minItems": min_items, "uniqueItems": True,
+        "type": "array", "minItems": min_items,
         "items": {"type": "string", "minLength": 1},
     }
 
@@ -82,10 +83,12 @@ def _method_candidate_schema():
 def _extend_l4_schema(schema: dict) -> dict:
     extract = schema["properties"]["papers"]["items"]["properties"]["extracts"]["items"]
     extract["properties"].update({
-        "anchor_id": {"type": "string", "minLength": 1},
-        "method_component_ids": _string_array_schema(min_items=1),
-        "method_ids": _string_array_schema(min_items=1),
-        "source_kind": {"enum": sorted(_ACCEPTED_SOURCE_KINDS)},
+        "anchor_id": {"type": "string"},
+        "method_component_ids": _string_array_schema(),
+        "method_ids": _string_array_schema(),
+        "source_kind": {
+            "enum": sorted(_ACCEPTED_SOURCE_KINDS | {_NAVIGATION_SOURCE_KIND, ""})
+        },
     })
     extract["required"].extend([
         "anchor_id", "method_component_ids", "method_ids", "source_kind",
@@ -349,6 +352,30 @@ implementation anchor may be different sources. Prefer PMC/Europe PMC JATS XML,
 OA HTML/XML, Supplementary Methods, method/protocol papers, official software
 documentation, versioned code, and preprints. Abstract labels, table mentions,
 reviews, and retrieval placeholders do not count as method anchors.
+For review or navigation-only extracts, set `anchor_id` to an empty string,
+`method_component_ids` and `method_ids` to empty arrays, and `source_kind` to
+`navigation_only`; do not claim method anchors for those extracts.
+For every retained method anchor, `source_payload` must contain at least 500
+bytes of the actual retrieved source text and the exact extract text must be
+present in that payload. If that evidence cannot be retrieved, do not retain
+a method anchor; mark the candidate as source-blocked or use navigation-only
+fields instead.
+The extract text must be copied verbatim as one contiguous substring from the
+retained source payload; do not paraphrase, normalize, or reconstruct it.
+For `source_kind` `primary_study` or `supplementary_methods`, the extract
+section must be `Methods` or a Methods subsection; Results and Discussion text
+from those papers is not a method anchor.
+MUST NOT use a primary-study Results, Discussion, abstract, table, or review
+extract as a method anchor; assign those extracts `navigation_only` fields.
+The output MUST include a `review_search` object with a truthful query and
+receipt. If no relevant review was found, set a zero-result status and record
+the actual search receipt; never omit or invent this receipt.
+The `method_components` array MUST contain at least one component with
+`required: true`; every required component must have an eligible candidate
+with a real accepted method anchor, or a truthful source-blocked candidate.
+Primary studies are navigation-only for L4 method anchoring; use method papers,
+protocols, supplementary methods, official documentation, or versioned code for
+the actual method anchor whenever possible.
 """
             prompt += _registered_source_prompt(list(user_sources or []))
         return command, prompt
@@ -581,8 +608,18 @@ reviews, and retrieval placeholders do not count as method anchors.
         work_dir = Path(work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
         schema_path = work_dir / "deep_research_output.schema.json"
+        schema = runtime_schema(node)
+        if node == "L4":
+            # OpenAI strict response schemas require every declared property
+            # to appear in `required`. Navigation-only L4 parsing keeps these
+            # fields optional at the compatibility API boundary, so make the
+            # provider-facing copy strict without changing that reader path.
+            extract = schema["properties"]["papers"]["items"]["properties"][
+                "extracts"
+            ]["items"]
+            extract["required"] = list(extract["properties"])
         schema_path.write_text(
-            json.dumps(runtime_schema(node), indent=2), encoding="utf-8"
+            json.dumps(schema, indent=2), encoding="utf-8"
         )
         local_sources = registered_sources(project_dir, candidate_id) if node == "L4" else []
         command, prompt = build_invocation(

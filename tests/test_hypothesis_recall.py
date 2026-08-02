@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -7,6 +8,7 @@ from research_loop.hypothesis_recall import (
     create_recall,
     load_recall,
     recall_path,
+    recall_manifest_entry,
     validate_recall,
 )
 from tests.test_hypothesis_pool import _seed_rejected_hypothesis
@@ -60,6 +62,25 @@ def test_recall_zero_result_is_valid(tmp_path):
         expected_candidate_id="C3",
         expected_round_id="3",
     )
+
+
+def test_recall_manifest_entry_resolves_relative_project_path(tmp_path, monkeypatch):
+    project, ledger, _rejected_id = _seed_rejected_hypothesis(tmp_path)
+    create_recall(
+        ledger,
+        project,
+        "C3_relative",
+        "3",
+        query_text="completely unrelated mars geology",
+        limit=10,
+    )
+    target = recall_path(project, "C3_relative", "3").resolve()
+    monkeypatch.chdir(project.parent)
+
+    entry = recall_manifest_entry(project.name, "C3_relative", "3")
+
+    assert Path(entry["artifact_path"]).is_absolute()
+    assert Path(entry["artifact_path"]).resolve() == target
 
 
 def test_recall_detects_tampering(tmp_path):

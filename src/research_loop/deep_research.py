@@ -103,8 +103,12 @@ def default_runtime_config(backend: str | None = None,
         "timeout": 900,
     }
     if backend == "codex":
+        codex_root = Path.home() / ".codex"
+        legacy_skill = codex_root / "skills" / "academic-research-suite"
+        relocated_skill = (codex_root / "skill-library" / "sources" /
+                           "codex-user" / "academic-research-suite")
         config["skill_path"] = str(
-            Path.home() / ".codex" / "skills" / "academic-research-suite")
+            legacy_skill if legacy_skill.exists() else relocated_skill)
     # The Claude plugin directory is installation-specific and is left empty
     # rather than guessed; runtime_ready() reports it as missing.
     return config
@@ -629,7 +633,7 @@ def evidence_artifact_manifest(
     run_id: str,
 ) -> dict:
     """Return the exact immutable evidence files consumed by one context."""
-    root = Path(project_dir)
+    root = Path(project_dir).resolve()
     artifact = _artifact(root, candidate_id, node, run_id=run_id)
     if artifact is None:
         raise DeepResearchError(
@@ -904,7 +908,7 @@ def run_and_persist(
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     schema_path = work_dir / "deep_research_output.schema.json"
-    schema_path.write_text(json.dumps(_runtime_schema(), indent=2), encoding="utf-8")
+    schema_path.write_text(json.dumps(_runtime_schema(node), indent=2), encoding="utf-8")
     command, prompt = build_invocation(spec, node, question, claim, work_dir, result_context)
     command[0] = resolve_subprocess_executable(command[0])
     execution_command, invocation_kwargs = subprocess_invocation(command, prompt)
