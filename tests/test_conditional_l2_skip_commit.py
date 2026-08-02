@@ -1,3 +1,4 @@
+from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
 from research_loop.hypothesis_ledger import HypothesisLedger
 from research_loop.node_skips import ensure_l2_skip_receipt
 from tests.native_v2_helpers import commit_v2
@@ -9,7 +10,7 @@ def test_verified_l2_skip_authorizes_l3_commit(tmp_path, monkeypatch):
     project = tmp_path / "project"
     project.mkdir()
     ledger = HypothesisLedger(store)
-    ledger.bind_project(project, profile_id="v2.1-native-1")
+    ledger.bind_project(project, profile_id=DEFAULT_NATIVE_PROFILE)
 
     l1 = commit_v2(project, "C1", "L1", "Einstein", {
         "schema_version": "2.1",
