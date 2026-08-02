@@ -60,6 +60,31 @@ def _read_json(path: Path, label: str) -> dict:
     return value
 
 
+def _validate_request(request: dict, project_dir: str | Path, task_id: str) -> dict:
+    handler_args = request.get("handler_args")
+    if (request.get("schema_version") != TASK_SCHEMA_VERSION or
+            request.get("task_id") != task_id or
+            not isinstance(handler_args, dict)):
+        raise DetachedTaskError(f"task {task_id} request identity is invalid")
+    requested_project = handler_args.get("project_dir")
+    if (not requested_project or
+            Path(requested_project).resolve() != Path(project_dir).resolve()):
+        raise DetachedTaskError(f"task {task_id} request project does not match")
+    candidate_id = handler_args.get("cand_id")
+    if (not isinstance(candidate_id, str) or not candidate_id or
+            "/" in candidate_id or "\\" in candidate_id or
+            candidate_id in {".", ".."} or not handler_args.get("node")):
+        raise DetachedTaskError(f"task {task_id} request target is incomplete")
+    return handler_args
+
+
+def _validate_status(status: dict, task_id: str) -> None:
+    if (status.get("schema_version") != TASK_SCHEMA_VERSION or
+            status.get("task_id") != task_id or
+            status.get("state") not in {"running", "succeeded", "failed"}):
+        raise DetachedTaskError(f"task {task_id} status identity is invalid")
+
+
 def _status(task_id: str, state: str, *, error: str = "", run_id: str = "") -> dict:
     value = {
         "schema_version": TASK_SCHEMA_VERSION,
@@ -84,6 +109,8 @@ def _public_cli_path() -> Path:
 def start_task(args: argparse.Namespace) -> dict:
     """Start the existing synchronous handler in a detached CLI worker."""
     project_dir = Path(args.project_dir).resolve()
+    if not project_dir.is_dir():
+        raise DetachedTaskError(f"project directory not found: {project_dir}")
     task_id = f"dr-{uuid.uuid4().hex}"
     task_dir = _task_dir(project_dir, task_id)
     task_dir.mkdir(parents=True, exist_ok=False)
@@ -100,40 +127,51 @@ def start_task(args: argparse.Namespace) -> dict:
     _write_json(task_dir / "request.json", request)
     _write_json(task_dir / "status.json", _status(task_id, "running"))
 
-    command = [
-        sys.executable,
-        str(_public_cli_path().resolve()),
-        "_deep-research-worker",
-        str(project_dir),
-        task_id,
-    ]
-    popen_kwargs = {
-        "cwd": request["working_directory"],
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-        "close_fds": True,
-    }
-    if os.name == "nt":
-        popen_kwargs["creationflags"] = (
-            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-        )
-    else:
-        popen_kwargs["start_new_session"] = True
+    stdout_log = None
+    stderr_log = None
     try:
+        command = [
+            sys.executable,
+            str(_public_cli_path().resolve()),
+            "_deep-research-worker",
+            str(project_dir),
+            task_id,
+        ]
+        stdout_log = (task_dir / "stdout.log").open("w", encoding="utf-8")
+        stderr_log = (task_dir / "stderr.log").open("w", encoding="utf-8")
+        popen_kwargs = {
+            "cwd": request["working_directory"],
+            "stdin": subprocess.DEVNULL,
+            "stdout": stdout_log,
+            "stderr": stderr_log,
+            "close_fds": True,
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = (
+                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+            )
+        else:
+            popen_kwargs["start_new_session"] = True
         subprocess.Popen(command, **popen_kwargs)
-    except OSError as exc:
+    except (OSError, DetachedTaskError) as exc:
         _write_json(
             task_dir / "status.json",
             _status(task_id, "failed", error=f"worker launch failed: {exc}"),
         )
         raise DetachedTaskError(f"worker launch failed: {exc}") from exc
+    finally:
+        if stdout_log is not None:
+            stdout_log.close()
+        if stderr_log is not None:
+            stderr_log.close()
     return get_status(project_dir, task_id)
 
 
 def get_status(project_dir: str | Path, task_id: str) -> dict:
     task_dir = _task_dir(project_dir, task_id)
-    return _read_json(task_dir / "status.json", f"task {task_id} status")
+    status = _read_json(task_dir / "status.json", f"task {task_id} status")
+    _validate_status(status, task_id)
+    return status
 
 
 def run_worker(
@@ -142,21 +180,14 @@ def run_worker(
         synchronous_handler: Callable[[argparse.Namespace], int]) -> int:
     """Run the existing handler unchanged and record its complete CLI output."""
     task_dir = _task_dir(project_dir, task_id)
-    request = _read_json(task_dir / "request.json", f"task {task_id} request")
-    handler_args = request.get("handler_args")
-    if not isinstance(handler_args, dict):
-        _write_json(
-            task_dir / "status.json",
-            _status(task_id, "failed", error="request has no handler_args object"),
-        )
-        return 3
-
     stdout_path = task_dir / "stdout.log"
     stderr_path = task_dir / "stderr.log"
     returncode = 3
     try:
-        with stdout_path.open("w", encoding="utf-8") as stdout, \
-                stderr_path.open("w", encoding="utf-8") as stderr:
+        request = _read_json(task_dir / "request.json", f"task {task_id} request")
+        handler_args = _validate_request(request, project_dir, task_id)
+        with stdout_path.open("a", encoding="utf-8") as stdout, \
+                stderr_path.open("a", encoding="utf-8") as stderr:
             old_stdout, old_stderr = sys.stdout, sys.stderr
             try:
                 sys.stdout, sys.stderr = stdout, stderr
@@ -207,8 +238,28 @@ def collect_task(project_dir: str | Path, task_id: str, audit: Callable) -> dict
         )
     request = _read_json(task_dir / "request.json", f"task {task_id} request")
     result = _read_json(task_dir / "result.json", f"task {task_id} result")
-    handler_args = request.get("handler_args", {})
+    handler_args = _validate_request(request, project_dir, task_id)
     run_id = result.get("run_id")
+    if (not isinstance(run_id, str) or not run_id or
+            Path(run_id).name != run_id or "/" in run_id or "\\" in run_id or
+            status.get("run_id") != run_id or
+            result.get("candidate_id") != handler_args.get("cand_id") or
+            result.get("node") != handler_args.get("node")):
+        raise DetachedTaskError(f"task {task_id} result identity is invalid")
+    expected_relative_path = (
+        Path("09_Literature_Database") / "evidence_packs" / "runs" /
+        f"{run_id}.json"
+    )
+    relative_path = Path(str(result.get("path") or ""))
+    if relative_path.as_posix() != expected_relative_path.as_posix():
+        raise DetachedTaskError(f"task {task_id} result path is invalid")
+    project_root = Path(project_dir).resolve()
+    artifact_path = project_root / expected_relative_path
+    persisted_result = _read_json(artifact_path, f"task {task_id} persisted evidence run")
+    if persisted_result != result:
+        raise DetachedTaskError(
+            f"task {task_id} result differs from the persisted evidence run"
+        )
     ok, reason = audit(
         project_dir,
         handler_args.get("cand_id"),

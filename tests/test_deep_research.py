@@ -426,7 +426,8 @@ def test_detached_deep_research_survives_start_process_exit_and_collects(
     fx.sentinel.unlink(missing_ok=True)
     (tmp_path / "exec").write_text(
         "import json, pathlib, time\n"
-        f"pathlib.Path({str(fx.sentinel)!r}).write_text('launched', encoding='utf-8')\n"
+        f"with pathlib.Path({str(fx.sentinel)!r}).open('a', encoding='utf-8') as stream:\n"
+        "    stream.write('launched\\n')\n"
         "time.sleep(3)\n"
         f"pathlib.Path({str(finished)!r}).write_text('finished', encoding='utf-8')\n"
         "print(json.dumps(" + repr(_payload()) + "))\n",
@@ -459,7 +460,8 @@ def test_detached_deep_research_survives_start_process_exit_and_collects(
 
     assert status_artifact is not None
     assert status_artifact["state"] == "succeeded", status_artifact
-    assert fx.sentinel.exists() and finished.exists()
+    assert fx.sentinel.read_text(encoding="utf-8").splitlines() == ["launched"]
+    assert finished.exists()
     assert (_task_dir(fx.project, task_id) / "result.json").is_file()
 
     collected = subprocess.run(
@@ -472,6 +474,20 @@ def test_detached_deep_research_survives_start_process_exit_and_collects(
         fx.project, fx.cand_id, "L1", run_id=artifact["run_id"]
     ) == (True, "")
     assert (fx.project / "02_Agent_Notes" / "_pre_research" / "L1_research.md").is_file()
+    context = subprocess.run(
+        [sys.executable, str(fx.cli), "assemble-context", str(fx.project),
+         fx.cand_id, "--node", "L1"],
+        capture_output=True, text=True, env=_deep_research_env(), timeout=10)
+    assert context.returncode == 0, context.stderr
+
+    artifact["queries"] = ["tampered task output"]
+    (_task_dir(fx.project, task_id) / "result.json").write_text(
+        json.dumps(artifact), encoding="utf-8")
+    rejected = subprocess.run(
+        [sys.executable, str(fx.cli), "deep-research-collect", str(fx.project), task_id],
+        capture_output=True, text=True, env=_deep_research_env(), timeout=10)
+    assert rejected.returncode == 3
+    assert "differs from the persisted evidence run" in rejected.stderr
 
 
 def test_detached_start_records_failed_when_worker_cannot_launch(tmp_path, monkeypatch):
@@ -493,11 +509,27 @@ def test_detached_start_records_failed_when_worker_cannot_launch(tmp_path, monke
     assert "worker launch denied" in status["error"]
 
 
+def test_detached_start_rejects_candidate_path_traversal(tmp_path):
+    project = tmp_path / "P"
+    (project / "01_Candidates").mkdir(parents=True)
+    (project / "escape.md").write_text("---\nquestion: q\nclaim: c\n---\n", encoding="utf-8")
+    cli = ROOT / "research_loop_v04.py"
+    result = subprocess.run(
+        [sys.executable, str(cli), "deep-research-start", str(project),
+         "../escape", "--node", "L1"],
+        capture_output=True, text=True, env=_deep_research_env(), timeout=10)
+    assert result.returncode == 2
+    assert "invalid candidate ID" in result.stderr
+    assert not (project / "08_Audit" / "deep_research_runtime" / "tasks").exists()
+
+
 def test_detached_worker_rejects_invalid_success_output(tmp_path):
     task_id = "task-invalid-json"
     task_dir = _task_dir(tmp_path, task_id)
     task_dir.mkdir(parents=True)
     (task_dir / "request.json").write_text(json.dumps({
+        "schema_version": dr_task.TASK_SCHEMA_VERSION,
+        "task_id": task_id,
         "handler_args": {"project_dir": str(tmp_path), "cand_id": "C1", "node": "L1"}
     }), encoding="utf-8")
     (task_dir / "status.json").write_text(json.dumps({
@@ -513,6 +545,23 @@ def test_detached_worker_rejects_invalid_success_output(tmp_path):
     assert status["state"] == "failed"
     assert "cannot read" in status["error"]
     assert not (task_dir / "result.json").exists()
+
+
+def test_detached_worker_marks_a_malformed_request_failed(tmp_path):
+    task_id = "task-malformed-request"
+    task_dir = _task_dir(tmp_path, task_id)
+    task_dir.mkdir(parents=True)
+    (task_dir / "request.json").write_text("{", encoding="utf-8")
+    (task_dir / "status.json").write_text(json.dumps({
+        "schema_version": dr_task.TASK_SCHEMA_VERSION,
+        "task_id": task_id,
+        "state": "running",
+    }), encoding="utf-8")
+
+    assert dr_task.run_worker(tmp_path, task_id, lambda _args: 0) == 3
+    status = json.loads((task_dir / "status.json").read_text(encoding="utf-8"))
+    assert status["state"] == "failed"
+    assert "cannot read" in status["error"]
 
 
 def test_deep_research_cli_executes_a_local_fake_codex(tmp_path, monkeypatch):

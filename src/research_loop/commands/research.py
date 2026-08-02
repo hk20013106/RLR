@@ -565,6 +565,17 @@ def cmd_deep_research_run(args):
 
 def cmd_deep_research_start(args):
     """Start the existing Deep Research command in a detached worker."""
+    project_dir = Path(args.project_dir)
+    if not project_dir.is_dir():
+        print(f"ERROR: project directory not found: {project_dir}", file=sys.stderr)
+        return 2
+    if (not args.cand_id or "/" in args.cand_id or "\\" in args.cand_id or
+            args.cand_id in {".", ".."}):
+        print(f"ERROR: invalid candidate ID: {args.cand_id}", file=sys.stderr)
+        return 2
+    if not _candidate_file(project_dir, args.cand_id).exists():
+        print(f"ERROR: candidate not found: {args.cand_id}", file=sys.stderr)
+        return 2
     try:
         artifact = deep_research_task.start_task(args)
     except deep_research_task.DetachedTaskError as exc:
