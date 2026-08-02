@@ -158,6 +158,30 @@ def test_l1_contract_rejects_missing_results_discussion_or_conclusion(tmp_path):
     assert ok is False and "Conclusion" in reason
 
 
+@pytest.mark.parametrize("section", [
+    "Conclusion",
+    "Conclusion (abstract concluding statement)",
+    "Conclusion—summary statement",
+])
+def test_l1_contract_accepts_located_conclusion_heading_variants(tmp_path, section):
+    payload = _payload()
+    payload["papers"][0]["extracts"][2]["section"] = section
+    dr.persist_run(tmp_path, "C1", "L1", payload,
+                   dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"))
+
+    assert dr.audit_evidence_pack(tmp_path, "C1", "L1") == (True, "")
+
+
+def test_l1_contract_rejects_non_heading_conclusion_text(tmp_path):
+    payload = _payload()
+    payload["papers"][0]["extracts"][2]["section"] = "Discussion conclusion"
+    dr.persist_run(tmp_path, "C1", "L1", payload,
+                   dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"))
+
+    ok, reason = dr.audit_evidence_pack(tmp_path, "C1", "L1")
+    assert ok is False and "Conclusion" in reason
+
+
 def test_l4_contract_accepts_primary_methods_and_review_search_miss(tmp_path):
     payload = _payload()
     payload["review_search"] = {"query": "systematic review network analysis", "status": "none_found", "receipt": "Europe PMC 0"}
