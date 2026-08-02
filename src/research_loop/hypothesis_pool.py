@@ -19,6 +19,8 @@ _ELIGIBILITY = {
 _WORKFLOW_EVENTS = {
     "PROPOSED": "PROPOSED",
     "REPROPOSED": "PROPOSED",
+    "REVISED": "PROPOSED",
+    "DERIVED": "PROPOSED",
     "SELECTED": "SELECTED",
     "REJECTED": "REJECTED",
     "METHOD_DESIGNED": "METHOD_DESIGNED",
@@ -82,6 +84,10 @@ def _workflow_status(event: dict[str, Any]) -> str | None:
     status = _WORKFLOW_EVENTS.get(str(event["event_type"]))
     if status:
         return status
+    if event.get("event_type") == "REACTIVATION_REVIEWED":
+        disposition = str(event.get("payload", {}).get("disposition") or "")
+        if disposition in {"SELECTED", "REJECTED"}:
+            return disposition
     if event.get("hypothesis_id") and event.get("node") in {"L8", "L8.5"}:
         return "AUDITED"
     if event.get("hypothesis_id") and event.get("node") == "L9a":
@@ -187,17 +193,28 @@ def build_pool(
 
         attacks = [event for event in events if event["event_type"] == "ATTACKED"]
         rejections = [
-            event for event in events if event["event_type"] == "REJECTED"
+            event
+            for event in events
+            if event["event_type"] == "REJECTED"
+            or (
+                event["event_type"] == "REACTIVATION_REVIEWED"
+                and event.get("payload", {}).get("disposition") == "REJECTED"
+            )
         ]
         last_rejection_event = rejections[-1] if rejections else None
         last_rejection = None
         if last_rejection_event:
+            payload = last_rejection_event.get("payload", {})
             last_rejection = {
                 "event_id": str(last_rejection_event["event_id"]),
                 "project_id": str(last_rejection_event["project_id"]),
                 "candidate_id": str(last_rejection_event["candidate_id"]),
                 "round_id": str(last_rejection_event["round_id"]),
-                "reason_code": str(last_rejection_event.get("outcome") or ""),
+                "reason_code": str(
+                    payload.get("reason_code")
+                    or last_rejection_event.get("outcome")
+                    or ""
+                ),
                 "reason": str(last_rejection_event.get("reason") or ""),
                 "commit_seq": int(last_rejection_event["commit_seq"]),
             }
@@ -216,14 +233,26 @@ def build_pool(
                 for event in attacks
             }
         )
-        unresolved_blockers = [str(event["event_id"]) for event in attacks]
+        unresolved_blockers = {str(event["event_id"]) for event in attacks}
+        for event in events:
+            if event["event_type"] != "REACTIVATION_REVIEWED":
+                continue
+            assessment = event.get("payload", {}).get(
+                "reactivation_assessment"
+            ) or {}
+            if assessment.get("basis_verdict") == "RESOLVED":
+                unresolved_blockers.difference_update(
+                    str(value)
+                    for value in assessment.get("prior_blocking_event_ids") or []
+                )
+        unresolved_blocker_ids = sorted(unresolved_blockers)
         eligibility, requirements = _eligibility(
             epistemic_status,
             latest_workflow_status,
             len(rejections),
-            unresolved_blockers,
+            unresolved_blocker_ids,
         )
-        if eligibility not in _ELIGIBILITY:  # defensive invariant
+        if eligibility not in _ELIGIBILITY:
             raise LedgerError(f"invalid reactivation eligibility: {eligibility}")
 
         records.append(
@@ -245,7 +274,7 @@ def build_pool(
                 "last_rejection": last_rejection,
                 "latest_occurrence": latest_occurrence,
                 "latest_workflow_status": latest_workflow_status,
-                "unresolved_blocker_event_ids": unresolved_blockers,
+                "unresolved_blocker_event_ids": unresolved_blocker_ids,
                 "reactivation_eligibility": eligibility,
                 "reactivation_requirements": requirements,
                 "first_seen_at": str(events[0]["created_at"]) if events else None,
