@@ -67,10 +67,11 @@ def _assert_zero_native_writes(project, store, candidate):
         con.close()
 
 
-def test_native_l1_context_requires_recall(tmp_path, capsys):
+def test_native_l1_context_requires_recall(tmp_path, capsys, monkeypatch):
     project, store, candidate, *_ = _native_l1_boundary(
         tmp_path, include_recall=False
     )
+    monkeypatch.delenv("RLR_AUTO_HYPOTHESIS_RECALL", raising=False)
     capsys.readouterr()
 
     rc = main([
