@@ -1,0 +1,46 @@
+name: Hypothesis Reactivation TDD
+
+on:
+  push:
+    branches:
+      - feat/hypothesis-pool-reactivation
+
+jobs:
+  targeted-test:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Import and CLI checks
+        run: |
+          python -c "import sys; sys.path.insert(0, 'src'); import research_loop"
+          python research_loop_v04.py --help
+
+      - name: Targeted hypothesis-pool tests
+        env:
+          PYTHONPATH: src
+        run: |
+          FILES=""
+          for file in \
+            tests/test_hypothesis_pool.py \
+            tests/test_hypothesis_recall.py \
+            tests/test_hypothesis_recall_cli.py \
+            tests/test_hypothesis_reactivation.py \
+            tests/test_hypothesis_reactivation_e2e.py \
+            tests/test_run_receipts.py \
+            tests/test_conditional_l2_skip.py; do
+            if [ -f "$file" ]; then
+              FILES="$FILES $file"
+            fi
+          done
+          python -m pytest -q --no-header -p no:cacheprovider $FILES
