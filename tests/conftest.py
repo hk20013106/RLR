@@ -17,7 +17,11 @@ os.environ.setdefault(
 
 
 def pytest_configure(config):
-    """Propagate coverage into CLI subprocesses before test modules import."""
+    """Install test adapters and propagate coverage before collection."""
+    import native_v2_helpers
+    from hypothesis_recall_test_support import install
+
+    install(native_v2_helpers)
     if getattr(config.option, "cov_source", None):
         root = Path(__file__).resolve().parents[1]
         os.environ["COVERAGE_PROCESS_START"] = str(root / ".coveragerc")
