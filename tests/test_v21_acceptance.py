@@ -496,14 +496,15 @@ def _legacy_profile_project(tmp_path: Path, *, status="KEEP"):
             "schema_version": "2.0",
             "hypotheses": [
                 {
-                    "proposal_key": "p1",
-                    "statement": "Legacy hypothesis",
+                    "proposal_key": f"p{index}",
+                    "statement": f"Legacy hypothesis {index}",
                     "operationalization": "measure",
                     "falsification_criteria": ["absent"],
                     "rationale": "legacy",
                 }
+                for index in range(13)
             ],
-            "primary_proposal_key": "p1",
+            "primary_proposal_key": "p0",
             "key_uncertainty": "legacy",
         },
         delta_path=project / "02_Agent_Notes" / "Einstein" / "C1_L1.json",
