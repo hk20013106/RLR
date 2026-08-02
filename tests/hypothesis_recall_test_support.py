@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -35,10 +36,32 @@ def install(native_helpers) -> None:
             source_file,
             store_path=store_path,
         )
+        project = Path(project_dir)
+        manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+
+        # The synthetic helper creates the immutable evidence pack directly.
+        # Context assembly also requires its canonical pre-research alias.
+        evidence = (manifest.get("pre_research") or {}).get("evidence_artifacts")
+        if evidence:
+            summary = next(
+                (
+                    item for item in evidence.get("files", [])
+                    if item.get("kind") == "summary"
+                ),
+                None,
+            )
+            if summary:
+                source_summary = project / str(summary["path"])
+                canonical_summary = (
+                    project / "02_Agent_Notes" / "_pre_research"
+                    / f"{node}_research.md"
+                )
+                canonical_summary.parent.mkdir(parents=True, exist_ok=True)
+                canonical_summary.write_bytes(source_summary.read_bytes())
+
         if node != "L1" or not include_recall:
             return manifest_path, receipt_path
 
-        project = Path(project_dir)
         ledger = HypothesisLedger(
             store_path or os.environ["RLR_HYPOTHESIS_STORE"]
         )
@@ -57,9 +80,6 @@ def install(native_helpers) -> None:
             query_text=query_text,
         )
 
-        import json
-
-        manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
         manifest["hypothesis_recall"] = recall_manifest_entry(
             project, candidate_id, round_id
         )
