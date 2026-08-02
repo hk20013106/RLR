@@ -27,13 +27,6 @@ def test_l1_retry_returns_original_receipt_after_clock_advances(tmp_path, monkey
                 "falsification_criteria": ["The first outcome is absent."],
                 "rationale": "Deterministic retry fixture.",
             },
-            {
-                "proposal_key": "p2",
-                "statement": "A second testable hypothesis",
-                "operationalization": "Measure the second outcome.",
-                "falsification_criteria": ["The second outcome is absent."],
-                "rationale": "Satisfies the native L1 minimum candidate set.",
-            },
         ],
         "primary_proposal_key": "p1",
         "key_uncertainty": "effect size",
