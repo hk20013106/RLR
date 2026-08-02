@@ -32,13 +32,6 @@ from research_loop.ledger_receipt_idempotency import (
 
 _install_receipt_idempotency(hypothesis_ledger)
 
-from research_loop import hypothesis_migration as hypothesis_migration
-from research_loop.migration_routing_compat import (
-    install as _install_migration_routing_compat,
-)
-
-_install_migration_routing_compat(hypothesis_migration)
-
 from research_loop import topology as topology
 from research_loop.topology_extensions import install as _install_topology_extensions
 
@@ -54,6 +47,5 @@ del _install_method_evidence, _install_method_evidence_compat
 del _review_navigation, _install_navigation_compat
 del _install_review_status_compat, _registered_sources
 del _install_method_contracts, _install_receipt_idempotency
-del _install_migration_routing_compat, hypothesis_migration
 del _install_topology_extensions, _install_conditional_routing
 del _lifecycle, _context
