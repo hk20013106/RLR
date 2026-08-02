@@ -2,9 +2,10 @@ import json
 
 import pytest
 
-from research_loop.hypothesis_ledger import LedgerError
+from research_loop.hypothesis_ledger import LedgerError, canonical_json
 from research_loop.hypothesis_pool import build_pool
 from research_loop.hypothesis_recall import create_recall
+from research_loop.node_skips import ensure_l2_skip_receipt
 from tests.test_hypothesis_pool import _seed_rejected_hypothesis
 
 
@@ -14,6 +15,16 @@ def _finalize(ledger, result):
         artifact_sha256=result.delta_hash,
         receipt_sha256=result.delta_hash,
     )
+
+
+def _write_l1_and_skip(project, result):
+    path = (
+        project / "02_Agent_Notes" / "Einstein"
+        / "C2_L1_einstein_delta.v2.json"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(canonical_json(result.normalized_delta), encoding="utf-8")
+    ensure_l2_skip_receipt(project, "C2", path)
 
 
 def _source(project, ledger, hypothesis_id):
@@ -263,6 +274,7 @@ def test_l3_records_reactivation_review_without_erasing_disposition(tmp_path):
         "reactivation_basis": _basis(),
     })
     _finalize(ledger, l1)
+    _write_l1_and_skip(project, l1)
     blocker_ids = recalled["unresolved_blocker_event_ids"]
 
     l3 = ledger.commit_delta(
