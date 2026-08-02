@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import contextvars
 import json
-from pathlib import Path
 from typing import Any
 
 from research_loop.hypothesis_recall import load_recall, validate_recall
@@ -91,7 +90,6 @@ def _prepare_l1(
 
     event_context: dict[str, dict[str, Any]] = {}
     definition_hashes: set[str] = set()
-    reused_sources: set[str] = set()
 
     for item in items:
         origin = str(item.get("origin") or "NEW")
@@ -123,11 +121,6 @@ def _prepare_l1(
 
         if origin in {"REACTIVATE", "REVISE"}:
             source_id = str(item["source_hypothesis_id"])
-            if source_id in reused_sources:
-                raise ledger_module.LedgerError(
-                    f"historical source is reused more than once in this L1 delta: {source_id}"
-                )
-            reused_sources.add(source_id)
             source = _require_recalled(ledger_module, recalled, source_id)
             source_definition = _source_definition(ledger_module, source)
             source_occurrence = str(
@@ -183,11 +176,6 @@ def _prepare_l1(
                 _require_recalled(ledger_module, recalled, parent_id)
                 for parent_id in parent_ids
             ]
-            if any(parent_id in reused_sources for parent_id in parent_ids):
-                raise ledger_module.LedgerError(
-                    "historical source is reused more than once in this L1 delta"
-                )
-            reused_sources.update(parent_ids)
             if any(
                 parent.get("reactivation_eligibility") == "BLOCKED_FALSIFIED"
                 for parent in parent_records
