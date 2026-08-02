@@ -30,6 +30,7 @@ _install_method_contracts(hypothesis_contracts)
 _install_reactivation_contracts(hypothesis_contracts)
 
 from research_loop import hypothesis_ledger as hypothesis_ledger
+from research_loop import constraint_validation as _constraint_validation
 from research_loop.ledger_receipt_idempotency import (
     install as _install_receipt_idempotency,
 )
@@ -39,10 +40,14 @@ from research_loop.hypothesis_reactivation import (
 from research_loop.hypothesis_reactivation_constraints import (
     install as _install_reactivation_constraints,
 )
+from research_loop.conditional_skip_constraints import (
+    install as _install_conditional_skip_constraints,
+)
 
 _install_receipt_idempotency(hypothesis_ledger)
 _install_hypothesis_reactivation(hypothesis_ledger)
 _install_reactivation_constraints(hypothesis_ledger)
+_install_conditional_skip_constraints(hypothesis_ledger, _constraint_validation)
 
 from research_loop import topology as topology
 from research_loop.topology_extensions import install as _install_topology_extensions
@@ -73,7 +78,7 @@ del _review_navigation, _install_navigation_compat
 del _install_review_status_compat, _registered_sources
 del _install_method_contracts, _install_reactivation_contracts
 del _install_receipt_idempotency, _install_hypothesis_reactivation
-del _install_reactivation_constraints
+del _install_reactivation_constraints, _install_conditional_skip_constraints
 del _install_topology_extensions, _install_conditional_routing
 del _install_hypothesis_recall_context, _install_hypothesis_pool_cli
-del _lifecycle, _ledger_commands, _context, _cli
+del _constraint_validation, _lifecycle, _ledger_commands, _context, _cli
