@@ -14,6 +14,9 @@ os.environ.setdefault(
     "RLR_HYPOTHESIS_STORE",
     str(Path(tempfile.gettempdir()) / f"rlr-pytest-{os.getpid()}.sqlite"),
 )
+# Canonical orchestration creates the cursor-bound recall before L1 context.
+# Existing positive CLI fixtures model that orchestration through this opt-in.
+os.environ.setdefault("RLR_AUTO_HYPOTHESIS_RECALL", "1")
 
 
 def pytest_configure(config):
