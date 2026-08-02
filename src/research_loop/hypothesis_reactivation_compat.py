@@ -89,7 +89,8 @@ def install(ledger_module, constraint_module) -> None:
                     "ON v.hypothesis_id=e.hypothesis_id "
                     "JOIN emissions m ON m.commit_seq=e.commit_seq "
                     "WHERE e.candidate_id=? AND e.commit_seq<=? "
-                    f"AND e.event_type IN ({l1_placeholders}) AND "
+                    f"AND e.event_type IN ({l1_placeholders}) "
+                    "AND e.node='L1' AND e.occurrence_id IS NOT NULL AND "
                     + ledger_module._FINALIZED_EMISSION_PREDICATE
                     + project_clause
                     + " ORDER BY e.commit_seq,e.event_id",
