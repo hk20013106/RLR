@@ -22,15 +22,23 @@ _install_review_status_compat(deep_research)
 
 from research_loop import hypothesis_contracts as hypothesis_contracts
 from research_loop.method_contracts import install as _install_method_contracts
+from research_loop.hypothesis_reactivation_contracts import (
+    install as _install_reactivation_contracts,
+)
 
 _install_method_contracts(hypothesis_contracts)
+_install_reactivation_contracts(hypothesis_contracts)
 
 from research_loop import hypothesis_ledger as hypothesis_ledger
 from research_loop.ledger_receipt_idempotency import (
     install as _install_receipt_idempotency,
 )
+from research_loop.hypothesis_reactivation import (
+    install as _install_hypothesis_reactivation,
+)
 
 _install_receipt_idempotency(hypothesis_ledger)
+_install_hypothesis_reactivation(hypothesis_ledger)
 
 from research_loop import topology as topology
 from research_loop.topology_extensions import install as _install_topology_extensions
@@ -59,7 +67,8 @@ _install_hypothesis_pool_cli(_cli)
 del _install_method_evidence, _install_method_evidence_compat
 del _review_navigation, _install_navigation_compat
 del _install_review_status_compat, _registered_sources
-del _install_method_contracts, _install_receipt_idempotency
+del _install_method_contracts, _install_reactivation_contracts
+del _install_receipt_idempotency, _install_hypothesis_reactivation
 del _install_topology_extensions, _install_conditional_routing
 del _install_hypothesis_recall_context, _install_hypothesis_pool_cli
 del _lifecycle, _ledger_commands, _context, _cli
