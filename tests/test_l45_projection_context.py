@@ -125,3 +125,33 @@ def test_staged_l45_commits_exact_context_evidence_manifest(monkeypatch, tmp_pat
     assert created is True
     assert path.is_file()
     assert artifact["l4b_evidence_manifest"] == expected
+
+
+def test_staged_l45_removes_new_projection_if_evidence_changes_during_commit(
+    monkeypatch, tmp_path
+):
+    manifest = _manifest(tmp_path)
+    evidence = _staged_evidence(manifest)
+    delta = tmp_path / "delta.json"
+    delta.write_text("{}", encoding="utf-8")
+    expected = _evidence_manifest("same")
+    changed = _evidence_manifest("changed-during-commit")
+    observed = iter((expected, changed))
+    monkeypatch.setattr(dr, "audit_evidence_pack", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(
+        dr, "evidence_artifact_manifest", lambda *a, **k: next(observed)
+    )
+
+    with pytest.raises(
+        dr.DeepResearchError, match="changed since context assembly"
+    ):
+        l4p.commit_l45_method_projection(
+            tmp_path,
+            "C1",
+            evidence,
+            delta,
+            expected_evidence_manifest=expected,
+        )
+
+    commit_dir = tmp_path / "08_Audit" / "l4_method_commits"
+    assert not commit_dir.exists() or list(commit_dir.glob("*.json")) == []
