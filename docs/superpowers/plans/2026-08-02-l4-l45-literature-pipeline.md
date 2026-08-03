@@ -46,22 +46,22 @@ hard dependencies.
 - [x] Test that `L4_PIPELINE_STAGES` declares ordered identities `L4A`, `L4B`,
   `L4C`, and `L4.5`, with L4C mapped to existing `L4_fisher` and L4.5 marked
   deterministic/non-cognitive.
-- [ ] Observe CI fail because `research_loop.l4_pipeline` does not exist.
+- [x] Observe CI fail because `research_loop.l4_pipeline` does not exist.
 
 ## Task 2: Implement and test L4A discovery
 
 **Create:** `src/research_loop/l4_pipeline.py`
 
-- [ ] Implement the strict provider schema.
+- [x] Implement the strict provider schema.
 - [ ] Reuse the configured ARS backend and existing command/receipt/subprocess
   helpers; add only the metadata-discovery prompt and schema boundary.
-- [ ] Implement identifier-first deterministic deduplication: DOI, PMID, stable
+- [x] Implement identifier-first deterministic deduplication: DOI, PMID, stable
   URL, normalized title plus year. Keep the higher relevance score and retain
   duplicate audit records.
-- [ ] Persist `L4ADiscoveryManifest/v1` under
+- [x] Persist `L4ADiscoveryManifest/v1` under
   `09_Literature_Database/l4/discovery/manifests/` with immutable run ID,
   runtime receipt, selected IDs, and manifest SHA256.
-- [ ] Add tests for deduplication, manifest persistence, and zero-selected
+- [x] Add tests for deduplication, manifest persistence, and zero-selected
   failure after persistence.
 - [ ] Observe RED, implement minimally, then observe GREEN through CI.
 
