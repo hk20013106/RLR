@@ -64,7 +64,10 @@ def l4a_discovery_schema() -> dict:
         "year": {"type": "integer"}, "journal": {"type": "string"},
         "abstract": {"type": "string"},
         "source_database": {"type": "string", "minLength": 1},
-        "source_metadata_response": {"type": "object", "additionalProperties": True},
+        # Codex structured outputs require every object to be closed.  The
+        # database response is intentionally heterogeneous, so the provider
+        # returns its canonical JSON representation and RLR parses it below.
+        "source_metadata_response": {"type": "string", "minLength": 2},
         "open_access_status": {"enum": ["open", "closed", "unknown"]},
         "full_text_status": {"enum": ["available_local", "available_oa", "metadata_only", "manual_required"]},
         "full_text_locations": _string_array_schema(),
@@ -112,6 +115,47 @@ def _asset_identity(asset: dict) -> str:
     return f"title:{_normalized_title(asset.get('title', ''))}|year:{asset.get('year', '')}"
 
 
+def _parse_source_metadata_response(value: Any, *, asset_id: str = "") -> dict[str, Any]:
+    if not isinstance(value, str) or not value.strip():
+        raise _deep_research.DeepResearchError(
+            f"L4A source_metadata_response for asset {asset_id or '<unknown>'} "
+            "must be a non-empty JSON string"
+        )
+
+    def reject_non_json_constant(constant: str) -> None:
+        raise ValueError(f"non-standard JSON constant {constant}")
+
+    try:
+        parsed = json.loads(value, parse_constant=reject_non_json_constant)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise _deep_research.DeepResearchError(
+            f"L4A source_metadata_response for asset {asset_id or '<unknown>'} "
+            "must be valid JSON"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise _deep_research.DeepResearchError(
+            f"L4A source_metadata_response for asset {asset_id or '<unknown>'} "
+            "must decode to a JSON object"
+        )
+    return parsed
+
+
+def _normalize_l4a_assets(assets: list[Any]) -> list[dict]:
+    normalized = []
+    for index, raw in enumerate(assets):
+        if not isinstance(raw, dict):
+            raise _deep_research.DeepResearchError(
+                f"L4A asset at index {index} must be an object"
+            )
+        asset = dict(raw)
+        asset["source_metadata_response"] = _parse_source_metadata_response(
+            asset.get("source_metadata_response"),
+            asset_id=str(asset.get("asset_id") or ""),
+        )
+        normalized.append(asset)
+    return normalized
+
+
 def deduplicate_l4a_assets(assets: list[dict]) -> tuple[list[dict], list[dict]]:
     chosen: dict[str, dict] = {}
     order: list[str] = []
@@ -152,7 +196,9 @@ def persist_l4a_discovery(
     project_id: str = "", round_id: str = "", profile_id: str = "",
 ) -> dict:
     project = Path(project_dir)
-    assets, duplicates = deduplicate_l4a_assets(list(payload.get("assets") or []))
+    assets, duplicates = deduplicate_l4a_assets(
+        _normalize_l4a_assets(list(payload.get("assets") or []))
+    )
     selected_ids = [str(a["asset_id"]) for a in assets if a.get("selection_status") == "selected"]
     seed = {
         "candidate_id": candidate_id, "question": question, "claim": claim,
