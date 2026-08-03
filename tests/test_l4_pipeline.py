@@ -320,19 +320,31 @@ def test_l45_commit_is_hash_bound_and_idempotent(monkeypatch, tmp_path):
     delta = project / "02_Agent_Notes" / "Fisher" / "C1_L4_fisher_delta.json"
     delta.parent.mkdir(parents=True)
     delta.write_text('{"schema_version":"2.1","candidate_id":"C1"}', encoding="utf-8")
+    context_evidence = {
+        "run_id": "RUN2",
+        "files": [{"path": "evidence", "sha256": "hash"}],
+    }
 
     monkeypatch.setattr(dr, "audit_evidence_pack", lambda *a, **k: (True, ""))
     monkeypatch.setattr(
         dr,
         "evidence_artifact_manifest",
-        lambda *a, **k: {"run_id": "RUN2", "files": [{"path": "evidence", "sha256": "hash"}]},
+        lambda *a, **k: context_evidence,
     )
 
     first, first_path, first_created = l4p.commit_l45_method_projection(
-        project, "C1", evidence, delta
+        project,
+        "C1",
+        evidence,
+        delta,
+        expected_evidence_manifest=context_evidence,
     )
     second, second_path, second_created = l4p.commit_l45_method_projection(
-        project, "C1", evidence, delta
+        project,
+        "C1",
+        evidence,
+        delta,
+        expected_evidence_manifest=context_evidence,
     )
 
     assert first["schema_version"] == l4p.L45_COMMIT_SCHEMA_VERSION
@@ -353,11 +365,23 @@ def test_l45_rejects_tampered_l4a_manifest(monkeypatch, tmp_path):
     manifest_path.write_text("{}", encoding="utf-8")
     delta = project / "delta.json"
     delta.write_text("{}", encoding="utf-8")
+    context_evidence = {"run_id": "RUN2", "files": []}
 
     monkeypatch.setattr(dr, "audit_evidence_pack", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(
+        dr,
+        "evidence_artifact_manifest",
+        lambda *a, **k: context_evidence,
+    )
 
     with pytest.raises(dr.DeepResearchError, match="L4A manifest"):
-        l4p.commit_l45_method_projection(project, "C1", evidence, delta)
+        l4p.commit_l45_method_projection(
+            project,
+            "C1",
+            evidence,
+            delta,
+            expected_evidence_manifest=context_evidence,
+        )
 
 
 def test_l45_rejects_changed_l4c_delta(monkeypatch, tmp_path):
@@ -366,14 +390,21 @@ def test_l45_rejects_changed_l4c_delta(monkeypatch, tmp_path):
     evidence = _linked_evidence(manifest)
     delta = project / "delta.json"
     delta.write_text("{}", encoding="utf-8")
+    context_evidence = {"run_id": "RUN2", "files": []}
 
     monkeypatch.setattr(dr, "audit_evidence_pack", lambda *a, **k: (True, ""))
     monkeypatch.setattr(
         dr,
         "evidence_artifact_manifest",
-        lambda *a, **k: {"run_id": "RUN2", "files": []},
+        lambda *a, **k: context_evidence,
     )
-    commit, _, _ = l4p.commit_l45_method_projection(project, "C1", evidence, delta)
+    commit, _, _ = l4p.commit_l45_method_projection(
+        project,
+        "C1",
+        evidence,
+        delta,
+        expected_evidence_manifest=context_evidence,
+    )
     delta.write_text('{"changed":true}', encoding="utf-8")
 
     with pytest.raises(dr.DeepResearchError, match="L4C delta SHA256"):
