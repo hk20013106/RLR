@@ -79,6 +79,52 @@ def _receipt():
     )
 
 
+def _persist_manifest(project):
+    return l4p.persist_l4a_discovery(
+        project,
+        "C1",
+        _discovery_payload(_asset()),
+        _receipt(),
+        question="Q",
+        claim="H",
+        project_id="P1",
+        round_id="1",
+        profile_id="v2.1-catalog-1",
+    )
+
+
+def _linked_evidence(manifest):
+    return {
+        "pipeline_schema": l4p.PIPELINE_SCHEMA_VERSION,
+        "pipeline_stage": "L4B",
+        "run_id": "RUN2",
+        "candidate_id": "C1",
+        "node": "L4",
+        "l4a_manifest_path": manifest["path"],
+        "l4a_manifest_sha256": manifest["manifest_sha256"],
+        "method_components": [
+            {"component_id": "C01", "name": "model", "required": True, "rationale": "test"}
+        ],
+        "method_candidates": [
+            {
+                "method_id": "M01",
+                "component_id": "C01",
+                "name": "interaction model",
+                "status": "eligible",
+                "method_anchor_ids": ["A01"],
+            }
+        ],
+        "method_anchors": [
+            {
+                "anchor_id": "A01",
+                "evidence_id": "E01",
+                "method_component_ids": ["C01"],
+                "method_ids": ["M01"],
+            }
+        ],
+    }
+
+
 def test_l4a_discovery_schema_is_strict_metadata_only():
     schema = l4p.l4a_discovery_schema()
 
@@ -265,3 +311,70 @@ def test_install_runs_l4a_then_delegates_l4b_with_frozen_catalog(monkeypatch, tm
     assert result["pipeline_stage"] == "L4B"
     assert result["l4a_manifest_path"] == manifest["path"]
     assert result["l4a_manifest_sha256"] == "abc123"
+
+
+def test_l45_commit_is_hash_bound_and_idempotent(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    manifest = _persist_manifest(project)
+    evidence = _linked_evidence(manifest)
+    delta = project / "02_Agent_Notes" / "Fisher" / "C1_L4_fisher_delta.json"
+    delta.parent.mkdir(parents=True)
+    delta.write_text('{"schema_version":"2.1","candidate_id":"C1"}', encoding="utf-8")
+
+    monkeypatch.setattr(dr, "audit_evidence_pack", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(
+        dr,
+        "evidence_artifact_manifest",
+        lambda *a, **k: {"run_id": "RUN2", "files": [{"path": "evidence", "sha256": "hash"}]},
+    )
+
+    first, first_path, first_created = l4p.commit_l45_method_projection(
+        project, "C1", evidence, delta
+    )
+    second, second_path, second_created = l4p.commit_l45_method_projection(
+        project, "C1", evidence, delta
+    )
+
+    assert first["schema_version"] == l4p.L45_COMMIT_SCHEMA_VERSION
+    assert first["component_ids"] == ["C01"]
+    assert first["method_ids"] == ["M01"]
+    assert first["anchor_ids"] == ["A01"]
+    assert first_path == second_path
+    assert first_created is True
+    assert second_created is False
+    assert json.loads(first_path.read_text(encoding="utf-8")) == first
+
+
+def test_l45_rejects_tampered_l4a_manifest(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    manifest = _persist_manifest(project)
+    evidence = _linked_evidence(manifest)
+    manifest_path = project / manifest["path"]
+    manifest_path.write_text("{}", encoding="utf-8")
+    delta = project / "delta.json"
+    delta.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(dr, "audit_evidence_pack", lambda *a, **k: (True, ""))
+
+    with pytest.raises(dr.DeepResearchError, match="L4A manifest"):
+        l4p.commit_l45_method_projection(project, "C1", evidence, delta)
+
+
+def test_l45_rejects_changed_l4c_delta(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    manifest = _persist_manifest(project)
+    evidence = _linked_evidence(manifest)
+    delta = project / "delta.json"
+    delta.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(dr, "audit_evidence_pack", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(
+        dr,
+        "evidence_artifact_manifest",
+        lambda *a, **k: {"run_id": "RUN2", "files": []},
+    )
+    commit, _, _ = l4p.commit_l45_method_projection(project, "C1", evidence, delta)
+    delta.write_text('{"changed":true}', encoding="utf-8")
+
+    with pytest.raises(dr.DeepResearchError, match="L4C delta SHA256"):
+        l4p.validate_l45_method_commit(project, commit)
