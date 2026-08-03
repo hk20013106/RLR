@@ -1,15 +1,67 @@
 # L4 Methods Evidence and User PDF Workflow
 
-L4 creates an evidence-backed catalog of method candidates. It does not make the final method decision.
+The formal DAG still contains one L4 node and retains the `L4_fisher` storage
+key. Internally, the method-planning pipeline is staged:
 
 ```text
-L4: method components + candidates + evidence anchors
+L4A: metadata discovery and frozen asset selection
+→ L4B: strict evidence construction and method candidate catalog
+→ L4C: Fisher method design (`L4_fisher` delta)
+→ L4.5: deterministic lineage validation and commit
 → L5: candidate-level EDA/QC critique
 → L6: selected methods and frozen execution plan
 → L7: execute only the approved plan
 ```
 
-## Core objects
+L4A/L4B/L4C/L4.5 are auditable internal stages, not additional formal DAG
+nodes. There is no L3.5 and L5-L10 are not renumbered.
+
+## Reuse-first implementation
+
+RLR does not duplicate mature literature and parsing systems.
+
+- L4A uses the configured Academic Research Skills runtime for metadata-only
+  discovery and persists `L4ADiscoveryManifest/v1`.
+- L4B delegates source retrieval, Methods extraction, source-payload retention,
+  method-candidate construction, and anchor verification to the existing
+  `deep_research.py`, `method_evidence.py`, review-navigation, and registered
+  user-source implementations.
+- L4C remains the existing Fisher cognitive node and existing delta contract.
+- L4.5 calls no model. It revalidates the exact L4A manifest, L4B evidence
+  artifact manifest, and persisted L4C delta hash before the native L4
+  transaction finalizes.
+
+Literature-search MCP, Zotero, GROBID, Docling, PaperQA2, and similar projects
+may be attached through replaceable adapters. They are not vendored or added as
+heavy base dependencies.
+
+## L4A discovery manifest
+
+L4A stores metadata and selection receipts only. Its schema includes paper
+identifiers, source database responses, abstract when available, open-access
+and full-text status, relevance score, selection status, and rationale.
+
+L4A cannot emit:
+
+- source payloads;
+- verbatim evidence extracts;
+- method components or candidates;
+- method anchors;
+- a final analysis plan.
+
+The immutable manifest is written under:
+
+```text
+09_Literature_Database/l4/discovery/manifests/
+```
+
+Deduplication uses DOI, then PMID, then stable URL, then normalized title and
+year. Duplicate records remain recorded in the manifest. L4B receives a
+canonical frozen catalog containing only L4A-selected assets and may resolve
+those assets or registered local sources; it may not silently broaden the
+corpus.
+
+## Core L4B objects
 
 A **method component** is a necessary part of the analysis, such as cross-species orthology mapping, differential-expression modelling, co-expression analysis, or enrichment testing.
 
@@ -26,6 +78,33 @@ A **method anchor** is a located, verifiable source excerpt that supports how a 
 - verified user-supplied PDF.
 
 A review may identify or compare methods, but it does not independently satisfy the reproducible-method requirement. Abstract labels such as `Methods and results`, table-only mentions, retrieval placeholders, and unlocated summaries are not accepted anchors.
+
+For staged evidence packs, every audit and context manifest also revalidates
+the linked L4A file and includes its exact file SHA256. Deleting or altering the
+discovery manifest invalidates the L4B evidence pack.
+
+## L4.5 deterministic commit
+
+L4.5 runs inside the existing native L4 finalize boundary. It projects only
+component, method, and anchor IDs already present in L4B and writes an immutable
+`L45MethodCommit/v1` artifact under:
+
+```text
+08_Audit/l4_method_commits/
+```
+
+It verifies:
+
+1. the staged L4B artifact points to an existing L4A manifest;
+2. the persisted L4A contents and manifest hash match the L4B linkage;
+3. the existing strict L4B evidence audit passes;
+4. the exact L4B evidence artifact manifest is available;
+5. the persisted `L4_fisher` delta still has the recorded SHA256.
+
+Identical retries are idempotent. A collision or lineage mismatch fails closed.
+Because L4.5 executes before the hypothesis commit receipt is written, failure
+aborts the native L4 persistence transaction. Legacy evidence packs without the
+staged pipeline marker retain their previous behavior.
 
 ## Registering a user-supplied PDF
 
@@ -70,7 +149,7 @@ Re-registering the same bytes for the same candidate is idempotent. A source reg
 
 Registration alone does **not** satisfy the L4 gate. It proves only file identity, integrity, and candidate ownership.
 
-On the next L4 deep-research run, ARS receives the registered source ID, path, and SHA256. ARS must read the local PDF and return:
+On the next L4B evidence-construction run, ARS receives the registered source ID, path, and SHA256. ARS must read the local PDF and return:
 
 - `source_kind: user_supplied_pdf`;
 - the exact `user_source_id` and PDF SHA256;
@@ -102,7 +181,7 @@ OCR is outside the current RLR scope. The failure report must identify the affec
 
 ## How Methods are presented
 
-The generated L4 Markdown catalog is stored with the evidence run:
+The generated L4B Markdown catalog is stored with the evidence run:
 
 ```text
 09_Literature_Database/evidence_packs/runs/<run_id>.md
@@ -122,4 +201,9 @@ For every method candidate it presents:
 - evidence anchors, source kinds, and locators;
 - missing-source status and the exact PDF registration command when needed.
 
-L5 critiques these candidates without deleting the comparison record. L6 records the final selection, rejected alternatives, parameters, software versions, scripts, required QC checks, and supporting anchor IDs. Raw source excerpts remain in the evidence store and are referenced by ID rather than copied wholesale into the execution plan.
+L4C Fisher uses this validated catalog to design the project-specific method
+plan. L5 critiques the plan and candidates without deleting the comparison
+record. L6 records the final selection, rejected alternatives, parameters,
+software versions, scripts, required QC checks, and supporting anchor IDs. Raw
+source excerpts remain in the evidence store and are referenced by ID rather
+than copied wholesale into the execution plan.

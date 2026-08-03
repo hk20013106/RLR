@@ -20,6 +20,22 @@ _install_navigation_compat(_review_navigation)
 _review_navigation.install(deep_research)
 _install_review_status_compat(deep_research)
 
+# L4A/L4B wraps the fully installed mature L4 evidence runtime so evidence
+# construction is delegated rather than duplicated. Compatibility preserves
+# the historical L4 work-directory/API contract. Lineage checks then bind every
+# staged evidence audit/context manifest to the exact L4A file, and the L4.5
+# core commit is bound to the exact evidence manifest Fisher consumed.
+from research_loop import l4_pipeline as _l4_pipeline_module
+from research_loop.l4_pipeline import install as _install_l4_pipeline
+from research_loop.l4_pipeline_compat import install as _install_l4_pipeline_compat
+from research_loop.l4_lineage import install as _install_l4_lineage
+from research_loop.l45_context_binding import install as _install_l45_context_binding
+
+_install_l4_pipeline(deep_research)
+_install_l4_pipeline_compat(_l4_pipeline_module, deep_research)
+_install_l4_lineage(deep_research)
+_install_l45_context_binding(_l4_pipeline_module)
+
 from research_loop import hypothesis_contracts as hypothesis_contracts
 from research_loop.method_contracts import install as _install_method_contracts
 from research_loop.hypothesis_reactivation_contracts import (
@@ -65,7 +81,9 @@ from research_loop.conditional_routing import install as _install_conditional_ro
 from research_loop.hypothesis_recall_context import (
     install as _install_hypothesis_recall_context,
 )
+from research_loop.l45_ledger import install as _install_l45_ledger
 
+_install_l45_ledger(_ledger_commands)
 _install_conditional_routing(_lifecycle, _context)
 _install_hypothesis_recall_context(_context, _ledger_commands)
 
@@ -80,10 +98,13 @@ _install_hypothesis_pool_cli(_cli)
 del _install_method_evidence, _install_method_evidence_compat
 del _review_navigation, _install_navigation_compat
 del _install_review_status_compat, _registered_sources
+del _install_l4_pipeline, _install_l4_pipeline_compat, _install_l4_lineage
+del _install_l45_context_binding, _l4_pipeline_module
 del _install_method_contracts, _install_reactivation_contracts
 del _install_receipt_idempotency, _install_hypothesis_reactivation
 del _install_reactivation_constraints, _install_conditional_skip_constraints
 del _install_reactivation_compat
-del _install_topology_extensions, _install_conditional_routing
-del _install_hypothesis_recall_context, _install_hypothesis_pool_cli
+del _install_topology_extensions, _install_l45_ledger
+del _install_conditional_routing, _install_hypothesis_recall_context
+del _install_hypothesis_pool_cli
 del _constraint_validation, _lifecycle, _ledger_commands, _context, _cli
