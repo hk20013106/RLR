@@ -1,8 +1,7 @@
-import json
-from pathlib import Path
 from types import SimpleNamespace
 
 from research_loop import deep_research as dr
+from research_loop import l4_lineage
 from research_loop import l4_pipeline as l4p
 
 
@@ -41,7 +40,6 @@ def _manifest(project):
 
 def _module(artifact):
     return SimpleNamespace(
-        run_and_persist=lambda *a, **k: artifact,
         _artifact=lambda *a, **k: artifact,
         audit_evidence_pack=lambda *a, **k: (True, ""),
         evidence_artifact_manifest=lambda *a, **k: {
@@ -59,7 +57,7 @@ def test_staged_l4_audit_revalidates_l4a_manifest(tmp_path):
         "l4a_manifest_sha256": manifest["manifest_sha256"],
     }
     module = _module(artifact)
-    l4p.install(module)
+    l4_lineage.install(module)
 
     assert module.audit_evidence_pack(tmp_path, "C1", "L4", run_id="RUN2") == (True, "")
 
@@ -78,7 +76,7 @@ def test_staged_evidence_manifest_includes_exact_l4a_file(tmp_path):
         "l4a_manifest_sha256": manifest["manifest_sha256"],
     }
     module = _module(artifact)
-    l4p.install(module)
+    l4_lineage.install(module)
 
     result = module.evidence_artifact_manifest(tmp_path, "C1", "L4", "RUN2")
     discovery = [item for item in result["files"] if item["kind"] == "l4a_discovery"]
