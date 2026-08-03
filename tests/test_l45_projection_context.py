@@ -53,6 +53,7 @@ def _staged_evidence(manifest):
         "profile_id": "v2.1-catalog-1",
         "l4a_manifest_path": manifest["path"],
         "l4a_manifest_sha256": manifest["manifest_sha256"],
+        "l4a_run_id": manifest["run_id"],
         "method_components": [],
         "method_candidates": [],
         "method_anchors": [],
