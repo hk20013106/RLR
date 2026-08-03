@@ -37,12 +37,26 @@ def install(l4_pipeline_module) -> None:
                 raise deep_research.DeepResearchError(
                     "L4B evidence artifacts changed since context assembly"
                 )
-        return original(
+
+        artifact, path, created = original(
             project_dir,
             candidate_id,
             evidence_artifact,
             l4c_delta_path,
         )
+        if staged and artifact.get("l4b_evidence_manifest") != expected_evidence_manifest:
+            if created:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    raise deep_research.DeepResearchError(
+                        "L4B evidence artifacts changed since context assembly; "
+                        "failed to remove the new L4.5 projection"
+                    ) from exc
+            raise deep_research.DeepResearchError(
+                "L4B evidence artifacts changed since context assembly"
+            )
+        return artifact, path, created
 
     l4_pipeline_module._l45_context_original_commit = original
     l4_pipeline_module.commit_l45_method_projection = commit_l45_method_projection
