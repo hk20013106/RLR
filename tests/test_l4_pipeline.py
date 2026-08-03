@@ -1,6 +1,7 @@
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -189,3 +190,78 @@ def test_l4a_zero_selection_persists_then_fails_closed(tmp_path):
     assert artifact["selected_asset_ids"] == []
     with pytest.raises(dr.DeepResearchError, match="no selected literature assets"):
         l4p.selected_l4a_assets(artifact, require=True)
+
+
+def test_frozen_l4a_catalog_is_canonical_and_metadata_only():
+    manifest = {
+        "selected_asset_ids": ["A1"],
+        "assets": [_asset()],
+    }
+
+    text = l4p.frozen_l4a_catalog(manifest)
+    decoded = json.loads(text)
+
+    assert decoded["schema_version"] == l4p.L4A_DISCOVERY_SCHEMA_VERSION
+    assert decoded["selected_asset_ids"] == ["A1"]
+    assert decoded["assets"][0]["doi"] == "10.1000/example"
+    assert "source_payload" not in text
+    assert "method_anchors" not in text
+
+
+def test_install_delegates_non_l4_without_discovery(monkeypatch, tmp_path):
+    calls = []
+
+    def original(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"node": args[2], "status": "completed"}
+
+    module = SimpleNamespace(run_and_persist=original)
+    monkeypatch.setattr(l4p, "run_l4a_discovery", lambda *a, **k: pytest.fail("L4A called"))
+    l4p.install(module)
+
+    result = module.run_and_persist(
+        tmp_path, "C1", "L1", "Q", "H",
+        dr.RuntimeSpec("codex", "codex"), tmp_path / "work",
+    )
+
+    assert result == {"node": "L1", "status": "completed"}
+    assert len(calls) == 1
+    assert calls[0][0][2] == "L1"
+
+
+def test_install_runs_l4a_then_delegates_l4b_with_frozen_catalog(monkeypatch, tmp_path):
+    manifest = {
+        "schema_version": l4p.L4A_DISCOVERY_SCHEMA_VERSION,
+        "pipeline_schema": l4p.PIPELINE_SCHEMA_VERSION,
+        "pipeline_stage": "L4A",
+        "run_id": "RUN1",
+        "path": "09_Literature_Database/l4/discovery/manifests/C1_RUN1.json",
+        "manifest_sha256": "abc123",
+        "selected_asset_ids": ["A1"],
+        "assets": [_asset()],
+    }
+    observed = {}
+
+    def original(*args, **kwargs):
+        observed["claim"] = args[4]
+        return {
+            "node": "L4",
+            "status": "completed",
+            "path": "09_Literature_Database/evidence_packs/runs/RUN2.json",
+        }
+
+    module = SimpleNamespace(run_and_persist=original)
+    monkeypatch.setattr(l4p, "run_l4a_discovery", lambda *a, **k: manifest)
+    l4p.install(module)
+
+    result = module.run_and_persist(
+        tmp_path, "C1", "L4", "Q", "H",
+        dr.RuntimeSpec("codex", "codex"), tmp_path / "work",
+    )
+
+    assert "FROZEN L4A DISCOVERY CORPUS" in observed["claim"]
+    assert '"asset_id":"A1"' in observed["claim"]
+    assert result["pipeline_schema"] == l4p.PIPELINE_SCHEMA_VERSION
+    assert result["pipeline_stage"] == "L4B"
+    assert result["l4a_manifest_path"] == manifest["path"]
+    assert result["l4a_manifest_sha256"] == "abc123"
