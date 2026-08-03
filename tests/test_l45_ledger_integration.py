@@ -1,39 +1,24 @@
-import inspect
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from research_loop import deep_research as dr
+from research_loop import l45_ledger
 from research_loop import l4_pipeline as l4p
-from research_loop.commands import ledger as ledger_commands
 
 
-def test_native_l45_helper_skips_legacy_evidence(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        dr,
-        "_artifact",
-        lambda *a, **k: {"run_id": "LEGACY", "candidate_id": "C1"},
-    )
-    monkeypatch.setattr(
-        l4p,
-        "commit_l45_method_projection",
-        lambda *a, **k: pytest.fail("legacy evidence must not create L4.5"),
-    )
-
-    result = ledger_commands._commit_l45_for_native_l4(
-        tmp_path,
-        "C1",
-        "L4",
-        {"evidence_artifacts": {"run_id": "LEGACY", "files": []}},
-        tmp_path / "delta.json",
-    )
-
-    assert result == (None, None, False)
-
-
-def test_native_l45_helper_passes_exact_context_evidence_manifest(
+def test_l45_projection_is_removed_when_ledger_finalization_fails(
     monkeypatch, tmp_path
 ):
-    expected_manifest = {
+    project = tmp_path / "project"
+    delta = project / "02_Agent_Notes" / "Fisher" / "C1_L4_fisher_delta.v2.json"
+    delta.parent.mkdir(parents=True)
+    delta.write_text("{}", encoding="utf-8")
+    projection = project / "08_Audit" / "l4_method_commits" / "commit.json"
+    projection.parent.mkdir(parents=True)
+    events = []
+
+    evidence_manifest = {
         "run_id": "RUN2",
         "files": [{"kind": "run", "path": "run.json", "sha256": "abc"}],
     }
@@ -43,33 +28,57 @@ def test_native_l45_helper_passes_exact_context_evidence_manifest(
         "run_id": "RUN2",
         "candidate_id": "C1",
     }
-    observed = {}
-    commit_path = tmp_path / "08_Audit" / "l4_method_commits" / "commit.json"
 
-    monkeypatch.setattr(dr, "_artifact", lambda *a, **k: staged)
+    def write_receipt(project_dir, receipt):
+        events.append("receipt")
+        path = Path(project_dir) / "receipt.json"
+        path.write_text("{}", encoding="utf-8")
+        return path
 
-    def fake_commit(*args, **kwargs):
-        observed["args"] = args
-        observed["kwargs"] = kwargs
-        return {"schema_version": l4p.L45_COMMIT_SCHEMA_VERSION}, commit_path, True
+    class FakeLedger:
+        def commit_delta(self, *args, **kwargs):
+            result = SimpleNamespace(receipt={"candidate_id": "C1", "node": "L4"})
+            _, _, cleanup = kwargs["_finalize_callback"](result)
+            cleanup()
+            raise RuntimeError("database finalization failed")
 
-    monkeypatch.setattr(l4p, "commit_l45_method_projection", fake_commit)
-
-    result = ledger_commands._commit_l45_for_native_l4(
-        tmp_path,
-        "C1",
-        "L4",
-        {"evidence_artifacts": expected_manifest},
-        tmp_path / "delta.json",
+    module = SimpleNamespace(
+        _write_hypothesis_commit_receipt=write_receipt,
+        _v2_candidate_delta_file=lambda *a, **k: delta,
+        deep_research=SimpleNamespace(
+            _artifact=lambda *a, **k: staged,
+            evidence_artifact_manifest=lambda *a, **k: evidence_manifest,
+            DeepResearchError=ValueError,
+        ),
+        HypothesisLedger=FakeLedger,
     )
 
-    assert result[1:] == (commit_path, True)
-    assert observed["args"][:3] == (tmp_path, "C1", staged)
-    assert observed["kwargs"]["expected_evidence_manifest"] == expected_manifest
+    def commit_projection(*args, **kwargs):
+        projection.write_text("{}", encoding="utf-8")
+        events.append("l45")
+        return {"schema_version": l4p.L45_COMMIT_SCHEMA_VERSION}, projection, True
 
+    monkeypatch.setattr(l45_ledger, "commit_l45_method_projection", commit_projection)
+    l45_ledger.install(module)
 
-def test_native_finalize_calls_l45_and_tracks_new_projection_for_cleanup():
-    source = inspect.getsource(ledger_commands._emit_delta_v2)
+    def finalize(result):
+        module._write_hypothesis_commit_receipt(
+            project,
+            {
+                "candidate_id": "C1",
+                "node": "L4",
+                "provenance": {"evidence_artifacts": evidence_manifest},
+            },
+        )
+        return "delta-hash", "receipt-hash", lambda: events.append("base-cleanup")
 
-    assert "_commit_l45_for_native_l4(" in source
-    assert "created.append(l45_path)" in source
+    with pytest.raises(RuntimeError, match="database finalization failed"):
+        module.HypothesisLedger().commit_delta(
+            project_dir=project,
+            candidate_id="C1",
+            node="L4",
+            _finalize_callback=finalize,
+        )
+
+    assert events == ["l45", "receipt", "base-cleanup"]
+    assert not projection.exists()
