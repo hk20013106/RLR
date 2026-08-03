@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
 from jsonschema import Draft202012Validator
@@ -218,18 +218,69 @@ def _read_paper_record(dr, project: Path, reference: dict) -> dict:
     return record
 
 
-def _selected_identity_sets(l4p, manifest: dict) -> dict[str, set]:
+def _coalesced_identifier(
+    dr,
+    label: str,
+    reference: dict,
+    record: dict,
+    normalizer: Callable[[Any], str],
+) -> str:
+    left = normalizer(reference.get(label.lower()))
+    right = normalizer(record.get(label.lower()))
+    if left and right and left != right:
+        _raise(dr, f"L4B paper reference has conflicting {label}")
+    return left or right
+
+
+def _selected_identities(l4p, manifest: dict) -> list[dict]:
     selected = l4p.selected_l4a_assets(manifest, require=True)
-    return {
-        "doi": {_normalized_doi(item.get("doi")) for item in selected if _normalized_doi(item.get("doi"))},
-        "pmid": {_normalized_pmid(item.get("pmid")) for item in selected if _normalized_pmid(item.get("pmid"))},
-        "url": {_normalized_url(item.get("url")) for item in selected if _normalized_url(item.get("url"))},
-        "title_year": {
-            (_normalized_title(item.get("title")), str(item.get("year") or "").strip())
-            for item in selected
-            if _normalized_title(item.get("title"))
-        },
-    }
+    return [
+        {
+            "asset_id": str(item.get("asset_id") or ""),
+            "doi": _normalized_doi(item.get("doi")),
+            "pmid": _normalized_pmid(item.get("pmid")),
+            "url": _normalized_url(item.get("url")),
+            "title_year": (
+                _normalized_title(item.get("title")),
+                str(item.get("year") or "").strip(),
+            ),
+        }
+        for item in selected
+    ]
+
+
+def _matches_one_selected_asset(
+    selected: list[dict],
+    *,
+    doi: str,
+    pmid: str,
+    url: str,
+    title_year: tuple[str, str],
+) -> tuple[bool, bool]:
+    supplied = {"doi": doi, "pmid": pmid, "url": url}
+    if doi:
+        primary_key, primary_value = "doi", doi
+    elif pmid:
+        primary_key, primary_value = "pmid", pmid
+    elif url:
+        primary_key, primary_value = "url", url
+    else:
+        primary_key, primary_value = "title_year", title_year
+
+    primary_matches = [
+        item for item in selected if item.get(primary_key) == primary_value
+    ]
+    if not primary_matches:
+        return False, False
+
+    for item in primary_matches:
+        conflicts = any(
+            value and item.get(key) and item.get(key) != value
+            for key, value in supplied.items()
+        )
+        if not conflicts:
+            return True, False
+    return False, True
 
 
 def _validate_frozen_corpus(
@@ -241,14 +292,16 @@ def _validate_frozen_corpus(
 ) -> None:
     project = Path(project_dir)
     candidate_id = str(artifact.get("candidate_id") or "")
-    allowed = _selected_identity_sets(l4p, manifest)
+    selected = _selected_identities(l4p, manifest)
     for reference in artifact.get("papers") or []:
         if not isinstance(reference, dict):
             _raise(dr, "L4B paper references must be objects")
         record = _read_paper_record(dr, project, reference)
-        user_source_id = str(
-            reference.get("user_source_id") or record.get("user_source_id") or ""
-        ).strip()
+        reference_source = str(reference.get("user_source_id") or "").strip()
+        record_source = str(record.get("user_source_id") or "").strip()
+        if reference_source and record_source and reference_source != record_source:
+            _raise(dr, "L4B paper reference has conflicting user_source_id")
+        user_source_id = reference_source or record_source
         if user_source_id:
             sha256 = str(record.get("user_source_sha256") or "").strip()
             ok, reason = verify_registered_source(
@@ -261,18 +314,28 @@ def _validate_frozen_corpus(
                 _raise(dr, reason)
             continue
 
-        doi = _normalized_doi(reference.get("doi") or record.get("doi"))
-        pmid = _normalized_pmid(reference.get("pmid") or record.get("pmid"))
-        url = _normalized_url(reference.get("url") or record.get("url"))
+        doi = _coalesced_identifier(
+            dr, "DOI", reference, record, _normalized_doi
+        )
+        pmid = _coalesced_identifier(
+            dr, "PMID", reference, record, _normalized_pmid
+        )
+        url = _coalesced_identifier(
+            dr, "URL", reference, record, _normalized_url
+        )
         title_year = _title_year(record or reference)
-        if doi:
-            accepted = doi in allowed["doi"]
-        elif pmid:
-            accepted = pmid in allowed["pmid"]
-        elif url:
-            accepted = url in allowed["url"]
-        else:
-            accepted = title_year in allowed["title_year"]
+        accepted, conflicting = _matches_one_selected_asset(
+            selected,
+            doi=doi,
+            pmid=pmid,
+            url=url,
+            title_year=title_year,
+        )
+        if conflicting:
+            _raise(
+                dr,
+                "L4B paper has conflicting identifiers across frozen L4A assets",
+            )
         if not accepted:
             identity = doi or pmid or url or f"{title_year[0]}|{title_year[1]}"
             _raise(
@@ -367,12 +430,15 @@ def install(l4p, dr, lineage_module) -> None:
             evidence_artifact.get("pipeline_schema") == l4p.PIPELINE_SCHEMA_VERSION
             and evidence_artifact.get("pipeline_stage") == "L4B"
         ):
-            _load_linked_manifest(
+            manifest = _load_linked_manifest(
                 l4p,
                 dr,
                 project_dir,
                 evidence_artifact,
                 expected_candidate_id=str(candidate_id),
+            )
+            _validate_frozen_corpus(
+                l4p, dr, project_dir, evidence_artifact, manifest
             )
         return original_commit(
             project_dir,
@@ -398,6 +464,12 @@ def install(l4p, dr, lineage_module) -> None:
         identity_error = _identity_reason(manifest, artifact)
         if identity_error:
             return False, identity_error, None
+        try:
+            _validate_frozen_corpus(
+                l4p, dr, project_dir, artifact, manifest
+            )
+        except dr.DeepResearchError as exc:
+            return False, str(exc), None
         return True, "", path
 
     lineage_module._validate_link = validate_lineage_link
