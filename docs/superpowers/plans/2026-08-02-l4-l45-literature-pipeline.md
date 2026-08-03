@@ -27,21 +27,16 @@ hard dependencies.
 - Do not change the `L4_fisher` storage key or delta schema.
 - Do not weaken source-payload, verbatim, Methods-section, review-receipt,
   registered-source, or required-component gates.
-- Non-L4 runtime behavior must delegate byte-for-byte through the captured
-  implementation path.
+- Non-L4 runtime behavior must delegate through the captured implementation.
 - Legacy evidence packs remain readable.
-- New artifacts must use project-relative paths and hash-bound lineage.
+- New artifacts use project-relative paths and hash-bound lineage.
 - No real-data success claim without a real-data run.
-
----
 
 ## Task 1: Specify L4A and stage identities with failing tests
 
-**Create:** `tests/test_l4_pipeline.py`
-
-- [x] Test that `l4a_discovery_schema()` is strict metadata-only.
-- [x] Test ordered identities `L4A`, `L4B`, `L4C`, and `L4.5`.
-- [x] Observe RED before implementation.
+- [x] Strict metadata-only schema test.
+- [x] Ordered L4A/L4B/L4C/L4.5 identity test.
+- [x] RED observed before implementation.
 
 ## Task 2: Implement and test L4A discovery
 
@@ -50,7 +45,7 @@ hard dependencies.
 - [x] Immutable hash-bound manifest persistence.
 - [x] Tests for deduplication, persistence, and zero-selection failure.
 - [ ] Reuse configured ARS execution helpers.
-- [ ] Observe GREEN through CI.
+- [ ] GREEN through CI.
 
 ## Task 3: Implement and test frozen-corpus L4B
 
