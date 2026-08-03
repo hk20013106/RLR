@@ -97,10 +97,17 @@ def install(l4_pipeline_module, deep_research_module) -> None:
     ):
         root = Path(work_dir)
         root.mkdir(parents=True, exist_ok=True)
-        # Preserve the historical path and schema contract for diagnostics and
-        # callers that inspect the failed/successful L4B invocation workspace.
+        # Preserve the historical path and the exact provider-facing L4B schema
+        # for diagnostics and callers that inspect a failed invocation. The
+        # reader schema permits navigation-only anchor fields to be omitted,
+        # whereas the provider schema must require every declared property.
+        schema = deep_research_module._runtime_schema("L4")
+        extract = schema["properties"]["papers"]["items"]["properties"][
+            "extracts"
+        ]["items"]
+        extract["required"] = list(extract["properties"])
         (root / "deep_research_output.schema.json").write_text(
-            json.dumps(deep_research_module._runtime_schema("L4"), indent=2),
+            json.dumps(schema, indent=2),
             encoding="utf-8",
         )
         discovery_work = root / "L4A"
