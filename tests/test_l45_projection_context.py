@@ -24,7 +24,7 @@ def _manifest(project):
             "journal": "Methods",
             "abstract": "metadata",
             "source_database": "Europe PMC",
-            "source_metadata_response": {"id": "A1"},
+            "source_metadata_response": '{"id":"A1"}',
             "open_access_status": "open",
             "full_text_status": "available_oa",
             "full_text_locations": ["https://example.org/paper"],

@@ -11,7 +11,7 @@ def _asset():
         "url": "https://example.org/paper", "title": "Method paper",
         "year": 2026, "journal": "Methods", "abstract": "metadata",
         "source_database": "Europe PMC",
-        "source_metadata_response": {"id": "A1"},
+        "source_metadata_response": '{"id":"A1"}',
         "open_access_status": "open", "full_text_status": "available_oa",
         "full_text_locations": ["https://example.org/paper"],
         "relevance_score": 9, "selection_status": "selected",
