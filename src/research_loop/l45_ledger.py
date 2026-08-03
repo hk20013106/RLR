@@ -76,7 +76,11 @@ def install(ledger_module) -> None:
             raise ValueError("cannot resolve persisted L4C delta for L4.5")
 
         _, commit_path, created = commit_l45_method_projection(
-            project_dir, candidate_id, evidence, delta_path
+            project_dir,
+            candidate_id,
+            evidence,
+            delta_path,
+            expected_evidence_manifest=evidence_ref,
         )
         state = _ACTIVE_L45_STATE.get()
         if state is not None:
