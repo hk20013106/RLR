@@ -39,11 +39,11 @@ hard dependencies.
 
 **Create:** `tests/test_l4_pipeline.py`
 
-- [ ] Test that `l4a_discovery_schema()` is strict metadata-only: it contains
+- [x] Test that `l4a_discovery_schema()` is strict metadata-only: it contains
   identifiers, metadata, availability, relevance, selection, and receipts, but
   no `source_payload`, `extracts`, `method_components`, or
   `method_candidates` anywhere in the schema.
-- [ ] Test that `L4_PIPELINE_STAGES` declares ordered identities `L4A`, `L4B`,
+- [x] Test that `L4_PIPELINE_STAGES` declares ordered identities `L4A`, `L4B`,
   `L4C`, and `L4.5`, with L4C mapped to existing `L4_fisher` and L4.5 marked
   deterministic/non-cognitive.
 - [ ] Commit the tests and observe CI fail because `research_loop.l4_pipeline`
