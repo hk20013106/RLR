@@ -46,8 +46,7 @@ hard dependencies.
 - [x] Test that `L4_PIPELINE_STAGES` declares ordered identities `L4A`, `L4B`,
   `L4C`, and `L4.5`, with L4C mapped to existing `L4_fisher` and L4.5 marked
   deterministic/non-cognitive.
-- [x] Commit the tests; observe CI fail because `research_loop.l4_pipeline`
-  does not exist.
+- [ ] Observe CI fail because `research_loop.l4_pipeline` does not exist.
 
 ## Task 2: Implement and test L4A discovery
 
