@@ -34,6 +34,7 @@ from research_loop.l4_provenance import install as _install_l4_provenance
 from research_loop.l4_provenance_compat import (
     install as _install_l4_provenance_compat,
 )
+from research_loop.l4_path_safety import install as _install_l4_path_safety
 from research_loop.l4_lineage import install as _install_l4_lineage
 from research_loop.l45_context_binding import install as _install_l45_context_binding
 
@@ -48,6 +49,7 @@ _install_l4_provenance_compat(
     _l4_pipeline_module,
     _l4_provenance_module,
 )
+_install_l4_path_safety(_l4_pipeline_module, deep_research)
 _install_l4_lineage(deep_research)
 _install_l45_context_binding(_l4_pipeline_module)
 
@@ -114,7 +116,8 @@ del _install_method_evidence, _install_method_evidence_compat
 del _review_navigation, _install_navigation_compat
 del _install_review_status_compat, _registered_sources
 del _install_l4_pipeline, _install_l4_pipeline_compat
-del _install_l4_provenance, _install_l4_provenance_compat, _install_l4_lineage
+del _install_l4_provenance, _install_l4_provenance_compat
+del _install_l4_path_safety, _install_l4_lineage
 del _install_l45_context_binding, _l4_pipeline_module, _l4_lineage_module
 del _l4_provenance_module
 del _install_method_contracts, _install_reactivation_contracts
