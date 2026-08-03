@@ -20,6 +20,12 @@ _install_navigation_compat(_review_navigation)
 _review_navigation.install(deep_research)
 _install_review_status_compat(deep_research)
 
+# L4A/L4B must wrap the fully installed mature L4 evidence runtime so it can
+# delegate evidence construction instead of duplicating it.
+from research_loop.l4_pipeline import install as _install_l4_pipeline
+
+_install_l4_pipeline(deep_research)
+
 from research_loop import hypothesis_contracts as hypothesis_contracts
 from research_loop.method_contracts import install as _install_method_contracts
 from research_loop.hypothesis_reactivation_contracts import (
@@ -79,7 +85,7 @@ _install_hypothesis_pool_cli(_cli)
 
 del _install_method_evidence, _install_method_evidence_compat
 del _review_navigation, _install_navigation_compat
-del _install_review_status_compat, _registered_sources
+del _install_review_status_compat, _registered_sources, _install_l4_pipeline
 del _install_method_contracts, _install_reactivation_contracts
 del _install_receipt_idempotency, _install_hypothesis_reactivation
 del _install_reactivation_constraints, _install_conditional_skip_constraints
