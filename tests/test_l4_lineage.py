@@ -53,8 +53,10 @@ def test_staged_l4_audit_revalidates_l4a_manifest(tmp_path):
     artifact = {
         "pipeline_schema": l4p.PIPELINE_SCHEMA_VERSION,
         "pipeline_stage": "L4B", "run_id": "RUN2",
+        "candidate_id": "C1",
         "l4a_manifest_path": manifest["path"],
         "l4a_manifest_sha256": manifest["manifest_sha256"],
+        "l4a_run_id": manifest["run_id"],
     }
     module = _module(artifact)
     l4_lineage.install(module)
@@ -72,8 +74,10 @@ def test_staged_evidence_manifest_includes_exact_l4a_file(tmp_path):
     artifact = {
         "pipeline_schema": l4p.PIPELINE_SCHEMA_VERSION,
         "pipeline_stage": "L4B", "run_id": "RUN2",
+        "candidate_id": "C1",
         "l4a_manifest_path": manifest["path"],
         "l4a_manifest_sha256": manifest["manifest_sha256"],
+        "l4a_run_id": manifest["run_id"],
     }
     module = _module(artifact)
     l4_lineage.install(module)
