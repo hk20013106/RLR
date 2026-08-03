@@ -1,206 +1,139 @@
-# L4/L4.5 Literature Pipeline Implementation Plan
+# L4A/L4B/L4C and L4.5 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Execute with test-driven development. Do not write production behavior before
+> observing the corresponding test fail.
 
-**Goal:** Split the overloaded L4 pre-research invocation into an auditable metadata-discovery stage and a frozen-corpus evidence-construction stage without renumbering the existing RLR DAG.
+**Goal:** Implement the approved global L4 pipeline as L4A discovery, L4B
+strict evidence construction, existing L4C Fisher method design, and a
+non-LLM L4.5 commit gate, while preserving the public DAG and all downstream
+contracts.
 
-**Architecture:** A new focused extension wraps the already-installed Deep Research runtime. Non-L4 calls remain unchanged. L4 calls execute a metadata-only discovery request, persist and deduplicate `LiteratureDiscoveryRun/v1`, then execute the existing strict method-evidence request against only the selected records and link the resulting evidence pack to the discovery manifest.
+**Architecture:** Add one focused `research_loop.l4_pipeline` extension. It
+wraps the fully installed Deep Research runtime only for node L4. L4A produces
+an immutable metadata manifest; L4B delegates to the existing mature L4 method
+evidence stack with a frozen corpus; L4C remains `L4_fisher`; L4.5 commits a
+hash-bound audit projection in the native L4 delta transaction.
 
-**Tech Stack:** Python 3.11/3.12, pytest, JSON Schema, existing `research_loop.deep_research` extension pattern, GitHub Actions Windows CI.
+**Reuse:** Academic Research Skills, `deep_research.py`, `method_evidence.py`,
+`method_review_navigation.py`, registered user sources, existing evidence
+audits, context manifests, and the hypothesis ledger are reused directly.
+Optional external retrieval/parsing tools remain adapters and are not added as
+hard dependencies.
 
-## Global Constraints
+## Global constraints
 
-- Do not modify L0-L3 behavior, existing topology numbering, `L4_fisher` delta schema, or L5-L10 contracts.
-- Do not weaken source-payload, verbatim-containment, Methods-section, review-receipt, or required-component gates.
-- Do not vendor or hard-code `literature-search-mcp`; preserve a replaceable discovery-executor boundary.
-- Persist discovery artifacts independently so L4.5 failure does not erase successful discovery.
-- Keep legacy evidence-pack readers compatible.
+- No L3.5 node.
+- Do not renumber L5-L10 or change their personas.
+- Do not change the `L4_fisher` storage key or delta schema.
+- Do not weaken source-payload, verbatim, Methods-section, review-receipt,
+  registered-source, or required-component gates.
+- Non-L4 runtime behavior must delegate byte-for-byte through the captured
+  implementation path.
+- Legacy evidence packs remain readable.
+- New artifacts must use project-relative paths and hash-bound lineage.
+- No real-data success claim without a real-data run.
 
 ---
 
-### Task 1: Specify split-pipeline behavior with failing tests
-
-**Files:**
-- Create: `tests/test_l4_pipeline.py`
-
-**Interfaces:**
-- Consumes: `research_loop.deep_research.run_and_persist`, `RuntimeSpec`, existing L4 evidence payload contract.
-- Produces: executable behavioral requirements for `l4_discovery_schema()`, `build_l4_discovery_prompt()`, and the two-stage L4 wrapper.
-
-- [ ] **Step 1: Write a failing schema-boundary test**
-
-Assert that the discovery schema requires metadata, availability, relevance, and selection fields but has no `source_payload`, `extracts`, `method_components`, or `method_candidates` properties.
-
-- [ ] **Step 2: Run the test and verify RED**
-
-Run:
-
-```bash
-PYTHONPATH=src python -m pytest tests/test_l4_pipeline.py::test_l4_discovery_schema_is_metadata_only -q
-```
-
-Expected: FAIL because the L4 pipeline extension and schema do not exist.
-
-- [ ] **Step 3: Write a failing two-stage execution test**
-
-Use a sequential fake subprocess response: the first response is a discovery payload and the second is a valid strict L4 evidence payload. Assert two invocations, persisted discovery artifact, linked evidence artifact, and frozen selected records in the evidence prompt.
-
-- [ ] **Step 4: Run the test and verify RED**
-
-Run:
-
-```bash
-PYTHONPATH=src python -m pytest tests/test_l4_pipeline.py::test_l4_runs_discovery_then_evidence_and_links_artifacts -q
-```
-
-Expected: FAIL because current L4 performs one overloaded invocation.
-
-- [ ] **Step 5: Commit failing tests**
-
-```bash
-git add tests/test_l4_pipeline.py
-git commit -m "test: specify split L4 discovery and evidence pipeline"
-```
-
-### Task 2: Implement metadata-only L4 discovery
-
-**Files:**
-- Create: `src/research_loop/l4_pipeline.py`
-- Modify: `src/research_loop/__init__.py`
-- Test: `tests/test_l4_pipeline.py`
-
-**Interfaces:**
-- Produces: `l4_discovery_schema() -> dict`, `build_l4_discovery_prompt(...) -> str`, `persist_discovery_run(...) -> dict`, and `install(deep_research_module) -> None`.
-- Discovery artifact schema: `LiteratureDiscoveryRun/v1`.
-
-- [ ] **Step 1: Implement the strict metadata-only discovery schema**
-
-Include query records, source-status receipts, paper identifiers and metadata, abstract, OA/PDF availability, relevance score, selection status, and reason. Require every declared property for provider strict-schema compatibility.
-
-- [ ] **Step 2: Implement deterministic identifier-first deduplication**
-
-Identity order: normalized DOI, PMID, stable URL, then normalized title + year. Retain the higher relevance-score record and record duplicates in the discovery artifact.
-
-- [ ] **Step 3: Implement immutable discovery persistence**
-
-Write `09_Literature_Database/discovery_runs/<run_id>.json`; include request/response receipt, selected paper records, duplicate records, question/claim hashes, and artifact SHA linkage fields.
-
-- [ ] **Step 4: Install the extension after existing method-evidence extensions**
-
-Import and call `l4_pipeline.install(deep_research)` in `research_loop.__init__`. Capture the current post-extension functions so non-L4 behavior delegates unchanged.
-
-- [ ] **Step 5: Run the schema test and verify GREEN**
-
-```bash
-PYTHONPATH=src python -m pytest tests/test_l4_pipeline.py::test_l4_discovery_schema_is_metadata_only -q
-```
-
-Expected: PASS.
-
-### Task 3: Implement frozen-corpus L4.5 evidence construction
-
-**Files:**
-- Modify: `src/research_loop/l4_pipeline.py`
-- Test: `tests/test_l4_pipeline.py`
-
-**Interfaces:**
-- Consumes: selected records from `LiteratureDiscoveryRun/v1` and registered local user sources.
-- Produces: existing strict L4 evidence pack with `pipeline_stage`, discovery ID/path/hash linkage.
-
-- [ ] **Step 1: Add a generic JSON-stage executor**
-
-Build stage-specific schema files and prompts, execute the configured Codex/Claude runtime, create a normal skill receipt, parse JSON, and fail closed on non-zero exit or malformed output.
-
-- [ ] **Step 2: Execute discovery first for node L4**
-
-Persist the discovery result before evidence construction. Stop before L4.5 when no paper has `selection_status=selected`.
-
-- [ ] **Step 3: Build the L4.5 evidence prompt**
-
-Start from the existing strict L4 method-evidence prompt and append the frozen selected-paper catalog. Explicitly prohibit replacing the corpus with a new broad search while permitting identifier/full-text resolution for selected records and registered local PDFs.
-
-- [ ] **Step 4: Execute and persist strict evidence construction**
-
-Use the existing extended L4 schema, validator, and persistence functions. Add discovery linkage fields to the resulting run artifact and rewrite the immutable run record before exposing success.
-
-- [ ] **Step 5: Run the two-stage test and verify GREEN**
-
-```bash
-PYTHONPATH=src python -m pytest tests/test_l4_pipeline.py::test_l4_runs_discovery_then_evidence_and_links_artifacts -q
-```
-
-Expected: PASS.
-
-### Task 4: Add failure and compatibility coverage
-
-**Files:**
-- Modify: `tests/test_l4_pipeline.py`
-- Modify: `src/research_loop/l4_pipeline.py`
-
-**Interfaces:**
-- Verifies record-level failure semantics and non-L4 compatibility.
-
-- [ ] **Step 1: Add a failing test for zero selected papers**
-
-Assert that discovery persists, evidence is not invoked, and the error names the selection blocker.
-
-- [ ] **Step 2: Add a failing test for L4.5 failure after discovery success**
-
-Assert that discovery remains readable and no completed L4 evidence pack is created.
-
-- [ ] **Step 3: Add a non-L4 delegation test**
-
-Assert that L1 still invokes the captured original `run_and_persist` path exactly once.
-
-- [ ] **Step 4: Implement only the behavior required by these tests**
-
-Keep failure messages stage-specific and do not broaden fallback behavior.
-
-- [ ] **Step 5: Run focused tests**
-
-```bash
-PYTHONPATH=src python -m pytest tests/test_l4_pipeline.py tests/test_deep_research.py -q
-```
-
-Expected: PASS.
-
-### Task 5: Documentation and full verification
-
-**Files:**
-- Modify: `README.md`
-- Modify: `docs/README_CN.md`
-- Modify: `docs/未来方向-AI4AI-PaSa-v21-MCP.md`
-
-**Interfaces:**
-- Documents L4 as discovery, L4.5 as evidence construction, Fisher as the unchanged cognitive L4 node, and the future MCP/Zotero adapter boundary.
-
-- [ ] **Step 1: Update architecture documentation**
-
-State explicitly that no L3.5 node is added and why.
-
-- [ ] **Step 2: Run import and syntax checks**
-
-```bash
-python -m compileall -q src tests/test_l4_pipeline.py
-PYTHONPATH=src python -c "import research_loop"
-```
-
-Expected: exit 0.
-
-- [ ] **Step 3: Run the full test suite on Python 3.11 and 3.12 through GitHub CI**
-
-Expected: both Windows matrix jobs pass with no coverage regression below the repository gate.
-
-- [ ] **Step 4: Review the complete branch diff**
-
-Verify only architecture docs, the focused extension, installation hook, and tests changed. Confirm no real-data files, SQLite databases, evidence packs, runtime logs, PDFs, or local artifacts are committed.
-
-- [ ] **Step 5: Open a pull request without merging**
-
-Title:
+## Task 1: Specify L4A and stage identities with failing tests
+
+**Create:** `tests/test_l4_pipeline.py`
+
+- [ ] Test that `l4a_discovery_schema()` is strict metadata-only: it contains
+  identifiers, metadata, availability, relevance, selection, and receipts, but
+  no `source_payload`, `extracts`, `method_components`, or
+  `method_candidates` anywhere in the schema.
+- [ ] Test that `L4_PIPELINE_STAGES` declares ordered identities `L4A`, `L4B`,
+  `L4C`, and `L4.5`, with L4C mapped to existing `L4_fisher` and L4.5 marked
+  deterministic/non-cognitive.
+- [ ] Commit the tests and observe CI fail because `research_loop.l4_pipeline`
+  does not exist.
+
+## Task 2: Implement and test L4A discovery
+
+**Create:** `src/research_loop/l4_pipeline.py`
+
+- [ ] Implement the strict provider schema.
+- [ ] Reuse the configured ARS backend and existing command/receipt/subprocess
+  helpers; add only the metadata-discovery prompt and schema boundary.
+- [ ] Implement identifier-first deterministic deduplication: DOI, PMID, stable
+  URL, normalized title plus year. Keep the higher relevance score and retain
+  duplicate audit records.
+- [ ] Persist `L4ADiscoveryManifest/v1` under
+  `09_Literature_Database/l4/discovery/manifests/` with immutable run ID,
+  runtime receipt, selected IDs, and manifest SHA256.
+- [ ] Add tests for deduplication, manifest persistence, and zero-selected
+  failure after persistence.
+- [ ] Observe RED, implement minimally, then observe GREEN through CI.
+
+## Task 3: Implement and test frozen-corpus L4B
+
+**Modify:** `src/research_loop/l4_pipeline.py`, `src/research_loop/__init__.py`
+
+- [ ] Install the extension after all existing method-evidence/navigation/status
+  extensions.
+- [ ] Capture the mature final `deep_research.run_and_persist` implementation.
+- [ ] For node L4, run L4A first and inject a canonical frozen selected-asset
+  catalog into the L4B request.
+- [ ] Delegate L4B execution and validation to the captured existing L4
+  implementation; do not duplicate its method evidence logic.
+- [ ] Add the versioned L4A linkage fields to the completed L4B artifact and
+  rewrite its existing artifact atomically before returning success.
+- [ ] Extend `audit_evidence_pack` and `evidence_artifact_manifest` only for new
+  linked artifacts so a missing/tampered L4A manifest fails closed and is
+  included in context hashing.
+- [ ] Add sequential fake-subprocess tests proving two calls, a frozen catalog
+  in the second prompt, retained discovery after L4B failure, and unchanged
+  non-L4 delegation.
+
+## Task 4: Implement and test L4.5 deterministic commit
+
+**Modify:** `src/research_loop/l4_pipeline.py`,
+`src/research_loop/commands/ledger.py`
+
+- [ ] Implement `commit_l45_method_projection(...)`.
+- [ ] Validate the exact L4A manifest hash, exact L4B evidence audit and
+  context-bound evidence manifest, and the persisted L4C delta hash.
+- [ ] Project component, method, and anchor IDs from L4B without inventing
+  values.
+- [ ] Persist immutable `L45MethodCommit/v1` under
+  `08_Audit/l4_method_commits/`; identical retries are idempotent and different
+  content at the same path fails.
+- [ ] Call it from the native L4 persistence finalize callback so a failure
+  aborts the transaction and cleanup removes newly created artifacts.
+- [ ] Preserve legacy behavior for evidence packs without
+  `L4MethodPlanningPipeline/v1`.
+- [ ] Add tests for successful commit, tampered discovery rejection, tampered
+  L4C delta rejection, and idempotent retry.
+
+## Task 5: Documentation and verification
+
+**Modify:** `README.md`, `docs/README_CN.md`, `docs/DAG_TOPOLOGY.md`, and focused
+L4 documentation only where necessary.
+
+- [ ] Document L4A/L4B/L4C/L4.5 and the reuse-first adapter boundary.
+- [ ] Run focused CI for the new tests and existing L4/deep-research tests.
+- [ ] Run the complete Windows Python 3.11/3.12 CI matrix.
+- [ ] Inspect CI job logs for failures; fix production defects rather than
+  weakening tests or validators.
+- [ ] Compare the branch with `main`; verify no runtime outputs, databases,
+  PDFs, source payloads, or unrelated files were committed.
+- [ ] Reopen the existing draft PR without merging. State that synthetic tests
+  validate software behavior only and that no real-data full-loop success is
+  claimed.
+
+## Required verification
 
 ```text
-feat: split L4 discovery from L4.5 evidence construction
+python -m pytest tests/test_l4_pipeline.py -q
+python -m pytest tests/test_l4_pipeline.py tests/test_l4_method_anchors.py tests/test_l4_review_navigation.py tests/test_deep_research.py -q
+python -m compileall -q src tests/test_l4_pipeline.py
+python -c "import research_loop"
+python -m pytest -q
+git diff --check
+python run_loop.py --help
 ```
 
-The PR must state that the real-data full loop is not claimed successful unless an actual real-data run is performed separately.
+Because the active execution environment cannot clone GitHub directly, RED and
+GREEN verification is performed by commits on the isolated feature branch and
+observed GitHub Actions runs. The branch must never be merged automatically.
