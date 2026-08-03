@@ -35,7 +35,10 @@ def _asset(
     year=2026,
     relevance_score=8.0,
     selection_status="selected",
+    source_metadata_response=None,
 ):
+    if source_metadata_response is None:
+        source_metadata_response = {"id": asset_id, "title": title}
     return {
         "asset_id": asset_id,
         "doi": doi,
@@ -46,7 +49,12 @@ def _asset(
         "journal": "Methods Journal",
         "abstract": "A metadata-only abstract.",
         "source_database": "Europe PMC",
-        "source_metadata_response": {"id": asset_id, "title": title},
+        "source_metadata_response": json.dumps(
+            source_metadata_response,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
         "open_access_status": "open",
         "full_text_status": "available_oa",
         "full_text_locations": [url],
@@ -156,6 +164,63 @@ def test_l4a_discovery_schema_is_strict_metadata_only():
         "method_anchors",
     }
     assert forbidden.isdisjoint(set(_schema_keys(schema)))
+
+
+def test_l4a_provider_schema_closes_every_object_schema():
+    schema = l4p.l4a_discovery_schema()
+
+    def assert_closed(value, path="root"):
+        if isinstance(value, dict):
+            if value.get("type") == "object":
+                assert value.get("additionalProperties") is False, path
+            for key, child in value.items():
+                assert_closed(child, f"{path}.{key}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                assert_closed(child, f"{path}[{index}]")
+
+    assert_closed(schema)
+    metadata_schema = schema["properties"]["assets"]["items"]["properties"][
+        "source_metadata_response"
+    ]
+    assert metadata_schema == {"type": "string", "minLength": 2}
+
+
+def test_l4a_persistence_parses_and_preserves_heterogeneous_source_metadata(tmp_path):
+    project = tmp_path / "project"
+    source_metadata = {
+        "id": "A1",
+        "title": "Example method paper",
+        "authors": [{"family": "Doe", "given": "A"}],
+        "database_fields": {"result_type": "article", "is_open": True},
+    }
+
+    artifact = l4p.persist_l4a_discovery(
+        project,
+        "C1",
+        _discovery_payload(_asset(source_metadata_response=source_metadata)),
+        _receipt(),
+        question="Q",
+        claim="H",
+    )
+
+    persisted = artifact["assets"][0]["source_metadata_response"]
+    assert persisted == source_metadata
+    assert isinstance(persisted, dict)
+    assert l4p.validate_l4a_manifest(project, artifact) == (True, "")
+
+
+@pytest.mark.parametrize("metadata", ["not-json", "[]", "null", "\"text\""])
+def test_l4a_persistence_rejects_invalid_source_metadata_json(tmp_path, metadata):
+    with pytest.raises(dr.DeepResearchError, match="source_metadata_response"):
+        l4p.persist_l4a_discovery(
+            tmp_path / "project",
+            "C1",
+            _discovery_payload(_asset(source_metadata_response=metadata)),
+            _receipt(),
+            question="Q",
+            claim="H",
+        )
 
 
 def test_l4_pipeline_declares_ordered_stage_identities():
