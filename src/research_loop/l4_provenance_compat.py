@@ -8,8 +8,6 @@ relaxing validation for persisted artifacts or explicit identity mismatches.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 
 def install(l4_pipeline_module, provenance_module) -> None:
     if getattr(l4_pipeline_module, "_l4_provenance_compat_installed", False):
@@ -48,13 +46,6 @@ def install(l4_pipeline_module, provenance_module) -> None:
     def persist_l4b_linkage(project_dir, artifact):
         relative = str(artifact.get("path") or "").strip()
         if not relative:
-            return base_persist_linkage(project_dir, artifact)
-        path = Path(relative)
-        if path.is_absolute() or ".." in path.parts:
-            return strict_persist_linkage(project_dir, artifact)
-        if not (Path(project_dir) / path).is_file():
-            # The captured historical implementation is intentionally a no-op
-            # for an artifact that has not yet been persisted.
             return base_persist_linkage(project_dir, artifact)
         return strict_persist_linkage(project_dir, artifact)
 
