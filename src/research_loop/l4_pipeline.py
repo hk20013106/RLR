@@ -1,4 +1,4 @@
-"""Contracts for the staged L4 method-planning pipeline.
+"""Contracts and orchestration for the staged L4 method-planning pipeline.
 
 L4A owns metadata discovery. L4B delegates to the mature method-evidence
 stack. L4C remains the existing ``L4_fisher`` cognitive node. L4.5 is a
@@ -10,6 +10,7 @@ import datetime as _dt
 import hashlib
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -137,8 +138,7 @@ def _sha256_json(value: Any) -> str:
 
 def _normalized_doi(value: str) -> str:
     value = str(value or "").strip().lower()
-    value = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", value)
-    return value
+    return re.sub(r"^https?://(?:dx\.)?doi\.org/", "", value)
 
 
 def _normalized_title(value: str) -> str:
@@ -294,3 +294,199 @@ def validate_l4a_manifest(project_dir: str | Path, manifest: dict) -> tuple[bool
     if not actual_hash or _sha256_json(expected) != actual_hash:
         return False, "L4A manifest SHA256 mismatch"
     return True, ""
+
+
+def frozen_l4a_catalog(manifest: dict) -> str:
+    """Return the canonical metadata-only selection passed to L4B."""
+    selected = selected_l4a_assets(manifest, require=True)
+    catalog = {
+        "schema_version": L4A_DISCOVERY_SCHEMA_VERSION,
+        "selected_asset_ids": list(manifest.get("selected_asset_ids") or []),
+        "assets": selected,
+    }
+    return _canonical_json(catalog)
+
+
+def build_l4a_prompt(question: str, claim: str) -> str:
+    """Build a discovery-only request for the installed ARS runtime."""
+    return f"""Use the installed Academic Research Skills literature-search capability.
+
+RLR stage: L4A Literature Discovery
+Scientific question: {question}
+Selected hypothesis/claim: {claim}
+
+Search for method, protocol, software, diagnostic, and alternative-method
+literature relevant to the selected hypothesis. Return metadata only, matching
+the supplied JSON schema. Record actual query receipts and source metadata.
+Do not retrieve or emit source payloads, verbatim extracts, method components,
+method candidates, method anchors, or a final analysis plan. Never invent an
+identifier, availability status, source receipt, or selection rationale.
+"""
+
+
+def run_l4a_discovery(
+    project_dir: str | Path,
+    candidate_id: str,
+    question: str,
+    claim: str,
+    spec: _deep_research.RuntimeSpec,
+    work_dir: str | Path,
+    skill_version: str = "unknown",
+    *,
+    project_id: str = "",
+    round_id: str = "",
+    profile_id: str = "",
+) -> dict:
+    """Execute L4A with the configured ARS backend and persist its manifest."""
+    work = Path(work_dir)
+    work.mkdir(parents=True, exist_ok=True)
+    schema_path = work / "deep_research_output.schema.json"
+    schema_path.write_text(json.dumps(l4a_discovery_schema(), indent=2), encoding="utf-8")
+    command, _ = _deep_research.build_invocation(
+        spec, "L4", question, claim, work
+    )
+    prompt = build_l4a_prompt(question, claim)
+    command[0] = _deep_research.resolve_subprocess_executable(command[0])
+    execution_command, invocation_kwargs = _deep_research.subprocess_invocation(command, prompt)
+    try:
+        completed = subprocess.run(
+            execution_command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            timeout=spec.timeout,
+            check=False,
+            **invocation_kwargs,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise _deep_research.DeepResearchError(
+            f"L4A Academic Research CLI invocation failed: {exc}"
+        ) from exc
+    receipt = _deep_research.skill_receipt(
+        spec.backend,
+        command,
+        prompt,
+        skill_version,
+        exit_code=completed.returncode,
+        stdout_hash=hashlib.sha256(completed.stdout.encode("utf-8")).hexdigest(),
+        model=spec.model,
+    )
+    if completed.returncode != 0:
+        raise _deep_research.DeepResearchError(
+            f"L4A Academic Research CLI exited {completed.returncode}: {completed.stderr.strip()}"
+        )
+    payload = _deep_research._parse_cli_output(completed.stdout)
+    artifact = persist_l4a_discovery(
+        project_dir,
+        candidate_id,
+        payload,
+        receipt,
+        question=question,
+        claim=claim,
+        project_id=project_id,
+        round_id=round_id,
+        profile_id=profile_id,
+    )
+    selected_l4a_assets(artifact, require=True)
+    return artifact
+
+
+def _persist_l4b_linkage(project_dir: str | Path, artifact: dict) -> None:
+    relative = str(artifact.get("path") or "")
+    if not relative:
+        return
+    path = Path(project_dir) / relative
+    if not path.is_file():
+        return
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(artifact, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def install(deep_research_module) -> None:
+    """Install L4A/L4B orchestration around the mature final L4 runtime."""
+    if getattr(deep_research_module, "_l4_pipeline_installed", False):
+        return
+    original = deep_research_module.run_and_persist
+
+    def run_and_persist(
+        project_dir,
+        candidate_id,
+        node,
+        question,
+        claim,
+        spec,
+        work_dir,
+        skill_version="unknown",
+        result_context="",
+        *,
+        project_id="",
+        round_id="",
+        profile_id="",
+        research_persona="Curie",
+    ):
+        if node != "L4":
+            return original(
+                project_dir,
+                candidate_id,
+                node,
+                question,
+                claim,
+                spec,
+                work_dir,
+                skill_version,
+                result_context,
+                project_id=project_id,
+                round_id=round_id,
+                profile_id=profile_id,
+                research_persona=research_persona,
+            )
+        manifest = run_l4a_discovery(
+            project_dir,
+            candidate_id,
+            question,
+            claim,
+            spec,
+            work_dir,
+            skill_version,
+            project_id=project_id,
+            round_id=round_id,
+            profile_id=profile_id,
+        )
+        catalog = frozen_l4a_catalog(manifest)
+        l4b_claim = (
+            f"{claim}\n\n=== FROZEN L4A DISCOVERY CORPUS ===\n{catalog}\n"
+            "Use only these selected records as the discovery corpus. You may "
+            "resolve their full text and registered local sources, but do not "
+            "silently add new literature records."
+        )
+        artifact = original(
+            project_dir,
+            candidate_id,
+            node,
+            question,
+            l4b_claim,
+            spec,
+            work_dir,
+            skill_version,
+            result_context,
+            project_id=project_id,
+            round_id=round_id,
+            profile_id=profile_id,
+            research_persona=research_persona,
+        )
+        artifact["pipeline_schema"] = PIPELINE_SCHEMA_VERSION
+        artifact["pipeline_stage"] = "L4B"
+        artifact["l4a_manifest_path"] = manifest["path"]
+        artifact["l4a_manifest_sha256"] = manifest["manifest_sha256"]
+        artifact["l4a_run_id"] = manifest["run_id"]
+        _persist_l4b_linkage(project_dir, artifact)
+        return artifact
+
+    deep_research_module._l4_pipeline_original_run_and_persist = original
+    deep_research_module.run_and_persist = run_and_persist
+    deep_research_module._l4_pipeline_installed = True
