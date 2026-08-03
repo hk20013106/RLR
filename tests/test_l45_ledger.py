@@ -7,12 +7,19 @@ from research_loop import l45_ledger
 from research_loop import l4_pipeline as l4p
 
 
+def _evidence_manifest():
+    return {
+        "run_id": "RUN2",
+        "files": [{"kind": "run", "path": "run.json", "sha256": "abc"}],
+    }
+
+
 def _receipt():
     return {
         "candidate_id": "C1",
         "node": "L4",
         "provenance": {
-            "evidence_artifacts": {"run_id": "RUN2"},
+            "evidence_artifacts": _evidence_manifest(),
         },
     }
 
@@ -35,7 +42,10 @@ def _module(tmp_path, evidence):
     module = SimpleNamespace(
         _write_hypothesis_commit_receipt=write_receipt,
         _v2_candidate_delta_file=lambda project_dir, key, candidate_id: delta,
-        deep_research=SimpleNamespace(_artifact=artifact),
+        deep_research=SimpleNamespace(
+            _artifact=artifact,
+            evidence_artifact_manifest=lambda *a, **k: _evidence_manifest(),
+        ),
     )
     return module, calls, delta
 
@@ -48,8 +58,9 @@ def test_staged_l4_runs_l45_before_hypothesis_receipt(monkeypatch, tmp_path):
     }
     module, calls, delta = _module(tmp_path, evidence)
 
-    def commit(project_dir, candidate_id, artifact, delta_path):
+    def commit(project_dir, candidate_id, artifact, delta_path, **kwargs):
         calls.append(("l45", candidate_id, artifact["run_id"], delta_path))
+        assert kwargs["expected_evidence_manifest"] == _evidence_manifest()
         return ({"schema_version": l4p.L45_COMMIT_SCHEMA_VERSION}, tmp_path / "l45.json", True)
 
     monkeypatch.setattr(l45_ledger, "commit_l45_method_projection", commit)
