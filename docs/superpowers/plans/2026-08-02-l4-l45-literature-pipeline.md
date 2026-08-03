@@ -136,3 +136,5 @@ python run_loop.py --help
 Because the active execution environment cannot clone GitHub directly, RED and
 GREEN verification is performed by commits on the isolated feature branch and
 observed GitHub Actions runs. The branch must never be merged automatically.
+
+Current checkpoint: L4A implementation committed; CI verification pending.
