@@ -54,6 +54,7 @@ def test_l45_projection_is_removed_when_ledger_finalization_fails(
     )
 
     def commit_projection(*args, **kwargs):
+        assert kwargs["expected_evidence_manifest"] == evidence_manifest
         projection.write_text("{}", encoding="utf-8")
         events.append("l45")
         return {"schema_version": l4p.L45_COMMIT_SCHEMA_VERSION}, projection, True
