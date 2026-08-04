@@ -13,6 +13,18 @@ from research_loop.user_sources import verify_registered_source
 
 
 _IDENTITY_FIELDS = ("project_id", "round_id", "profile_id")
+_REVIEW_TYPES = {
+    "review", "systematic_review", "systematic review", "meta_analysis",
+    "meta analysis", "meta-analysis", "review/meta-analysis",
+}
+_REVIEW_ROLES = {"review", "systematic_review", "meta_analysis"}
+_REVIEW_STATUS_ALIASES = {
+    "relevant_review_found": "completed",
+    "relevant_review_located": "completed",
+    "review_located": "completed",
+    "no_relevant_review_found": "none_found",
+    "zero_results": "none_found",
+}
 
 
 def _raise(dr, message: str) -> None:
@@ -195,6 +207,14 @@ def _normalized_url(value: Any) -> str:
     )
 
 
+def _normalized_role(value: Any) -> str:
+    return str(value or "").strip().casefold().replace("-", "_")
+
+
+def _is_review_record(record: dict) -> bool:
+    return _normalized_role(record.get("paper_type")) in _REVIEW_TYPES
+
+
 def _normalized_title(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
 
@@ -241,6 +261,7 @@ def _selected_identities(l4p, manifest: dict) -> list[dict]:
             "doi": _normalized_doi(item.get("doi")),
             "pmid": _normalized_pmid(item.get("pmid")),
             "url": _normalized_url(item.get("url")),
+            "role": _normalized_role(item.get("role")) or "unspecified",
             "title_year": (
                 _normalized_title(item.get("title")),
                 str(item.get("year") or "").strip(),
@@ -248,6 +269,28 @@ def _selected_identities(l4p, manifest: dict) -> list[dict]:
         }
         for item in selected
     ]
+
+
+def _matching_selected_asset_ids(
+    selected: list[dict],
+    *,
+    doi: str,
+    pmid: str,
+    url: str,
+    title_year: tuple[str, str],
+) -> list[str]:
+    for key, value in (("doi", doi), ("pmid", pmid), ("url", url)):
+        if value:
+            owners = _identifier_owners(selected, key, value)
+            if owners:
+                return sorted(owners)
+    if title_year[0]:
+        return sorted(
+            str(item.get("asset_id") or "")
+            for item in selected
+            if item.get("title_year") == title_year
+        )
+    return []
 
 
 def _identifier_owners(selected: list[dict], key: str, value: str) -> list[str]:
@@ -379,6 +422,147 @@ def _format_identifier_conflict(identity: str, details: dict) -> str:
     )
 
 
+def _validate_review_search_contract(
+    dr,
+    manifest: dict,
+    artifact: dict,
+    selected: list[dict],
+) -> None:
+    review = artifact.get("review_search")
+    if not isinstance(review, dict) or not str(review.get("receipt") or "").strip():
+        _raise(
+            dr,
+            "L4B review_search must include a truthful receipt for the frozen corpus",
+        )
+    status = str(review.get("status") or "").strip().casefold()
+    status = _REVIEW_STATUS_ALIASES.get(status, status)
+    if status not in {"completed", "none_found", "not_retained"}:
+        _raise(dr, f"L4B review_search status is invalid for frozen corpus: {status or '<empty>'}")
+    selected_reviews = [
+        item for item in selected if item.get("role") in _REVIEW_ROLES
+    ]
+    if not selected_reviews and status != "not_retained":
+        _raise(
+            dr,
+            "L4B frozen L4A catalog has no selected review; review_search "
+            "must use status=not_retained and must not search online",
+        )
+
+
+def _validate_frozen_paper(
+    l4p,
+    dr,
+    project: Path,
+    candidate_id: str,
+    selected: list[dict],
+    reference: dict,
+    record: dict,
+) -> None:
+    reference_source = str(reference.get("user_source_id") or "").strip()
+    record_source = str(record.get("user_source_id") or "").strip()
+    if reference_source and record_source and reference_source != record_source:
+        _raise(dr, "L4B paper reference has conflicting user_source_id")
+    user_source_id = reference_source or record_source
+
+    doi = _coalesced_identifier(
+        dr, "DOI", reference, record, _normalized_doi
+    )
+    pmid = _coalesced_identifier(
+        dr, "PMID", reference, record, _normalized_pmid
+    )
+    url = _coalesced_identifier(
+        dr, "URL", reference, record, _normalized_url
+    )
+    title_year = _title_year(record or reference)
+    matching_ids = _matching_selected_asset_ids(
+        selected,
+        doi=doi,
+        pmid=pmid,
+        url=url,
+        title_year=title_year,
+    )
+
+    if user_source_id:
+        sha256 = str(record.get("user_source_sha256") or "").strip()
+        ok, reason = verify_registered_source(
+            project, candidate_id, user_source_id, sha256
+        )
+        if not ok:
+            _raise(dr, reason)
+        if _is_review_record(record) and not any(
+            item.get("asset_id") in matching_ids and item.get("role") in _REVIEW_ROLES
+            for item in selected
+        ):
+            _raise(
+                dr,
+                f"L4B review {record.get('title') or '<untitled>'!r} is not a "
+                "selected review in the frozen L4A catalog",
+            )
+        return
+
+    accepted, conflict_details = _matches_one_selected_asset(
+        selected,
+        doi=doi,
+        pmid=pmid,
+        url=url,
+        title_year=title_year,
+    )
+    if conflict_details:
+        _raise(
+            dr,
+            _format_identifier_conflict(
+                _paper_identity(
+                    record,
+                    reference,
+                    doi=doi,
+                    pmid=pmid,
+                    url=url,
+                    title_year=title_year,
+                ),
+                conflict_details,
+            ),
+        )
+    if _is_review_record(record) and not any(
+        item.get("asset_id") in matching_ids and item.get("role") in _REVIEW_ROLES
+        for item in selected
+    ):
+        _raise(
+            dr,
+            f"L4B review {record.get('title') or '<untitled>'!r} is not a "
+            "selected review in the frozen L4A catalog",
+        )
+    if not accepted:
+        identity = doi or pmid or url or f"{title_year[0]}|{title_year[1]}"
+        _raise(
+            dr,
+            f"L4B paper {identity or '<unidentified>'} is outside the frozen L4A corpus",
+        )
+
+
+def _validate_frozen_payload(
+    l4p,
+    dr,
+    project_dir: str | Path,
+    candidate_id: str,
+    payload: dict,
+    manifest: dict,
+) -> None:
+    project = Path(project_dir)
+    selected = _selected_identities(l4p, manifest)
+    if payload.get("method_components"):
+        _validate_review_search_contract(dr, manifest, payload, selected)
+    for paper in payload.get("papers") or []:
+        if not isinstance(paper, dict):
+            _raise(dr, "L4B paper records must be objects")
+        reference = {
+            key: paper.get(key, "")
+            for key in ("doi", "pmid", "url", "user_source_id")
+        }
+        _validate_frozen_paper(
+            l4p, dr, project, candidate_id, selected, reference, paper
+        )
+
+
 def _validate_frozen_corpus(
     l4p,
     dr,
@@ -389,65 +573,15 @@ def _validate_frozen_corpus(
     project = Path(project_dir)
     candidate_id = str(artifact.get("candidate_id") or "")
     selected = _selected_identities(l4p, manifest)
+    if artifact.get("method_components"):
+        _validate_review_search_contract(dr, manifest, artifact, selected)
     for reference in artifact.get("papers") or []:
         if not isinstance(reference, dict):
             _raise(dr, "L4B paper references must be objects")
         record = _read_paper_record(dr, project, reference)
-        reference_source = str(reference.get("user_source_id") or "").strip()
-        record_source = str(record.get("user_source_id") or "").strip()
-        if reference_source and record_source and reference_source != record_source:
-            _raise(dr, "L4B paper reference has conflicting user_source_id")
-        user_source_id = reference_source or record_source
-        if user_source_id:
-            sha256 = str(record.get("user_source_sha256") or "").strip()
-            ok, reason = verify_registered_source(
-                project,
-                candidate_id,
-                user_source_id,
-                sha256,
-            )
-            if not ok:
-                _raise(dr, reason)
-            continue
-
-        doi = _coalesced_identifier(
-            dr, "DOI", reference, record, _normalized_doi
+        _validate_frozen_paper(
+            l4p, dr, project, candidate_id, selected, reference, record
         )
-        pmid = _coalesced_identifier(
-            dr, "PMID", reference, record, _normalized_pmid
-        )
-        url = _coalesced_identifier(
-            dr, "URL", reference, record, _normalized_url
-        )
-        title_year = _title_year(record or reference)
-        accepted, conflict_details = _matches_one_selected_asset(
-            selected,
-            doi=doi,
-            pmid=pmid,
-            url=url,
-            title_year=title_year,
-        )
-        if conflict_details:
-            _raise(
-                dr,
-                _format_identifier_conflict(
-                    _paper_identity(
-                        record,
-                        reference,
-                        doi=doi,
-                        pmid=pmid,
-                        url=url,
-                        title_year=title_year,
-                    ),
-                    conflict_details,
-                ),
-            )
-        if not accepted:
-            identity = doi or pmid or url or f"{title_year[0]}|{title_year[1]}"
-            _raise(
-                dr,
-                f"L4B paper {identity or '<unidentified>'} is outside the frozen L4A corpus",
-            )
 
 
 def install(l4p, dr, lineage_module) -> None:
@@ -524,6 +658,22 @@ def install(l4p, dr, lineage_module) -> None:
         return original_persist_linkage(project_dir, artifact)
 
     l4p._persist_l4b_linkage = persist_l4b_linkage
+
+    def validate_l4b_payload_before_persistence(project_dir, candidate_id, payload):
+        context = getattr(dr, "_l4b_frozen_manifest_context", None)
+        if not context:
+            return
+        context_project, context_candidate, manifest = context
+        if (
+            Path(project_dir).resolve() != Path(context_project).resolve()
+            or str(candidate_id) != str(context_candidate)
+        ):
+            _raise(dr, "L4B frozen manifest context does not match the payload project or candidate")
+        _validate_frozen_payload(
+            l4p, dr, project_dir, str(candidate_id), payload, manifest
+        )
+
+    dr._l4b_pre_persist_validator = validate_l4b_payload_before_persistence
 
     original_commit = l4p.commit_l45_method_projection
 

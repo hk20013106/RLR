@@ -62,6 +62,12 @@ def l4a_discovery_schema() -> dict:
         "url": {"type": "string"},
         "title": {"type": "string", "minLength": 1},
         "year": {"type": "integer"}, "journal": {"type": "string"},
+        "role": {
+            "enum": [
+                "primary", "method", "protocol", "review", "navigation",
+                "other", "unspecified",
+            ]
+        },
         "abstract": {"type": "string"},
         "source_database": {"type": "string", "minLength": 1},
         # Provider wire form after the shared raw-result adapter. Codex
@@ -82,7 +88,9 @@ def l4a_discovery_schema() -> dict:
     asset = {
         "type": "object", "additionalProperties": False,
         "properties": asset_properties,
-        "required": list(asset_properties),
+        # ``role`` was added after earlier immutable manifests were created;
+        # persistence supplies ``unspecified`` for those historical assets.
+        "required": [key for key in asset_properties if key != "role"],
     }
     return {
         "type": "object", "additionalProperties": False,
@@ -203,6 +211,7 @@ def _normalize_l4a_assets(assets: list[Any]) -> list[dict]:
                 f"L4A asset at index {index} must be an object"
             )
         asset = dict(raw)
+        asset.setdefault("role", "unspecified")
         asset["source_metadata_response"] = _parse_source_metadata_response(
             asset.get("source_metadata_response"),
             asset_id=str(asset.get("asset_id") or ""),
@@ -310,10 +319,15 @@ def validate_l4a_manifest(project_dir: str | Path, manifest: dict) -> tuple[bool
 
 
 def frozen_l4a_catalog(manifest: dict) -> str:
+    assets = []
+    for raw in selected_l4a_assets(manifest, require=True):
+        asset = dict(raw)
+        asset.setdefault("role", "unspecified")
+        assets.append(asset)
     return _canonical_json({
         "schema_version": L4A_DISCOVERY_SCHEMA_VERSION,
         "selected_asset_ids": list(manifest.get("selected_asset_ids") or []),
-        "assets": selected_l4a_assets(manifest, require=True),
+        "assets": assets,
     })
 
 
@@ -326,7 +340,9 @@ Selected hypothesis/claim: {claim}
 
 Search for method, protocol, software, diagnostic, and alternative-method
 literature. Return metadata only, matching the supplied JSON schema. Record
-actual query receipts and source metadata. For source_metadata_response, return
+actual query receipts and source metadata. Classify every asset with role
+primary, method, protocol, review, navigation, other, or unspecified. For
+source_metadata_response, return
 the complete database metadata object encoded as one canonical JSON string:
 UTF-8, sorted keys, compact separators, finite JSON numbers only, and no
 leading/trailing whitespace. Do not use Python repr, Markdown fences, or
@@ -412,17 +428,40 @@ def install(deep_research_module) -> None:
         )
         catalog = frozen_l4a_catalog(manifest)
         frozen_claim = (
-            f"{claim}\n\n=== FROZEN L4A DISCOVERY CORPUS ===\n{catalog}\n"
-            "Use only these selected records as the discovery corpus. Resolve "
-            "their full text and registered local sources, but do not silently "
-            "add new literature records."
+            f"{claim}\n\n=== FROZEN L4B HANDOFF ===\n"
+            "This L4B run is closed over the exact L4A selected-asset catalog "
+            "below. MUST NOT perform online literature searches, follow-up "
+            "review searches, add new citations, or create new online paper "
+            "records. Use only the selected records in this catalog and "
+            "formally registered local sources. Full-text resolution may use "
+            "an alias URL for the same selected DOI/PMID; it does not add a "
+            "paper. A review or navigation paper is admissible only when a "
+            "selected catalog asset has role=review. If no selected asset has "
+            "role=review, do not search for one and return a review_search "
+            "receipt with status=not_retained explaining that no selected "
+            "review was retained; emit no review paper. Review/navigation "
+            "extracts must never claim method anchors.\n\n"
+            "=== FROZEN L4A DISCOVERY CORPUS (complete selected catalog) ===\n"
+            f"{catalog}\n"
         )
-        artifact = original(
-            project_dir, candidate_id, node, question, frozen_claim, spec,
-            work_dir, skill_version, result_context, project_id=project_id,
-            round_id=round_id, profile_id=profile_id,
-            research_persona=research_persona,
+        previous_context = getattr(
+            _deep_research, "_l4b_frozen_manifest_context", None
         )
+        _deep_research._l4b_frozen_manifest_context = (
+            Path(project_dir).resolve(), str(candidate_id), manifest
+        )
+        try:
+            artifact = original(
+                project_dir, candidate_id, node, question, frozen_claim, spec,
+                work_dir, skill_version, result_context, project_id=project_id,
+                round_id=round_id, profile_id=profile_id,
+                research_persona=research_persona,
+            )
+        finally:
+            if previous_context is None:
+                delattr(_deep_research, "_l4b_frozen_manifest_context")
+            else:
+                _deep_research._l4b_frozen_manifest_context = previous_context
         artifact.update({
             "pipeline_schema": PIPELINE_SCHEMA_VERSION,
             "pipeline_stage": "L4B",

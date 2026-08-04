@@ -57,9 +57,11 @@ The immutable manifest is written under:
 
 Deduplication uses DOI, then PMID, then stable URL, then normalized title and
 year. Duplicate records remain recorded in the manifest. L4B receives a
-canonical frozen catalog containing only L4A-selected assets and may resolve
-those assets or registered local sources; it may not silently broaden the
-corpus.
+canonical frozen catalog containing only L4A-selected assets, including each
+asset's role. L4B may resolve those assets or registered local sources, but it
+must not perform online searches or silently broaden the corpus. A review or
+navigation paper is admissible only when a selected L4A asset has role
+`review`; otherwise L4B records a `not_retained` review-search receipt.
 
 ## Core L4B objects
 

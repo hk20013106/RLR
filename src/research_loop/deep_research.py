@@ -303,9 +303,11 @@ def _stage_instruction(node: str) -> str:
                 "For every claim, extract located Results, Discussion, and Conclusion evidence "
                 "from primary research papers.")
     if node == "L4":
-        return ("Run a method literature review. Extract located Methods from primary studies. "
-                "Also execute a review query; capture Results and Conclusion from each relevant "
-                "review, or record a zero-result review-search receipt.")
+        return ("Construct L4B evidence only from the supplied frozen L4A handoff and "
+                "formally registered local sources. Do not perform online literature or "
+                "review searches and do not add new paper records. Extract located Methods "
+                "from selected primary or method sources; use selected review sources only "
+                "for navigation, or record the required no-review receipt.")
     if node == "L8.5":
         return ("Run post-result literature verification. For every L7/L8 finding, record a "
                 "located paper-based confirmation, contradiction, or unresolved verdict.")
