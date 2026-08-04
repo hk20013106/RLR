@@ -1,14 +1,13 @@
 """Identifier-bearing method inventory for staged L4 evidence acquisition.
 
-This module leaves the historical L4A provider/persistence API readable while
-adding an additive inventory contract for new staged runs. Exact method-source
-identifiers are materialized as selected resolver assets so provenance checks
-remain closed-corpus and deterministic even when ordinary literature selection
-would otherwise omit the source.
+New staged L4A runs keep the historical discovery-manifest contract readable,
+but persist the method inventory and exact-source assets atomically. This keeps
+closed-corpus provenance deterministic and makes identical retries idempotent.
 """
 from __future__ import annotations
 
 import copy
+import datetime as dt
 import hashlib
 import json
 import re
@@ -110,7 +109,7 @@ def _inventory_item_schema() -> dict:
 
 
 def discovery_schema(l4p) -> dict:
-    """Return the strict L4A wire schema used by new staged runs."""
+    """Strict provider wire schema for new L4A inventory runs."""
     schema = copy.deepcopy(l4p.l4a_discovery_schema())
     schema["properties"]["method_inventory"] = {
         "type": "array",
@@ -128,20 +127,19 @@ RLR stage: L4A Method Inventory and Source Metadata
 Scientific question: {question}
 Selected hypothesis/claim: {claim}
 
-First identify the explicit statistical, computational, diagnostic, and
-alternative methods implied by the authorized project context. Return those
-methods in `method_inventory`. This is an inventory, not a final method choice:
-do not create method components, eligibility decisions, required execution
-flags, evidence anchors, or an analysis plan.
+Identify the explicit statistical, computational, diagnostic, and alternative
+methods implied by the authorized project context. Return those methods in
+`method_inventory`. This is an inventory, not a final method choice: do not
+create method components, eligibility decisions, required execution flags,
+evidence anchors, or an analysis plan.
 
 For every method, carry forward any DOI, PMID, PMCID, stable URL, or exact asset
-identifier already present in the authorized context. A known identifier must
-not be dropped merely because the corresponding paper is not selected as a
-general literature asset. Search metadata only to fill missing identifiers.
-Never invent an identifier. Use year 0 only when an exact source identifier is
-known but its publication year is unavailable. When no exact source is found,
-retain the method with empty source arrays so the next stage can record an
-explicit evidence gap.
+identifier already present in authorized context. A known identifier must not
+be dropped merely because the corresponding paper is not selected as a general
+literature asset. Search metadata only to fill missing identifiers. Never
+invent an identifier. Use year 0 only when an exact source identifier is known
+but its publication year is unavailable. When no exact source is found, retain
+the method with empty source arrays so L4B can record an explicit evidence gap.
 
 Return metadata only. Do not retrieve full text or emit source payloads or
 verbatim extracts. Keep the ordinary `assets` catalog and selection receipts.
@@ -157,8 +155,7 @@ def _validate_inventory_payload(l4p, dr, payload: dict) -> dict:
         "queries": payload.get("queries"),
         "assets": payload.get("assets"),
     }
-    canonical_base = l4p._canonicalize_l4a_provider_payload(base_payload)
-    canonical = dict(canonical_base)
+    canonical = dict(l4p._canonicalize_l4a_provider_payload(base_payload))
     canonical["method_inventory"] = payload.get("method_inventory")
     errors = sorted(
         Draft202012Validator(discovery_schema(l4p)).iter_errors(canonical),
@@ -174,8 +171,8 @@ def _validate_inventory_payload(l4p, dr, payload: dict) -> dict:
     if len(method_ids) != len(set(method_ids)):
         raise dr.DeepResearchError("L4A method_inventory method_id values must be unique")
     for item in inventory:
-        source_asset_ids = [str(value).strip() for value in item["source_asset_ids"]]
-        if len(source_asset_ids) != len(set(source_asset_ids)):
+        asset_ids = [str(value).strip() for value in item["source_asset_ids"]]
+        if len(asset_ids) != len(set(asset_ids)):
             raise dr.DeepResearchError(
                 f"L4A method {item['method_id']} source_asset_ids must be unique"
             )
@@ -208,8 +205,9 @@ def _asset_identity(asset: dict) -> tuple[str, str]:
             metadata = json.loads(metadata)
         except json.JSONDecodeError:
             metadata = {}
-    text = _canonical_json(metadata or {})
-    match = re.search(r"\bPMC\d+\b", text, flags=re.IGNORECASE)
+    match = re.search(
+        r"\bPMC\d+\b", _canonical_json(metadata or {}), flags=re.IGNORECASE
+    )
     if match:
         return "pmcid", match.group(0).upper()
     url = _normalized_url(asset.get("url"))
@@ -263,12 +261,6 @@ def _pseudo_asset(method: dict, hint: dict) -> dict:
     identity = "|".join(_hint_identity(hint))
     asset_id = f"MI_{_safe(method_id)}_{_safe(source_ref_id)}_{_sha(identity)[:8]}"
     url = _hint_url(hint)
-    metadata = {
-        "inventory_schema": INVENTORY_SCHEMA_VERSION,
-        "method_id": method_id,
-        "source_ref_id": source_ref_id,
-        "pmcid": str(hint.get("pmcid") or "").strip().upper(),
-    }
     explicit_locations = [
         str(value).strip()
         for value in hint.get("full_text_locations") or []
@@ -279,6 +271,12 @@ def _pseudo_asset(method: dict, hint: dict) -> dict:
         if value not in locations:
             locations.append(value)
     open_access = bool(str(hint.get("pmcid") or "").strip() or explicit_locations)
+    metadata = {
+        "inventory_schema": INVENTORY_SCHEMA_VERSION,
+        "method_id": method_id,
+        "source_ref_id": source_ref_id,
+        "pmcid": str(hint.get("pmcid") or "").strip().upper(),
+    }
     return {
         "asset_id": asset_id,
         "doi": _normalized_doi(hint.get("doi")),
@@ -290,7 +288,7 @@ def _pseudo_asset(method: dict, hint: dict) -> dict:
         "journal": "",
         "abstract": "",
         "source_database": "method_inventory_exact_identifier",
-        "source_metadata_response": _canonical_json(metadata),
+        "source_metadata_response": metadata,
         "open_access_status": "open" if open_access else "unknown",
         "full_text_status": "available_oa" if open_access else "metadata_only",
         "full_text_locations": locations,
@@ -306,16 +304,39 @@ def _pseudo_asset(method: dict, hint: dict) -> dict:
     }
 
 
-def _augment_assets(payload: dict, dr) -> tuple[list[dict], list[dict]]:
-    assets = [dict(asset) for asset in payload["assets"]]
+def _deduplicate_assets(l4p, assets: list[dict]) -> tuple[list[dict], list[dict], dict[str, str]]:
+    deduplicated, duplicates = l4p.deduplicate_l4a_assets(
+        l4p._normalize_l4a_assets(list(assets))
+    )
+    aliases = {
+        str(item["duplicate_asset_id"]): str(item["kept_asset_id"])
+        for item in duplicates
+    }
+    return deduplicated, duplicates, aliases
+
+
+def _remap_inventory(inventory: list[dict], aliases: dict[str, str]) -> list[dict]:
+    result = copy.deepcopy(inventory)
+    for method in result:
+        remapped = []
+        for raw in method.get("source_asset_ids") or []:
+            asset_id = aliases.get(str(raw), str(raw))
+            if asset_id not in remapped:
+                remapped.append(asset_id)
+        method["source_asset_ids"] = remapped
+    return result
+
+
+def _augment_assets(l4p, dr, assets: list[dict], inventory: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    assets, duplicates, aliases = _deduplicate_assets(l4p, assets)
+    inventory = _remap_inventory(inventory, aliases)
     by_id = {str(asset["asset_id"]): asset for asset in assets}
     identities = {_asset_identity(asset): str(asset["asset_id"]) for asset in assets}
-    normalized_inventory = copy.deepcopy(payload["method_inventory"])
 
-    for method in normalized_inventory:
+    for method in inventory:
         linked_ids = []
-        for asset_id in method["source_asset_ids"]:
-            asset_id = str(asset_id)
+        for raw_id in method["source_asset_ids"]:
+            asset_id = str(raw_id)
             if asset_id not in by_id:
                 raise dr.DeepResearchError(
                     f"L4A method {method['method_id']} references unknown asset {asset_id}"
@@ -325,8 +346,7 @@ def _augment_assets(payload: dict, dr) -> tuple[list[dict], list[dict]]:
             asset["selection_reason"] = (
                 f"Exact source referenced by method inventory item {method['method_id']}."
             )
-            if asset_id not in linked_ids:
-                linked_ids.append(asset_id)
+            linked_ids.append(asset_id)
 
         for hint in method["source_hints"]:
             identity = _hint_identity(hint)
@@ -347,7 +367,56 @@ def _augment_assets(payload: dict, dr) -> tuple[list[dict], list[dict]]:
             if asset_id not in linked_ids:
                 linked_ids.append(asset_id)
         method["source_asset_ids"] = linked_ids
-    return assets, normalized_inventory
+
+    final_assets, later_duplicates, later_aliases = _deduplicate_assets(l4p, assets)
+    inventory = _remap_inventory(inventory, later_aliases)
+    return final_assets, duplicates + later_duplicates, inventory
+
+
+def _manifest_base(
+    l4p,
+    *,
+    candidate_id: str,
+    question: str,
+    claim: str,
+    queries: list,
+    assets: list[dict],
+    duplicates: list[dict],
+    inventory: list[dict],
+    runtime_receipt: dict,
+    project_id: str,
+    round_id: str,
+    profile_id: str,
+) -> dict:
+    selected_ids = [
+        str(asset["asset_id"])
+        for asset in assets
+        if asset.get("selection_status") == "selected"
+    ]
+    if not selected_ids:
+        raise l4p._deep_research.DeepResearchError(
+            "L4A discovery produced no selected literature assets"
+        )
+    return {
+        "schema_version": l4p.L4A_DISCOVERY_SCHEMA_VERSION,
+        "pipeline_schema": l4p.PIPELINE_SCHEMA_VERSION,
+        "pipeline_stage": "L4A",
+        "project_id": project_id,
+        "round_id": str(round_id),
+        "candidate_id": candidate_id,
+        "profile_id": profile_id,
+        "question": question,
+        "claim": claim,
+        "question_sha256": _sha(question),
+        "claim_sha256": _sha(claim),
+        "queries": queries,
+        "assets": assets,
+        "duplicates": duplicates,
+        "selected_asset_ids": selected_ids,
+        "runtime_receipt": runtime_receipt,
+        "inventory_schema": INVENTORY_SCHEMA_VERSION,
+        "method_inventory": inventory,
+    }
 
 
 def persist_discovery(
@@ -365,38 +434,82 @@ def persist_discovery(
     profile_id: str = "",
 ) -> dict:
     canonical = _validate_inventory_payload(l4p, dr, payload)
-    assets, inventory = _augment_assets(canonical, dr)
+    assets, duplicates, inventory = _augment_assets(
+        l4p,
+        dr,
+        canonical["assets"],
+        canonical["method_inventory"],
+    )
     receipt = dict(runtime_receipt)
     receipt["method_inventory_sha256"] = _sha(_canonical_json(inventory))
-    base_payload = {
-        "schema_version": l4p.L4A_DISCOVERY_SCHEMA_VERSION,
-        "queries": canonical["queries"],
-        "assets": assets,
-    }
-    artifact = l4p.persist_l4a_discovery(
-        project_dir,
-        candidate_id,
-        base_payload,
-        receipt,
+    base = _manifest_base(
+        l4p,
+        candidate_id=candidate_id,
         question=question,
         claim=claim,
+        queries=list(canonical["queries"]),
+        assets=assets,
+        duplicates=duplicates,
+        inventory=inventory,
+        runtime_receipt=receipt,
         project_id=project_id,
         round_id=round_id,
         profile_id=profile_id,
     )
-    artifact["inventory_schema"] = INVENTORY_SCHEMA_VERSION
-    artifact["method_inventory"] = inventory
-    unsigned = dict(artifact)
-    unsigned.pop("manifest_sha256", None)
-    artifact["manifest_sha256"] = l4p._sha256_json(unsigned)
-    path = Path(project_dir) / str(artifact["path"])
-    path.write_text(
+    run_seed = {
+        key: value
+        for key, value in base.items()
+        if key not in {"pipeline_stage", "pipeline_schema"}
+    }
+    run_id = _sha(_canonical_json(run_seed))[:20]
+    relative = (
+        Path("09_Literature_Database/l4/discovery/manifests")
+        / f"{candidate_id}_{run_id}.json"
+    )
+    target = Path(project_dir) / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if target.exists():
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise dr.DeepResearchError(
+                f"immutable L4A inventory manifest is unreadable: {target}"
+            ) from exc
+        expected = dict(base)
+        expected.update({
+            "run_id": run_id,
+            "created_at": existing.get("created_at"),
+            "path": relative.as_posix(),
+        })
+        expected["manifest_sha256"] = l4p._sha256_json(expected)
+        if existing != expected:
+            raise dr.DeepResearchError(
+                f"immutable L4A inventory manifest already exists with different content: {target}"
+            )
+        ok, reason = l4p.validate_l4a_manifest(project_dir, existing)
+        if not ok:
+            raise dr.DeepResearchError(
+                f"persisted L4A inventory manifest failed validation: {reason}"
+            )
+        return existing
+
+    artifact = dict(base)
+    artifact.update({
+        "run_id": run_id,
+        "created_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
+        "path": relative.as_posix(),
+    })
+    artifact["manifest_sha256"] = l4p._sha256_json(artifact)
+    target.write_text(
         json.dumps(artifact, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
         encoding="utf-8",
     )
     ok, reason = l4p.validate_l4a_manifest(project_dir, artifact)
     if not ok:
-        raise dr.DeepResearchError(f"persisted L4A inventory manifest failed validation: {reason}")
+        raise dr.DeepResearchError(
+            f"persisted L4A inventory manifest failed validation: {reason}"
+        )
     return artifact
 
 
@@ -417,8 +530,6 @@ def run_discovery(
 ) -> dict:
     work = Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
-    # Keep the historical schema path stable for diagnostics and compatibility
-    # tests. The new L4A provider receives its own explicit inventory schema.
     legacy_schema_path = work / "deep_research_output.schema.json"
     inventory_schema_path = work / "l4a_method_inventory_output.schema.json"
     legacy_schema_path.write_text(
@@ -449,7 +560,9 @@ def run_discovery(
             **invocation_kwargs,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise dr.DeepResearchError(f"L4A method-inventory invocation failed: {exc}") from exc
+        raise dr.DeepResearchError(
+            f"L4A method-inventory invocation failed: {exc}"
+        ) from exc
     receipt = dr.skill_receipt(
         spec.backend,
         command,
@@ -480,7 +593,10 @@ def run_discovery(
 
 def inventory_sources(manifest: dict) -> tuple[list[dict], list[dict]]:
     """Return exact resolver assets plus inventory items lacking any source."""
-    assets = {str(asset.get("asset_id") or ""): asset for asset in manifest.get("assets") or []}
+    assets = {
+        str(asset.get("asset_id") or ""): asset
+        for asset in manifest.get("assets") or []
+    }
     linked: dict[str, dict] = {}
     no_source = []
     for method in manifest.get("method_inventory") or []:
