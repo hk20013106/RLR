@@ -40,17 +40,50 @@ def install(contracts_module) -> None:
         "method_anchor_ids": _string_array(),
         "rejection_reasons": _string_array(),
         "missing_source": {"type": "string"},
+        # Staged L4 v2 fields. They are additive so historical native-v2.1
+        # deltas remain readable. Once one appears, all three are required.
+        "execution_required": {"type": "boolean"},
+        "evidence_card_ids": _string_array(),
+        "evidence_gap_ids": _string_array(),
     }, [
         "method_id", "component_id", "hypothesis_ids", "name", "status",
         "purpose", "applicable_to", "implementation_steps", "assumptions",
         "expected_outputs", "strengths", "limitations", "alternatives",
         "method_anchor_ids", "rejection_reasons", "missing_source",
     ])
+    staged_fields = (
+        "execution_required", "evidence_card_ids", "evidence_gap_ids"
+    )
+    candidate["dependentRequired"] = {
+        field: [other for other in staged_fields if other != field]
+        for field in staged_fields
+    }
     candidate["allOf"] = [
         {
-            "if": {"properties": {"status": {"const": "eligible"}},
-                   "required": ["status"]},
+            # Historical eligible candidates predate evidence cards and keep
+            # their original method-anchor requirement.
+            "if": {
+                "allOf": [
+                    {
+                        "properties": {"status": {"const": "eligible"}},
+                        "required": ["status"],
+                    },
+                    {"not": {"required": ["execution_required"]}},
+                ]
+            },
             "then": {"properties": {"method_anchor_ids": {"minItems": 1}}},
+        },
+        {
+            # New staged runs require strong evidence only for Fisher-declared
+            # implementation paths. Optional alternatives may carry gaps.
+            "if": {
+                "properties": {
+                    "status": {"const": "eligible"},
+                    "execution_required": {"const": True},
+                },
+                "required": ["status", "execution_required"],
+            },
+            "then": {"properties": {"evidence_card_ids": {"minItems": 1}}},
         },
         {
             "if": {"properties": {"status": {"const": "ineligible"}},
@@ -112,6 +145,7 @@ def install(contracts_module) -> None:
         "software_requirements": _string_array(),
         "scripts": _string_array(min_items=1),
         "method_anchor_ids": _string_array(min_items=1),
+        "evidence_card_ids": _string_array(),
         "l5_qc_requirements": _string_array(),
     }, [
         "component_id", "selected_method_ids", "decision_rationale",
