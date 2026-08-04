@@ -37,6 +37,7 @@ from research_loop.l4_provenance_compat import (
 from research_loop.l4_path_safety import install as _install_l4_path_safety
 from research_loop.l4_lineage import install as _install_l4_lineage
 from research_loop.l45_context_binding import install as _install_l45_context_binding
+from research_loop import l4_closed_corpus as _l4_closed_corpus
 
 _install_l4_pipeline(deep_research)
 _install_l4_pipeline_compat(_l4_pipeline_module, deep_research)
@@ -52,6 +53,7 @@ _install_l4_provenance_compat(
 _install_l4_path_safety(_l4_pipeline_module, deep_research)
 _install_l4_lineage(deep_research)
 _install_l45_context_binding(_l4_pipeline_module)
+_l4_closed_corpus.install(_l4_pipeline_module, deep_research)
 
 from research_loop import hypothesis_contracts as hypothesis_contracts
 from research_loop.method_contracts import install as _install_method_contracts
@@ -118,7 +120,8 @@ del _install_review_status_compat, _registered_sources
 del _install_l4_pipeline, _install_l4_pipeline_compat
 del _install_l4_provenance, _install_l4_provenance_compat
 del _install_l4_path_safety, _install_l4_lineage
-del _install_l45_context_binding, _l4_pipeline_module, _l4_lineage_module
+del _install_l45_context_binding, _l4_closed_corpus
+del _l4_pipeline_module, _l4_lineage_module
 del _l4_provenance_module
 del _install_method_contracts, _install_reactivation_contracts
 del _install_receipt_idempotency, _install_hypothesis_reactivation
