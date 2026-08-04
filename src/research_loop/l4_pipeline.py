@@ -64,9 +64,10 @@ def l4a_discovery_schema() -> dict:
         "year": {"type": "integer"}, "journal": {"type": "string"},
         "abstract": {"type": "string"},
         "source_database": {"type": "string", "minLength": 1},
-        # Codex structured outputs require every object to be closed.  The
-        # database response is intentionally heterogeneous, so the provider
-        # returns its canonical JSON representation and RLR parses it below.
+        # Provider wire form after the shared raw-result adapter. Codex
+        # structured outputs require every object to be closed, while database
+        # metadata is heterogeneous; the semantic object is therefore carried
+        # as canonical JSON text here and restored to an object for persistence.
         "source_metadata_response": {"type": "string", "minLength": 2},
         "open_access_status": {"enum": ["open", "closed", "unknown"]},
         "full_text_status": {"enum": ["available_local", "available_oa", "metadata_only", "manual_required"]},
@@ -116,21 +117,48 @@ def _asset_identity(asset: dict) -> str:
 
 
 def _parse_source_metadata_response(value: Any, *, asset_id: str = "") -> dict[str, Any]:
-    if not isinstance(value, str) or not value.strip():
+    if isinstance(value, dict):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        text = value.strip()
+        fenced = re.fullmatch(
+            r"```[ \t]*(?:json)?[ \t]*\r?\n?(.*?)\r?\n?```",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if fenced:
+            text = fenced.group(1).strip()
+
+        def reject_non_json_constant(constant: str) -> None:
+            raise ValueError(f"non-standard JSON constant {constant}")
+
+        try:
+            parsed = json.loads(text, parse_constant=reject_non_json_constant)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise _deep_research.DeepResearchError(
+                f"L4A source_metadata_response for asset {asset_id or '<unknown>'} "
+                "must be valid JSON"
+            ) from exc
+    else:
         raise _deep_research.DeepResearchError(
             f"L4A source_metadata_response for asset {asset_id or '<unknown>'} "
-            "must be a non-empty JSON string"
+            "must be a non-empty JSON object or JSON string"
         )
 
-    def reject_non_json_constant(constant: str) -> None:
-        raise ValueError(f"non-standard JSON constant {constant}")
-
     try:
-        parsed = json.loads(value, parse_constant=reject_non_json_constant)
-    except (json.JSONDecodeError, ValueError) as exc:
+        parsed = json.loads(
+            json.dumps(
+                parsed,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        )
+    except (TypeError, ValueError) as exc:
         raise _deep_research.DeepResearchError(
             f"L4A source_metadata_response for asset {asset_id or '<unknown>'} "
-            "must be valid JSON"
+            "must be JSON-serializable"
         ) from exc
     if not isinstance(parsed, dict):
         raise _deep_research.DeepResearchError(
@@ -140,7 +168,34 @@ def _parse_source_metadata_response(value: Any, *, asset_id: str = "") -> dict[s
     return parsed
 
 
+def _canonicalize_l4a_provider_payload(payload: Any) -> Any:
+    """Validate raw L4A metadata and convert it to the strict provider wire form.
+
+    The adapter is the single ingress boundary for compatible object/string
+    forms. It only emits a canonical JSON string after the value has decoded to
+    an object; ordinary text and non-object JSON never reach schema validation.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("assets"), list):
+        return payload
+    normalized = dict(payload)
+    normalized_assets = []
+    for raw in payload["assets"]:
+        if not isinstance(raw, dict) or "source_metadata_response" not in raw:
+            normalized_assets.append(raw)
+            continue
+        asset = dict(raw)
+        metadata = _parse_source_metadata_response(
+            asset["source_metadata_response"],
+            asset_id=str(asset.get("asset_id") or ""),
+        )
+        asset["source_metadata_response"] = _canonical_json(metadata)
+        normalized_assets.append(asset)
+    normalized["assets"] = normalized_assets
+    return normalized
+
+
 def _normalize_l4a_assets(assets: list[Any]) -> list[dict]:
+    """Restore canonical provider strings to persisted metadata objects."""
     normalized = []
     for index, raw in enumerate(assets):
         if not isinstance(raw, dict):
@@ -271,7 +326,11 @@ Selected hypothesis/claim: {claim}
 
 Search for method, protocol, software, diagnostic, and alternative-method
 literature. Return metadata only, matching the supplied JSON schema. Record
-actual query receipts and source metadata. Do not emit source payloads,
+actual query receipts and source metadata. For source_metadata_response, return
+the complete database metadata object encoded as one canonical JSON string:
+UTF-8, sorted keys, compact separators, finite JSON numbers only, and no
+leading/trailing whitespace. Do not use Python repr, Markdown fences, or
+explanatory text. Do not emit source payloads,
 verbatim extracts, method components, method candidates, method anchors, or a
 final analysis plan. Never invent identifiers, availability, or receipts.
 """

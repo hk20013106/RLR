@@ -33,6 +33,7 @@ def _require_unique(dr, records: list[dict], key: str) -> None:
 
 
 def _validate_provider_payload(l4p, dr, payload: Any) -> None:
+    """Validate a payload after the shared L4A adapter has run."""
     if not isinstance(payload, dict):
         _raise(dr, "L4A payload must be a JSON object")
     validator = Draft202012Validator(l4p.l4a_discovery_schema())
@@ -56,13 +57,13 @@ def _provider_payload_from_manifest(l4p, dr, manifest: dict) -> dict:
         metadata = asset.get("source_metadata_response")
         if not isinstance(metadata, dict):
             _raise(dr, "L4A manifest source_metadata_response must be a JSON object")
-        asset["source_metadata_response"] = l4p._canonical_json(metadata)
+        asset["source_metadata_response"] = metadata
         assets.append(asset)
-    return {
+    return l4p._canonicalize_l4a_provider_payload({
         "schema_version": manifest.get("schema_version"),
         "queries": manifest.get("queries"),
         "assets": assets,
-    }
+    })
 
 
 def _validate_manifest_semantics(l4p, dr, manifest: dict) -> None:
@@ -380,11 +381,12 @@ def install(l4p, dr, lineage_module) -> None:
     ):
         if not str(candidate_id or "").strip():
             _raise(dr, "L4A candidate_id must be non-empty")
-        _validate_provider_payload(l4p, dr, payload)
+        canonical_payload = l4p._canonicalize_l4a_provider_payload(payload)
+        _validate_provider_payload(l4p, dr, canonical_payload)
         artifact = original_persist_discovery(
             project_dir,
             candidate_id,
-            payload,
+            canonical_payload,
             runtime_receipt,
             question=question,
             claim=claim,

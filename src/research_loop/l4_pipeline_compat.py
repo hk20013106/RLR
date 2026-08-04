@@ -66,12 +66,7 @@ def _legacy_evidence_to_discovery(payload: dict) -> dict:
             "journal": str(metadata.get("journal") or ""),
             "abstract": "",
             "source_database": str(paper.get("source_database") or "legacy"),
-            "source_metadata_response": json.dumps(
-                dict(paper.get("source_metadata_response") or {}),
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
+            "source_metadata_response": paper.get("source_metadata_response"),
             "open_access_status": "open" if open_access else "unknown",
             "full_text_status": (
                 "available_oa" if has_payload or open_access else "metadata_only"
