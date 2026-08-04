@@ -20,11 +20,11 @@ _install_navigation_compat(_review_navigation)
 _review_navigation.install(deep_research)
 _install_review_status_compat(deep_research)
 
-# L4A/L4B wraps the fully installed mature L4 evidence runtime so evidence
-# construction is delegated rather than duplicated. Compatibility preserves
-# the historical L4 work-directory/API contract. Provenance hardening validates
-# the complete L4A contract, frozen-corpus membership, and cross-stage identity
-# before lineage/context/ledger consumers capture their function references.
+# The historical staged pipeline and provenance validators remain installed for
+# compatibility. New staged L4 runs are intercepted after those boundaries by
+# l4_evidence_bundle: L4A builds an identifier-bearing method inventory and L4B
+# performs deterministic exact-source retrieval only. Fisher method design
+# remains L4C and the required-path check remains deterministic at L4.5.
 from research_loop import l4_pipeline as _l4_pipeline_module
 from research_loop.l4_pipeline import install as _install_l4_pipeline
 from research_loop.l4_pipeline_compat import install as _install_l4_pipeline_compat
@@ -37,7 +37,7 @@ from research_loop.l4_provenance_compat import (
 from research_loop.l4_path_safety import install as _install_l4_path_safety
 from research_loop.l4_lineage import install as _install_l4_lineage
 from research_loop.l45_context_binding import install as _install_l45_context_binding
-from research_loop import l4_closed_corpus as _l4_closed_corpus
+from research_loop.l4_evidence_bundle import install as _install_l4_evidence_bundle
 
 _install_l4_pipeline(deep_research)
 _install_l4_pipeline_compat(_l4_pipeline_module, deep_research)
@@ -51,9 +51,9 @@ _install_l4_provenance_compat(
     _l4_provenance_module,
 )
 _install_l4_path_safety(_l4_pipeline_module, deep_research)
+_install_l4_evidence_bundle(_l4_pipeline_module, deep_research)
 _install_l4_lineage(deep_research)
 _install_l45_context_binding(_l4_pipeline_module)
-_l4_closed_corpus.install(_l4_pipeline_module, deep_research)
 
 from research_loop import hypothesis_contracts as hypothesis_contracts
 from research_loop.method_contracts import install as _install_method_contracts
@@ -120,7 +120,7 @@ del _install_review_status_compat, _registered_sources
 del _install_l4_pipeline, _install_l4_pipeline_compat
 del _install_l4_provenance, _install_l4_provenance_compat
 del _install_l4_path_safety, _install_l4_lineage
-del _install_l45_context_binding, _l4_closed_corpus
+del _install_l4_evidence_bundle, _install_l45_context_binding
 del _l4_pipeline_module, _l4_lineage_module
 del _l4_provenance_module
 del _install_method_contracts, _install_reactivation_contracts
