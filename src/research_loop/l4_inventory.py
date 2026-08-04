@@ -94,7 +94,6 @@ def _inventory_item_schema() -> dict:
         "inventory_reason": {"type": "string", "minLength": 1},
         "source_asset_ids": {
             "type": "array",
-            "uniqueItems": True,
             "items": {"type": "string", "minLength": 1},
         },
         "source_hints": {
@@ -175,6 +174,11 @@ def _validate_inventory_payload(l4p, dr, payload: dict) -> dict:
     if len(method_ids) != len(set(method_ids)):
         raise dr.DeepResearchError("L4A method_inventory method_id values must be unique")
     for item in inventory:
+        source_asset_ids = [str(value).strip() for value in item["source_asset_ids"]]
+        if len(source_asset_ids) != len(set(source_asset_ids)):
+            raise dr.DeepResearchError(
+                f"L4A method {item['method_id']} source_asset_ids must be unique"
+            )
         refs = [str(hint["source_ref_id"]).strip() for hint in item["source_hints"]]
         if len(refs) != len(set(refs)):
             raise dr.DeepResearchError(
