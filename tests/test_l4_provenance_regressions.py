@@ -184,6 +184,164 @@ def test_l4b_rejects_identifiers_spliced_from_different_selected_assets(tmp_path
         l4p._persist_l4b_linkage(tmp_path, artifact)
 
 
+def test_l4b_accepts_real_pmc_url_alias_when_a1_doi_and_pmid_agree(tmp_path):
+    """Regression from the real 2026-08-04 L4B artifact (A1)."""
+    manifest = _manifest(
+        tmp_path,
+        _asset(
+            asset_id="A1",
+            doi="10.1111/nyas.15296",
+            pmid="39934982",
+            url="https://pubmed.ncbi.nlm.nih.gov/39934982/",
+            title=(
+                "The trabecular and compact myocardium of adult vertebrate "
+                "ventricles are transcriptionally similar despite "
+                "morphological differences"
+            ),
+            year=2025,
+        ),
+    )
+    paper_path = _paper_record(
+        tmp_path,
+        title=(
+            "The trabecular and compact myocardium of adult vertebrate "
+            "ventricles are transcriptionally similar despite morphological "
+            "differences"
+        ),
+        metadata={"year": 2025, "journal": "Annals of the New York Academy of Sciences"},
+        doi="10.1111/nyas.15296",
+        pmid="39934982",
+        url="https://pmc.ncbi.nlm.nih.gov/articles/PMC11918530/",
+    )
+    artifact = _artifact(
+        manifest,
+        papers=[
+            _paper_reference(
+                paper_path,
+                doi="10.1111/nyas.15296",
+                pmid="39934982",
+                url="https://pmc.ncbi.nlm.nih.gov/articles/PMC11918530/",
+            )
+        ],
+        path="09_Literature_Database/evidence_packs/runs/RUN2.json",
+    )
+
+    _write_unstaged_run(tmp_path, artifact)
+
+    l4p._persist_l4b_linkage(tmp_path, artifact)
+
+
+def test_l4b_identifier_conflict_reports_paper_and_asset_details(tmp_path):
+    manifest = _manifest(
+        tmp_path,
+        _asset(asset_id="A1", doi="10.1000/one", pmid="111"),
+        _asset(
+            asset_id="A2",
+            doi="10.1000/two",
+            pmid="222",
+            url="https://example.org/two",
+            title="Second method paper",
+        ),
+    )
+    paper_path = _paper_record(
+        tmp_path,
+        title="Spliced paper",
+        doi="10.1000/one",
+        pmid="222",
+        url="",
+    )
+    artifact = _artifact(
+        manifest,
+        papers=[_paper_reference(paper_path, doi="10.1000/one", pmid="222")],
+        path="09_Literature_Database/evidence_packs/runs/RUN2.json",
+    )
+    _write_unstaged_run(tmp_path, artifact)
+
+    with pytest.raises(dr.DeepResearchError) as exc_info:
+        l4p._persist_l4b_linkage(tmp_path, artifact)
+
+    message = str(exc_info.value)
+    assert "Spliced paper" in message
+    assert "A1" in message and "A2" in message
+    assert "DOI" in message and "PMID" in message
+
+
+def test_l4b_rejects_url_owned_by_another_frozen_asset(tmp_path):
+    manifest = _manifest(
+        tmp_path,
+        _asset(asset_id="A1", doi="10.1000/one", pmid="111"),
+        _asset(
+            asset_id="A2",
+            doi="10.1000/two",
+            pmid="222",
+            url="https://example.org/two",
+            title="Second method paper",
+        ),
+    )
+    paper_path = _paper_record(
+        tmp_path,
+        doi="10.1000/one",
+        pmid="111",
+        url="https://example.org/two",
+    )
+    artifact = _artifact(
+        manifest,
+        papers=[
+            _paper_reference(
+                paper_path,
+                doi="10.1000/one",
+                pmid="111",
+                url="https://example.org/two",
+            )
+        ],
+        path="09_Literature_Database/evidence_packs/runs/RUN2.json",
+    )
+    _write_unstaged_run(tmp_path, artifact)
+
+    with pytest.raises(dr.DeepResearchError, match="URL") as exc_info:
+        l4p._persist_l4b_linkage(tmp_path, artifact)
+
+    message = str(exc_info.value)
+    assert "A1" in message and "A2" in message
+
+
+def test_real_l4b_extra_review_remains_outside_frozen_corpus(tmp_path):
+    """The real L4B review record must remain a hard gate, not be dropped."""
+    manifest = _manifest(
+        tmp_path,
+        _asset(
+            asset_id="A1",
+            doi="10.1111/nyas.15296",
+            pmid="39934982",
+            url="https://pubmed.ncbi.nlm.nih.gov/39934982/",
+        ),
+    )
+    paper_path = _paper_record(
+        tmp_path,
+        title="Comparative transcriptomics in human and mouse",
+        metadata={"year": 2017, "journal": "Nature Reviews Genetics"},
+        doi="10.1038/nrg.2017.19",
+        pmid="28479595",
+        url="https://pmc.ncbi.nlm.nih.gov/articles/PMC6413734/",
+    )
+    artifact = _artifact(
+        manifest,
+        papers=[
+            _paper_reference(
+                paper_path,
+                doi="10.1038/nrg.2017.19",
+                pmid="28479595",
+                url="https://pmc.ncbi.nlm.nih.gov/articles/PMC6413734/",
+            )
+        ],
+        path="09_Literature_Database/evidence_packs/runs/RUN2.json",
+    )
+    _write_unstaged_run(tmp_path, artifact)
+
+    with pytest.raises(dr.DeepResearchError, match="outside the frozen L4A corpus"):
+        l4p._persist_l4b_linkage(tmp_path, artifact)
+
+
 def test_l4b_nonempty_missing_artifact_path_does_not_bypass_validation(tmp_path):
     manifest = _manifest(tmp_path, _asset())
     paper_path = _paper_record(
