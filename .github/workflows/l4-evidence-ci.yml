@@ -1,0 +1,80 @@
+name: L4 evidence CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  targeted:
+    name: Targeted L4 / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    env:
+      PYTHONPATH: src
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Compile affected modules
+        run: >-
+          python -m py_compile
+          src/research_loop/l4_inventory.py
+          src/research_loop/l4_evidence_bundle.py
+          src/research_loop/l4_closed_corpus.py
+          src/research_loop/l4_pipeline.py
+          src/research_loop/method_contracts.py
+      - name: Run targeted L4 tests
+        run: >-
+          python -m pytest -q
+          tests/test_l4_evidence_bundle.py
+          tests/test_method_evidence_card_contracts.py
+          tests/test_method_decision_contracts.py
+          tests/test_l4b_closed_corpus_fulltext.py
+          tests/test_l4_pipeline.py
+          tests/test_l4_method_anchors.py
+          tests/test_l4_source_blocked_catalog.py
+          tests/test_l4_provenance_hardening.py
+          tests/test_l4_provenance_regressions.py
+          tests/test_l4_path_safety.py
+          tests/test_l45_context_binding.py
+          tests/test_l45_ledger.py
+          tests/test_l45_ledger_integration.py
+
+  full-suite:
+    name: Full suite / Python 3.13
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: src
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Run full regression suite
+        run: python -m pytest -q
+      - name: Check patch whitespace
+        shell: bash
+        run: |
+          base="${{ github.base_ref }}"
+          if [ -z "$base" ]; then
+            base="codex/l4a-source-metadata-contract"
+          fi
+          git fetch origin "$base"
+          git diff --check "origin/$base...HEAD"
