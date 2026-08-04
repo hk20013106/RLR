@@ -40,18 +40,18 @@ The formal DAG remains unchanged. L4A, L4B, L4C, and L4.5 remain internal stages
 
 ### L4A — method inventory and source metadata
 
-L4A remains cognitive and metadata-only, but its primary product becomes a method inventory independent of asset selection.
+L4A remains cognitive and metadata-only, but its primary product becomes a method inventory independent of ordinary asset ranking.
 
 Each inventory item contains:
 
 - `method_id`: stable run-local slug;
 - `name`;
 - `purpose`;
-- `source_asset_ids`: matching records in the L4A asset catalog, regardless of their selected/reserve status;
+- `source_asset_ids`: matching records in the L4A asset catalog, regardless of their original selected/reserve status;
 - `source_hints`: exact known DOI, PMID, PMCID, or stable URL identifiers;
 - `inventory_reason`: why the method is relevant to the current question and claim.
 
-L4A must carry forward exact identifiers already present in authorized context. It may perform metadata search only to fill missing identifiers. A known DOI/PMID/PMCID is not rediscovered merely because the corresponding paper was not selected as a general literature asset.
+L4A must carry forward exact identifiers already present in authorized context. It may perform metadata search only to fill missing identifiers. A known DOI/PMID/PMCID is not rediscovered merely because the corresponding paper was not selected as a general literature asset. Inventory-linked reserve assets and exact source hints are materialized as selected exact-source assets before the manifest is frozen.
 
 L4A does not define method components, candidate eligibility, execution requirements, or the final analysis plan.
 
@@ -59,10 +59,9 @@ L4A does not define method components, candidate eligibility, execution requirem
 
 L4B becomes non-cognitive. It receives the persisted L4A method inventory and constructs exact-source contracts from:
 
-1. inventory source hints;
-2. inventory-referenced L4A assets, whether selected or reserve;
-3. selected L4A assets retained for navigation;
-4. candidate-scoped registered local sources.
+1. inventory source hints materialized in the L4A catalog;
+2. inventory-referenced L4A assets, whether originally selected or reserve;
+3. candidate-scoped registered local sources.
 
 For each exact source it:
 
@@ -119,14 +118,20 @@ L6 remains the final method-selection authority. Its `selected_methods` must ref
 
 ### L4A manifest
 
-The existing immutable discovery manifest is extended additively with `method_inventory`. Existing asset records and hashes remain intact. The schema version is advanced to `L4ADiscoveryManifest/v2` for new staged runs; v1 remains readable for historical verification.
+The existing immutable `L4ADiscoveryManifest/v1` is extended additively. New staged manifests retain the historical schema marker for compatible readers and add:
+
+```text
+inventory_schema: L4MethodInventory/v2
+method_inventory: [...]
+```
+
+Inventory-linked exact source assets are included in the ordinary asset catalog and `selected_asset_ids`, so the existing frozen-corpus and provenance validators continue to operate without a parallel manifest format. The additive inventory fields are included in the manifest hash.
 
 ### L4B evidence bundle
 
-A new staged artifact marker is used:
+New staged L4B runs retain the existing pipeline linkage marker and add:
 
 ```text
-pipeline_schema: L4MethodPlanningPipeline/v2
 evidence_bundle_schema: L4BEvidenceBundle/v2
 pipeline_stage: L4B
 ```
@@ -163,9 +168,9 @@ An evidence gap contains:
 
 ## Compatibility
 
-- Historical v1 L4A/L4B artifacts remain readable and auditable under their original semantics.
-- New staged runs use v2 artifacts and the new responsibility boundaries.
-- `method_evidence.py` remains available for historical/legacy evidence readers but is not the producer for staged v2 L4B.
+- Historical L4A/L4B artifacts remain readable and auditable under their original semantics.
+- New staged runs are identified by the additive `L4MethodInventory/v2` and `L4BEvidenceBundle/v2` markers.
+- `method_evidence.py` remains available for historical/legacy evidence readers but is not the producer for new staged L4B.
 - The public `deep-research-run --node L4` command still performs L4A followed by L4B; its L4B portion is now deterministic.
 - Existing public CLI spellings, L0 contract, candidate identity, ledger rules, and artifact roots remain unchanged.
 
@@ -186,7 +191,8 @@ L4B non-blocking evidence gaps:
 - paywall without registered local source;
 - no explicit Methods section;
 - Methods section below the accepted substantive threshold;
-- metadata/abstract-only response.
+- metadata/abstract-only response;
+- no exact source identifier for an inventoried method.
 
 L4.5 hard failures:
 
@@ -198,18 +204,18 @@ L4.5 hard failures:
 
 Targeted tests must prove:
 
-1. inventory source hints create resolver contracts even when no corresponding asset is selected;
-2. inventory-referenced reserve assets are resolved;
+1. inventory source hints create resolver contracts even when no corresponding general asset was selected;
+2. inventory-referenced reserve assets are promoted and resolved;
 3. L4B emits evidence gaps without inventing method components/candidates;
 4. L4B audit passes a truthful mixed bundle containing accepted cards and unresolved gaps;
-5. L4B still rejects source substitution, unsafe URLs, malformed receipts, and false extracts;
+5. L4B still rejects source substitution, unsafe paths, malformed receipts, tampering, and false extracts;
 6. L4C schema allows optional alternatives without evidence cards;
 7. L4C schema requires an evidence card for `execution_required: true` eligible candidates;
 8. L4.5 blocks a required implementation path without accepted evidence;
 9. L4.5 accepts a required path backed by an accepted evidence card;
-10. historical staged v1 artifacts remain readable;
+10. historical staged artifacts remain readable;
 11. L1, L8.5, ledger, provenance, path-safety, and full regression tests remain green.
 
 ## Delivery
 
-Development occurs on `refactor/l4-evidence-design`, based on the PR #12 head containing the resolver implementation and real-pilot report. A new pull request supersedes PR #12. GitHub Actions must run targeted L4 tests and the full suite. A real-data pilot remains a separate local validation after CI.
+Development occurs on `refactor/l4-evidence-design`, based on the PR #12 head containing the resolver implementation and real-pilot report. PR #13 supersedes PR #12. GitHub Actions runs targeted L4 tests and the full suite. A real-data pilot remains a separate local validation after CI.
