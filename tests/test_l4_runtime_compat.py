@@ -1,4 +1,5 @@
 import hashlib
+from types import SimpleNamespace
 
 from research_loop import l4_runtime_compat as compat
 
@@ -21,7 +22,7 @@ def test_receipt_canonicalization_is_cross_platform(tmp_path):
     assert path.read_bytes() == canonical
 
 
-def test_runtime_routes_only_native_v21_l4_to_staged_pipeline(tmp_path):
+def test_runtime_routes_only_verified_native_codex_l4_to_staged_pipeline(tmp_path):
     calls = []
 
     class FakeDeepResearch:
@@ -38,12 +39,18 @@ def test_runtime_routes_only_native_v21_l4_to_staged_pipeline(tmp_path):
         )
 
     compat.install(FakeDeepResearch, FakeBundle)
-    common = (
-        tmp_path, "C1", "L4", "question", "claim", object(), tmp_path / "work"
-    )
+    base = (tmp_path, "C1", "L4", "question", "claim")
+    work = tmp_path / "work"
 
-    assert FakeDeepResearch.run_and_persist(*common, profile_id="v2.0")["path"] == "legacy"
     assert FakeDeepResearch.run_and_persist(
-        *common, profile_id="v2.1-catalog-1"
+        *base, SimpleNamespace(backend="codex"), work, profile_id="v2.0"
+    )["path"] == "legacy"
+    assert FakeDeepResearch.run_and_persist(
+        *base, SimpleNamespace(backend="claude"), work,
+        profile_id="v2.1-catalog-1",
+    )["path"] == "legacy"
+    assert FakeDeepResearch.run_and_persist(
+        *base, SimpleNamespace(backend="codex"), work,
+        profile_id="v2.1-catalog-1",
     )["path"] == "staged"
-    assert calls == ["legacy", "staged"]
+    assert calls == ["legacy", "legacy", "staged"]
