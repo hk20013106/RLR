@@ -361,7 +361,7 @@ def test_prompt_distinguishes_search_from_exact_asset_retrieval(tmp_path):
     assert "allowed and required to read" in prompt.lower()
     assert "retrieving a registered selected asset is not literature search" in prompt.lower()
     assert "all permitted registered-asset retrieval paths" in prompt.lower()
-    assert str(tmp_path / "A1.xml") in prompt
+    assert json.dumps(str(tmp_path / "A1.xml")) in prompt
 
 
 def test_receipts_and_provider_response_are_persisted_without_credentials(tmp_path):
