@@ -1,9 +1,10 @@
 """Narrow compatibility boundary for staged L4 v2.
 
-Native v2.1 runs use the deterministic inventory/evidence pipeline. Historical
-profiles retain the original L4 provider behavior. Retrieval receipt text is
-canonicalized to UTF-8/LF after persistence so its recorded hash is identical
-on Windows and POSIX hosts.
+Native v2.1 Codex structured-output runs use the deterministic
+inventory/evidence pipeline. Historical profiles and Claude plugin runs retain
+the original L4 provider behavior until an inventory-schema adapter is verified
+for that provider. Retrieval receipt text is canonicalized to UTF-8/LF after
+persistence so its recorded hash is identical on Windows and POSIX hosts.
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ from pathlib import Path
 
 
 _NATIVE_PROFILE_PREFIX = "v2.1"
+_STAGED_BACKENDS = {"codex"}
 
 
 def _sha(value: bytes) -> str:
@@ -35,6 +37,13 @@ def _canonicalize_receipts(project_dir, artifact: dict) -> None:
         expected = str(ref.get("sha256") or "")
         if not expected or _sha(raw) != expected:
             raise ValueError("L4B retrieval receipt canonical hash mismatch")
+
+
+def _supports_staged_l4(spec, profile_id: str) -> bool:
+    return (
+        str(profile_id).startswith(_NATIVE_PROFILE_PREFIX)
+        and str(getattr(spec, "backend", "")) in _STAGED_BACKENDS
+    )
 
 
 def install(deep_research_module, evidence_bundle_module) -> None:
@@ -67,7 +76,7 @@ def install(deep_research_module, evidence_bundle_module) -> None:
         profile_id="",
         research_persona="Curie",
     ):
-        if node == "L4" and not str(profile_id).startswith(_NATIVE_PROFILE_PREFIX):
+        if node == "L4" and not _supports_staged_l4(spec, profile_id):
             return legacy_run(
                 project_dir,
                 candidate_id,
