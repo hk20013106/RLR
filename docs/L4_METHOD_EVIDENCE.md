@@ -24,12 +24,21 @@ work. It persists the existing immutable `L4ADiscoveryManifest/v1` plus the
 additive marker `inventory_schema: L4MethodInventory/v2` and a
 `method_inventory` array.
 
-The inventory identifies explicit methods and carries forward exact DOI, PMID,
-PMCID, stable URL, or matching asset IDs already present in authorized context.
+The cognitive provider identifies method entities and carries forward exact
+identifiers already present in authorized context. It does not have sole
+authority over canonical source identity. After method identification, RLR
+applies the versioned `L4MethodSourceRegistry/v1`: built-in entries provide
+reviewed canonical source hints, while an optional project registry at
+`09_Literature_Database/l4/method_source_registry.json` may replace an entry by
+`canonical_method_id`. The registry only enriches methods already present in
+the inventory; it never injects unrelated methods into a study.
+
 Inventory-referenced reserve assets are promoted into the exact-source corpus.
-An exact source hint not already represented by an asset is materialized as a
-selected identifier-bearing asset. Therefore, a known method source does not
-disappear merely because ordinary literature ranking changes between runs.
+A registry or provider source hint not already represented by an asset is
+materialized as a selected identifier-bearing asset. The registry file hashes,
+matched canonical IDs, and resulting inventory hash are retained in the L4A
+runtime receipt. Therefore, a known method source does not disappear merely
+because ordinary literature ranking changes between runs.
 
 L4A does not emit source payloads, verbatim extracts, method components,
 candidate eligibility, `required` flags, or an analysis plan.
@@ -147,6 +156,7 @@ Stable staged artifacts include:
 
 ```text
 09_Literature_Database/l4/discovery/manifests/          L4A manifests
+09_Literature_Database/l4/method_source_registry.json   optional project registry
 09_Literature_Database/evidence_packs/runs/             L4B bundles and summaries
 09_Literature_Database/evidence_packs/papers/           paper records
 09_Literature_Database/evidence_packs/sources/          retained payloads
@@ -161,6 +171,7 @@ artifacts.
 ## Compatibility
 
 Historical staged artifacts continue to use their original semantics and
-readers. New staged runs are identified by `L4MethodInventory/v2` and
-`L4BEvidenceBundle/v2`. Public CLI spellings, formal DAG nodes, candidate
-identity, ledger rules, and artifact roots remain unchanged.
+readers. Native v2.1 staged runs are identified by `L4MethodInventory/v2` and
+`L4BEvidenceBundle/v2`; historical profiles retain the original provider path.
+Public CLI spellings, formal DAG nodes, candidate identity, ledger rules, and
+artifact roots remain unchanged.
