@@ -139,8 +139,10 @@ For every method, carry forward any DOI, PMID, PMCID, stable URL, or exact asset
 identifier already present in the authorized context. A known identifier must
 not be dropped merely because the corresponding paper is not selected as a
 general literature asset. Search metadata only to fill missing identifiers.
-Never invent an identifier. When no exact source is found, retain the method
-with empty source arrays so the next stage can record an explicit evidence gap.
+Never invent an identifier. Use year 0 only when an exact source identifier is
+known but its publication year is unavailable. When no exact source is found,
+retain the method with empty source arrays so the next stage can record an
+explicit evidence gap.
 
 Return metadata only. Do not retrieve full text or emit source payloads or
 verbatim extracts. Keep the ordinary `assets` catalog and selection receipts.
@@ -263,11 +265,16 @@ def _pseudo_asset(method: dict, hint: dict) -> dict:
         "source_ref_id": source_ref_id,
         "pmcid": str(hint.get("pmcid") or "").strip().upper(),
     }
+    explicit_locations = [
+        str(value).strip()
+        for value in hint.get("full_text_locations") or []
+        if str(value).strip()
+    ]
     locations = []
-    for value in list(hint.get("full_text_locations") or []) + ([url] if url else []):
-        value = str(value).strip()
-        if value and value not in locations:
+    for value in explicit_locations + ([url] if url else []):
+        if value not in locations:
             locations.append(value)
+    open_access = bool(str(hint.get("pmcid") or "").strip() or explicit_locations)
     return {
         "asset_id": asset_id,
         "doi": _normalized_doi(hint.get("doi")),
@@ -280,8 +287,8 @@ def _pseudo_asset(method: dict, hint: dict) -> dict:
         "abstract": "",
         "source_database": "method_inventory_exact_identifier",
         "source_metadata_response": _canonical_json(metadata),
-        "open_access_status": "open" if hint.get("pmcid") or locations else "unknown",
-        "full_text_status": "available_oa" if hint.get("pmcid") or locations else "metadata_only",
+        "open_access_status": "open" if open_access else "unknown",
+        "full_text_status": "available_oa" if open_access else "metadata_only",
         "full_text_locations": locations,
         "relevance_score": 10.0,
         "selection_status": "selected",
@@ -406,11 +413,23 @@ def run_discovery(
 ) -> dict:
     work = Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
-    (work / "deep_research_output.schema.json").write_text(
+    # Keep the historical schema path stable for diagnostics and compatibility
+    # tests. The new L4A provider receives its own explicit inventory schema.
+    legacy_schema_path = work / "deep_research_output.schema.json"
+    inventory_schema_path = work / "l4a_method_inventory_output.schema.json"
+    legacy_schema_path.write_text(
+        json.dumps(dr._runtime_schema("L4"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    inventory_schema_path.write_text(
         json.dumps(discovery_schema(l4p), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     command, _ = dr.build_invocation(spec, "L4", question, claim, work)
+    command = [
+        str(inventory_schema_path) if value == str(legacy_schema_path) else value
+        for value in command
+    ]
     prompt = build_prompt(question, claim)
     command[0] = dr.resolve_subprocess_executable(command[0])
     execution_command, invocation_kwargs = dr.subprocess_invocation(command, prompt)
