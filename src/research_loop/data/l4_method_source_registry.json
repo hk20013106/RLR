@@ -5,7 +5,6 @@
       "canonical_method_id": "deseq2",
       "aliases": [
         "deseq2",
-        "deseq 2",
         "differential expression deseq2"
       ],
       "source_hints": [
@@ -29,7 +28,6 @@
       "canonical_method_id": "combat",
       "aliases": [
         "combat",
-        "com bat",
         "empirical bayes batch adjustment",
         "empirical bayes batch effect adjustment"
       ],
