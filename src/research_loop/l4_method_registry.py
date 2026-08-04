@@ -15,6 +15,7 @@ from typing import Any
 
 
 REGISTRY_SCHEMA_VERSION = "L4MethodSourceRegistry/v1"
+_BUILTIN_RELATIVE_PATH = Path("research_loop/data/l4_method_source_registry.json")
 _BUILTIN_PATH = Path(__file__).parent / "data" / "l4_method_source_registry.json"
 _PROJECT_RELATIVE_PATH = Path(
     "09_Literature_Database/l4/method_source_registry.json"
@@ -193,7 +194,7 @@ def load_registry(project_dir: str | Path) -> tuple[list[dict], dict]:
             merged[str(item["canonical_method_id"])] = copy.deepcopy(item)
     receipt = {
         "schema_version": REGISTRY_SCHEMA_VERSION,
-        "builtin_path": _BUILTIN_PATH.as_posix(),
+        "builtin_path": _BUILTIN_RELATIVE_PATH.as_posix(),
         "builtin_sha256": _sha(_canonical_json(builtin)),
         "project_path": _PROJECT_RELATIVE_PATH.as_posix()
         if project else "",
