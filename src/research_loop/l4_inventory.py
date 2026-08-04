@@ -1,8 +1,9 @@
 """Identifier-bearing method inventory for staged L4 evidence acquisition.
 
 New staged L4A runs keep the historical discovery-manifest contract readable,
-but persist the method inventory and exact-source assets atomically. This keeps
-closed-corpus provenance deterministic and makes identical retries idempotent.
+but persist the method inventory and exact-source assets atomically. A
+versioned registry maps methods already identified by L4A to canonical source
+identifiers without re-running literature selection.
 """
 from __future__ import annotations
 
@@ -16,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator
+
+from research_loop import l4_method_registry
 
 
 INVENTORY_SCHEMA_VERSION = "L4MethodInventory/v2"
@@ -139,7 +142,8 @@ be dropped merely because the corresponding paper is not selected as a general
 literature asset. Search metadata only to fill missing identifiers. Never
 invent an identifier. Use year 0 only when an exact source identifier is known
 but its publication year is unavailable. When no exact source is found, retain
-the method with empty source arrays so L4B can record an explicit evidence gap.
+the method with empty source arrays; a versioned deterministic registry may
+supply a canonical source, otherwise L4B records an explicit evidence gap.
 
 Return metadata only. Do not retrieve full text or emit source payloads or
 verbatim extracts. Keep the ordinary `assets` catalog and selection receipts.
@@ -287,7 +291,7 @@ def _pseudo_asset(method: dict, hint: dict) -> dict:
         "role": _role(str(hint.get("source_kind") or "method_paper")),
         "journal": "",
         "abstract": "",
-        "source_database": "method_inventory_exact_identifier",
+        "source_database": "method_source_registry_or_exact_identifier",
         "source_metadata_response": metadata,
         "open_access_status": "open" if open_access else "unknown",
         "full_text_status": "available_oa" if open_access else "metadata_only",
@@ -375,6 +379,7 @@ def _augment_assets(l4p, dr, assets: list[dict], inventory: list[dict]) -> tuple
 
 def _manifest_base(
     l4p,
+    dr,
     *,
     candidate_id: str,
     question: str,
@@ -394,7 +399,7 @@ def _manifest_base(
         if asset.get("selection_status") == "selected"
     ]
     if not selected_ids:
-        raise l4p._deep_research.DeepResearchError(
+        raise dr.DeepResearchError(
             "L4A discovery produced no selected literature assets"
         )
     return {
@@ -434,16 +439,24 @@ def persist_discovery(
     profile_id: str = "",
 ) -> dict:
     canonical = _validate_inventory_payload(l4p, dr, payload)
+    try:
+        registry_inventory, registry_receipt = l4_method_registry.apply_registry(
+            project_dir, canonical["method_inventory"]
+        )
+    except l4_method_registry.MethodRegistryError as exc:
+        raise dr.DeepResearchError(f"L4 method-source registry failed: {exc}") from exc
     assets, duplicates, inventory = _augment_assets(
         l4p,
         dr,
         canonical["assets"],
-        canonical["method_inventory"],
+        registry_inventory,
     )
     receipt = dict(runtime_receipt)
+    receipt["method_source_registry"] = registry_receipt
     receipt["method_inventory_sha256"] = _sha(_canonical_json(inventory))
     base = _manifest_base(
         l4p,
+        dr,
         candidate_id=candidate_id,
         question=question,
         claim=claim,
