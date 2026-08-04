@@ -288,5 +288,6 @@ def test_l4b_prompt_states_reference_closure_contract():
     )
 
     assert "method_component_ids" in captured["claim"]
-    assert "component_id of every referenced method_id" in captured["claim"]
+    assert "`component_id` of every" in captured["claim"]
+    assert "referenced `method_id`" in captured["claim"]
     assert "Do not use L4A asset IDs" in captured["claim"]
