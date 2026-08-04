@@ -38,6 +38,7 @@ jobs:
       - name: Run targeted L4 tests
         run: >-
           python -m pytest -q
+          tests/test_l4_inventory_schema.py
           tests/test_l4_evidence_bundle.py
           tests/test_method_evidence_card_contracts.py
           tests/test_method_decision_contracts.py
