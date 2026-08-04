@@ -53,8 +53,8 @@ jobs:
           tests/test_l45_ledger_integration.py
 
   full-suite:
-    name: Full suite / Python 3.13
-    runs-on: ubuntu-latest
+    name: Full suite / Windows / Python 3.13
+    runs-on: windows-latest
     env:
       PYTHONPATH: src
     steps:
@@ -70,11 +70,14 @@ jobs:
       - name: Run full regression suite
         run: python -m pytest -q
       - name: Check patch whitespace
-        shell: bash
+        shell: pwsh
         run: |
-          base="${{ github.base_ref }}"
-          if [ -z "$base" ]; then
-            base="codex/l4a-source-metadata-contract"
-          fi
-          git fetch origin "$base"
+          $base = "${{ github.base_ref }}"
+          if ([string]::IsNullOrWhiteSpace($base)) {
+            $base = "codex/l4a-source-metadata-contract"
+          }
+          git fetch origin $base
           git diff --check "origin/$base...HEAD"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
