@@ -35,6 +35,10 @@ from research_loop.l4_provenance_compat import (
 from research_loop.l4_path_safety import install as _install_l4_path_safety
 from research_loop.l4_lineage import install as _install_l4_lineage
 from research_loop.l45_context_binding import install as _install_l45_context_binding
+from research_loop import l4_inventory as _l4_inventory_module
+from research_loop.l4_inventory_projection import (
+    install as _install_l4_inventory_projection,
+)
 from research_loop import l4_evidence_bundle as _l4_evidence_bundle_module
 from research_loop.l4_evidence_bundle import install as _install_l4_evidence_bundle
 from research_loop.l4_runtime_compat import install as _install_l4_runtime_compat
@@ -51,6 +55,7 @@ _install_l4_provenance_compat(
     _l4_provenance_module,
 )
 _install_l4_path_safety(_l4_pipeline_module, deep_research)
+_install_l4_inventory_projection(_l4_inventory_module, deep_research)
 _install_l4_evidence_bundle(_l4_pipeline_module, deep_research)
 _install_l4_runtime_compat(deep_research, _l4_evidence_bundle_module)
 _install_l4_lineage(deep_research)
@@ -121,10 +126,11 @@ del _install_review_status_compat, _registered_sources
 del _install_l4_pipeline, _install_l4_pipeline_compat
 del _install_l4_provenance, _install_l4_provenance_compat
 del _install_l4_path_safety, _install_l4_lineage
-del _install_l4_evidence_bundle, _install_l4_runtime_compat
-del _install_l45_context_binding
+del _install_l4_inventory_projection, _install_l4_evidence_bundle
+del _install_l4_runtime_compat, _install_l45_context_binding
 del _l4_pipeline_module, _l4_lineage_module
-del _l4_provenance_module, _l4_evidence_bundle_module
+del _l4_provenance_module, _l4_inventory_module
+del _l4_evidence_bundle_module
 del _install_method_contracts, _install_reactivation_contracts
 del _install_receipt_idempotency, _install_hypothesis_reactivation
 del _install_reactivation_constraints, _install_conditional_skip_constraints
