@@ -132,6 +132,11 @@ def _linked_evidence(manifest):
                 "method_ids": ["M01"],
             }
         ],
+        "review_search": {
+            "query": "frozen catalog review",
+            "status": "not_retained",
+            "receipt": "No selected review in frozen L4A catalog; review navigation not retained.",
+        },
     }
 
 
