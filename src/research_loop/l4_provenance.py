@@ -250,6 +250,14 @@ def _selected_identities(l4p, manifest: dict) -> list[dict]:
     ]
 
 
+def _identifier_owners(selected: list[dict], key: str, value: str) -> list[str]:
+    return [
+        str(item.get("asset_id") or "")
+        for item in selected
+        if value and item.get(key) == value
+    ]
+
+
 def _matches_one_selected_asset(
     selected: list[dict],
     *,
@@ -257,8 +265,60 @@ def _matches_one_selected_asset(
     pmid: str,
     url: str,
     title_year: tuple[str, str],
-) -> tuple[bool, bool]:
+) -> tuple[bool, dict]:
     supplied = {"doi": doi, "pmid": pmid, "url": url}
+    strong_owners = {
+        key: _identifier_owners(selected, key, value)
+        for key, value in (("doi", doi), ("pmid", pmid))
+        if value and _identifier_owners(selected, key, value)
+    }
+    strong_asset_ids = {
+        asset_id for owners in strong_owners.values() for asset_id in owners
+    }
+    if len(strong_asset_ids) > 1:
+        return False, {
+            "asset_ids": sorted(strong_asset_ids),
+            "fields": {
+                key.upper(): {"supplied": value, "asset_ids": owners}
+                for key, owners in strong_owners.items()
+                for value in (supplied[key],)
+            },
+        }
+
+    if len(strong_asset_ids) == 1:
+        asset_id = next(iter(strong_asset_ids))
+        item = next(item for item in selected if item.get("asset_id") == asset_id)
+        conflicts = {}
+        for key, value in supplied.items():
+            frozen = str(item.get(key) or "")
+            if value and frozen and frozen != value:
+                conflicts[key.upper()] = {
+                    "supplied": value,
+                    "frozen": frozen,
+                    "asset_ids": _identifier_owners(selected, key, value),
+                }
+        hard_conflicts = {
+            key: value
+            for key, value in conflicts.items()
+            if key in {"DOI", "PMID"} or value["asset_ids"]
+        }
+        if hard_conflicts:
+            return False, {
+                "asset_ids": sorted(
+                    {asset_id}
+                    | {
+                        other_id
+                        for value in hard_conflicts.values()
+                        for other_id in value["asset_ids"]
+                    }
+                ),
+                "fields": hard_conflicts,
+            }
+        # DOI/PMID uniquely identify this frozen asset. A different URL is
+        # accepted only when no other frozen asset owns it (for example, the
+        # real L4B PMC full-text URL for the PubMed-selected A1 record).
+        return True, {}
+
     if doi:
         primary_key, primary_value = "doi", doi
     elif pmid:
@@ -272,16 +332,51 @@ def _matches_one_selected_asset(
         item for item in selected if item.get(primary_key) == primary_value
     ]
     if not primary_matches:
-        return False, False
+        return False, {}
+    return True, {}
 
-    for item in primary_matches:
-        conflicts = any(
-            value and item.get(key) and item.get(key) != value
-            for key, value in supplied.items()
+
+def _paper_identity(
+    record: dict,
+    reference: dict,
+    *,
+    doi: str,
+    pmid: str,
+    url: str,
+    title_year: tuple[str, str],
+) -> str:
+    title = str(record.get("title") or reference.get("title") or "").strip()
+    year = str(
+        record.get("year")
+        or (record.get("metadata") or {}).get("year")
+        or reference.get("year")
+        or title_year[1]
+        or ""
+    ).strip()
+    return (
+        f"doi={doi or '<none>'}; pmid={pmid or '<none>'}; "
+        f"url={url or '<none>'}; title={title or '<none>'!r}; "
+        f"year={year or '<none>'}"
+    )
+
+
+def _format_identifier_conflict(identity: str, details: dict) -> str:
+    fields = []
+    for label, values in sorted((details.get("fields") or {}).items()):
+        supplied = values.get("supplied") or "<none>"
+        frozen = values.get("frozen")
+        frozen_text = f"; frozen={frozen!r}" if frozen else ""
+        owners = ",".join(values.get("asset_ids") or []) or "<none>"
+        fields.append(
+            f"{label}: supplied={supplied!r}{frozen_text}; "
+            f"matching_assets={owners}"
         )
-        if not conflicts:
-            return True, False
-    return False, True
+    asset_ids = ",".join(details.get("asset_ids") or []) or "<none>"
+    return (
+        f"L4B paper {identity} has conflicting identifiers across frozen "
+        f"L4A assets [{asset_ids}]: "
+        f"{'; '.join(fields) or '<no field details>'}"
+    )
 
 
 def _validate_frozen_corpus(
@@ -325,17 +420,27 @@ def _validate_frozen_corpus(
             dr, "URL", reference, record, _normalized_url
         )
         title_year = _title_year(record or reference)
-        accepted, conflicting = _matches_one_selected_asset(
+        accepted, conflict_details = _matches_one_selected_asset(
             selected,
             doi=doi,
             pmid=pmid,
             url=url,
             title_year=title_year,
         )
-        if conflicting:
+        if conflict_details:
             _raise(
                 dr,
-                "L4B paper has conflicting identifiers across frozen L4A assets",
+                _format_identifier_conflict(
+                    _paper_identity(
+                        record,
+                        reference,
+                        doi=doi,
+                        pmid=pmid,
+                        url=url,
+                        title_year=title_year,
+                    ),
+                    conflict_details,
+                ),
             )
         if not accepted:
             identity = doi or pmid or url or f"{title_year[0]}|{title_year[1]}"
