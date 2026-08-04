@@ -21,6 +21,7 @@ def _manifest(project):
             "url": "https://example.org/paper",
             "title": "Method paper",
             "year": 2026,
+            "role": "method",
             "journal": "Methods",
             "abstract": "metadata",
             "source_database": "Europe PMC",

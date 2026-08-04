@@ -9,7 +9,7 @@ def _asset():
     return {
         "asset_id": "A1", "doi": "10.1000/example", "pmid": "",
         "url": "https://example.org/paper", "title": "Method paper",
-        "year": 2026, "journal": "Methods", "abstract": "metadata",
+        "year": 2026, "role": "method", "journal": "Methods", "abstract": "metadata",
         "source_database": "Europe PMC",
         "source_metadata_response": '{"id":"A1"}',
         "open_access_status": "open", "full_text_status": "available_oa",

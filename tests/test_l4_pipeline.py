@@ -48,6 +48,7 @@ def _asset(
         "url": url,
         "title": title,
         "year": year,
+        "role": "method",
         "journal": "Methods Journal",
         "abstract": "A metadata-only abstract.",
         "source_database": "Europe PMC",
@@ -191,6 +192,16 @@ def test_l4a_provider_schema_closes_every_object_schema():
         "source_metadata_response"
     ]
     assert metadata_schema == {"type": "string", "minLength": 2}
+
+
+def test_l4a_provider_schema_requires_every_asset_property_for_codex_strict():
+    schema = l4p.l4a_discovery_schema()
+    asset = schema["properties"]["assets"]["items"]
+
+    # Codex structured outputs reject a closed object when a declared property
+    # is omitted from required, even when the application treats it as legacy-
+    # optional during persistence.
+    assert set(asset["required"]) == set(asset["properties"])
 
 
 def test_l4a_persistence_parses_and_preserves_heterogeneous_source_metadata(tmp_path):

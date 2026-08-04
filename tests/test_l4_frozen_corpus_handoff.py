@@ -24,7 +24,7 @@ def _asset(
     url="https://example.org/paper",
     title="Example method paper",
     year=2026,
-    role=None,
+    role="method",
 ):
     asset = {
         "asset_id": asset_id,
@@ -47,8 +47,7 @@ def _asset(
         "method_component_hints": ["model"],
         "diagnostic_requirements": ["interaction test"],
     }
-    if role is not None:
-        asset["role"] = role
+    asset["role"] = role
     return asset
 
 

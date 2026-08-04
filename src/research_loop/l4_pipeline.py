@@ -88,9 +88,11 @@ def l4a_discovery_schema() -> dict:
     asset = {
         "type": "object", "additionalProperties": False,
         "properties": asset_properties,
-        # ``role`` was added after earlier immutable manifests were created;
-        # persistence supplies ``unspecified`` for those historical assets.
-        "required": [key for key in asset_properties if key != "role"],
+        # Codex structured outputs require every declared property to be
+        # required.  Historical persisted manifests are normalized with
+        # ``role=unspecified`` before they are validated at the persistence
+        # boundary.
+        "required": list(asset_properties),
     }
     return {
         "type": "object", "additionalProperties": False,

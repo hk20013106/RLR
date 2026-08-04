@@ -64,6 +64,7 @@ def _legacy_evidence_to_discovery(payload: dict) -> dict:
             "title": str(paper.get("title") or identifier),
             "year": int(metadata.get("year") or 0),
             "journal": str(metadata.get("journal") or ""),
+            "role": "unspecified",
             "abstract": "",
             "source_database": str(paper.get("source_database") or "legacy"),
             "source_metadata_response": paper.get("source_metadata_response"),
