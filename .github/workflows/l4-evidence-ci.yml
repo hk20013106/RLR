@@ -33,6 +33,7 @@ jobs:
           src/research_loop/l4_method_registry.py
           src/research_loop/l4_inventory.py
           src/research_loop/l4_evidence_bundle.py
+          src/research_loop/l4_runtime_compat.py
           src/research_loop/l4_closed_corpus.py
           src/research_loop/l4_pipeline.py
           src/research_loop/method_contracts.py
@@ -42,6 +43,7 @@ jobs:
           tests/test_l4_method_registry.py
           tests/test_l4_inventory_schema.py
           tests/test_l4_evidence_bundle.py
+          tests/test_l4_runtime_compat.py
           tests/test_method_evidence_card_contracts.py
           tests/test_method_decision_contracts.py
           tests/test_l4b_closed_corpus_fulltext.py
