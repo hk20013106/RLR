@@ -41,6 +41,20 @@ def _safe(dr, value: Any) -> str:
     return dr._safe_id(str(value or ""))
 
 
+def _bound_path(project: Path, value: Any, label: str) -> Path:
+    """Resolve a project-relative artifact path without permitting escape."""
+    relative = Path(str(value or ""))
+    if not str(relative) or relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"{label} must be a non-empty project-relative path")
+    root = project.resolve()
+    resolved = (root / relative).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"{label} escapes the project") from exc
+    return resolved
+
+
 def _source_kind(asset: dict) -> str:
     role = str(asset.get("role") or "method").strip().casefold()
     return {
@@ -350,6 +364,11 @@ def run_l4b_evidence(
         "exit_code": 0,
         "model": "none",
     }
+    queries = [
+        str(item.get("query") or "").strip()
+        for item in manifest.get("queries") or []
+        if str(item.get("query") or "").strip()
+    ] or ["deterministic exact-source resolution"]
     artifact = {
         "schema_version": dr.SCHEMA_VERSION,
         "evidence_receipt_schema": "EvidenceRunReceipt/v2",
@@ -365,7 +384,7 @@ def run_l4b_evidence(
         "candidate_id": str(candidate_id),
         "node": "L4",
         "created_at": dr._now(),
-        "queries": [str(item.get("query") or "") for item in manifest.get("queries") or []],
+        "queries": queries,
         "skill_receipt": skill_receipt,
         "papers": paper_refs,
         "rejected_papers": [],
@@ -403,7 +422,7 @@ def run_l4b_evidence(
 
 
 def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bool, str]:
-    project = Path(project_dir)
+    project = Path(project_dir).resolve()
     if artifact.get("evidence_bundle_schema") != EVIDENCE_BUNDLE_SCHEMA:
         return False, "unexpected L4B evidence bundle schema"
     if artifact.get("pipeline_stage") != "L4B":
@@ -416,11 +435,13 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
     if receipt.get("backend") != "deterministic" or receipt.get("exit_code") != 0:
         return False, "L4B deterministic resolver receipt is invalid"
 
-    manifest_path = project / str(artifact.get("l4a_manifest_path") or "")
     try:
+        manifest_path = _bound_path(
+            project, artifact.get("l4a_manifest_path"), "L4A manifest path"
+        )
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False, "L4B linked L4A manifest is unreadable"
+    except (ValueError, OSError, json.JSONDecodeError):
+        return False, "L4B linked L4A manifest is unreadable or unsafe"
     ok, reason = l4p.validate_l4a_manifest(project, manifest)
     if not ok:
         return False, f"L4A manifest validation failed: {reason}"
@@ -430,10 +451,10 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
     records = {}
     for ref in artifact.get("papers") or []:
         try:
-            path = project / str(ref["path"])
+            path = _bound_path(project, ref["path"], "L4B paper-record path")
             record = json.loads(path.read_text(encoding="utf-8"))
-        except (KeyError, OSError, json.JSONDecodeError):
-            return False, "L4B evidence bundle references an unreadable paper record"
+        except (KeyError, ValueError, OSError, json.JSONDecodeError):
+            return False, "L4B evidence bundle references an unreadable or unsafe paper record"
         records[str(record.get("paper_id") or "")] = record
 
     cards = artifact.get("evidence_cards") or []
@@ -446,7 +467,12 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
         record = records.get(str(card.get("paper_id") or ""))
         if not record:
             return False, f"L4B evidence card {card_id} references an unknown paper"
-        source_path = project / str(record.get("source_payload_path") or "")
+        try:
+            source_path = _bound_path(
+                project, record.get("source_payload_path"), "L4B source-payload path"
+            )
+        except ValueError:
+            return False, f"L4B evidence card {card_id} source payload path is unsafe"
         if not source_path.is_file():
             return False, f"L4B evidence card {card_id} source payload is missing"
         payload = source_path.read_text(encoding="utf-8")
@@ -466,7 +492,12 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
             return False, f"L4B evidence card {card_id} locator is missing"
         if not cc.extract_is_contiguous(payload, text):
             return False, f"L4B evidence card {card_id} extract is not contiguous"
-        receipt_path = project / str(record.get("retrieval_receipt_path") or "")
+        try:
+            receipt_path = _bound_path(
+                project, record.get("retrieval_receipt_path"), "L4B retrieval-receipt path"
+            )
+        except ValueError:
+            return False, f"L4B evidence card {card_id} retrieval receipt path is unsafe"
         if not receipt_path.is_file():
             return False, f"L4B evidence card {card_id} retrieval receipt is missing"
         if _sha(receipt_path.read_bytes()) != str(record.get("retrieval_receipt_sha256") or ""):
@@ -684,7 +715,7 @@ def install(l4p, dr) -> None:
         projected["method_candidates"] = copy.deepcopy(candidates)
         projected["method_anchors"] = [
             {
-                "anchor_id": str(card.get("evidence_card_id") or ""),
+                "anchor_id": str(card.get("anchor_id") or ""),
                 "evidence_id": str(card.get("evidence_id") or ""),
                 "method_component_ids": [],
                 "method_ids": [str(card.get("method_id") or "")],
