@@ -221,7 +221,10 @@ def test_l4b_no_source_becomes_gap_not_global_failure(tmp_path):
     project = tmp_path / "project"
     manifest = _persist(
         project,
-        assets=[],
+        # Preserve the established L4A invariant that at least one literature
+        # asset is selected, while proving that this inventory method itself
+        # does not need an exact source to let L4B persist a truthful gap.
+        assets=[_asset(selection_status="selected")],
         methods=[_method("unresolved", source_hints=[])],
     )
 
