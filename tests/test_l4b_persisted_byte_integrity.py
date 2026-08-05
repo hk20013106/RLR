@@ -67,7 +67,6 @@ def _manifest(project: Path) -> dict:
             "source_asset_ids": ["A1"],
             "source_hints": [{
                 "source_ref_id": "deseq2-love-2014",
-                "asset_id": "A1",
                 "title": "Moderated estimation of fold change and dispersion for RNA-seq data with DESeq2",
                 "year": 2014,
                 "doi": "10.1186/s13059-014-0550-8",
