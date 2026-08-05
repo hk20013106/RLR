@@ -34,7 +34,9 @@ jobs:
       - name: Compile affected modules
         run: >-
           python -m py_compile
+          src/research_loop/source_payload_integrity.py
           src/research_loop/l4_method_registry.py
+          src/research_loop/l4_registry_projection_integrity.py
           src/research_loop/l4_inventory.py
           src/research_loop/l4_inventory_projection.py
           src/research_loop/l4_evidence_bundle.py
@@ -45,6 +47,7 @@ jobs:
       - name: Run targeted L4 tests
         run: >-
           python -m pytest -q
+          tests/test_l4_real_pilot_integrity.py
           tests/test_l4_method_registry.py
           tests/test_l4_inventory_schema.py
           tests/test_l4_inventory_projection.py
