@@ -10,12 +10,8 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest]
-        python-version: ["3.11", "3.12"]
+    name: Test / Windows / Python 3.13
+    runs-on: windows-latest
     defaults:
       run:
         shell: bash
@@ -24,7 +20,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.13"
 
       - name: Install dependencies
         run: pip install -r requirements.txt -r requirements-dev.txt
@@ -49,7 +45,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "### Coverage — ${{ matrix.os }} / py${{ matrix.python-version }}"
+            echo "### Coverage — Windows / Python 3.13"
             echo '```'
             grep -A 1000 "^Name " pytest-output.txt || echo "(coverage table not found)"
             echo '```'
