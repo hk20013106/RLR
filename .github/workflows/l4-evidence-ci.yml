@@ -13,12 +13,8 @@ concurrency:
 
 jobs:
   targeted:
-    name: Targeted L4 / Python ${{ matrix.python-version }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.13"]
+    name: Targeted L4 / Windows / Python 3.13
+    runs-on: windows-latest
     env:
       PYTHONPATH: src
     steps:
@@ -27,7 +23,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.13"
           cache: pip
       - name: Install test dependencies
         run: python -m pip install -r requirements-dev.txt
