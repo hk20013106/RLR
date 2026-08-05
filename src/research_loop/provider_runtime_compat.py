@@ -17,6 +17,16 @@ def _read(path: Path) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _is_legacy_python_provider(args) -> bool:
+    """Identify old test/provider shims that do not implement Codex JSONL."""
+    if not args or len(args) < 2:
+        return False
+    executable = Path(str(args[0])).name.lower()
+    return executable in {
+        "python", "python.exe", "python3", "python3.exe",
+    } and str(args[1]) == "exec"
+
+
 def install(deep_research_module, detached_task_module, l4_pipeline_module) -> None:
     if getattr(deep_research_module, "_provider_observability_compat_installed", False):
         return
@@ -26,10 +36,13 @@ def install(deep_research_module, detached_task_module, l4_pipeline_module) -> N
 
     def provider_scoped_run(args, *positional, **kwargs):
         context = _runtime._CONTEXT.get()
-        if context is not None and context.get("backend") != "codex":
-            # Only Codex CLI's JSONL and output-last-message contract has been
-            # verified. Other providers retain their established invocation and
-            # output parsing until their own native streaming contract is proven.
+        if context is not None and (
+            context.get("backend") != "codex" or _is_legacy_python_provider(args)
+        ):
+            # Only the native Codex CLI JSONL/output-last-message contract is
+            # observed. Claude and legacy Python shims retain their established
+            # single-JSON stdout behavior instead of being misclassified as a
+            # Codex event stream.
             return proxy._original.run(args, *positional, **kwargs)
         return previous_proxy_run(args, *positional, **kwargs)
 
