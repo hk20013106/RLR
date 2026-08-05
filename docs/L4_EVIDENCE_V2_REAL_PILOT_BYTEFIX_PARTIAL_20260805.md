@@ -41,7 +41,7 @@ The follow-up change on PR #13 now:
 
 ## Software validation after the fix
 
-Validated implementation head: `8a7087307a3dd03b1ba8e1194ba0f85d08d9296f`.
+Validated implementation and documentation head: `bfdc5f1dee672d9062ead9e91315e018dcf265b9`.
 
 Windows/Python 3.13 only:
 
