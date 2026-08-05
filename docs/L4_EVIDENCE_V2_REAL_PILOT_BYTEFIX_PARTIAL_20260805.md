@@ -41,8 +41,6 @@ The follow-up change on PR #13 now:
 
 ## Software validation after the fix
 
-Validated implementation and documentation head: `bfdc5f1dee672d9062ead9e91315e018dcf265b9`.
-
 Windows/Python 3.13 only:
 
 - targeted L4 tests: `116 passed`;
