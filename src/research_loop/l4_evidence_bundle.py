@@ -18,6 +18,7 @@ from research_loop import l4_inventory
 
 
 EVIDENCE_BUNDLE_SCHEMA = "L4BEvidenceBundle/v2"
+EVIDENCE_RECEIPT_SCHEMA = "EvidenceRunReceipt/v1.1"
 DETERMINISTIC_RECEIPT_SCHEMA = "DeterministicResolverReceipt/v2"
 
 
@@ -100,18 +101,81 @@ def _failure_reason(result: dict) -> str:
 
 
 def _render_summary(artifact: dict) -> str:
+    papers = artifact.get("papers") or []
+    cards = artifact.get("evidence_cards") or []
+    gaps = artifact.get("evidence_gaps") or []
+    receipt = artifact.get("skill_receipt") or {}
+
+    identifiers = []
+    for paper in papers:
+        paper_id = str(paper.get("paper_id") or paper.get("asset_id") or "source")
+        doi = str(paper.get("doi") or "").strip()
+        pmid = str(paper.get("pmid") or "").strip()
+        url = str(paper.get("url") or "").strip()
+        if doi:
+            identifier = f"doi:{doi}"
+        elif pmid:
+            identifier = f"PMID:{pmid}"
+        elif url:
+            identifier = url
+        else:
+            identifier = paper_id
+        identifiers.append(f"{paper_id} ({identifier})")
+
+    card_digest = ", ".join(
+        f"{card['evidence_card_id']}(method={card['method_id']})"
+        for card in cards
+    ) or "none"
+    gap_digest = ", ".join(
+        f"{gap['evidence_gap_id']}(method={gap['method_id']})"
+        for gap in gaps
+    ) or "none"
+    source_digest = ", ".join(identifiers) or "none"
+
     lines = [
         "# Pre-Research: L4",
         "",
         "## Runtime digest",
         f"Deterministic L4B evidence bundle `{artifact['run_id']}`.",
+        f"Sources: {source_digest}.",
+        "L4B retrieves exact registered sources and extracts evidence; L4C defines method components, candidates, eligibility, execution requirements, and the final plan.",
+        f"Accepted evidence cards: {card_digest}.",
+        f"Evidence gaps: {gap_digest}.",
+        "",
+        "## Evidence pack",
+        f"- {artifact['path']}",
+        "",
+        "## Query log",
+    ]
+    queries = [
+        str(query).strip()
+        for query in artifact.get("queries") or []
+        if str(query).strip()
+    ]
+    if queries:
+        lines.extend(f"- {query}" for query in queries)
+    else:
+        lines.append("- deterministic exact-source resolution")
+
+    lines.extend([
+        "",
+        "## Tool receipt",
+        (
+            f"- {receipt.get('backend') or 'deterministic'} / "
+            f"{receipt.get('skill') or 'closed-corpus-exact-source-resolver'} "
+            f"{receipt.get('skill_version') or ''}; "
+            f"command_hash={receipt.get('command_hash') or ''}; "
+            f"prompt_hash={receipt.get('prompt_hash') or ''}"
+        ),
+        "",
+        "## Source count",
+        str(len(papers)),
         "",
         "## Responsibility boundary",
         "L4B retrieves exact registered sources and extracts evidence. It does not define method components, candidates, eligibility, required flags, or the final plan.",
         "",
         "## Accepted evidence cards",
-    ]
-    cards = artifact.get("evidence_cards") or []
+    ])
     if cards:
         for card in cards:
             lines.append(
@@ -120,8 +184,8 @@ def _render_summary(artifact: dict) -> str:
             )
     else:
         lines.append("- none")
+
     lines.extend(["", "## Evidence gaps"])
-    gaps = artifact.get("evidence_gaps") or []
     if gaps:
         for gap in gaps:
             lines.append(
@@ -130,17 +194,8 @@ def _render_summary(artifact: dict) -> str:
             )
     else:
         lines.append("- none")
-    lines.extend([
-        "",
-        "## Evidence pack",
-        f"- {artifact['path']}",
-        "",
-        "## Source count",
-        str(len(artifact.get("papers") or [])),
-        "",
-    ])
+    lines.append("")
     return "\n".join(lines)
-
 
 def run_l4b_evidence(
     l4p,
@@ -378,7 +433,7 @@ def run_l4b_evidence(
     ] or ["deterministic exact-source resolution"]
     artifact = {
         "schema_version": dr.SCHEMA_VERSION,
-        "evidence_receipt_schema": "EvidenceRunReceipt/v2",
+        "evidence_receipt_schema": EVIDENCE_RECEIPT_SCHEMA,
         "evidence_bundle_schema": EVIDENCE_BUNDLE_SCHEMA,
         "kind": "deep_research_run",
         "research_phase": "pre_research",
@@ -432,6 +487,8 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
     project = Path(project_dir).resolve()
     if artifact.get("evidence_bundle_schema") != EVIDENCE_BUNDLE_SCHEMA:
         return False, "unexpected L4B evidence bundle schema"
+    if artifact.get("evidence_receipt_schema") != EVIDENCE_RECEIPT_SCHEMA:
+        return False, "unexpected L4B evidence receipt schema"
     if artifact.get("pipeline_stage") != "L4B":
         return False, "evidence bundle is not an L4B artifact"
     if str(artifact.get("candidate_id") or "") != str(candidate_id):
