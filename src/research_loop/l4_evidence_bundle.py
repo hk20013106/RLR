@@ -221,6 +221,13 @@ def run_l4b_evidence(
         retrieval_refs.append(receipt_ref)
 
         payload = str(result.get("source_payload") or "")
+        raw_source_bytes = result.get("source_bytes")
+        payload_bytes = (
+            bytes(raw_source_bytes)
+            if isinstance(raw_source_bytes, (bytes, bytearray))
+            else payload.encode("utf-8")
+        )
+        payload_hash = _sha(payload_bytes) if payload_bytes else ""
         methods = result.get("methods_section") or None
         accepted = bool(
             result.get("status") == "resolved"
@@ -236,7 +243,7 @@ def run_l4b_evidence(
             content_type = str(result.get("content_type") or "")
             suffix = ".xml" if "xml" in content_type.casefold() else ".html" if "html" in content_type.casefold() else ".txt"
             source_file = sources_dir / f"{paper_id}{suffix}"
-            source_file.write_text(payload, encoding="utf-8")
+            source_file.write_bytes(payload_bytes)
             source_path = source_file.relative_to(project).as_posix()
 
         anchor_id = ""
@@ -255,7 +262,7 @@ def run_l4b_evidence(
                 "locator": str(methods.get("locator") or ""),
                 "extraction_method": f"deterministic-{methods.get('parser') or 'source'}",
                 "verification_status": "located",
-                "source_hash": _sha(payload),
+                "source_hash": payload_hash,
                 "method_ids": method_ids,
                 "source_ref_ids": source_ref_ids,
                 "source_kind": _source_kind(asset),
@@ -277,7 +284,7 @@ def run_l4b_evidence(
                 "source_metadata_response": asset.get("source_metadata_response") or {},
                 "metadata_response_hash": _sha(_canonical_json(asset.get("source_metadata_response") or {})),
                 "open_access": True,
-                "content_hash": _sha(payload),
+                "content_hash": payload_hash,
                 "source_payload_path": source_path,
                 "retrieval_receipt_path": receipt_ref["path"],
                 "retrieval_receipt_sha256": receipt_ref["sha256"],
@@ -313,7 +320,7 @@ def run_l4b_evidence(
                     "source_kind": _source_kind(asset),
                     "section": str(methods.get("section") or "Methods"),
                     "locator": str(methods.get("locator") or ""),
-                    "content_hash": _sha(payload),
+                    "content_hash": payload_hash,
                     "status": "accepted",
                 })
             else:
@@ -475,8 +482,15 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
             return False, f"L4B evidence card {card_id} source payload path is unsafe"
         if not source_path.is_file():
             return False, f"L4B evidence card {card_id} source payload is missing"
-        payload = source_path.read_text(encoding="utf-8")
-        if _sha(payload) != str(card.get("content_hash") or ""):
+        try:
+            payload_bytes = source_path.read_bytes()
+            payload = payload_bytes.decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            return False, f"L4B evidence card {card_id} source payload is unreadable"
+        payload_hash = _sha(payload_bytes)
+        if payload_hash != str(record.get("content_hash") or ""):
+            return False, f"L4B evidence card {card_id} paper content hash mismatch"
+        if payload_hash != str(card.get("content_hash") or ""):
             return False, f"L4B evidence card {card_id} content hash mismatch"
         extracts = {
             str(item.get("evidence_id") or ""): item
@@ -485,6 +499,8 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
         extract = extracts.get(str(card.get("evidence_id") or ""))
         if not extract:
             return False, f"L4B evidence card {card_id} extract is missing"
+        if str(extract.get("source_hash") or "") != payload_hash:
+            return False, f"L4B evidence card {card_id} extract source hash mismatch"
         text = str(extract.get("text") or "")
         if len(text.encode("utf-8")) < cc.MIN_BYTES:
             return False, f"L4B evidence card {card_id} extract is below 500 bytes"
@@ -502,6 +518,19 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
             return False, f"L4B evidence card {card_id} retrieval receipt is missing"
         if _sha(receipt_path.read_bytes()) != str(record.get("retrieval_receipt_sha256") or ""):
             return False, f"L4B evidence card {card_id} retrieval receipt hash mismatch"
+        try:
+            receipt_data = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False, f"L4B evidence card {card_id} retrieval receipt is unreadable"
+        selected_attempt = receipt_data.get("selected_attempt") or {}
+        if str(selected_attempt.get("content_hash") or "") != payload_hash:
+            return False, f"L4B evidence card {card_id} receipt content hash mismatch"
+        try:
+            receipt_byte_length = int(selected_attempt.get("byte_length"))
+        except (TypeError, ValueError):
+            return False, f"L4B evidence card {card_id} receipt byte count is invalid"
+        if receipt_byte_length != len(payload_bytes):
+            return False, f"L4B evidence card {card_id} receipt byte count mismatch"
     if len(card_ids) != len(set(card_ids)):
         return False, "L4B evidence_card_id values must be unique"
 

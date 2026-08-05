@@ -453,6 +453,7 @@ def resolve_contract(project, contract, *, fetcher=None):
                 "status": "resolved",
                 "contract": _public(contract),
                 "source_payload": payload,
+                "source_bytes": body,
                 "content_type": receipt["content_type"],
                 "methods_section": methods,
                 "receipt": copy.deepcopy(receipt),
@@ -467,6 +468,7 @@ def resolve_contract(project, contract, *, fetcher=None):
         "status": "failed",
         "contract": _public(contract),
         "source_payload": "",
+        "source_bytes": b"",
         "content_type": "",
         "methods_section": None,
         "receipt": None,
@@ -629,7 +631,12 @@ def resolve_manifest(project, candidate, manifest, work_dir, *, selected_assets,
                 else ".html"
             )
             path = directory / f"{_safe(result['contract']['paper_id'])}{suffix}"
-            path.write_text(result["source_payload"], encoding="utf-8")
+            source_bytes = result.get("source_bytes")
+            path.write_bytes(
+                bytes(source_bytes)
+                if isinstance(source_bytes, (bytes, bytearray))
+                else result["source_payload"].encode("utf-8")
+            )
             result["local_path"] = str(path.resolve())
     state = {
         "manifest_path": manifest.get("path", ""),
