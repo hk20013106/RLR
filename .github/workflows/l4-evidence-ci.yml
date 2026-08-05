@@ -51,6 +51,7 @@ jobs:
           tests/test_l4_inventory_schema.py
           tests/test_l4_inventory_projection.py
           tests/test_l4_evidence_bundle.py
+          tests/test_l4b_to_l4c_context.py
           tests/test_l4_runtime_compat.py
           tests/test_method_evidence_card_contracts.py
           tests/test_method_decision_contracts.py
