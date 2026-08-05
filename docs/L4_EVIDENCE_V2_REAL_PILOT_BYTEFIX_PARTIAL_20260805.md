@@ -32,11 +32,40 @@ The staged-v2 production path in `l4_evidence_bundle.run_l4b_evidence()` still w
 
 The follow-up change on PR #13 now:
 
-- retains the raw response bytes in the deterministic resolver result;
+- retains the raw HTTP response bytes in the deterministic resolver result;
 - writes those exact bytes with `Path.write_bytes()` in staged L4B;
 - derives paper, extract, and card hashes from those exact bytes;
 - preserves raw bytes in the resolver work-directory handoff;
 - makes `audit_bundle()` verify the actual persisted bytes against paper/card/extract hashes and the selected receipt hash and byte count;
 - adds a Windows regression that reproduced the CRLF failure before the fix.
 
-PR #13 must remain unmerged until a new independent real-data pilot confirms the full byte/hash equality without LF/CRLF normalization.
+## Software validation after the fix
+
+Validated implementation head: `8a7087307a3dd03b1ba8e1194ba0f85d08d9296f`.
+
+Windows/Python 3.13 only:
+
+- targeted L4 tests: `116 passed`;
+- full regression suite: `646 passed`;
+- repository full suite with coverage: `646 passed`, total coverage 70%;
+- import check and CLI help: passed;
+- `git diff --check`: passed.
+
+These checks establish software regression safety and reproduce the Windows newline boundary. They do not replace a new independent real-data pilot.
+
+PR #13 must remain unmerged until a current-head pilot confirms, without LF/CRLF normalization:
+
+```text
+SHA256(persisted source bytes)
+== paper content_hash
+== selected retrieval receipt content_hash
+== every relevant extract source_hash
+== every relevant accepted-card content_hash
+```
+
+and:
+
+```text
+persisted source byte count
+== selected retrieval receipt byte_length
+```
