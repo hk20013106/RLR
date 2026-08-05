@@ -43,7 +43,7 @@ The staged artifact also declared `EvidenceRunReceipt/v2`, while native v2.1 con
 
 ## Corrective design
 
-The generic pre-research gate remains unchanged. The staged L4B producer is being aligned to the established interface:
+The generic pre-research gate remains unchanged. The staged L4B producer is aligned to the established interface:
 
 - Runtime digest includes the exact run ID, persisted DOI/PMID/URL identifiers, compact accepted-card IDs, compact evidence-gap IDs, method IDs, and the L4B/L4C responsibility boundary;
 - Query log is rendered from persisted artifact queries;
@@ -52,7 +52,7 @@ The generic pre-research gate remains unchanged. The staged L4B producer is bein
 - the evidence run identity remains `EvidenceRunReceipt/v1.1`;
 - the staged content marker remains `L4BEvidenceBundle/v2`.
 
-A Windows/Python 3.13 integration test now exercises the real transition:
+A Windows/Python 3.13 integration test exercises the real transition:
 
 ```text
 persist L4A inventory
@@ -62,4 +62,21 @@ persist L4A inventory
 → context contains run/card/gap/method IDs and responsibility boundary
 ```
 
-PR #13 must remain open until a new independent pilot passes L4A → L4B → L4C → L4.5 without manual artifact edits.
+## GitHub implementation validation
+
+The integration test first reproduced the pilot failure on the unmodified producer:
+
+```text
+1 failed, 116 passed
+Runtime digest carries no DOI/PMID/URL identifier
+```
+
+After the producer-contract correction:
+
+- targeted L4 Windows/Python 3.13: `117 passed`;
+- full regression Windows/Python 3.13: `647 passed`;
+- repository full suite with coverage: `647 passed`, total coverage 70%;
+- import check and CLI help: passed;
+- `git diff --check`: passed.
+
+These results verify the software boundary only. PR #13 must remain open until a new independent pilot passes L4A → L4B → L4C → L4.5 without manual artifact edits.
