@@ -26,6 +26,9 @@ jobs:
           @'
           from pathlib import Path
 
+          def block(*lines):
+              return "\n".join(lines) + "\n"
+
           def replace_once(text, old, new, label):
               count = text.count(old)
               if count != 1:
@@ -36,100 +39,102 @@ jobs:
           text = bundle_path.read_text(encoding="utf-8")
           text = replace_once(
               text,
-              '''        payload = str(result.get("source_payload") or "")
-          methods = result.get("methods_section") or None
-          ''',
-              '''        payload = str(result.get("source_payload") or "")
-          raw_source_bytes = result.get("source_bytes")
-          payload_bytes = (
-              bytes(raw_source_bytes)
-              if isinstance(raw_source_bytes, (bytes, bytearray))
-              else payload.encode("utf-8")
-          )
-          payload_hash = _sha(payload_bytes) if payload_bytes else ""
-          methods = result.get("methods_section") or None
-          ''',
+              block(
+                  '        payload = str(result.get("source_payload") or "")',
+                  '        methods = result.get("methods_section") or None',
+              ),
+              block(
+                  '        payload = str(result.get("source_payload") or "")',
+                  '        raw_source_bytes = result.get("source_bytes")',
+                  '        payload_bytes = (',
+                  '            bytes(raw_source_bytes)',
+                  '            if isinstance(raw_source_bytes, (bytes, bytearray))',
+                  '            else payload.encode("utf-8")',
+                  '        )',
+                  '        payload_hash = _sha(payload_bytes) if payload_bytes else ""',
+                  '        methods = result.get("methods_section") or None',
+              ),
               "bundle payload bytes",
           )
           text = replace_once(
               text,
-              '''            source_file.write_text(payload, encoding="utf-8")
-          ''',
-              '''            source_file.write_bytes(payload_bytes)
-          ''',
+              block('            source_file.write_text(payload, encoding="utf-8")'),
+              block('            source_file.write_bytes(payload_bytes)'),
               "bundle source write",
           )
           text = replace_once(
               text,
-              '''                "source_hash": _sha(payload),
-          ''',
-              '''                "source_hash": payload_hash,
-          ''',
+              block('                "source_hash": _sha(payload),'),
+              block('                "source_hash": payload_hash,'),
               "bundle extract hash",
           )
-          if text.count('''                "content_hash": _sha(payload),
-          ''') != 2:
+          old_content_hash = block('                "content_hash": _sha(payload),')
+          if text.count(old_content_hash) != 2:
               raise SystemExit("bundle content hashes: expected two matches")
           text = text.replace(
-              '''                "content_hash": _sha(payload),
-          ''',
-              '''                "content_hash": payload_hash,
-          ''',
+              old_content_hash,
+              block('                "content_hash": payload_hash,'),
           )
           text = replace_once(
               text,
-              '''        payload = source_path.read_text(encoding="utf-8")
-          if _sha(payload) != str(card.get("content_hash") or ""):
-              return False, f"L4B evidence card {card_id} content hash mismatch"
-          ''',
-              '''        try:
-              payload_bytes = source_path.read_bytes()
-              payload = payload_bytes.decode("utf-8")
-          except (OSError, UnicodeDecodeError):
-              return False, f"L4B evidence card {card_id} source payload is unreadable"
-          payload_hash = _sha(payload_bytes)
-          if payload_hash != str(record.get("content_hash") or ""):
-              return False, f"L4B evidence card {card_id} paper content hash mismatch"
-          if payload_hash != str(card.get("content_hash") or ""):
-              return False, f"L4B evidence card {card_id} content hash mismatch"
-          ''',
+              block(
+                  '        payload = source_path.read_text(encoding="utf-8")',
+                  '        if _sha(payload) != str(card.get("content_hash") or ""):',
+                  '            return False, f"L4B evidence card {card_id} content hash mismatch"',
+              ),
+              block(
+                  '        try:',
+                  '            payload_bytes = source_path.read_bytes()',
+                  '            payload = payload_bytes.decode("utf-8")',
+                  '        except (OSError, UnicodeDecodeError):',
+                  '            return False, f"L4B evidence card {card_id} source payload is unreadable"',
+                  '        payload_hash = _sha(payload_bytes)',
+                  '        if payload_hash != str(record.get("content_hash") or ""):',
+                  '            return False, f"L4B evidence card {card_id} paper content hash mismatch"',
+                  '        if payload_hash != str(card.get("content_hash") or ""):',
+                  '            return False, f"L4B evidence card {card_id} content hash mismatch"',
+              ),
               "bundle byte audit",
           )
           text = replace_once(
               text,
-              '''        if not extract:
-              return False, f"L4B evidence card {card_id} extract is missing"
-          text = str(extract.get("text") or "")
-          ''',
-              '''        if not extract:
-              return False, f"L4B evidence card {card_id} extract is missing"
-          if str(extract.get("source_hash") or "") != payload_hash:
-              return False, f"L4B evidence card {card_id} extract source hash mismatch"
-          text = str(extract.get("text") or "")
-          ''',
+              block(
+                  '        if not extract:',
+                  '            return False, f"L4B evidence card {card_id} extract is missing"',
+                  '        text = str(extract.get("text") or "")',
+              ),
+              block(
+                  '        if not extract:',
+                  '            return False, f"L4B evidence card {card_id} extract is missing"',
+                  '        if str(extract.get("source_hash") or "") != payload_hash:',
+                  '            return False, f"L4B evidence card {card_id} extract source hash mismatch"',
+                  '        text = str(extract.get("text") or "")',
+              ),
               "bundle extract audit",
           )
           text = replace_once(
               text,
-              '''        if _sha(receipt_path.read_bytes()) != str(record.get("retrieval_receipt_sha256") or ""):
-              return False, f"L4B evidence card {card_id} retrieval receipt hash mismatch"
-          ''',
-              '''        if _sha(receipt_path.read_bytes()) != str(record.get("retrieval_receipt_sha256") or ""):
-              return False, f"L4B evidence card {card_id} retrieval receipt hash mismatch"
-          try:
-              receipt_data = json.loads(receipt_path.read_text(encoding="utf-8"))
-          except (OSError, json.JSONDecodeError):
-              return False, f"L4B evidence card {card_id} retrieval receipt is unreadable"
-          selected_attempt = receipt_data.get("selected_attempt") or {}
-          if str(selected_attempt.get("content_hash") or "") != payload_hash:
-              return False, f"L4B evidence card {card_id} receipt content hash mismatch"
-          try:
-              receipt_byte_length = int(selected_attempt.get("byte_length"))
-          except (TypeError, ValueError):
-              return False, f"L4B evidence card {card_id} receipt byte count is invalid"
-          if receipt_byte_length != len(payload_bytes):
-              return False, f"L4B evidence card {card_id} receipt byte count mismatch"
-          ''',
+              block(
+                  '        if _sha(receipt_path.read_bytes()) != str(record.get("retrieval_receipt_sha256") or ""):',
+                  '            return False, f"L4B evidence card {card_id} retrieval receipt hash mismatch"',
+              ),
+              block(
+                  '        if _sha(receipt_path.read_bytes()) != str(record.get("retrieval_receipt_sha256") or ""):',
+                  '            return False, f"L4B evidence card {card_id} retrieval receipt hash mismatch"',
+                  '        try:',
+                  '            receipt_data = json.loads(receipt_path.read_text(encoding="utf-8"))',
+                  '        except (OSError, json.JSONDecodeError):',
+                  '            return False, f"L4B evidence card {card_id} retrieval receipt is unreadable"',
+                  '        selected_attempt = receipt_data.get("selected_attempt") or {}',
+                  '        if str(selected_attempt.get("content_hash") or "") != payload_hash:',
+                  '            return False, f"L4B evidence card {card_id} receipt content hash mismatch"',
+                  '        try:',
+                  '            receipt_byte_length = int(selected_attempt.get("byte_length"))',
+                  '        except (TypeError, ValueError):',
+                  '            return False, f"L4B evidence card {card_id} receipt byte count is invalid"',
+                  '        if receipt_byte_length != len(payload_bytes):',
+                  '            return False, f"L4B evidence card {card_id} receipt byte count mismatch"',
+              ),
               "bundle receipt audit",
           )
           bundle_path.write_text(text, encoding="utf-8", newline="\n")
@@ -138,37 +143,41 @@ jobs:
           text = resolver_path.read_text(encoding="utf-8")
           text = replace_once(
               text,
-              '''                "source_payload": payload,
-                  "content_type": receipt["content_type"],
-          ''',
-              '''                "source_payload": payload,
-                  "source_bytes": body,
-                  "content_type": receipt["content_type"],
-          ''',
+              block(
+                  '                "source_payload": payload,',
+                  '                "content_type": receipt["content_type"],',
+              ),
+              block(
+                  '                "source_payload": payload,',
+                  '                "source_bytes": body,',
+                  '                "content_type": receipt["content_type"],',
+              ),
               "resolver resolved bytes",
           )
           text = replace_once(
               text,
-              '''        "source_payload": "",
-              "content_type": "",
-          ''',
-              '''        "source_payload": "",
-              "source_bytes": b"",
-              "content_type": "",
-          ''',
+              block(
+                  '        "source_payload": "",',
+                  '        "content_type": "",',
+              ),
+              block(
+                  '        "source_payload": "",',
+                  '        "source_bytes": b"",',
+                  '        "content_type": "",',
+              ),
               "resolver failed bytes",
           )
           text = replace_once(
               text,
-              '''            path.write_text(result["source_payload"], encoding="utf-8")
-          ''',
-              '''            source_bytes = result.get("source_bytes")
-              path.write_bytes(
-                  bytes(source_bytes)
-                  if isinstance(source_bytes, (bytes, bytearray))
-                  else result["source_payload"].encode("utf-8")
-              )
-          ''',
+              block('            path.write_text(result["source_payload"], encoding="utf-8")'),
+              block(
+                  '            source_bytes = result.get("source_bytes")',
+                  '            path.write_bytes(',
+                  '                bytes(source_bytes)',
+                  '                if isinstance(source_bytes, (bytes, bytearray))',
+                  '                else result["source_payload"].encode("utf-8")',
+                  '            )',
+              ),
               "resolver handoff write",
           )
           resolver_path.write_text(text, encoding="utf-8", newline="\n")
