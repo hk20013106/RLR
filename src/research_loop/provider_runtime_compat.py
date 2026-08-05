@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 
+from research_loop import provider_runtime_observability as _runtime
+
 
 def _read(path: Path) -> dict:
     try:
@@ -18,9 +20,23 @@ def install(deep_research_module, detached_task_module, l4_pipeline_module) -> N
     if getattr(deep_research_module, "_provider_observability_compat_installed", False):
         return
 
+    proxy = deep_research_module.subprocess
+    previous_proxy_run = proxy.run
+
+    def provider_scoped_run(args, *positional, **kwargs):
+        context = _runtime._CONTEXT.get()
+        if context is not None and context.get("backend") != "codex":
+            # Only Codex CLI's JSONL and output-last-message contract has been
+            # verified. Other providers retain their established invocation and
+            # output parsing until their own native streaming contract is proven.
+            return proxy._original.run(args, *positional, **kwargs)
+        return previous_proxy_run(args, *positional, **kwargs)
+
+    proxy.run = provider_scoped_run
+
     # L4A has its own provider subprocess boundary. Share the same proxy object
     # so Codex JSONL streaming and existing monkeypatch-based tests both reach it.
-    l4_pipeline_module.subprocess = deep_research_module.subprocess
+    l4_pipeline_module.subprocess = proxy
 
     previous_status = detached_task_module._status
     previous_validate = detached_task_module._validate_status
