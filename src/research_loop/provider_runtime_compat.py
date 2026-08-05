@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 from research_loop import provider_runtime_observability as _runtime
@@ -33,6 +34,19 @@ def install(deep_research_module, detached_task_module, l4_pipeline_module) -> N
         return previous_proxy_run(args, *positional, **kwargs)
 
     proxy.run = provider_scoped_run
+
+    # Several installed scientific wrappers own a copied stdlib subprocess
+    # module and reimplement the final provider boundary. Bind every loaded
+    # provider owner to the same proxy; otherwise the active L1/L4 wrapper can
+    # bypass observation even though deep_research itself is patched.
+    provider_owner_modules = (
+        "research_loop.method_evidence",
+        "research_loop.method_review_navigation",
+    )
+    for module_name in provider_owner_modules:
+        module = sys.modules.get(module_name)
+        if module is not None and hasattr(module, "subprocess"):
+            module.subprocess = proxy
 
     # L4A has its own provider subprocess boundary. Share the same proxy object
     # so Codex JSONL streaming and existing monkeypatch-based tests both reach it.
