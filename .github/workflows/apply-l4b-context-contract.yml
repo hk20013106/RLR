@@ -25,6 +25,7 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import textwrap
 
           path = Path("src/research_loop/l4_evidence_bundle.py")
           text = path.read_text(encoding="utf-8")
@@ -41,7 +42,8 @@ jobs:
               raise SystemExit("summary renderer start is not unique")
           start = text.index(start_marker)
           end = text.index(end_marker, start)
-          new_renderer = '''def _render_summary(artifact: dict) -> str:
+          new_renderer = textwrap.dedent('''\
+          def _render_summary(artifact: dict) -> str:
               papers = artifact.get("papers") or []
               cards = artifact.get("evidence_cards") or []
               gaps = artifact.get("evidence_gaps") or []
@@ -137,10 +139,7 @@ jobs:
                   lines.append("- none")
               lines.append("")
               return "\\n".join(lines)
-          '''
-          # Dedent the function body generated inside this workflow script.
-          import textwrap
-          new_renderer = textwrap.dedent(new_renderer).rstrip()
+          ''').rstrip()
           text = text[:start] + new_renderer + text[end:]
 
           old_schema = '        "evidence_receipt_schema": "EvidenceRunReceipt/v2",'
@@ -149,16 +148,14 @@ jobs:
               raise SystemExit(f"artifact receipt schema: expected one match, found {text.count(old_schema)}")
           text = text.replace(old_schema, new_schema, 1)
 
-          audit_marker = '''    if artifact.get("evidence_bundle_schema") != EVIDENCE_BUNDLE_SCHEMA:
-              return False, "unexpected L4B evidence bundle schema"
-              '''
-          audit_replacement = '''    if artifact.get("evidence_bundle_schema") != EVIDENCE_BUNDLE_SCHEMA:
-              return False, "unexpected L4B evidence bundle schema"
-              if artifact.get("evidence_receipt_schema") != EVIDENCE_RECEIPT_SCHEMA:
-                  return False, "unexpected L4B evidence receipt schema"
-              '''
-          audit_marker = textwrap.dedent(audit_marker)
-          audit_replacement = textwrap.dedent(audit_replacement)
+          audit_marker = (
+              '    if artifact.get("evidence_bundle_schema") != EVIDENCE_BUNDLE_SCHEMA:\n'
+              '        return False, "unexpected L4B evidence bundle schema"\n'
+          )
+          audit_replacement = audit_marker + (
+              '    if artifact.get("evidence_receipt_schema") != EVIDENCE_RECEIPT_SCHEMA:\n'
+              '        return False, "unexpected L4B evidence receipt schema"\n'
+          )
           if text.count(audit_marker) != 1:
               raise SystemExit(f"audit schema gate: expected one match, found {text.count(audit_marker)}")
           text = text.replace(audit_marker, audit_replacement, 1)
