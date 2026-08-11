@@ -67,8 +67,8 @@ def install(deep_research_module, detached_task_module, l4_pipeline_module) -> N
 
     previous_status = detached_task_module._status
     previous_validate = detached_task_module._validate_status
-    detailed_terminal = {
-        "succeeded", "provider_failed", "validation_failed", "job_timed_out",
+    detailed_failure_terminal = {
+        "provider_failed", "validation_failed", "job_timed_out",
         "inactivity_timed_out", "cancelled", "provider_dead", "transport_lost",
     }
 
@@ -77,8 +77,14 @@ def install(deep_research_module, detached_task_module, l4_pipeline_module) -> N
         before = _read(Path(task_dir_value) / "status.json") if task_dir_value else {}
         value = previous_status(task_id, state, error=error, run_id=run_id)
         if state == "failed":
-            if before.get("state") in detailed_terminal:
-                value["state"] = before["state"]
+            before_state = before.get("state")
+            if before_state == "succeeded":
+                # Provider execution/persistence succeeded, but the enclosing
+                # synchronous command failed its evidence/audit gate afterwards.
+                value["state"] = "validation_failed"
+                value["legacy_state"] = "failed"
+            elif before_state in detailed_failure_terminal:
+                value["state"] = before_state
                 value["legacy_state"] = "failed"
             else:
                 # Preserve the v1 public contract for worker-launch, malformed
