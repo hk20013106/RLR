@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -134,7 +135,6 @@ def test_job_timeout_preserves_partial_logs_and_process_cleanup_receipt(tmp_path
     assert receipt["process_tree_cleanup"]["attempted"] is True
     assert receipt["process_tree_cleanup"]["provider_alive_after_cleanup"] is False
     assert result.runtime_receipt_sha256
-    import hashlib
     assert result.runtime_receipt_sha256 == hashlib.sha256(receipt_path.read_bytes()).hexdigest()
 
 
@@ -174,3 +174,95 @@ def test_runtime_status_never_exposes_reasoning_text(tmp_path, monkeypatch):
     serialized = json.dumps(_status(runtime), ensure_ascii=False)
     assert "reasoning" not in serialized or '"type": "reasoning"' in serialized
     assert "text" not in _status(runtime).get("current_item", {})
+
+
+def test_terminal_status_keeps_existing_revision_monotonic(tmp_path, monkeypatch):
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    (task_dir / "status.json").write_text(json.dumps({
+        "schema_version": "ProviderRuntimeStatus/v1",
+        "task_schema_version": "DeepResearchDetachedTask/v2",
+        "task_id": "dr-revision",
+        "state": "running",
+        "revision": 310,
+        "provider_alive": True,
+    }), encoding="utf-8")
+    monkeypatch.setenv("RLR_DEEP_RESEARCH_TASK_DIR", str(task_dir))
+
+    terminal = deep_research_task._status(
+        "dr-revision", "succeeded", run_id="run-fixture"
+    )
+
+    assert terminal["revision"] == 311
+    assert terminal["state"] == "succeeded"
+
+
+def test_worker_diagnostics_cannot_mutate_provider_stderr_after_receipt(tmp_path, monkeypatch):
+    monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "stream")
+    monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.01")
+    task_id = "dr-stderr-ownership"
+    task_dir = (
+        tmp_path / "08_Audit" / "deep_research_runtime" / "tasks" / task_id
+    )
+    task_dir.mkdir(parents=True)
+    (task_dir / "request.json").write_text(json.dumps({
+        "schema_version": deep_research_task.TASK_SCHEMA_VERSION,
+        "task_id": task_id,
+        "handler_args": {
+            "project_dir": str(tmp_path.resolve()),
+            "cand_id": "C1",
+            "node": "L1",
+            "backend": "codex",
+        },
+    }), encoding="utf-8")
+    (task_dir / "status.json").write_text(json.dumps({
+        "schema_version": deep_research_task.TASK_SCHEMA_VERSION,
+        "task_id": task_id,
+        "state": "running",
+    }), encoding="utf-8")
+
+    def handler(_args):
+        result = run_observed_provider(
+            command=[sys.executable, str(FIXTURE), "exec", "--json"],
+            prompt="fixture prompt",
+            runtime_dir=task_dir,
+            backend="codex",
+            task_id=task_id,
+            candidate_id="C1",
+            node="L1",
+            job_timeout=3,
+            observer_interval=0.01,
+        )
+        assert result.final_status == "succeeded"
+        print("post-provider worker diagnostic", file=sys.stderr, flush=True)
+        return 3
+
+    assert deep_research_task.run_worker(tmp_path, task_id, handler) == 3
+
+    receipt = json.loads((task_dir / "runtime_receipt.json").read_text(encoding="utf-8"))
+    provider_stderr = task_dir / "stderr.log"
+    actual_hash = hashlib.sha256(provider_stderr.read_bytes()).hexdigest()
+    assert receipt["artifacts"]["stderr"]["sha256"] == actual_hash
+    worker_stderr = task_dir / "worker_stderr.log"
+    assert worker_stderr.is_file()
+    assert "post-provider worker diagnostic" in worker_stderr.read_text(encoding="utf-8")
+
+
+def test_recoverable_error_event_does_not_claim_terminal_provider_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "recoverable_error")
+    monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.15")
+    runtime = tmp_path / "runtime"
+    holder = {}
+    thread = threading.Thread(target=lambda: holder.setdefault("result", _run(runtime)))
+    thread.start()
+
+    status = _wait_for(lambda: (
+        value if (
+            (value := _status(runtime)).get("last_provider_event", {}).get("type") == "error"
+        ) else None
+    ))
+    assert status["provider_alive"] is True
+    assert status["state"] != "provider_failed"
+
+    thread.join(5)
+    assert holder["result"].final_status == "succeeded"
