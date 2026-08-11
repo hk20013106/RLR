@@ -13,54 +13,62 @@ eligibility, or change a DAG transition.
 `deep-research-run` -> `commands.research.cmd_deep_research_run` ->
 `deep_research.run_and_persist` -> provider CLI.
 
-`RuntimeSpec.timeout`, loaded from `00_Preflight/deep_research_runtime.json` or a
-CLI override, is owned by `run_and_persist`. The provider is currently invoked
-with `subprocess.run(..., capture_output=True, timeout=...)`. Provider stdout and
-stderr are therefore buffered inside that call until exit or timeout.
+Before this extension, `RuntimeSpec.timeout`, loaded from
+`00_Preflight/deep_research_runtime.json` or a CLI override, was owned by
+`run_and_persist`, and the provider was invoked with
+`subprocess.run(..., capture_output=True, timeout=...)`. Provider stdout and
+stderr were therefore buffered inside that call until exit or timeout.
 
 ### Detached
 
 `deep-research-start` creates a task directory and launches
 `_deep-research-worker`. The worker invokes the same synchronous
-`cmd_deep_research_run`. Detachment moves the wait into another process but does
-not change the inner provider boundary. The worker can observe only its own CLI
-stdout/stderr and final return code; it cannot see the provider PID, Codex
-items, event timestamps, process activity, or the point at which execution
-stopped.
+`cmd_deep_research_run`. Detachment alone moved the wait into another process
+but did not change the inner provider boundary, so the worker previously could
+observe only its own CLI stdout/stderr and final return code. The observability
+extension now supervises the nested provider boundary directly.
 
 ## Reused Codex capability
 
-The official Codex CLI exposes the required primitives directly:
+The Codex CLI exposes the required primitives directly:
 
 - `codex exec --json`: JSONL events on stdout;
 - `--output-schema FILE`: constrain the final agent response;
 - `--output-last-message FILE` / `-o FILE`: write the final response separately;
 - `--ephemeral` and `--ignore-user-config`: retained from the existing command.
 
-Official event types include `thread.started`, `turn.started`, `item.started`,
+Observed event types include `thread.started`, `turn.started`, `item.started`,
 `item.updated`, `item.completed`, `turn.completed`, `turn.failed`, and `error`.
 Item types include `command_execution`, `mcp_tool_call`, `web_search`,
 `reasoning`, and `agent_message`.
 
-Therefore the minimal correct design is CLI streaming, not a new heartbeat
-protocol and not an SDK/App Server migration:
+Therefore the provider path uses CLI streaming rather than a new heartbeat
+protocol or an SDK/App Server migration:
 
 ```text
-stdout             -> append-only events.jsonl
-stderr             -> append-only stderr.log
---output-last-message -> final_output.json
+provider stdout              -> append-only events.jsonl
+provider stderr              -> append-only stderr.log
+--output-last-message        -> final_output.json
+worker stderr / gate errors  -> append-only worker_stderr.log
 ```
 
-The final structured response is never parsed from the event stream.
+The final structured response is never parsed from the event stream. Provider
+and detached-worker diagnostics have separate ownership so the immutable
+provider receipt cannot be invalidated by later evidence-gate or worker output.
 
 ## Signal ownership
 
 ### Codex semantic events
 
 Codex events supply thread identity, turn lifecycle, current item identity and
-item type. RLR projects only safe progress metadata into `status.json`:
-item ID/type/status, MCP server/tool, command, or web query. Reasoning text and
+item type. RLR projects only safe progress metadata into `status.json`: item
+ID/type/status, MCP server/tool, command, or web query. Reasoning text and
 agent-message content are not copied into ordinary status output.
+
+A generic `error` event is recorded as provider diagnostic evidence but is not
+by itself terminal: a real provider may emit an error and continue. A
+`turn.failed` event, non-zero provider exit, timeout, or other terminal runtime
+fact determines provider failure.
 
 ### RLR supervisor
 
@@ -77,7 +85,9 @@ The supervisor supplies facts Codex events cannot prove:
 These signals remain distinct. An observer heartbeat proves only that the
 supervisor is alive. A live PID proves only that the provider process exists.
 A provider event proves semantic activity. CPU/I/O changes prove process
-activity without claiming useful scientific progress.
+activity without claiming useful scientific progress. The finalized receipt
+retains the last known non-null process telemetry rather than replacing it with
+an unavailable snapshot after process exit.
 
 ## Mutable runtime status
 
@@ -94,29 +104,42 @@ request.json
 status.json
 stdout.log                 detached worker result envelope compatibility
 events.jsonl               provider semantic stream
-stderr.log                 provider/worker diagnostics
-final_output.json           final structured provider response
-runtime_receipt.json        finalized immutable runtime receipt
-result.json                 completed evidence-run result compatibility
+stderr.log                 provider diagnostics; immutable-receipt bound
+worker_stderr.log          detached worker / validation diagnostics
+final_output.json          final structured provider response
+runtime_receipt.json       finalized immutable provider runtime receipt
+result.json                completed evidence-run result compatibility
 ```
 
-`status.json` is atomically replaced and revisioned. Its state may be
+`status.json` is atomically replaced and revisioned. Revisions are monotonic
+across provider observation and detached-worker finalization. Its state may be
 `starting`, `running`, `waiting_external`, `validating`, `persisting`,
 `succeeded`, `provider_failed`, `validation_failed`, `job_timed_out`,
 `inactivity_timed_out`, `cancelled`, `provider_dead`, or `transport_lost`.
 Legacy `DeepResearchDetachedTask/v1` status remains readable.
 
-The first implementation retains the existing job timeout. It does not add a
-default inactivity timeout because reliable event/process activity measurement
-must exist before inactivity policy can be justified.
+Provider success is not identical to detached-task success. After provider
+completion, evidence validation may still fail closed. In that case the
+provider receipt can record successful provider execution while the final task
+status is `validation_failed`; `result.json` is not created unless the enclosing
+command succeeds.
+
+The implementation retains the existing job timeout. It does not add a default
+inactivity timeout because reliable event/process activity measurement must
+exist before inactivity policy can be justified.
 
 ## Immutable receipt
 
 `ProviderRuntimeReceipt/v1` is finalized after provider termination and process
 cleanup. It binds task/candidate/node/backend, provider version, command and
-prompt hashes, timestamps, PID/thread ID, terminal status, exit code, last
-successful event, termination reason, artifact paths/hashes/bytes, timeout
-facts, and process-tree cleanup results.
+prompt hashes, timestamps, PID/thread ID, provider terminal status, exit code,
+last successful event, termination reason, provider artifact paths/hashes/bytes,
+timeout facts, last known process activity, and process-tree cleanup results.
+
+The receipt owns `events.jsonl`, provider `stderr.log`, and `final_output.json`.
+`worker_stderr.log` is intentionally outside this provider receipt because the
+detached worker can continue through persistence and evidence validation after
+the provider receipt has already been finalized.
 
 The existing evidence/tool receipt references the finalized runtime receipt by
 relative path, schema, and SHA-256. High-frequency status is not copied into the
@@ -146,14 +169,18 @@ gates.
 1. Direct invokes the provider synchronously; detached invokes that same path in
    a background worker.
 2. The provider invocation layer owns the current job timeout.
-3. `subprocess.run(capture_output=True)` buffers stdout/stderr in the provider
-   invocation layer.
-4. Detached observes worker lifecycle and final CLI output only; it lacks
-   provider semantic/process evidence.
-5. Codex thread/turn/item/error events are direct progress signals.
+3. The old `subprocess.run(capture_output=True)` boundary buffered provider
+   stdout/stderr; the new boundary streams them separately.
+4. Detached runtime status now observes provider lifecycle as well as the outer
+   worker finalization state.
+5. Codex thread/turn/item/error events are provider progress/diagnostic signals;
+   a generic `error` is not necessarily terminal.
 6. PID/liveness, observer heartbeat, CPU/I/O activity, byte counts, timeout, and
-   cleanup must come from the RLR supervisor.
-7. Mutable status belongs only in the runtime task directory.
-8. The immutable receipt is generated after exit/termination and cleanup.
-9. The evidence/tool receipt binds the finalized runtime receipt path/schema/hash.
+   cleanup come from the RLR supervisor.
+7. Mutable status belongs only in the runtime task directory and revisions remain
+   monotonic through finalization.
+8. The provider runtime receipt is generated after provider exit/termination and
+   cleanup, before later worker/evidence-gate diagnostics can mutate its files.
+9. The evidence/tool receipt binds the finalized runtime receipt
+   path/schema/hash; provider and worker stderr are separate files.
 10. The change is orthogonal to and preserves L4A/L4B/L4C/L4.5/L5 authority.
