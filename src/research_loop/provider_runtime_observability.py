@@ -417,7 +417,7 @@ def run_observed_provider(
                     changes["state"] = "running"
                 elif event_type == "turn.completed":
                     changes["state"] = "validating"
-                elif event_type in {"turn.failed", "error"}:
+                elif event_type == "turn.failed":
                     changes["state"] = "provider_failed"
                 publish(**changes)
 
@@ -434,6 +434,15 @@ def run_observed_provider(
     stdout_thread.start()
     stderr_thread.start()
     last_snapshot = _process_snapshot(process.pid)
+    initial_changes: dict[str, Any] = {
+        "provider_alive": bool(last_snapshot["alive"]),
+        "child_pids": last_snapshot.get("children", []),
+    }
+    if last_snapshot.get("cpu_seconds") is not None:
+        initial_changes["cpu_seconds"] = last_snapshot.get("cpu_seconds")
+    if last_snapshot.get("io_bytes") is not None:
+        initial_changes["io_bytes"] = last_snapshot.get("io_bytes")
+    publish(**initial_changes)
     cleanup = {
         "attempted": False, "targeted_pids": [], "terminated_pids": [],
         "killed_pids": [], "errors": [], "provider_alive_after_cleanup": False,
@@ -443,17 +452,21 @@ def run_observed_provider(
     while process.poll() is None:
         time.sleep(max(0.01, observer_interval))
         snapshot = _process_snapshot(process.pid)
+        cpu_seconds = snapshot.get("cpu_seconds")
+        io_bytes = snapshot.get("io_bytes")
         activity_changed = (
-            snapshot.get("cpu_seconds") != last_snapshot.get("cpu_seconds")
-            or snapshot.get("io_bytes") != last_snapshot.get("io_bytes")
+            (cpu_seconds is not None and cpu_seconds != shared.get("cpu_seconds"))
+            or (io_bytes is not None and io_bytes != shared.get("io_bytes"))
         )
         changes = {
             "observer_heartbeat_at": _now(),
             "provider_alive": bool(snapshot["alive"]),
-            "cpu_seconds": snapshot.get("cpu_seconds"),
-            "io_bytes": snapshot.get("io_bytes"),
             "child_pids": snapshot.get("children", []),
         }
+        if cpu_seconds is not None:
+            changes["cpu_seconds"] = cpu_seconds
+        if io_bytes is not None:
+            changes["io_bytes"] = io_bytes
         if activity_changed:
             changes["last_process_activity_at"] = _now()
         publish(**changes)
@@ -745,8 +758,9 @@ def install(deep_research_module, detached_task_module) -> None:
         if task_dir:
             existing = _read_json(Path(task_dir) / "status.json")
             if existing:
+                previous_revision = int(existing.get("revision", 0))
                 existing.update(value)
-                existing["revision"] = int(existing.get("revision", 0)) + 1
+                existing["revision"] = previous_revision + 1
                 value = existing
         return value
 
