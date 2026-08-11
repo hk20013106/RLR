@@ -266,3 +266,28 @@ def test_recoverable_error_event_does_not_claim_terminal_provider_failure(tmp_pa
 
     thread.join(5)
     assert holder["result"].final_status == "succeeded"
+
+
+def test_worker_failure_after_provider_success_becomes_validation_failed(tmp_path, monkeypatch):
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    (task_dir / "status.json").write_text(json.dumps({
+        "schema_version": "ProviderRuntimeStatus/v1",
+        "task_schema_version": "DeepResearchDetachedTask/v2",
+        "task_id": "dr-validation",
+        "state": "succeeded",
+        "revision": 310,
+        "provider_alive": False,
+        "run_id": "run-fixture",
+    }), encoding="utf-8")
+    monkeypatch.setenv("RLR_DEEP_RESEARCH_TASK_DIR", str(task_dir))
+
+    failed = deep_research_task._status(
+        "dr-validation",
+        "failed",
+        error="L1 evidence lacks located Results extract",
+    )
+
+    assert failed["state"] == "validation_failed"
+    assert failed["legacy_state"] == "failed"
+    assert failed["revision"] == 311
