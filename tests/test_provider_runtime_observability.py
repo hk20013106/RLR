@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from research_loop import deep_research_task
+from research_loop import provider_runtime_observability as runtime_observability
 from research_loop.provider_runtime_observability import run_observed_provider
 
 
@@ -291,3 +292,35 @@ def test_worker_failure_after_provider_success_becomes_validation_failed(tmp_pat
     assert failed["state"] == "validation_failed"
     assert failed["legacy_state"] == "failed"
     assert failed["revision"] == 311
+
+
+def test_receipt_retains_last_known_process_activity_after_provider_exit(tmp_path, monkeypatch):
+    monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "stream")
+    monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.01")
+    runtime = tmp_path / "runtime"
+    original_snapshot = runtime_observability._process_snapshot
+
+    def snapshot(pid):
+        value = original_snapshot(pid)
+        if value.get("alive"):
+            value["cpu_seconds"] = 1.25
+            value["io_bytes"] = 4242
+        return value
+
+    monkeypatch.setattr(runtime_observability, "_process_snapshot", snapshot)
+    result = run_observed_provider(
+        command=[sys.executable, str(FIXTURE), "exec", "--json"],
+        prompt="fixture prompt",
+        runtime_dir=runtime,
+        backend="codex",
+        task_id="dr-telemetry",
+        candidate_id="C1",
+        node="L1",
+        job_timeout=3,
+        observer_interval=0.20,
+    )
+
+    assert result.final_status == "succeeded"
+    receipt = json.loads((runtime / "runtime_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["process_activity"]["cpu_seconds"] == 1.25
+    assert receipt["process_activity"]["io_bytes"] == 4242
