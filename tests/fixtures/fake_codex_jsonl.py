@@ -76,6 +76,9 @@ def main() -> int:
         _emit({"type": "turn.completed", "usage": {}})
         _write_final(final_path)
         return 0
+    if mode == "recoverable_error":
+        _emit({"type": "error", "message": "temporary fixture error"})
+        time.sleep(delay)
     item_type = "mcp_tool_call" if mode == "stuck_mcp" else "command_execution"
     item = {"id": "item-1", "type": item_type, "status": "in_progress"}
     if item_type == "mcp_tool_call":
