@@ -28,10 +28,10 @@ def test_contract_failure_is_fact_not_patch_proposal():
     assert "fix" not in event
 
 
-def test_process_failure_keeps_exit_code_without_raw_logs():
+def test_process_failure_keeps_program_identity_not_task_arguments_or_raw_logs():
     event = observe_process_failure(
         component="root_entrypoint",
-        command=["python", "run_loop.py", "run", "PROJECT", "CANDIDATE"],
+        command=["python", "run_loop.py", "run", "PRIVATE_PROJECT", "CANDIDATE"],
         exit_code=3,
         expected_contract="runner_nonzero_propagation",
         rlr_revision=REVISION,
@@ -40,15 +40,24 @@ def test_process_failure_keeps_exit_code_without_raw_logs():
 
     assert event["event_type"] == "runtime_failure"
     assert event["observed"]["exit_code"] == 3
-    assert event["observed"]["command"] == [
-        "python",
-        "run_loop.py",
-        "run",
-        "PROJECT",
-        "CANDIDATE",
-    ]
+    assert event["observed"]["command"] == ["python", "run_loop.py"]
+    assert "PRIVATE_PROJECT" not in str(event)
     assert "stdout" not in event["observed"]
     assert "stderr" not in event["observed"]
+
+
+def test_module_process_identity_keeps_python_module_not_following_arguments():
+    event = observe_process_failure(
+        component="test_runner",
+        command=["python", "-m", "pytest", "PRIVATE_TEST_SELECTOR"],
+        exit_code=1,
+        expected_contract="runner_nonzero_propagation",
+        rlr_revision=REVISION,
+        observed_at=WHEN,
+    )
+
+    assert event["observed"]["command"] == ["python", "-m", "pytest"]
+    assert "PRIVATE_TEST_SELECTOR" not in str(event)
 
 
 def test_verification_failure_records_validator_identity():
