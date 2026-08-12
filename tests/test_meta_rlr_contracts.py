@@ -86,6 +86,23 @@ def test_failure_identity_changes_when_stable_facts_change():
     assert first["dedup_fingerprint"] != second["dedup_fingerprint"]
 
 
+def test_tampered_event_and_dedup_identities_fail_closed():
+    original = build_maintenance_event(
+        observed_at="2026-08-13T00:00:00Z",
+        **_common_event_kwargs(),
+    )
+
+    tampered_event_id = dict(original)
+    tampered_event_id["event_id"] = "rme-" + "f" * 20
+    with pytest.raises(MaintenanceContractError, match="event_id"):
+        validate_maintenance_event(tampered_event_id)
+
+    tampered_dedup = dict(original)
+    tampered_dedup["dedup_fingerprint"] = "f" * 64
+    with pytest.raises(MaintenanceContractError, match="dedup_fingerprint"):
+        validate_maintenance_event(tampered_dedup)
+
+
 def test_absolute_or_parent_traversal_rlr_artifact_reference_is_rejected():
     for unsafe_ref in ("D:/private/data.csv", "../private/data.csv"):
         kwargs = _common_event_kwargs()
