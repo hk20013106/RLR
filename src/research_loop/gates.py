@@ -9,6 +9,7 @@ from research_loop.paths import _candidate_file, _pre_research_file
 from research_loop.yamlio import _load_yaml_front
 from research_loop.delta import _delta_for_candidate
 from research_loop import l0_contract
+from research_loop.l0_data import L0DataError, write_current_round_data_binding
 from research_loop.l0_state import L0StateError, restore_previous_round
 from research_loop.ledger import _read_branch_ledger, _prior_unexplored_ids
 from research_loop.preresearch import (
@@ -39,6 +40,7 @@ def _audit_pre_research(project_dir, node_id, pr_cfg, cand_id=None, *, evidence_
         )
     return True, ""
 
+
 def _audit_branch_coverage(project_dir, cand_id):
     """Every prior unexplored branch must be statused in this candidate's ledger.
     Hard-fails only for from_memory + loop_type=divergent."""
@@ -54,7 +56,9 @@ def _audit_branch_coverage(project_dir, cand_id):
         return False, f"branch gate: prior unexplored branches not statused: {sorted(missing)}"
     return True, ""
 
+
 DIVERGENCE_MIN_NEW_QUERY_FAMILIES = 2
+
 
 def _audit_divergence(project_dir, node_id, cand_id):
     """L1 divergence gate. Hard-fails only for from_memory + loop_type=divergent.
@@ -89,6 +93,7 @@ def _audit_divergence(project_dir, node_id, cand_id):
                        f"(need >= {need}); reused={sorted(fams & cache)}")
     return True, ""
 
+
 def _audit_l10_traceability(project_dir, cand_id, delta):
     """L10b gate: for from_memory candidates, the decision must state whether
     literature changed direction and carry a decision_grounding block."""
@@ -120,6 +125,7 @@ def _audit_l10_evidence(project_dir, cand_id, delta):
         return False, f"L10b references unknown evidence IDs: {unknown}"
     return True, ""
 
+
 def _l6_script_branches(project_dir, cand_id):
     p = _delta_for_candidate(project_dir, "L6_oppenheimer", cand_id)
     out = {}
@@ -145,6 +151,7 @@ def _l6_script_branches(project_dir, cand_id):
             pass
     return out
 
+
 def _audit_l7_manifest(project_dir, cand_id, delta):
     """L7 gate: for from_memory candidates, every executed script must map to an
     approved L6 script + a branch_id (consistent with L6's branch)."""
@@ -163,6 +170,7 @@ def _audit_l7_manifest(project_dir, cand_id, delta):
             return False, f"L7 script {name!r}: branch_id {s['branch_id']!r} != L6 {l6[name]!r}"
     return True, ""
 
+
 def _critique_ref_valid(project_dir, cand_id, ref):
     """ref form 'L2_feynman#<idx>' or 'L5_tukey#<idx>' -> must point at a real attack."""
     try:
@@ -178,6 +186,7 @@ def _critique_ref_valid(project_dir, cand_id, ref):
     except Exception:
         return False
     return 0 <= idx < len(obj.get("attacks", []))
+
 
 def _audit_l6_traceability(project_dir, cand_id, delta):
     """L6 gate: for from_memory candidates, every analysis-plan script must carry a
@@ -223,6 +232,7 @@ def _audit_l6_traceability(project_dir, cand_id, delta):
             return False, f"L6 script {s.get('name')!r}: missing branch_id"
     return True, ""
 
+
 def _audit_l4_methods(project_dir, cand_id, delta):
     """L4 method gate: for from_memory candidates, every method-dependent script
     must cite a full_text method_card, unless marked status=internally_motivated."""
@@ -251,6 +261,7 @@ def _audit_l4_methods(project_dir, cand_id, delta):
                            f"'internally_motivated'")
     return True, ""
 
+
 def _audit_l0_memory(project_dir, cand_id, delta):
     """Gate: from_memory candidates must carry a hash-matching prior_loop_memory.
     No-op for legacy (non-from_memory) candidates."""
@@ -272,7 +283,7 @@ def _audit_l0_memory(project_dir, cand_id, delta):
 
 
 def _audit_l0_contract(project_dir, cand_id):
-    """Strict current-input validation plus deterministic prior-evidence restore."""
+    """Validate declaration, restore prior evidence, then freeze one data authority."""
     cf = _candidate_file(project_dir, cand_id)
     fm = _load_yaml_front(cf) if cf and cf.exists() else {}
     contract, ap, raw = l0_contract.load_contract(project_dir, cand_id)
@@ -281,7 +292,10 @@ def _audit_l0_contract(project_dir, cand_id):
     if errs:
         return False, "; ".join(errs)
     try:
-        restore_previous_round(project_dir, cand_id)
+        evidence_binding = restore_previous_round(project_dir, cand_id)
+        write_current_round_data_binding(project_dir, cand_id, evidence_binding)
     except L0StateError as exc:
+        return False, f"{exc.code}: {exc.detail}"
+    except L0DataError as exc:
         return False, f"{exc.code}: {exc.detail}"
     return True, ""
