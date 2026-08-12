@@ -60,19 +60,20 @@ class LoopXCli:
             shell=False,
         )
         if completed.returncode != 0:
-            diagnostic = (completed.stderr or "").strip().replace("\n", " ")
-            if len(diagnostic) > 500:
-                diagnostic = diagnostic[:497] + "..."
-            suffix = f": {diagnostic}" if diagnostic else ""
+            # stderr remains at the external-process boundary.  Meta-RLR records
+            # compact exit/check facts and explicit evidence references instead
+            # of propagating arbitrary provider text into maintenance state.
             raise LoopXError(
-                f"LoopX command failed with exit code {completed.returncode}{suffix}"
+                f"LoopX command failed with exit code {completed.returncode}"
             )
 
         raw = (completed.stdout or "").strip()
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise LoopXError(f"LoopX did not return exactly one valid JSON document: {exc}") from exc
+            raise LoopXError(
+                f"LoopX did not return exactly one valid JSON document: {exc}"
+            ) from exc
         if not isinstance(payload, Mapping):
             raise LoopXError("LoopX JSON response must be an object")
         return dict(payload)
