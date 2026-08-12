@@ -61,16 +61,79 @@ def test_maintenance_event_identity_changes_when_stable_facts_change():
     assert first["dedup_fingerprint"] != second["dedup_fingerprint"]
 
 
-def test_absolute_rlr_artifact_reference_is_rejected():
-    kwargs = _common_event_kwargs()
-    kwargs["evidence_refs"] = [
-        {"kind": "rlr_artifact", "ref": "D:/private/data.csv"}
-    ]
+def test_absolute_or_parent_traversal_rlr_artifact_reference_is_rejected():
+    for unsafe_ref in ("D:/private/data.csv", "../private/data.csv"):
+        kwargs = _common_event_kwargs()
+        kwargs["evidence_refs"] = [
+            {"kind": "rlr_artifact", "ref": unsafe_ref}
+        ]
 
-    with pytest.raises(MaintenanceContractError, match="relative"):
+        with pytest.raises(MaintenanceContractError, match="repository-relative"):
+            build_maintenance_event(
+                observed_at="2026-08-13T00:00:00Z",
+                **kwargs,
+            )
+
+
+def test_raw_log_keys_are_rejected_at_the_event_boundary():
+    kwargs = _common_event_kwargs()
+    kwargs["observed"] = {
+        "error_code": "X",
+        "stderr": "private raw diagnostic",
+    }
+
+    with pytest.raises(MaintenanceContractError, match="raw/private"):
         build_maintenance_event(
             observed_at="2026-08-13T00:00:00Z",
             **kwargs,
+        )
+
+
+def test_unbounded_observed_payload_is_rejected():
+    kwargs = _common_event_kwargs()
+    kwargs["observed"] = {
+        "error_code": "X",
+        "detail": "x" * 20000,
+    }
+
+    with pytest.raises(MaintenanceContractError, match="compact"):
+        build_maintenance_event(
+            observed_at="2026-08-13T00:00:00Z",
+            **kwargs,
+        )
+
+
+def test_unknown_top_level_and_evidence_fields_fail_closed():
+    valid = build_maintenance_event(
+        observed_at="2026-08-13T00:00:00Z",
+        **_common_event_kwargs(),
+    )
+    with_extra = dict(valid)
+    with_extra["fix"] = "weaken the gate"
+
+    with pytest.raises(MaintenanceContractError, match="unexpected fields"):
+        validate_maintenance_event(with_extra)
+
+    kwargs = _common_event_kwargs()
+    kwargs["evidence_refs"] = [
+        {
+            "kind": "rlr_artifact",
+            "ref": "08_Audit/example.json",
+            "raw_log": "do not copy me",
+        }
+    ]
+    with pytest.raises(MaintenanceContractError, match="unexpected fields"):
+        build_maintenance_event(
+            observed_at="2026-08-13T00:00:00Z",
+            **kwargs,
+        )
+
+
+def test_observed_at_requires_timezone_aware_iso8601():
+    with pytest.raises(MaintenanceContractError, match="ISO-8601"):
+        build_maintenance_event(
+            observed_at="2026-08-13 00:00:00",
+            **_common_event_kwargs(),
         )
 
 
