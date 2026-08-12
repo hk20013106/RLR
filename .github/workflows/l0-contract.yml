@@ -1,0 +1,52 @@
+name: L0 contract CI
+
+on:
+  pull_request:
+    branches:
+      - codex/l4a-source-metadata-contract
+    paths:
+      - "src/research_loop/l0_*.py"
+      - "src/research_loop/common.py"
+      - "src/research_loop/gates.py"
+      - "src/research_loop/commands/continuation.py"
+      - "src/research_loop/commands/reporting.py"
+      - "tests/test_l0_*.py"
+      - "tests/test_cross_round_e2e.py"
+      - "tests/test_run_loop_guards.py"
+      - "requirements*.txt"
+      - ".github/workflows/l0-contract.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  l0-contract:
+    name: L0 state + preflight / Windows / Python 3.13
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Compile L0 modules
+        shell: bash
+        run: |
+          python -m py_compile \
+            src/research_loop/l0_state.py \
+            src/research_loop/l0_preflight.py \
+            src/research_loop/gates.py \
+            src/research_loop/commands/continuation.py \
+            src/research_loop/commands/reporting.py
+      - name: Run targeted L0 tests
+        run: >-
+          python -m pytest -q
+          tests/test_l0_state_restore.py
+          tests/test_l0_preflight_probes.py
+          tests/test_cross_round_e2e.py
+          tests/test_run_loop_guards.py
+      - name: Check patch whitespace
+        shell: bash
+        run: git diff --check ${{ github.event.pull_request.base.sha }} HEAD
