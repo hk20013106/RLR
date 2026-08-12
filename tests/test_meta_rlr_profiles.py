@@ -1,9 +1,11 @@
 import pytest
 
+from rlr_maintenance.contracts import MaintenanceContractError, build_maintenance_event
 from rlr_maintenance.profiles import (
     VERIFICATION_PROFILE_SCHEMA,
     all_profiles,
     get_profile,
+    profile_for_event,
 )
 
 
@@ -48,3 +50,28 @@ def test_l4_and_l10c_profiles_are_separate_contract_families():
     assert "l10c_single_finalization_owner" not in l4.protected_contracts
     assert "l10c_single_finalization_owner" in l10c.protected_contracts
     assert "l4b_frozen_corpus_only" not in l10c.protected_contracts
+
+
+def _event(expected_contract="runner_nonzero_propagation"):
+    return build_maintenance_event(
+        event_type="runtime_failure",
+        component="root_entrypoint",
+        severity="blocking",
+        observed_at="2026-08-13T00:00:00Z",
+        rlr_revision="a" * 40,
+        observed={"command": ["python", "run_loop.py"], "exit_code": 0},
+        expected_contract=expected_contract,
+    )
+
+
+def test_profile_routing_requires_a_valid_maintenance_event():
+    event = _event()
+    assert profile_for_event(event).profile_id == "l0_state_integrity"
+
+    with pytest.raises(MaintenanceContractError):
+        profile_for_event({"expected_contract": "runner_nonzero_propagation"})
+
+
+def test_unowned_expected_contract_fails_closed_without_second_registry():
+    with pytest.raises(KeyError, match="maps to 0 verification profiles"):
+        profile_for_event(_event("unowned_contract"))
