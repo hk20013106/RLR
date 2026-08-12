@@ -129,7 +129,10 @@ def cmd_next_step(args):
     }
 
     if status in FINAL_STATUSES:
-        if status == "KEEP":
+        # KEEP and REVISE both represent completed L10b decisions whose round
+        # still needs the shared L10c finalization boundary. DROP/DOWNGRADE and
+        # ARCHIVED remain terminal here and do not open a continuation round.
+        if status in {"KEEP", "REVISE"}:
             node_info = node_map.get("L10c")
             if node_info:
                 result = {
