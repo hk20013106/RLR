@@ -7,7 +7,6 @@ enforces the V0.7 Deep Research gate: L1/L4/L8.5 fail closed (rc=3) without a
 successful ARS receipt and a valid evidence pack; `assemble_context()` here
 re-raises that as a hard stop.
 
-
 Drives research_loop_v04.py (the controller) around its DAG using a
 provider-neutral orchestrator, and decides whether to open another round with a
 hybrid StopPolicy (hard cap + L10b decision + optional Review gate + marginal
@@ -35,17 +34,15 @@ HERE = Path(__file__).resolve().parent
 CONTROLLER = HERE / "research_loop_v04.py"
 sys.path.insert(0, str(HERE))
 
-import research_loop_v04 as rl       # noqa: E402  (controller: DAG metadata + helpers)
+import research_loop_v04 as rl       # noqa: E402
 import orchestrator as orch          # noqa: E402
-from research_loop.api import EngineAPI  # noqa: E402  (in-process controller facade)
+from research_loop.api import EngineAPI  # noqa: E402
 from research_loop.compatibility import PROFILE_V20, get_profile
 from research_loop.deep_research import SUPPORTED_BACKENDS
 from research_loop.delta import artifact_for_node
+from research_loop.l0_state import L0StateError, restore_previous_round
 from research_loop.topology import topology_for_profile
 
-# In-process engine facade — replaces the subprocess `_ctl()` transport (Phase 5).
-# Byte-for-byte equivalent to spawning `python research_loop_v04.py <cmd>`, but
-# without the per-call interpreter cost; see research_loop/api.py.
 ENGINE = EngineAPI()
 
 
@@ -66,9 +63,6 @@ headless:
   command: ""
 
 deep_research:
-  # Leave backend empty to use the project's own 00_Preflight/deep_research_runtime.json
-  # (set by `preflight`, which detects the current agent host). Only set an explicit
-  # backend here to force an override -- it takes precedence over the project runtime.
   backend: ""
   executable: ""
   skill_path: ""
@@ -88,40 +82,14 @@ stop_policy:
   keep_requires_review_accept: true
   marginal_gain_stop_threshold: 2
   max_l7_failures: 2
-  max_node_failures: 2   # cognitive-node emit failures before hard-abort (R3)
+  max_node_failures: 2
 
 everos:
   enabled: false
   scope: project_only
 
-# ---------------------------------------------------------------------------
-# Automatic provider templates (tool-agnostic; commented placeholders).
-#
-# CONTRACT (host & command): the command MUST write the delta JSON to
-# {output_file}. Placeholders: {prompt_file} {output_file} {node} {persona}
-# {workspace}. Each node = one fresh subprocess (a fresh session). Raw chat CLIs
-# emit prose -> wrap them so the wrapper writes pure JSON (the generic wrapper is
-# the safest path). Adjust flags to your CLI -- these are SHAPES, not verified.
-#
-# A) HostAgentProvider via env (no config edit needed):
-#      export RLR_HOST_AGENT_CMD='python my_agent.py --prompt {prompt_file} --out {output_file} --node {node} --persona {persona}'
-#    (or 'claude -p < {prompt_file} > {output_file}', etc.)
-#
-# B) Pin a command provider in config:
-#   provider:
-#     default:
-#       type: command
-#       command: "python my_agent.py --prompt {prompt_file} --out {output_file} --node {node} --persona {persona}"
-#       timeout: 600
-#
-#   Codex CLI (placeholder flags):
-#       command: "codex exec --input {prompt_file} --output {output_file}"
-#   Claude CLI (headless; shell redirection works):
-#       command: "claude -p < {prompt_file} > {output_file}"   # wrap if not pure JSON
-#
-# Manual mode is DEBUG-ONLY (run with: --provider manual). Do NOT set
-# type: manual as a default -- the runner will fail loud if you do.
-# ---------------------------------------------------------------------------
+# Automatic provider templates are documented in RUNNER.md. Manual mode is
+# debug-only; the canonical runner never silently falls back to it.
 """
 
 REVIEW_SCHEMA = {
@@ -145,22 +113,12 @@ def log(msg):
     print(f"[run_loop] {msg}")
 
 
-# --- controller plumbing ----------------------------------------------------
-
 def _ctl(*args):
-    # In-process call into the engine (was: subprocess to research_loop_v04.py).
-    # Returns a CtlResult with the same .returncode/.stdout/.stderr surface, so
-    # every callsite below reads it exactly as it read CompletedProcess before.
     return ENGINE.run_cli(*args)
 
 
 def auto_pitfall(project, cand, node, category, symptom, provider="unknown",
                  evidence=""):
-    """Auto-record a status=draft pitfall when the loop hits a failure. Drafts
-    are NOT scanned/enforced until the profile-bound L8 audit confirms them --
-    this just makes the
-    failure durable so a human can triage it. Never fatal: a ledger write must
-    not take down the run."""
     try:
         r = _ctl("record-pitfall", project, cand, "--node", node,
                  "--category", category, "--symptom", symptom[:500],
@@ -171,7 +129,7 @@ def auto_pitfall(project, cand, node, category, symptom, provider="unknown",
             log(f"auto-recorded draft pitfall ({category} @ {node})")
         else:
             log(f"auto-pitfall failed (non-fatal): {r.stderr.strip()}")
-    except Exception as e:  # noqa: BLE001 -- ledger must never break the loop
+    except Exception as e:
         log(f"auto-pitfall error (non-fatal): {e}")
 
 
@@ -229,8 +187,6 @@ def emit_delta(project, cand, node, persona, delta, run_dir, receipt=None,
 def advance(project, cand, step):
     ac = step.get("advance_command")
     if step.get("node") == "L10b":
-        # A v2 L10b is the sole candidate-decision input.  Do not repeat its
-        # conclusion through the generic mutable decision command.
         _ctl("finalize-candidate", project, cand)
     elif ac == "decision":
         _ctl("decision", project, cand, "--status", step.get("advance_status"),
@@ -262,9 +218,6 @@ def provider_for(node, cfg, args):
 
 
 def preflight_providers(cfg, args):
-    """Fail loud unless an AUTOMATIC provider is configured and constructible.
-    Manual is debug-only: allowed only via `--provider manual`, never as a
-    default and never as a silent fallback. Returns True if good to run."""
     if cfg.mode == "main_agent":
         log("mode: main_agent (host session orchestrates; no python provider needed)")
         return True
@@ -334,7 +287,6 @@ def write_receipt(run_dir, node, persona, prov, context, step, cand, round_id,
 
 
 def _shadow_run_id(node, cand, round_id, candidates, seed, match_budget):
-    """Return a stable safe advisory-run identity for retry de-duplication."""
     identity = json.dumps({"stage": node, "candidate": cand, "round": round_id,
                            "candidates": sorted(candidates), "seed": seed,
                            "match_budget": match_budget}, sort_keys=True)
@@ -344,7 +296,6 @@ def _shadow_run_id(node, cand, round_id, candidates, seed, match_budget):
 
 def _write_shadow_failure_audit(project, run_id, node, cand, error, command,
                                 seed, match_budget, outcome="failed"):
-    """Best-effort shadow-only audit. It must never disturb the formal loop."""
     try:
         audit_dir = Path(project) / "08_Audit" / "ranking"
         audit_dir.mkdir(parents=True, exist_ok=True)
@@ -387,12 +338,11 @@ def _write_shadow_failure_audit(project, run_id, node, cand, error, command,
                     temp_path.unlink(missing_ok=True)
                 raise
         raise RuntimeError("unable to allocate a shadow ranking audit filename")
-    except Exception as exc:  # noqa: BLE001 -- advisory audit must stay advisory
+    except Exception as exc:
         log(f"shadow ranking failure audit skipped: {exc}")
 
 
 def _shadow_artifact_status(project, run_id, stage, candidates, seed, match_budget):
-    """Trust only the engine's hash-verified completion marker for deduplication."""
     base = Path(project) / "08_Audit" / "ranking"
     paths = {
         "artifact": base / f"{run_id}.json",
@@ -440,7 +390,6 @@ def _shadow_artifact_status(project, run_id, stage, candidates, seed, match_budg
 
 
 def run_shadow_ranking(project, cand, node, args, round_id):
-    """Launch an isolated advisory ranking after L3/L10b emission, never fatal."""
     if not getattr(args, "shadow_ranking", False) or node not in ("L3", "L10b"):
         return
     candidates = []
@@ -500,14 +449,12 @@ def run_shadow_ranking(project, cand, node, args, round_id):
             f"ranking-shadow exited {result.returncode}"
     except subprocess.TimeoutExpired:
         error = f"ranking-shadow timed out after {timeout}s"
-    except Exception as exc:  # noqa: BLE001 -- shadow execution is always fail-soft
+    except Exception as exc:
         error = f"ranking-shadow launch failed: {exc}"
     log(f"shadow ranking failed (non-fatal): {error}")
     _write_shadow_failure_audit(project, run_id, node, cand, error, command,
                                 seed, match_budget)
 
-
-# --- node execution ---------------------------------------------------------
 
 def exec_cognitive(project, cand, step, cfg, args, run_dir, round_id,
                    do_advance=True, authorization_id=None):
@@ -515,14 +462,6 @@ def exec_cognitive(project, cand, step, cfg, args, run_dir, round_id,
     evidence_run_id = getattr(args, "evidence_run_ids", {}).get(node)
     ctx, manifest = assemble_context(project, cand, node, authorization_id,
                                      evidence_run_id)
-    # Fail-closed re-gate at the dispatch boundary: for L0, run the SAME unified
-    # validator (l0_contract.validate_l0_input_contract, via _audit_l0_contract)
-    # immediately before the provider writes its prompt. assemble_context above
-    # already gates (rc=3 -> RuntimeError), so this closes the residual window:
-    # a stale/tampered artifact between assemble and dispatch, or any future path
-    # that reaches dispatch without the assemble gate, still cannot emit an L0
-    # prompt from invalid input. (The provider block-assertion is a last-resort
-    # backstop only; this is the authoritative pre-write validator call.)
     if node == "L0":
         ok_c, c_reason = rl._audit_l0_contract(Path(project), cand)
         if not ok_c:
@@ -536,7 +475,7 @@ def exec_cognitive(project, cand, step, cfg, args, run_dir, round_id,
         delta = prov.run_agent(node, persona, ctx, output_schema=schema,
                                tools=step.get("tools_policy"),
                                run_dir=str(run_dir))
-    except Exception as e:  # provider failure -> durable draft, then propagate
+    except Exception as e:
         auto_pitfall(project, cand, node, "provider_failure",
                      f"{persona} provider raised: {e}", provider=pname,
                      evidence=str(run_dir))
@@ -621,7 +560,6 @@ def _deep_research_config(cfg):
 
 
 def ensure_pre_research(project, cand, node, cfg, args, run_dir):
-    """Ensure Deep Research stages have an evidence-backed ARS artifact."""
     if node not in rl.PRE_RESEARCH_MAP:
         return True
     target = (Path(project) / "02_Agent_Notes" / "_pre_research"
@@ -683,9 +621,6 @@ def ensure_pre_research(project, cand, node, cfg, args, run_dir):
 
 
 def _bump_node_failure(exec_state, node, max_node_failures):
-    """Track repeated cognitive-node emit failures (mirrors l7_failures).
-    Returns True once `node` has hit the bound -- caller must abort, not
-    retry forever."""
     counts = exec_state.setdefault("node_failures", {})
     counts[node] = counts.get(node, 0) + 1
     return counts[node] >= max_node_failures
@@ -737,22 +672,13 @@ def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
         if not ensure_pre_research(project, cand, node, cfg, args, run_dir):
             return f"node_failed:{node}"
         if node == "L10c":
-            _ctl("aggregate-report", project, cand)
-            # sync human-readable output to Obsidian
-            sync_script = HERE / "sync_to_obsidian.py"
-            if sync_script.exists():
-                _ctl_sync = subprocess.run(
-                    [sys.executable, str(sync_script), project, "--cand", cand],
-                    capture_output=True, text=True)
-                if _ctl_sync.returncode == 0:
-                    log("Obsidian sync complete (end-of-round)")
-                else:
-                    warn = (_ctl_sync.stderr.strip() or _ctl_sync.stdout.strip()
-                            or "unknown error")
-                    log(f"Obsidian sync skipped: {warn}")
-            else:
-                log("sync_to_obsidian.py not found; skipping Obsidian sync")
-            log("L10c: aggregate-report generated FINAL_REPORT")
+            report = _ctl("aggregate-report", project, cand)
+            if report.returncode != 0:
+                detail = (report.stderr.strip() or report.stdout.strip()
+                          or "aggregate-report failed")
+                log(f"L10c finalization failed: {detail}")
+                return "node_failed:L10c"
+            log("L10c: report + required Obsidian projection + round manifest complete")
             return "completed"
         if node == "L7":
             log("node L7 (Turing) [execution / Path A]")
@@ -769,8 +695,6 @@ def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
                 f"aborting round (no further retries)")
             return f"node_failed:{node}"
 
-
-# --- review gate ------------------------------------------------------------
 
 def run_review_gate(project, cand, cfg, args, run_dir):
     rep = Path(project) / "FINAL_REPORT.md"
@@ -802,11 +726,8 @@ def run_review_gate(project, cand, cfg, args, run_dir):
         return None
 
 
-# --- stop policy ------------------------------------------------------------
-
 class StopPolicy:
-    """Hybrid stop rule. The driving question is not 'are there issues' but
-    'would another round plausibly change the conclusion'."""
+    """Hybrid stop rule: continue only if another round can change conclusion."""
 
     def __init__(self, max_rounds=3, marginal_gain_stop_threshold=2,
                  keep_requires_review_accept=True, max_l7_failures=2):
@@ -866,8 +787,6 @@ class StopPolicy:
         decision = str(l10b.get("decision", "")).upper()
         review_verdict = (review or {}).get("review_verdict")
         next_steps = l10b.get("next_steps") or []
-
-        # ---- STOP conditions (take precedence) ----
         if status in ("DROP", "DOWNGRADE", "ARCHIVED"):
             return self._stop(f"terminal status {status}")
         if l7_failures >= self.max_l7_failures:
@@ -889,13 +808,9 @@ class StopPolicy:
                               "(polish-only, not conclusion-changing)")
         if self._no_new_evidence_two_rounds(prev_summaries):
             return self._stop("two consecutive rounds added no new key evidence")
-
-        # ---- CONTINUE conditions ----
         executable = self._executable(next_steps, review)
         if decision == "REVISE" and executable and round_id < self.max_rounds:
             return self._continue(l10b, review, parent_fm)
-
-        # ---- conservative default: stop ----
         if status == "KEEP":
             return self._stop("KEEP (no review verdict; nothing to continue on)")
         return self._stop("no continue condition met (default stop)")
@@ -915,8 +830,6 @@ def evidence_sig(project, cand):
                        sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()
 
-
-# --- next-round child candidate ---------------------------------------------
 
 def create_child(project, parent_cand, decision, new_round):
     parent_fm = rl._load_yaml_front(rl._candidate_file(Path(project), parent_cand))
@@ -956,8 +869,6 @@ def create_child(project, parent_cand, decision, new_round):
     return child
 
 
-# --- dry run ----------------------------------------------------------------
-
 def _plan_line(nid, cfg, node_map, is_l10c=False):
     ni = node_map[nid]
     if is_l10c:
@@ -994,7 +905,6 @@ def dry_run_plan(project, cand, cfg, max_rounds, review_on):
     print()
     tail = "review gate -> " if review_on else ""
     log(f"after L10c: {tail}StopPolicy(max_rounds={max_rounds}) decides stop/continue")
-    # show whether the default automatic provider is actually runnable now
     try:
         orch.make_provider(cfg.default, override_type=None)
         log(f"default provider '{cfg.default.get('type')}' resolves OK (automatic)")
@@ -1003,8 +913,6 @@ def dry_run_plan(project, cand, cfg, max_rounds, review_on):
     log("dry-run complete (one round planned; loop is bounded by max_rounds)")
     return 0
 
-
-# --- main run ---------------------------------------------------------------
 
 def cmd_run(args):
     project, cand = args.project_dir, args.cand_id
@@ -1017,8 +925,6 @@ def cmd_run(args):
         log(f"ERROR: no candidate {cand} in {project}")
         return 2
 
-    # L0 dependency gate (hard stop; must never be skipped). The controller
-    # check-deps returns non-zero if a required dependency is missing.
     dep = _ctl("check-deps", project)
     if dep.returncode != 0:
         log("L0 DEPENDENCY GATE FAILED -- halting (not skipping):")
@@ -1037,6 +943,18 @@ def cmd_run(args):
         return dry_run_plan(project, cand, cfg, max_rounds,
                             review_on=(not args.no_review
                                        and cfg.review.get("enabled", True)))
+
+    # Restore is deterministic state validation, not provider work. It must run
+    # before provider readiness or main-agent handoff so a broken continuation
+    # cannot consume model quota or receive an orchestration prompt.
+    try:
+        binding = restore_previous_round(project, cand)
+    except L0StateError as exc:
+        log(f"L0 STATE RESTORE FAILED -- {exc.code}: {exc.detail}")
+        return 3
+    if binding.get("binding_status") == "PASS":
+        log(f"L0 state restore PASS: {len(binding.get('verified_artifacts', []))} "
+            "prior artifacts verified")
 
     if not preflight_providers(cfg, args):
         log("aborting: no automatic provider configured (see RUNNER.md).")
@@ -1070,9 +988,8 @@ def cmd_run(args):
             log("halted per --stop-after-node (no stop decision taken)")
             return 0
         if isinstance(outcome, str) and outcome.startswith("node_failed:"):
-            log(f"ABORTING RUN: {outcome} -- repeated cognitive-node emit "
-                f"failure (see stop_policy.max_node_failures); not treated "
-                f"as success")
+            log(f"ABORTING RUN: {outcome} -- node execution/finalization failed; "
+                "not treated as success")
             return 4
 
         run_dir = Path(project) / "08_Run_Receipts" / cur / f"round_{round_id:02d}"
@@ -1090,7 +1007,7 @@ def cmd_run(args):
                              round_id=round_id, prev_summaries=summaries,
                              l7_failures=exec_state["l7_failures"],
                              parent_fm=parent_fm)
-        (run_dir).mkdir(parents=True, exist_ok=True)
+        run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "stop_decision.json").write_text(
             json.dumps(decision, indent=2, ensure_ascii=False), encoding="utf-8")
         log(f"STOP DECISION: stop={decision['stop']} — {decision['reason']}")
@@ -1189,8 +1106,7 @@ def build_parser():
     sp.add_argument("--max-rounds", dest="max_rounds", type=int, default=None)
     sp.add_argument("--provider", choices=["main_agent", "host", "command", "manual"],
                     default=None,
-                    help="force a provider type for all nodes "
-                         "(manual is debug-only)")
+                    help="force a provider type for all nodes (manual is debug-only)")
     sp.add_argument("--dry-run", action="store_true",
                     help="print the plan; no model calls, no state changes")
     sp.add_argument("--stop-after-node", dest="stop_after_node",
@@ -1220,4 +1136,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     sys.exit(main())
-
