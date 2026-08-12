@@ -9,15 +9,9 @@ from .contracts import build_maintenance_event
 
 def _compact_command(command: Sequence[str]) -> list[str]:
     compact: list[str] = []
-    for index, token in enumerate(command):
+    for token in command:
         text = str(token)
-        if index == 0 and (
-            PurePosixPath(text).is_absolute() or PureWindowsPath(text).is_absolute()
-        ):
-            compact.append(PureWindowsPath(text).name or PurePosixPath(text).name)
-        elif index > 0 and (
-            PurePosixPath(text).is_absolute() or PureWindowsPath(text).is_absolute()
-        ):
+        if PurePosixPath(text).is_absolute() or PureWindowsPath(text).is_absolute():
             compact.append(PureWindowsPath(text).name or PurePosixPath(text).name)
         else:
             compact.append(text)
@@ -105,6 +99,38 @@ def observe_verification_failure(
             "check_id": str(check_id),
             "outcome": str(outcome),
             "returncode": int(returncode),
+        },
+        expected_contract=expected_contract,
+        evidence_refs=evidence_refs,
+        source_receipts=source_receipts,
+        suggested_route="repair",
+    )
+
+
+def observe_ci_failure(
+    *,
+    component: str,
+    check_id: str,
+    conclusion: str,
+    run_id: str,
+    expected_contract: str,
+    rlr_revision: str,
+    observed_at: str,
+    evidence_refs: Iterable[Mapping[str, Any]] = (),
+    source_receipts: Iterable[Mapping[str, Any]] = (),
+    severity: str = "blocking",
+) -> dict[str, Any]:
+    """Record a compact CI outcome without copying workflow logs."""
+    return build_maintenance_event(
+        event_type="ci_failure",
+        component=component,
+        severity=severity,
+        observed_at=observed_at,
+        rlr_revision=rlr_revision,
+        observed={
+            "check_id": str(check_id),
+            "conclusion": str(conclusion),
+            "run_id": str(run_id),
         },
         expected_contract=expected_contract,
         evidence_refs=evidence_refs,
