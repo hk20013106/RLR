@@ -37,6 +37,18 @@ def test_profiles_use_argv_not_shell_commands_and_include_full_regression():
             assert not any(token in {"&&", "||", ";"} for token in step.command)
 
 
+def test_protected_contract_ownership_is_globally_unique():
+    owners = {}
+    duplicates = []
+    for profile in all_profiles():
+        for contract in profile.protected_contracts:
+            if contract in owners:
+                duplicates.append((contract, owners[contract], profile.profile_id))
+            owners[contract] = profile.profile_id
+
+    assert duplicates == []
+
+
 def test_unknown_profile_fails_closed():
     with pytest.raises(KeyError, match="unknown verification profile"):
         get_profile("does-not-exist")
