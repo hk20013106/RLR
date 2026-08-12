@@ -26,7 +26,7 @@ def _common_event_kwargs():
     }
 
 
-def test_maintenance_event_schema_and_stable_identity_ignore_observation_time():
+def test_event_id_is_occurrence_identity_but_dedup_ignores_observation_time():
     kwargs = _common_event_kwargs()
     first = build_maintenance_event(
         observed_at="2026-08-13T00:00:00Z",
@@ -38,13 +38,12 @@ def test_maintenance_event_schema_and_stable_identity_ignore_observation_time():
     )
 
     assert first["schema_version"] == MAINTENANCE_EVENT_SCHEMA
-    assert first["event_id"] == second["event_id"]
+    assert first["event_id"] != second["event_id"]
     assert first["dedup_fingerprint"] == second["dedup_fingerprint"]
-    assert first["observed_at"] != second["observed_at"]
     assert validate_maintenance_event(first) == first
 
 
-def test_dedup_identity_ignores_evidence_occurrence_and_route():
+def test_dedup_identity_ignores_evidence_severity_and_route():
     kwargs = _common_event_kwargs()
     first = build_maintenance_event(
         observed_at="2026-08-13T00:00:00Z",
@@ -53,6 +52,7 @@ def test_dedup_identity_ignores_evidence_occurrence_and_route():
     )
 
     second_kwargs = _common_event_kwargs()
+    second_kwargs["severity"] = "warning"
     second_kwargs["evidence_refs"] = [
         {"kind": "github_check", "ref": "workflow-run:second-observation"}
     ]
@@ -62,13 +62,14 @@ def test_dedup_identity_ignores_evidence_occurrence_and_route():
         **second_kwargs,
     )
 
-    assert first["event_id"] == second["event_id"]
     assert first["dedup_fingerprint"] == second["dedup_fingerprint"]
+    assert first["event_id"] != second["event_id"]
     assert first["evidence_refs"] != second["evidence_refs"]
+    assert first["severity"] != second["severity"]
     assert first["suggested_route"] != second["suggested_route"]
 
 
-def test_maintenance_event_identity_changes_when_stable_facts_change():
+def test_failure_identity_changes_when_stable_facts_change():
     kwargs = _common_event_kwargs()
     first = build_maintenance_event(
         observed_at="2026-08-13T00:00:00Z",
