@@ -1,140 +1,150 @@
 # L0 Pre-flight + State Restore Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** execute this plan task-by-task. TDD is mandatory for behavior changes. Do not expand into literature-transport implementation or L4 changes.
 
-**Goal:** Make L0 a deterministic pre-flight + previous-round evidence restore boundary with granular failure codes, immutable-by-hash round manifests, and explicit evidence bindings.
+**Goal:** Make the single formal L0 node a deterministic pre-flight + previous-round evidence restore boundary, with one authoritative round-finalization path and component-specific failures.
 
-**Architecture:** Keep one formal L0 node. Add a focused `l0_state.py` leaf that owns round-manifest and evidence-binding schemas/validation. Reuse `l0_contract.py`, `next_loop_memory.json`, the existing L7 execution manifest, current evidence directories, and the hypothesis ledger. Integrate manifest emission at L10c/continuation creation and restore before any continuation-round provider work.
+**Base:** `e669ca3bc5229deabf46e89ca353fde510de5f98`
 
-**Tech Stack:** Python 3.11/3.12, pathlib, hashlib, json, pytest, existing RLR controller/runner APIs.
+## Architecture review — 2026-08-12
 
-## Global Constraints
+This plan was re-audited before continuing implementation. The audit applies three rules to every change:
 
-- Base commit: `e669ca3bc5229deabf46e89ca353fde510de5f98`.
-- Do not modify the merged PR #12 L4A→L4B closed-corpus contract.
-- One formal `L0` DAG node; no L0a/L0b/L0c nodes.
-- Large artifacts are retained in place and bound by exact path + SHA-256; do not copy them into a new store.
-- `l0_contract.py` remains the sole current-round input schema/validator.
-- `next_loop_memory.json` remains semantic continuation state; round manifests hold physical evidence state.
-- Continuation restore must fail before L1/provider execution on missing/tampered inherited evidence.
-- Failure output must include a specific component error code.
+1. **One owner per concern.** Do not keep two independent implementations of the same check/finalization path.
+2. **Dependency → consumer closure.** A blocking dependency must have a real downstream consumer in the current codebase.
+3. **Scope discipline.** Only changes required to complete the L0 evidence/state contract belong in PR #15.
+
+### Audit findings
+
+1. `l0_preflight.py` is now the intended owner of framework readiness probes, but `cmd_preflight` and `cmd_check_deps` still repeat the Academic Research runtime check. This duplicates authority and must be removed.
+2. PubMed MCP and Zotero readiness probes are useful, but their actual literature consumers are not yet wired in the canonical RLR path. They must be reported as **target-required / non-blocking readiness** in this PR, not falsely treated as closed blocking dependencies. They become blocking only in the later literature-transport integration that actually consumes them.
+3. Obsidian already has a real L10c consumer. If it is blocking at L0, L10c sync failure cannot remain a warning. Finalization must fail closed.
+4. Round manifest creation currently has two owners (`aggregate-report` and `emit-loop-memory`). This violates single ownership. L10c finalization must own manifest creation; loop-memory may only consume an already-frozen manifest.
+5. The manifest currently captures source files, L7 script outputs, reports, literature JSON and run receipts, but not all authoritative result/audit artifacts. It must include explicit L7 result artifact refs and candidate delta/audit artifacts without broad directory guessing.
+6. Continuation restore is enforced by the L0 context gate, but `run_loop.py` still performs provider readiness/main-agent handoff before a runner-level restore guard. A continuation must fail before provider setup/handoff.
+7. `L0 contract CI` tests are green, but its whitespace step fails because shallow checkout does not contain the PR base commit. This is CI plumbing, not a product failure; fix by fetching sufficient history, not by weakening `git diff --check`.
+
+### Explicitly out of scope
+
+- Actual PubMed MCP search/full-text consumer implementation.
+- Zotero item/PDF registration adapter.
+- Any L4A→L4B, L4C, or L4.5 changes.
+- New evidence database or duplicate artifact store.
+- L7 workspace redesign.
+- New formal DAG nodes.
+- Automatic merge of PR #15.
 
 ---
 
-### Task 1: Round Evidence Manifest Core
+## Task 1 — Preflight authority and enforcement semantics
 
-**Files:**
-- Create: `src/research_loop/l0_state.py`
-- Create: `tests/test_l0_state_restore.py`
-
-**Interfaces:**
-- Produces: `build_round_manifest(project_dir, cand_id) -> dict`
-- Produces: `write_round_manifest(project_dir, cand_id) -> tuple[Path, str]`
-- Produces: `load_round_manifest(path) -> dict`
-- Produces: `verify_round_manifest(project_dir, manifest, expected_candidate, expected_round) -> list[dict]`
-
-- [ ] Write failing tests for schema identity, source hash capture, L7 output capture, missing artifact and hash mismatch.
-- [ ] Confirm tests fail because `research_loop.l0_state` does not exist.
-- [ ] Implement minimal manifest collection from existing authoritative inputs: `l0_input.yaml`, L7 execution manifest/output files, candidate-scoped reports, literature cards/evidence packs, and run/audit receipts.
-- [ ] Keep artifact records deterministic and sorted.
-- [ ] Confirm targeted tests pass.
-
-### Task 2: Evidence Binding and Continuation Restore
-
-**Files:**
-- Modify: `src/research_loop/l0_state.py`
-- Modify: `src/research_loop/commands/continuation.py`
-- Modify: `src/research_loop/commands/lifecycle.py`
-- Modify: `tests/test_l0_state_restore.py`
-- Modify: `tests/test_cross_round_e2e.py`
-
-**Interfaces:**
-- Produces: `restore_previous_round(project_dir, cand_id) -> dict`
-- Produces: `write_evidence_binding(project_dir, cand_id, binding) -> Path`
-
-- [ ] Write failing tests: initial round restore is a no-op; continuation requires linked manifest; missing manifest fails with `L0_RESTORE_MANIFEST_MISSING`; tampered artifact fails with `L0_RESTORE_ARTIFACT_HASH_MISMATCH`; valid restore writes `L0EvidenceBinding/v1`.
-- [ ] Extend loop memory with `round_manifest_path` and `round_manifest_sha256`; never embed all artifact records in loop memory.
-- [ ] Validate previous candidate/round/project identity before bytes.
-- [ ] Fail closed without modifying the prior manifest.
-- [ ] Confirm targeted continuation tests pass.
-
-### Task 3: Canonical Runner Binding Gate
-
-**Files:**
-- Modify: `src/run_loop.py`
-- Modify: `tests/test_run_loop_guards.py`
-- Modify: `tests/test_l0_state_restore.py`
-
-**Interfaces:**
-- Consumes: `restore_previous_round(project, cand_id)`.
-
-- [ ] Write failing runner test proving a continuation cannot reach provider setup when restore fails.
-- [ ] Call deterministic restore after dependency checks and before provider execution/main-agent handoff.
-- [ ] Log the exact restore error code and return hard-stop code 3.
-- [ ] Preserve initial-round behavior.
-- [ ] Confirm runner guard tests pass.
-
-### Task 4: Granular Preflight Probe Contract
-
-**Files:**
-- Create: `src/research_loop/l0_preflight.py`
+**Files**
+- Modify: `src/research_loop/l0_preflight.py`
 - Modify: `src/research_loop/common.py`
 - Modify: `src/research_loop/commands/lifecycle.py`
-- Create: `tests/test_l0_preflight_probes.py`
-
-**Interfaces:**
-- Produces: `ProbeResult(component, status, code, detail, consumer)`.
-- Produces: `run_preflight_probes(project_dir) -> list[ProbeResult]`.
-- Produces: `write_preflight_receipt(project_dir, results) -> Path`.
-
-- [ ] Write failing tests for exact component codes for package/provider/filesystem, Academic Research, Zotero, evidence store, hypothesis ledger and Obsidian.
-- [ ] Preserve current dependency declarations but route output through structured results rather than a single boolean gate.
-- [ ] Probe Zotero beyond raw TCP where possible: local API endpoint readable; if only socket status is available, report that exact capability rather than claiming library readability.
-- [ ] Validate Obsidian path, `.obsidian/`, and writability.
-- [ ] Validate evidence-store directories with create/read/delete probe.
-- [ ] Write `00_Preflight/preflight_receipt.json` on every preflight run.
-- [ ] Confirm targeted tests pass.
-
-### Task 5: PubMed MCP Readiness Boundary
-
-**Files:**
-- Modify: `src/research_loop/l0_preflight.py`
 - Modify: `tests/test_l0_preflight_probes.py`
-- Modify: `docs/DAG_TOPOLOGY.md`
 
-**Interfaces:**
-- Required capability names: `pubmed_search_articles`, `pubmed_fetch_articles`, `pubmed_fetch_fulltext`.
+**Contract**
+- `l0_preflight.py` is the sole framework-owned service-probe authority.
+- Each `ProbeResult` states whether it is currently blocking.
+- Current blocking probes: core Python/packages, filesystem, Academic Research, hypothesis ledger, evidence store, Obsidian.
+- PubMed MCP and Zotero remain visible readiness probes but non-blocking until their real consumers are wired.
+- `preflight_receipt.json` records both status and enforcement semantics.
 
-- [ ] Add tests for unconfigured/start-failed and required-tool-missing cases.
-- [ ] Represent MCP readiness through explicit configuration/probe evidence; do not pretend an stdio MCP has a TCP port.
-- [ ] Fail with `L0_RESEARCH_PUBMED_MCP_START_FAILED` or `L0_RESEARCH_PUBMED_MCP_REQUIRED_TOOL_MISSING` as appropriate.
-- [ ] Document PubMed MCP as literature transport and Academic Research as reasoning/orchestration.
-- [ ] Confirm targeted tests pass.
+**TDD**
+- [ ] RED: failed non-blocking PubMed/Zotero probe does not make overall preflight fail.
+- [ ] RED: failed blocking ARS/ledger/Obsidian probe does make overall preflight fail.
+- [ ] RED: lifecycle commands do not execute a second ARS readiness check.
+- [ ] Minimal implementation; no new generic dependency framework.
 
-### Task 6: L10c Round Finalization
+## Task 2 — Complete authoritative round evidence manifest
 
-**Files:**
-- Modify: `src/research_loop/commands/reporting.py`
-- Modify: `src/research_loop/commands/continuation.py`
-- Modify: `tests/test_cross_round_e2e.py`
+**Files**
+- Modify: `src/research_loop/l0_state.py`
 - Modify: `tests/test_l0_state_restore.py`
 
-**Interfaces:**
-- L10c finalization emits candidate report, round manifest and loop memory linkage without copying large artifacts.
+**Contract**
+- One artifact path is registered once with the strongest appropriate class.
+- Explicit authoritative sources only:
+  - current L0 source contract;
+  - L7 execution manifest outputs;
+  - L7 `results[*].artifact_refs` as `result`;
+  - candidate-scoped final reports;
+  - candidate-owned literature evidence;
+  - emitted candidate deltas/audit artifacts;
+  - runtime receipts.
+- No broad scan that invents evidence ownership.
+- L7 output records link to the existing execution manifest as producer receipt where known.
 
-- [ ] Write failing test that aggregate-report/finalization leaves an immutable round manifest available to the next round.
-- [ ] Emit the manifest after reports are written so result reports can be included.
-- [ ] Ensure repeated emission with identical bytes is idempotent; conflicting existing manifest is a hard failure.
-- [ ] Ensure child creation uses the manifest-linked loop memory.
-- [ ] Confirm cross-round tests pass.
+**TDD**
+- [ ] RED: L7 result artifact refs are persisted as `result`.
+- [ ] RED: a path present as both L7 output and result is not duplicated.
+- [ ] RED: candidate delta/audit evidence is registered.
+- [ ] RED: tampering remains fail-closed.
 
-### Task 7: Verification
+## Task 3 — Single L10c finalization owner
 
-**Files:**
-- No new production scope unless a failing test identifies a contract bug.
+**Files**
+- Modify: `src/research_loop/commands/reporting.py`
+- Modify: `src/research_loop/commands/continuation.py`
+- Modify: `src/run_loop.py`
+- Modify: `tests/test_cross_round_e2e.py`
+- Modify: `tests/test_run_loop_guards.py`
 
-- [ ] Run targeted L0 state/continuation/runner/preflight tests.
-- [ ] Run L4/L4.5 regression tests to prove PR #12 boundaries are untouched.
-- [ ] Run full suite.
-- [ ] Run `git diff --check` equivalent through CI/check tooling.
-- [ ] Inspect CI for the feature head; do not merge automatically unless explicitly requested.
+**Contract**
+- `aggregate-report`/L10c owns round finalization:
+  1. generate candidate-scoped reports;
+  2. run required Obsidian projection;
+  3. freeze round evidence manifest only after sync succeeds.
+- `run_loop.py` must not run a second independent Obsidian path.
+- `emit-loop-memory` requires an existing valid round manifest and only links it by path/hash; it never creates/rebuilds the manifest.
+- A failed Obsidian sync leaves no frozen round manifest.
+
+**TDD**
+- [ ] RED: Obsidian sync failure makes L10c fail and no manifest is frozen.
+- [ ] RED: runner checks aggregate-report return code and does not claim completion on failure.
+- [ ] RED: `emit-loop-memory` fails if L10c manifest is absent.
+- [ ] RED: successful L10c leaves a manifest consumable by continuation.
+
+## Task 4 — Earliest runner restore guard
+
+**Files**
+- Modify: `src/run_loop.py`
+- Modify: `tests/test_run_loop_guards.py`
+
+**Contract**
+- After component dependency checks, but before provider readiness or main-agent handoff, call the same `restore_previous_round()` authority used by the L0 context gate.
+- Initial round remains `NOT_APPLICABLE` and unchanged.
+- Continuation failure logs the exact `L0_RESTORE_*` code and returns hard-stop code 3.
+
+**TDD**
+- [ ] RED: bad continuation manifest prevents `preflight_providers()` from being called.
+- [ ] RED: bad continuation manifest prevents main-agent handoff.
+- [ ] RED: initial round still reaches existing provider logic.
+
+## Task 5 — CI and documentation closure
+
+**Files**
+- Modify: `.github/workflows/l0-contract.yml`
+- Modify: `docs/DAG_TOPOLOGY.md`
+- Update: this plan/spec only where behavior changed.
+
+**Contract**
+- Keep `git diff --check` meaningful; fetch PR base history instead of removing the check.
+- Document one L0 node, round evidence restore, current blocking vs future literature-transport readiness, and required Obsidian finalization.
+
+## Task 6 — Verification
+
+No new production scope unless a failing test proves a contract defect.
+
+- [ ] L0 targeted tests GREEN.
+- [ ] Provider runtime tests GREEN.
+- [ ] L4/L4.5 regression tests GREEN.
+- [ ] Full suite GREEN.
+- [ ] `git diff --check` GREEN.
+- [ ] PR #15 diff reviewed for accidental L4/literature-transport expansion.
+- [ ] PR #15 remains draft until local real-environment pilot is performed.
+
+## Completion boundary
+
+GitHub-side work is complete only when all repository tests/checks are green and no known L0 contract bug remains. The final real environment acceptance is separate and must be run locally because it requires the user's actual Academic Research runtime, PubMed MCP, Zotero Desktop, Obsidian vault, and cross-round filesystem state.
