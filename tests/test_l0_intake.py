@@ -11,6 +11,8 @@ from unittest.mock import patch
 import yaml
 
 from research_loop import l0_contract
+from research_loop.l0_state import ROUND_MANIFEST_SCHEMA
+from research_loop.hypothesis_ledger import binding_path
 from research_loop.providers.command import CommandProvider
 
 
@@ -40,6 +42,33 @@ def _prompt_via_provider(context, run_dir):
     provider = CommandProvider({"command": command})
     provider.run_agent("L0", "Linnaeus", context, run_dir=str(run_dir))
     return Path(provider.last_prompt_file).read_text(encoding="utf-8")
+
+
+def _write_prior_round_manifest(project, seed_path, memory):
+    """Make a continuation seed represent a physically finalized prior round.
+
+    This intake test has no prior analysis artifacts of its own, so an empty
+    artifact list is intentional. Artifact completeness/hash behavior is covered
+    by the dedicated l0_state tests.
+    """
+    binding = json.loads(binding_path(project).read_text(encoding="utf-8"))
+    candidate_id = str(memory["source_candidate_id"])
+    round_id = str(memory["parent_round_id"])
+    manifest = {
+        "schema_version": ROUND_MANIFEST_SCHEMA,
+        "project_id": str(binding["project_id"]),
+        "candidate_id": candidate_id,
+        "round_id": round_id,
+        "artifacts": [],
+    }
+    path = (project / "08_Audit" / "round_manifests" /
+            f"{candidate_id}_round_{round_id}.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8")
+    memory["round_manifest_path"] = path.relative_to(project).as_posix()
+    memory["round_manifest_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    seed_path.write_text(json.dumps(memory), encoding="utf-8")
 
 
 def test_normalize_initial_request_with_local_directory(tmp_path):
@@ -80,7 +109,7 @@ def test_normalize_continuation_uses_verified_memory_and_reaches_l0_prompt(tmp_p
     data_file = project / "data.tsv"
     data_file.write_text("sample\tvalue\nA\t1\n", encoding="utf-8")
     seed = tmp_path / "seed.json"
-    seed.write_text(json.dumps({
+    memory = {
         "source_candidate_id": "C_PARENT_0001",
         "next_round_hypothesis": "unused seed hypothesis",
         "required_new_search_directions": ["direction"],
@@ -88,7 +117,8 @@ def test_normalize_continuation_uses_verified_memory_and_reaches_l0_prompt(tmp_p
         "previous_final_decision": "REVISE",
         "previous_conclusion": "prior conclusion",
         "round_id": "2", "parent_round_id": "1",
-    }), encoding="utf-8")
+    }
+    _write_prior_round_manifest(project, seed, memory)
     request = tmp_path / "continuation.md"
     request.write_text(
         "Scientific question: Does the ancient signal remain after re-analysis?\n"
