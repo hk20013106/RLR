@@ -7,15 +7,26 @@ from typing import Any, Iterable, Mapping, Sequence
 from .contracts import build_maintenance_event
 
 
+def _basename(token: str) -> str:
+    text = str(token)
+    if PurePosixPath(text).is_absolute() or PureWindowsPath(text).is_absolute():
+        return PureWindowsPath(text).name or PurePosixPath(text).name
+    return text
+
+
 def _compact_command(command: Sequence[str]) -> list[str]:
-    compact: list[str] = []
-    for token in command:
-        text = str(token)
-        if PurePosixPath(text).is_absolute() or PureWindowsPath(text).is_absolute():
-            compact.append(PureWindowsPath(text).name or PurePosixPath(text).name)
-        else:
-            compact.append(text)
-    return compact
+    """Keep program identity while excluding task-specific/private arguments."""
+    if not command:
+        raise ValueError("command must contain at least one argv token")
+
+    first = _basename(str(command[0]))
+    identity = [first]
+    if first.lower().startswith("python") and len(command) > 1:
+        second = _basename(str(command[1]))
+        identity.append(second)
+        if second == "-m" and len(command) > 2:
+            identity.append(_basename(str(command[2])))
+    return identity
 
 
 def observe_contract_failure(
