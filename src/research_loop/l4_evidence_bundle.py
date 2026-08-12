@@ -536,7 +536,7 @@ def run_l4b_from_manifest(
     for field, supplied in identity.items():
         supplied_value = str(supplied or "").strip()
         manifest_value = str(manifest.get(field) or "").strip()
-        if supplied_value and manifest_value and supplied_value != manifest_value:
+        if supplied_value and supplied_value != manifest_value:
             raise dr.DeepResearchError(
                 f"L4A manifest {field} does not match the requested L4B identity"
             )

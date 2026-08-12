@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -7,6 +8,7 @@ from research_loop import deep_research as dr
 from research_loop import l4_pipeline as l4p
 from research_loop import l4_inventory
 from research_loop import l4_evidence_bundle as bundle
+from research_loop.commands import research as research_commands
 
 
 METHOD_TEXT = (
@@ -222,6 +224,60 @@ def test_l4b_resume_revalidates_manifest_identity_and_hash(tmp_path):
             l4p, dr, project, "C1", manifest["path"], tmp_path / "work",
             project_id="P1",
         )
+
+
+def test_native_l4_entry_resumes_l4b_without_provider(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    (project / "01_Candidates").mkdir(parents=True)
+    (project / "01_Candidates" / "C1.md").write_text(
+        "---\nquestion: Which method should test H1?\n"
+        "claim: H1 predicts differential expression.\nround_id: 1\n---\n",
+        encoding="utf-8",
+    )
+    manifest = _persist(
+        project,
+        assets=[_asset(selection_status="selected")],
+        methods=[_method(source_asset_ids=["A1"])],
+    )
+    original_resume = bundle.run_l4b_from_manifest
+    observed = {}
+
+    def resume(*args, **kwargs):
+        observed["called"] = True
+        kwargs["fetcher"] = lambda url: _response(url)
+        return original_resume(*args, **kwargs)
+
+    monkeypatch.setattr(bundle, "run_l4b_from_manifest", resume)
+    monkeypatch.setattr(
+        research_commands,
+        "_bound_profile",
+        lambda _project: (
+            SimpleNamespace(profile_id="v2.1-catalog-1"),
+            {"project_id": "P1"},
+        ),
+    )
+    monkeypatch.setattr(
+        research_commands,
+        "topology_for_profile",
+        lambda _profile: ({}, {"L4": {"research_persona": "Curie"}}, {}),
+    )
+    monkeypatch.setattr(
+        dr,
+        "run_and_persist",
+        lambda *args, **kwargs: pytest.fail("native L4B resume invoked a provider"),
+    )
+
+    result = research_commands.cmd_deep_research_run(
+        SimpleNamespace(
+            project_dir=str(project),
+            cand_id="C1",
+            node="L4",
+            l4a_manifest=manifest["path"],
+        )
+    )
+
+    assert result == 0
+    assert observed["called"] is True
 
 
 def test_inventory_hint_materializes_selected_exact_source(tmp_path):
