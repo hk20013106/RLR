@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from typing import Any, Mapping
 
 
 VERIFICATION_PROFILE_SCHEMA = "RLRVerificationProfile/v1"
@@ -57,12 +58,18 @@ _PROFILES = {
             "provider_after_restore_only",
             "round_manifest_hash_integrity",
             "continuation_manifest_binding_integrity",
+            "runner_nonzero_propagation",
         ),
         required_validation=(
             _pytest_step(
                 "meta_contract",
                 "tests/test_meta_rlr_contracts.py",
                 "tests/test_meta_rlr_observer.py",
+                "-q",
+            ),
+            _pytest_step(
+                "root_entrypoint_regression",
+                "tests/test_root_run_loop_entrypoint.py",
                 "-q",
             ),
             _pytest_step(
@@ -140,3 +147,27 @@ def get_profile(profile_id: str) -> VerificationProfile:
 
 def all_profiles() -> tuple[VerificationProfile, ...]:
     return tuple(_PROFILES[key] for key in sorted(_PROFILES))
+
+
+def profile_for_event(event: Mapping[str, Any]) -> VerificationProfile:
+    """Return the unique verification profile owning an event's contract.
+
+    The event's durable ``expected_contract`` is the routing key. Profile
+    ownership is derived from each profile's own ``protected_contracts`` so the
+    maintenance boundary does not create a second contract-to-profile registry.
+    Missing or ambiguous ownership fails closed.
+    """
+    contract = event.get("expected_contract")
+    if not isinstance(contract, str) or not contract:
+        raise KeyError("maintenance event has no expected_contract")
+
+    matches = [
+        profile
+        for profile in all_profiles()
+        if contract in profile.protected_contracts
+    ]
+    if len(matches) != 1:
+        raise KeyError(
+            f"expected contract {contract!r} maps to {len(matches)} verification profiles"
+        )
+    return matches[0]
