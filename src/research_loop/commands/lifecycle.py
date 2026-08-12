@@ -110,7 +110,7 @@ def cmd_next_step(args):
         return 1
     fm = _load_yaml_front(cf)
     status = fm.get("current_status", "NEW")
-    # Unbound directories are legacy read-only inputs.  Bound projects always
+    # Unbound directories are legacy read-only inputs. Bound projects always
     # select the topology from their immutable ledger profile.
     profile_id = PROFILE_V20
     if binding_path(project_dir).exists():
@@ -129,7 +129,10 @@ def cmd_next_step(args):
     }
 
     if status in FINAL_STATUSES:
-        if status == "KEEP":
+        # KEEP and REVISE both represent completed L10b decisions whose round
+        # still needs the shared L10c finalization boundary. DROP/DOWNGRADE and
+        # ARCHIVED remain terminal here and do not open a continuation round.
+        if status in {"KEEP", "REVISE"}:
             node_info = node_map.get("L10c")
             if node_info:
                 result = {
@@ -244,12 +247,6 @@ def cmd_next_step(args):
         "knowledge_base": node_info.get("knowledge_base"),
     }
     result.update(profile_metadata)
-    # L7 is reused under both METHOD_APPROVED and NEEDS_EXECUTION. Its DAG
-    # advance_command (execution-gate) only applies at METHOD_APPROVED -- that
-    # gate is what opens NEEDS_EXECUTION. Once the gate is open, Turing runs
-    # and emits the L7 delta, after which the candidate must advance to
-    # EXECUTED via `decision`. Without this override next-step would keep
-    # returning L7/execution-gate and the walk would dead-end before L8.
     if status == "NEEDS_EXECUTION" and node_id == "L7":
         delta_done = _delta_belongs_to_candidate(
             project_dir, "L7_turing", args.cand_id)
@@ -310,8 +307,6 @@ def cmd_new_candidate(args):
     from_memory = getattr(args, "from_memory", None)
     loop_type = getattr(args, "loop_type", None) or ""
     explicit_rt = getattr(args, "round_type", None)
-    # Round type is explicit (never inferred from file existence). If not given,
-    # derive from --from-memory, but a conflicting explicit value is an error.
     if explicit_rt == "initial" and from_memory:
         print("ERROR: --round-type initial conflicts with --from-memory "
               "(a from-memory candidate is a continuation)", file=sys.stderr)
@@ -375,8 +370,6 @@ def cmd_new_candidate(args):
     else:
         cand_id = "C" + _stamp()
 
-    # --- structured source_input (from --source-input-file, or flags, or the
-    # legacy single --input description as an inline input) -------------------
     si_override = getattr(args, "source_input_file", None)
     if si_override:
         try:
@@ -409,12 +402,9 @@ def cmd_new_candidate(args):
             description=args.input,
             fmt=getattr(args, "input_format", "") or "")
     else:
-        # legacy single-flag caller: the free-text --input becomes an inline
-        # source_input (no files -> no existence check -> back-compat).
         source_input = l0_contract.build_source_input(
             input_type="inline", description=args.input, fmt="unspecified")
 
-    # --- build + persist the structured input contract artifact -------------
     if round_type == "continuation":
         prev_decision = (mem.get("previous_final_decision")
                          or mem.get("terminal_decision") or "")
@@ -449,7 +439,6 @@ def cmd_new_candidate(args):
     except ValueError:
         ic_rel = ic_path.as_posix()
 
-    # Frontmatter carries ONLY pointers to the artifact (flat scalar keys).
     mem_fields.update({
         "input_contract_path": ic_rel,
         "input_contract_hash": ic_hash,
@@ -720,25 +709,21 @@ def cmd_preflight(args):
     for f in skipped:
         print(f"  skipped  00_Preflight/{f} (exists; use --force to overwrite)")
 
-    # --- L0 DEPENDENCY GATE (hard stop; must never be skipped) ---
-    ok, missing = _check_dependencies(project_dir)
-    try:
-        runtime_spec, _runtime_version = deep_research.load_runtime_spec(project_dir)
-        runtime_ok, runtime_reason = deep_research.runtime_ready(runtime_spec)
-    except deep_research.DeepResearchError as exc:
-        runtime_ok, runtime_reason = False, str(exc)
+    # Single component-level authority: _check_dependencies delegates framework
+    # probes to l0_preflight and persists preflight_receipt.json. Lifecycle only
+    # formats/enforces those results; it never repeats an ARS/service probe.
+    ok, missing, advisory = _check_dependencies(project_dir)
     print("\nL0 dependency gate:")
     for d in ok:
         print(f"  OK       {d['kind']}:{d['name']}")
+    for d in advisory:
+        print(f"  WARN     {d['kind']}:{d['name']} -- {d.get('error_code')}: "
+              f"{d.get('detail')} (readiness only; future consumer: {d['needed_for']})",
+              file=sys.stderr)
     for d in missing:
         print(f"  MISSING  {d['kind']}:{d['name']} ({d.get('label', d['name'])})"
               f"  -- {d['needed_for']}", file=sys.stderr)
-    if runtime_ok:
-        print("  OK       deep_research:Academic Research runtime")
-    else:
-        print(f"  MISSING  deep_research:Academic Research runtime -- {runtime_reason}",
-              file=sys.stderr)
-    if missing or not runtime_ok:
+    if missing:
         print("\nPREFLIGHT GATE: STOP -- required dependencies missing.",
               file=sys.stderr)
         print("The loop must NOT proceed past L0. Satisfy each, then re-run "
@@ -746,12 +731,12 @@ def cmd_preflight(args):
         for d in missing:
             print(f"  {d['name']}: {_dep_fix_hint(d)}", file=sys.stderr)
         return 3
-    print("\nPREFLIGHT GATE: PASS -- all required dependencies present.")
+    if advisory:
+        print("\nPREFLIGHT GATE: PASS WITH WARNINGS -- blocking dependencies present; "
+              "future literature-transport readiness is incomplete.")
+    else:
+        print("\nPREFLIGHT GATE: PASS -- all required dependencies present.")
 
-    # --- L0 PITFALL GATE (after deps; must never be skipped) ---
-    # A confirmed hard_stop pitfall scoped to L0 (or a promoted preflight gate)
-    # blocks the boot: the loop must not re-enter a known-fatal trap until the
-    # pitfall is resolved (fixed, or retired via pitfall-status).
     passed, blocking = pl.hard_stop_check(project_dir, node="L0")
     if not passed:
         print("\nL0 PITFALL GATE: STOP -- confirmed hard_stop pitfall(s) "
@@ -767,35 +752,25 @@ def cmd_preflight(args):
     return 0
 
 def cmd_check_deps(args):
-    """Standalone L0 dependency check (same gate as preflight); non-zero = STOP."""
+    """Standalone L0 component gate; non-zero means a blocking dependency failed."""
     project_dir = Path(args.project_dir) if getattr(args, "project_dir", None) else None
-    ok, missing = _check_dependencies(project_dir)
+    ok, missing, advisory = _check_dependencies(project_dir)
     for d in ok:
         print(f"OK       {d['kind']}:{d['name']}")
+    for d in advisory:
+        print(f"WARN     {d['kind']}:{d['name']} -- {d.get('error_code')}: "
+              f"{d.get('detail')} (readiness only; future consumer: {d['needed_for']})",
+              file=sys.stderr)
     for d in missing:
         print(f"MISSING  {d['kind']}:{d['name']} ({d.get('label', d['name'])})"
               f"  -- {d['needed_for']}\n         satisfy: {_dep_fix_hint(d)}",
               file=sys.stderr)
-    runtime_ok, runtime_reason = True, ""
-    if project_dir is not None:
-        try:
-            runtime_spec, _runtime_version = deep_research.load_runtime_spec(project_dir)
-            runtime_ok, runtime_reason = deep_research.runtime_ready(runtime_spec)
-        except deep_research.DeepResearchError as exc:
-            runtime_ok, runtime_reason = False, str(exc)
-        if runtime_ok:
-            print("OK       deep_research:Academic Research runtime")
-        else:
-            print(f"MISSING  deep_research:Academic Research runtime -- {runtime_reason}",
-                  file=sys.stderr)
-    if missing or not runtime_ok:
+    if missing:
         print("DEPENDENCY GATE: STOP -- satisfy the missing dependencies above; "
               "the loop must not proceed.", file=sys.stderr)
         return 3
     print("DEPENDENCY GATE: PASS")
 
-    # L0 pitfall gate (same hard_stop gate as preflight). Only when a project
-    # dir is known -- pitfalls are per-project.
     if project_dir is not None:
         passed, blocking = pl.hard_stop_check(project_dir, node="L0")
         if not passed:
@@ -923,8 +898,6 @@ def cmd_decision(args):
         return 2
     fm = _load_yaml_front(cf)
     frm = fm.get("current_status", "NEW")
-    # Ordering guard: reject illegal jumps (e.g. KEEP from NEW) unless --force.
-    # Same-status logging and -> ARCHIVED are always allowed.
     legal = (args.status == frm
              or args.status == "ARCHIVED"
              or args.status in DECISION_TRANSITIONS.get(frm, set()))

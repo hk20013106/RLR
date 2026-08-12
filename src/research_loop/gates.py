@@ -9,6 +9,7 @@ from research_loop.paths import _candidate_file, _pre_research_file
 from research_loop.yamlio import _load_yaml_front
 from research_loop.delta import _delta_for_candidate
 from research_loop import l0_contract
+from research_loop.l0_state import L0StateError, restore_previous_round
 from research_loop.ledger import _read_branch_ledger, _prior_unexplored_ids
 from research_loop.preresearch import (
     _validate_pre_research_content, _parse_pre_research_provenance,
@@ -271,15 +272,16 @@ def _audit_l0_memory(project_dir, cand_id, delta):
 
 
 def _audit_l0_contract(project_dir, cand_id):
-    """Strict L0 input-contract gate (strict-on-reaching-L0; no legacy soft-floor).
-
-    Loads the structured input artifact + frontmatter pointers and runs the ONE
-    authoritative validator (l0_contract.validate_l0_input_contract). Returns
-    (ok, reason). This is the single validation authority shared by
-    assemble-context L0 and emit-delta L0."""
+    """Strict current-input validation plus deterministic prior-evidence restore."""
     cf = _candidate_file(project_dir, cand_id)
     fm = _load_yaml_front(cf) if cf and cf.exists() else {}
     contract, ap, raw = l0_contract.load_contract(project_dir, cand_id)
     errs = l0_contract.validate_l0_input_contract(
         contract, fm, project_dir, cand_id, artifact_path=ap, raw_bytes=raw)
-    return (len(errs) == 0, "; ".join(errs))
+    if errs:
+        return False, "; ".join(errs)
+    try:
+        restore_previous_round(project_dir, cand_id)
+    except L0StateError as exc:
+        return False, f"{exc.code}: {exc.detail}"
+    return True, ""

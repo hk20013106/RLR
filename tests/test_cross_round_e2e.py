@@ -2,15 +2,17 @@
 
 Plan §4 Phase 7 names one integration gap that no existing test covers:
 
-    emit-loop-memory  ->  new-candidate --from-memory  ->  L0 gate  ->  L1 divergence
+    finalized round manifest -> emit-loop-memory -> new-candidate --from-memory
+        -> L0 gate -> L1 divergence
 
 `test_v06_divergence.py` exercises each gate in ISOLATION, seeding the
 from_memory candidate from a hand-written `_write_seed(...)` dict. That proves
 the gates' logic but NOT that round N's terminal artifact is exactly what round
 N+1 consumes. This module closes that gap: it drives a real terminal candidate
-through `emit-loop-memory`, feeds the PRODUCED seed into `new-candidate
---from-memory`, and then asserts the seed threads all the way into the L0
-memory-hash gate and the L1 divergence gate ON THE SAME CANDIDATE.
+through the finalized evidence boundary and `emit-loop-memory`, feeds the
+PRODUCED seed into `new-candidate --from-memory`, and then asserts the seed
+threads all the way into the L0 memory-hash gate and the L1 divergence gate ON
+THE SAME CANDIDATE.
 
 Two of the assertions additionally go through the real CLI (`assemble-context`)
 rather than calling `_audit_*` directly, so they also guard gate WIRING (that
@@ -27,6 +29,7 @@ from pathlib import Path
 from deep_research_fixtures import persist_synthetic_evidence
 from native_v2_helpers import write_catalog_emission_receipts
 from research_loop import deep_research
+from research_loop.l0_state import write_round_manifest
 
 RL = str(Path(__file__).resolve().parent.parent / "research_loop_v04.py")
 
@@ -139,9 +142,17 @@ def _seed_terminal_candidate(proj, loop_type="divergent"):
          "feasibility_assessment": {"verdict": "PASS", "evidence": "fixture"},
          "attack_resolutions": [{"attack_id": "A1", "verdict": "RESOLVED", "evidence": "fixture"}]}],
          "method_decision": "APPROVE", "reason": "r"})
+
+    # The round manifest is evidence, not a promise about a file that never
+    # existed. Seed a real L7 result with the exact hash used by the committed
+    # L7 delta so cross-round verification exercises the production contract.
+    result_path = proj / "04_Analysis_Outputs" / "result.json"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(json.dumps({"value": 42}), encoding="utf-8")
+    result_hash = hashlib.sha256(result_path.read_bytes()).hexdigest()
     emit("L7", "Turing", {"results": [{"result_key": "R1",
          "hypothesis_ids": [hid], "summary": "result", "artifact_refs": [{
-             "path": "04_Analysis_Outputs/result.json", "sha256": "a" * 64}]}],
+             "path": "04_Analysis_Outputs/result.json", "sha256": result_hash}]}],
          "scripts_run": [], "warnings": [], "failures": []})
     l7_path = next((proj / "02_Agent_Notes" / "Turing").glob(f"{cand}_*_delta.v2.json"))
     evidence_id = json.loads(l7_path.read_text(encoding="utf-8"))["results"][0]["evidence_id"]
@@ -172,6 +183,13 @@ def _round_n_plus_1(tmp_path, loop_type="divergent"):
     """Build the full chain and return (proj, cand_n, seed_path, cand_n1)."""
     proj = _new_project(tmp_path)
     cand_n = _seed_terminal_candidate(proj, loop_type)
+
+    # This test owns cross-round continuity, not Obsidian. Model the state after
+    # a successful L10c by freezing the same production round manifest directly;
+    # L10c sync-before-freeze ordering is covered separately.
+    manifest_path, manifest_hash = write_round_manifest(proj, cand_n)
+    assert manifest_path.exists()
+    assert hashlib.sha256(manifest_path.read_bytes()).hexdigest() == manifest_hash
 
     r = _run("emit-loop-memory", str(proj), cand_n)
     assert r.returncode == 0, r.stderr

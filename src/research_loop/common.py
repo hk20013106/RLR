@@ -61,13 +61,12 @@ def _port_open(host, port, timeout=0.6):
 
 
 def _dep_present(dep):
-    """True if a dependency is satisfied. A non-empty `attest_env` env var ALWAYS
-    satisfies it -- the fail-closed escape hatch for things Python cannot
-    introspect (Claude skills, GUI apps like Zotero/Obsidian)."""
+    """Compatibility checker for project-declared simple dependencies.
+
+    Framework-owned L0 dependencies are probed by l0_preflight with concrete
+    component checks. This helper remains only for `dependencies.md` entries.
+    """
     import os
-    ae = dep.get("attest_env")
-    if ae and os.environ.get(ae, "").strip():
-        return True
     kind, name = dep.get("kind"), dep.get("name", "")
     if kind == "python":
         import importlib.util
@@ -80,25 +79,24 @@ def _dep_present(dep):
     if kind == "port":
         host, _, port = (dep.get("addr") or "").partition(":")
         return bool(port) and _port_open(host or "127.0.0.1", port)
-    if kind == "skill":
-        return False  # only satisfiable via attest_env (handled above): fail closed
     return False
 
 
 def _dep_fix_hint(dep):
-    kind, ae = dep.get("kind"), dep.get("attest_env")
+    kind = dep.get("kind")
+    if kind == "probe":
+        code = dep.get("error_code") or "L0_PROBE_FAILED"
+        detail = dep.get("detail") or "see preflight_receipt.json"
+        return f"resolve {code}: {detail}"
     if kind == "python":
         return f"pip install {dep.get('pip', dep['name'])}"
     if kind == "command":
         return f"install / put on PATH: {dep['name']}"
-    if kind == "skill":
-        return f"enable {dep.get('label', dep['name'])}, then attest: set {ae}=1"
     if kind == "port":
-        return (f"start {dep.get('label', dep['name'])} (connector {dep.get('addr')})"
-                + (f", or set {ae}=1" if ae else ""))
+        return f"start {dep.get('label', dep['name'])} (connector {dep.get('addr')})"
     if kind == "env":
-        return (f"set ${dep.get('env')}" + (" to an existing path" if dep.get("check_path") else "")
-                + (f", or set {ae}=1" if ae else ""))
+        return (f"set ${dep.get('env')}" +
+                (" to an existing path" if dep.get("check_path") else ""))
     return "(see 00_Preflight/dependencies.md)"
 
 
@@ -123,40 +121,77 @@ def _parse_declared_deps(project_dir):
     return deps
 
 
-# --- L0 dependency gate -----------------------------------------------------
-# Runtime dependencies the L0 preflight HARD-CHECKS. A missing REQUIRED
-# dependency STOPS the loop (preflight exits non-zero) -- it must NEVER be
-# skipped. Project-specific deps are declared in 00_Preflight/dependencies.md
-# and are checked the same way. Owned here (not in a command module) so every
-# consumer -- common, templates, lifecycle, the standalone CLI -- resolves it by
-# plain import instead of an engine.py monkey-patch.
+# Minimal framework package metadata kept for callers that ask for a dependency
+# check without a project directory. Project-aware L0 uses concrete probes.
 REQUIRED_DEPENDENCIES = [
     {"kind": "python", "name": "yaml", "label": "PyYAML", "pip": "PyYAML",
-     "needed_for": "manage_literature_db.py (growable literature DB; L1/L4/L8.5)"},
-    {"kind": "port", "name": "zotero", "label": "Zotero", "addr": "127.0.0.1:23119",
-     "attest_env": "RLR_ZOTERO",
-     "needed_for": "reference manager / citation source for the literature DB"},
-    {"kind": "env", "name": "obsidian", "label": "Obsidian vault", "env": "OBSIDIAN_VAULT",
-     "check_path": True, "attest_env": "RLR_OBSIDIAN",
-     "needed_for": "end-of-round human-readable sync (sync_to_obsidian.py)"},
+     "needed_for": "RLR YAML contracts"},
+    {"kind": "python", "name": "jsonschema", "label": "jsonschema",
+     "needed_for": "RLR schema validation"},
+    {"kind": "python", "name": "psutil", "label": "psutil",
+     "needed_for": "provider process observability"},
 ]
 
 
+def _probe_as_dep(result):
+    return {
+        "kind": "probe",
+        "name": result.component,
+        "label": result.component,
+        "needed_for": result.consumer,
+        "present": result.status == "PASS",
+        "error_code": result.code,
+        "detail": result.detail,
+        "enforcement": result.enforcement,
+    }
+
+
 def _check_dependencies(project_dir=None):
-    """Check framework + project-declared dependencies. Returns (ok, missing),
-    each a list of dep dicts with an added 'present' flag."""
-    items = [dict(d) for d in REQUIRED_DEPENDENCIES]
+    """Return `(ok, missing, advisory)` for the single L0 readiness authority.
+
+    `missing` contains only blocking failures. `advisory` contains failed
+    readiness-only probes whose future consumers are not yet wired. The full
+    machine-readable probe set is always persisted for project-aware checks.
+    """
     if project_dir:
-        seen = {(d["kind"], d["name"]) for d in items}
-        for d in _parse_declared_deps(project_dir):
-            if (d["kind"], d["name"]) not in seen:
-                items.append(d)
+        from research_loop.l0_preflight import (
+            ENFORCEMENT_READINESS_ONLY,
+            run_preflight_probes,
+            write_preflight_receipt,
+        )
+
+        results = run_preflight_probes(Path(project_dir))
+        write_preflight_receipt(Path(project_dir), results)
+        ok, missing, advisory = [], [], []
+        for result in results:
+            dep = _probe_as_dep(result)
+            if dep["present"]:
+                ok.append(dep)
+            elif result.enforcement == ENFORCEMENT_READINESS_ONLY:
+                advisory.append(dep)
+            else:
+                missing.append(dep)
+
+        # Project-specific declared requirements are explicitly blocking. They
+        # remain additive and never substitute for framework-owned probes.
+        seen = {(d["kind"], d["name"]) for d in ok + missing + advisory}
+        for declared in _parse_declared_deps(project_dir):
+            key = (declared["kind"], declared["name"])
+            if key in seen:
+                continue
+            dep = dict(declared)
+            dep["present"] = _dep_present(dep)
+            dep["enforcement"] = "blocking"
+            (ok if dep["present"] else missing).append(dep)
+        return ok, missing, advisory
+
+    items = [dict(d) for d in REQUIRED_DEPENDENCIES]
     ok, missing = [], []
-    for d in items:
-        d = dict(d)
-        d["present"] = _dep_present(d)
-        (ok if d["present"] else missing).append(d)
-    return ok, missing
+    for dep in items:
+        dep["present"] = _dep_present(dep)
+        dep["enforcement"] = "blocking"
+        (ok if dep["present"] else missing).append(dep)
+    return ok, missing, []
 
 
 def _slug(s):
