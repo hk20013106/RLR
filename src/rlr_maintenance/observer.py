@@ -112,7 +112,6 @@ def observe_ci_failure(
     component: str,
     check_id: str,
     conclusion: str,
-    run_id: str,
     expected_contract: str,
     rlr_revision: str,
     observed_at: str,
@@ -120,7 +119,7 @@ def observe_ci_failure(
     source_receipts: Iterable[Mapping[str, Any]] = (),
     severity: str = "blocking",
 ) -> dict[str, Any]:
-    """Record a compact CI outcome without copying workflow logs."""
+    """Record stable CI failure facts; run identity stays in evidence refs."""
     return build_maintenance_event(
         event_type="ci_failure",
         component=component,
@@ -130,7 +129,6 @@ def observe_ci_failure(
         observed={
             "check_id": str(check_id),
             "conclusion": str(conclusion),
-            "run_id": str(run_id),
         },
         expected_contract=expected_contract,
         evidence_refs=evidence_refs,
