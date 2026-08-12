@@ -70,12 +70,11 @@ def test_verification_failure_records_validator_identity():
     }
 
 
-def test_ci_failure_records_check_identity_without_copying_logs():
+def test_ci_failure_records_stable_check_fact_and_keeps_run_id_in_evidence():
     event = observe_ci_failure(
         component="github_ci",
         check_id="CI / Test / Windows / Python 3.13",
         conclusion="failure",
-        run_id="31622141836",
         expected_contract="runner_nonzero_propagation",
         rlr_revision=REVISION,
         evidence_refs=[
@@ -88,8 +87,10 @@ def test_ci_failure_records_check_identity_without_copying_logs():
     assert event["observed"] == {
         "check_id": "CI / Test / Windows / Python 3.13",
         "conclusion": "failure",
-        "run_id": "31622141836",
     }
+    assert event["evidence_refs"] == [
+        {"kind": "github_check", "ref": "workflow-run:31622141836"}
+    ]
     assert "stdout" not in event["observed"]
     assert "stderr" not in event["observed"]
 
