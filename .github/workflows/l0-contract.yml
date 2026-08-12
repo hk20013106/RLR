@@ -10,10 +10,12 @@ on:
       - "src/research_loop/gates.py"
       - "src/research_loop/commands/continuation.py"
       - "src/research_loop/commands/reporting.py"
+      - "src/sync_to_obsidian.py"
       - "src/run_loop.py"
       - "tests/test_l0_*.py"
       - "tests/test_cross_round_e2e.py"
       - "tests/test_run_loop_guards.py"
+      - "tests/test_obsidian_native_projection.py"
       - "requirements*.txt"
       - ".github/workflows/l0-contract.yml"
   workflow_dispatch:
@@ -43,6 +45,7 @@ jobs:
             src/research_loop/gates.py \
             src/research_loop/commands/continuation.py \
             src/research_loop/commands/reporting.py \
+            src/sync_to_obsidian.py \
             src/run_loop.py
       - name: Run targeted L0 tests
         run: >-
@@ -54,6 +57,7 @@ jobs:
           tests/test_l0_revise_finalization.py
           tests/test_cross_round_e2e.py
           tests/test_run_loop_guards.py
+          tests/test_obsidian_native_projection.py
       - name: Check patch whitespace
         shell: bash
         run: git diff --check ${{ github.event.pull_request.base.sha }} HEAD
