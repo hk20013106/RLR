@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, Iterable, Mapping
 
@@ -150,6 +151,25 @@ def _validate_schema(event: Mapping[str, Any]) -> None:
         raise _schema_error(errors[0])
 
 
+def _validate_observed_at(value: str) -> None:
+    """Enforce the canonical timestamp form used by maintenance provenance."""
+    if "T" not in value:
+        raise MaintenanceContractError(
+            "observed_at must be timezone-aware ISO-8601 date-time"
+        )
+    parse_value = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(parse_value)
+    except ValueError as exc:
+        raise MaintenanceContractError(
+            "observed_at must be timezone-aware ISO-8601 date-time"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise MaintenanceContractError(
+            "observed_at must be timezone-aware ISO-8601 date-time"
+        )
+
+
 def _safe_repository_ref(ref: str) -> bool:
     posix = PurePosixPath(ref)
     windows = PureWindowsPath(ref)
@@ -169,6 +189,8 @@ def _walk_keys(value: object) -> Iterable[str]:
 
 
 def _validate_semantics(event: Mapping[str, Any]) -> None:
+    _validate_observed_at(event["observed_at"])
+
     observed = event["observed"]
     private_keys = sorted(set(_walk_keys(observed)) & _RAW_PRIVATE_KEYS)
     if private_keys:
