@@ -196,17 +196,12 @@ def test_emit_loop_memory_never_creates_missing_round_manifest(tmp_path, monkeyp
     project = tmp_path / "P"
     project.mkdir()
     _candidate(project, "C1")
-    called = {"write": False}
-
-    def forbidden_write(*_a, **_k):
-        called["write"] = True
-        return project / "should-not-exist.json", "deadbeef"
-
-    monkeypatch.setattr(continuation, "write_round_manifest", forbidden_write)
     monkeypatch.setattr(
         continuation,
         "_build_loop_memory",
-        lambda *_a, **_k: {"source_candidate_id": "C1"},
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("semantic loop memory must not be built before manifest verification")
+        ),
     )
 
     rc = continuation.cmd_emit_loop_memory(
@@ -214,7 +209,8 @@ def test_emit_loop_memory_never_creates_missing_round_manifest(tmp_path, monkeyp
     )
 
     assert rc == 2
-    assert called["write"] is False
+    assert not (project / "08_Audit" / "round_manifests" / "C1_round_1.json").exists()
+    assert not (project / "08_Audit" / "loop_memory" / "C1_next_loop_memory.json").exists()
 
 
 def test_aggregate_report_sync_failure_prevents_manifest_freeze(tmp_path, monkeypatch):
