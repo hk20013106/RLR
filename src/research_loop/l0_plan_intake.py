@@ -1,9 +1,10 @@
-"""Structured-frontmatter preplan compatibility adapter for L0 intake (v0.9)."""
+"""Structured-frontmatter preplan compatibility adapter for L0 intake."""
 import hashlib
 import os
 import re
 import unicodedata
 from pathlib import Path
+
 import yaml
 from yaml.constructor import ConstructorError
 
@@ -42,12 +43,7 @@ StrictPlanLoader.add_constructor(
 
 
 def _normalize_conflict_text(s: str) -> str:
-    """Normalize text for body/frontmatter conflict comparison.
-
-    Performs Unicode NFC normalization, collapses consecutive whitespace, and
-    removes spaces introduced by line folding between CJK characters/punctuation.
-    Does NOT modify English word spaces or frontmatter values stored in contract.
-    """
+    """Normalize text for body/frontmatter conflict comparison."""
     if not s:
         return ""
     s = unicodedata.normalize("NFC", s)
@@ -60,27 +56,20 @@ def _normalize_conflict_text(s: str) -> str:
 
 
 def detect_intake_schema(frontmatter_text: str) -> bool:
-    """Return True if closed frontmatter text declares an intake_schema."""
     if not frontmatter_text:
         return False
     return bool(re.search(r"^\s*intake_schema\s*:", frontmatter_text, re.MULTILINE))
 
 
 def parse_frontmatter_strict(frontmatter_text: str):
-    """Parse frontmatter YAML with duplicate key rejection.
-
-    Returns (parsed_mapping_or_none, list_of_error_strings).
-    Never raises exceptions past this boundary.
-    """
+    """Parse frontmatter YAML with duplicate-key rejection; never raise outward."""
     if not frontmatter_text or not frontmatter_text.strip():
         return None, ["frontmatter is empty"]
-
     yaml_text = frontmatter_text.rstrip()
     if yaml_text.endswith("\n---"):
         yaml_text = yaml_text[:-4]
     elif yaml_text.endswith("---"):
         yaml_text = yaml_text[:-3]
-
     try:
         parsed = yaml.load(yaml_text, Loader=StrictPlanLoader)
     except DuplicateKeyError as err:
@@ -93,15 +82,12 @@ def parse_frontmatter_strict(frontmatter_text: str):
         return None, [f"YAML syntax error: {err}"]
     except Exception as err:
         return None, [f"YAML parsing error: {err}"]
-
     if not isinstance(parsed, dict):
         return None, ["frontmatter must be a YAML mapping/dictionary"]
-
     return parsed, []
 
 
 def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
-    """Stream-hash a file using chunked reads."""
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(chunk_size), b""):
@@ -110,7 +96,6 @@ def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
 
 
 def _normalize_path(path_str: str):
-    """Resolve and normalize a file path for case-insensitive duplicate comparison on NT."""
     resolved = Path(path_str).expanduser().resolve()
     posix = resolved.as_posix()
     if os.name == "nt":
@@ -119,15 +104,111 @@ def _normalize_path(path_str: str):
 
 
 def _derive_format(paths):
-    """Derive sorted unique lowercase file extensions joined by comma."""
     exts = set()
     for p in paths:
         ext = Path(p).suffix.lower().lstrip(".")
         if ext:
             exts.add(ext)
-    if not exts:
-        return "unspecified"
-    return ", ".join(sorted(exts))
+    return ", ".join(sorted(exts)) if exts else "unspecified"
+
+
+def _verify_file_manifest(manifest, *, data=None):
+    """Reuse the structured intake's existing exact-file verification contract."""
+    missing_fields = []
+    errors = []
+    resolved_data_root = None
+    if data:
+        resolved_data_root = Path(data).expanduser().resolve()
+        if not resolved_data_root.exists():
+            errors.append(f"source_input.location: local path not found: {resolved_data_root}")
+        elif not resolved_data_root.is_dir():
+            errors.append(f"source_input.location: --data root is not a directory: {resolved_data_root}")
+
+    seen_normalized_paths = {}
+    clean_manifest = []
+    for i, entry in enumerate(manifest):
+        if not isinstance(entry, dict):
+            errors.append(f"source_input.file_manifest[{i}] must be a mapping")
+            continue
+
+        role = entry.get("role")
+        if role is None or not isinstance(role, str) or not role.strip() or _is_placeholder(role):
+            missing_fields.append(f"source_input.file_manifest[{i}].role")
+
+        path_str = entry.get("path")
+        valid_path = True
+        if path_str is None or not isinstance(path_str, str) or not path_str.strip() or _is_placeholder(path_str):
+            missing_fields.append(f"source_input.file_manifest[{i}].path")
+            valid_path = False
+
+        bytes_val = entry.get("bytes")
+        valid_bytes = True
+        if bytes_val is None:
+            missing_fields.append(f"source_input.file_manifest[{i}].bytes")
+            valid_bytes = False
+        elif isinstance(bytes_val, bool) or not isinstance(bytes_val, int) or bytes_val < 0:
+            errors.append(f"source_input.file_manifest[{i}].bytes must be a non-negative integer")
+            valid_bytes = False
+
+        sha_val = entry.get("sha256")
+        valid_sha = True
+        if sha_val is None:
+            missing_fields.append(f"source_input.file_manifest[{i}].sha256")
+            valid_sha = False
+        elif not isinstance(sha_val, str) or not re.match(r"^[0-9a-f]{64}$", sha_val):
+            errors.append(f"source_input.file_manifest[{i}].sha256 must be a 64-character lowercase hex string")
+            valid_sha = False
+
+        resolved_path = None
+        if valid_path:
+            try:
+                resolved_path, norm_path = _normalize_path(path_str)
+                if norm_path in seen_normalized_paths:
+                    prev = seen_normalized_paths[norm_path]
+                    errors.append(f"source_input.file_manifest[{i}].path duplicates source_input.file_manifest[{prev}].path after normalization")
+                else:
+                    seen_normalized_paths[norm_path] = i
+            except Exception as err:
+                errors.append(f"source_input.file_manifest[{i}].path invalid: {err}")
+                valid_path = False
+
+        if valid_path and resolved_data_root and resolved_data_root.exists() and resolved_data_root.is_dir():
+            try:
+                resolved_path.relative_to(resolved_data_root)
+            except ValueError:
+                errors.append(f"source_input.file_manifest[{i}].path resolves outside --data root")
+
+        if valid_path:
+            try:
+                if not resolved_path.exists():
+                    errors.append(f"source_input.file_manifest[{i}].path: file not found")
+                elif not resolved_path.is_file():
+                    errors.append(f"source_input.file_manifest[{i}].path: path is not a regular file")
+                else:
+                    if valid_bytes and resolved_path.stat().st_size != bytes_val:
+                        errors.append(f"source_input.file_manifest[{i}].bytes mismatch: declared={bytes_val} actual={resolved_path.stat().st_size}")
+                    if valid_sha:
+                        actual_hash = _sha256_file(resolved_path)
+                        if actual_hash != sha_val:
+                            errors.append(f"source_input.file_manifest[{i}].sha256 mismatch: declared={sha_val} actual={actual_hash}")
+            except OSError as err:
+                errors.append(f"source_input.file_manifest[{i}].path: filesystem error accessing file: {err}")
+
+        if isinstance(entry, dict) and all(k in entry for k in ("role", "path", "bytes", "sha256")):
+            clean_manifest.append({
+                "role": str(entry["role"]).strip(),
+                "path": str(entry["path"]).strip(),
+                "bytes": entry["bytes"],
+                "sha256": str(entry["sha256"]).strip(),
+            })
+
+    return clean_manifest, resolved_data_root, missing_fields, errors
+
+
+def _current_contract(contract, inherited_inputs):
+    contract["schema_version"] = l0_contract.SUPPORTED_SCHEMA_VERSIONS[-1]
+    contract["inherited_inputs"] = list(inherited_inputs or [])
+    return contract
 
 
 def normalize_frontmatter(
@@ -143,19 +224,11 @@ def normalize_frontmatter(
     memory_hash="",
     request_text="",
 ):
-    """Normalize a structured-frontmatter preplan into an L0 input contract.
-
-    Task 2.5: Build existing schema-1.0 contract.
-    Note: l0_plan_intake.py MUST NOT import l0_intake.py.
-    """
+    """Normalize a structured preplan into the canonical L0 contract."""
     parsed, parse_errors = parse_frontmatter_strict(frontmatter_text)
     if parse_errors:
-        return {
-            "contract": None,
-            "missing_fields": [],
-            "errors": parse_errors,
-            "round_type": "initial",
-        }
+        return {"contract": None, "missing_fields": [], "errors": parse_errors,
+                "round_type": "initial"}
 
     schema = parsed.get("intake_schema")
     if schema != "research-loop-plan/1.0":
@@ -167,28 +240,31 @@ def normalize_frontmatter(
         }
 
     round_type = parsed.get("round_type", "initial")
-    if round_type != "initial":
+    if round_type not in l0_contract.ROUND_TYPES:
+        return {"contract": None, "missing_fields": [],
+                "errors": [f"round_type must be one of {list(l0_contract.ROUND_TYPES)}"],
+                "round_type": str(round_type)}
+    # A continuation is meaningful only when the caller supplies the verified
+    # previous-round loop-memory identity. Preserve fail-closed behavior for a
+    # bare `round_type: continuation` document.
+    if round_type == "continuation" and not memory:
         return {
             "contract": None,
             "missing_fields": [],
-            "errors": ["structured continuation rounds are not supported in v0.9"],
-            "round_type": str(round_type),
+            "errors": ["structured continuation rounds are not supported in v0.9 without verified --from-memory linkage"],
+            "round_type": "continuation",
         }
 
     missing_fields = []
     errors = []
-
-    # 1. round_id
     round_id_val = parsed.get("round_id")
     if round_id_val is None or isinstance(round_id_val, (dict, list)) or _is_placeholder(round_id_val):
         missing_fields.append("round_id")
 
-    # 2. scientific_question
     sq_val = parsed.get("scientific_question")
     if sq_val is None or not isinstance(sq_val, str) or _is_placeholder(sq_val):
         missing_fields.append("scientific_question")
 
-    # 3. current_round.hypothesis
     current_round = parsed.get("current_round")
     if not isinstance(current_round, dict):
         missing_fields.append("current_round.hypothesis")
@@ -197,27 +273,32 @@ def normalize_frontmatter(
         if hypo_val is None or not isinstance(hypo_val, str) or _is_placeholder(hypo_val):
             missing_fields.append("current_round.hypothesis")
 
-    # 4. source_input.file_manifest
-    source_input = parsed.get("source_input")
-    manifest = None
-    if not isinstance(source_input, dict):
-        missing_fields.append("source_input.file_manifest")
-    else:
-        manifest = source_input.get("file_manifest")
-        if not isinstance(manifest, list) or len(manifest) == 0:
-            missing_fields.append("source_input.file_manifest")
+    inherited_inputs = parsed.get("inherited_inputs", []) or []
+    if not isinstance(inherited_inputs, list):
+        errors.append("inherited_inputs must be a list")
+        inherited_inputs = []
 
-    # 5. research_plan
+    source_input = parsed.get("source_input")
+    manifest = []
+    if source_input is not None:
+        if not isinstance(source_input, dict):
+            missing_fields.append("source_input.file_manifest")
+        else:
+            manifest = source_input.get("file_manifest")
+            if not isinstance(manifest, list) or len(manifest) == 0:
+                missing_fields.append("source_input.file_manifest")
+                manifest = []
+    elif round_type == "initial" or not inherited_inputs:
+        missing_fields.append("source_input.file_manifest")
+
     research_plan = parsed.get("research_plan")
     if not isinstance(research_plan, dict) or len(research_plan) == 0:
         missing_fields.append("research_plan")
 
-    # 6. Body/frontmatter conflict checks
     if isinstance(sq_val, str) and not _is_placeholder(sq_val):
         body_sq = (body_fields or {}).get("scientific_question", "").strip()
         if body_sq and _normalize_conflict_text(body_sq) != _normalize_conflict_text(sq_val):
             errors.append(f"scientific_question: body label ('{body_sq}') conflicts with frontmatter ('{sq_val.strip()}')")
-
     if isinstance(current_round, dict):
         hypo_val = current_round.get("hypothesis")
         if isinstance(hypo_val, str) and not _is_placeholder(hypo_val):
@@ -225,134 +306,81 @@ def normalize_frontmatter(
             if body_hypo and _normalize_conflict_text(body_hypo) != _normalize_conflict_text(hypo_val):
                 errors.append(f"current_round.hypothesis: body label ('{body_hypo}') conflicts with frontmatter ('{hypo_val.strip()}')")
 
-    if missing_fields or errors:
-        return {
-            "contract": None,
-            "missing_fields": sorted(set(missing_fields)),
-            "errors": errors,
-            "round_type": "initial",
+    if round_type == "continuation":
+        required_memory = {
+            "source_candidate_id": "previous_round.candidate_id",
+            "previous_hypothesis": "previous_round.hypothesis",
+            "previous_final_decision": "previous_round.final_decision",
+            "previous_conclusion": "previous_round.conclusion",
+            "round_id": "round_id",
+            "parent_round_id": "parent_round_id",
         }
-
-    # Task 2.4: Verification of manifest entries
-    resolved_data_root = None
-    if data:
-        resolved_data_root = Path(data).expanduser().resolve()
-        if not resolved_data_root.exists():
-            errors.append(f"source_input.location: local path not found: {resolved_data_root}")
-        elif not resolved_data_root.is_dir():
-            errors.append(f"source_input.location: --data root is not a directory: {resolved_data_root}")
-
-    seen_normalized_paths = {}
-
-    for i, entry in enumerate(manifest):
-        if not isinstance(entry, dict):
-            errors.append(f"source_input.file_manifest[{i}] must be a mapping")
-            continue
-
-        role = entry.get("role")
-        if role is None or not isinstance(role, str) or not role.strip() or _is_placeholder(role):
-            missing_fields.append(f"source_input.file_manifest[{i}].role")
-
-        path_str = entry.get("path")
-        has_valid_path_field = True
-        if path_str is None or not isinstance(path_str, str) or not path_str.strip() or _is_placeholder(path_str):
-            missing_fields.append(f"source_input.file_manifest[{i}].path")
-            has_valid_path_field = False
-
-        bytes_val = entry.get("bytes")
-        has_valid_bytes_field = True
-        if bytes_val is None:
-            missing_fields.append(f"source_input.file_manifest[{i}].bytes")
-            has_valid_bytes_field = False
-        elif isinstance(bytes_val, bool) or not isinstance(bytes_val, int) or bytes_val < 0:
-            errors.append(f"source_input.file_manifest[{i}].bytes must be a non-negative integer")
-            has_valid_bytes_field = False
-
-        sha_val = entry.get("sha256")
-        has_valid_sha_field = True
-        if sha_val is None:
-            missing_fields.append(f"source_input.file_manifest[{i}].sha256")
-            has_valid_sha_field = False
-        elif not isinstance(sha_val, str) or not re.match(r"^[0-9a-f]{64}$", sha_val):
-            errors.append(f"source_input.file_manifest[{i}].sha256 must be a 64-character lowercase hex string")
-            has_valid_sha_field = False
-
-        resolved_path = None
-        if has_valid_path_field:
-            try:
-                resolved_path, norm_path = _normalize_path(path_str)
-                if norm_path in seen_normalized_paths:
-                    prev_index = seen_normalized_paths[norm_path]
-                    errors.append(f"source_input.file_manifest[{i}].path duplicates source_input.file_manifest[{prev_index}].path after normalization")
-                else:
-                    seen_normalized_paths[norm_path] = i
-            except Exception as err:
-                errors.append(f"source_input.file_manifest[{i}].path invalid: {err}")
-                has_valid_path_field = False
-
-        if has_valid_path_field and resolved_data_root and resolved_data_root.exists() and resolved_data_root.is_dir():
-            try:
-                resolved_path.relative_to(resolved_data_root)
-            except ValueError:
-                errors.append(f"source_input.file_manifest[{i}].path resolves outside --data root")
-
-        if has_valid_path_field:
-            try:
-                if not resolved_path.exists():
-                    errors.append(f"source_input.file_manifest[{i}].path: file not found")
-                elif not resolved_path.is_file():
-                    errors.append(f"source_input.file_manifest[{i}].path: path is not a regular file")
-                else:
-                    if has_valid_bytes_field:
-                        actual_size = resolved_path.stat().st_size
-                        if actual_size != bytes_val:
-                            errors.append(f"source_input.file_manifest[{i}].bytes mismatch: declared={bytes_val} actual={actual_size}")
-                    if has_valid_sha_field:
-                        actual_hash = _sha256_file(resolved_path)
-                        if actual_hash != sha_val:
-                            errors.append(f"source_input.file_manifest[{i}].sha256 mismatch: declared={sha_val} actual={actual_hash}")
-            except OSError as err:
-                errors.append(f"source_input.file_manifest[{i}].path: filesystem error accessing file: {err}")
+        for key, field in required_memory.items():
+            if not str((memory or {}).get(key) or "").strip():
+                missing_fields.append(field)
+        if not str(memory_hash or "").strip():
+            missing_fields.append("previous_round.memory_hash")
 
     if missing_fields or errors:
-        return {
-            "contract": None,
-            "missing_fields": sorted(set(missing_fields)),
-            "errors": errors,
-            "round_type": "initial",
-        }
-
-    # Task 2.5: Build canonical schema-1.0 contract
-    verified_files = [entry["path"].strip() for entry in manifest]
-    fmt = _derive_format(verified_files)
-    location_str = resolved_data_root.as_posix() if resolved_data_root else None
-    desc = f"{len(manifest)} verified file(s) from structured preplan round {str(round_id_val)}"
-
-    source_input_contract = l0_contract.build_source_input(
-        input_type="files",
-        files=verified_files,
-        location=location_str,
-        description=desc,
-        fmt=fmt,
-    )
+        return {"contract": None, "missing_fields": sorted(set(missing_fields)),
+                "errors": errors, "round_type": round_type}
 
     clean_manifest = []
-    for entry in manifest:
-        clean_manifest.append({
-            "role": entry["role"].strip(),
-            "path": entry["path"].strip(),
-            "bytes": entry["bytes"],
-            "sha256": entry["sha256"].strip(),
-        })
-    source_input_contract["file_manifest"] = clean_manifest
+    resolved_data_root = None
+    if manifest:
+        clean_manifest, resolved_data_root, mf_missing, mf_errors = _verify_file_manifest(
+            manifest, data=data
+        )
+        missing_fields.extend(mf_missing)
+        errors.extend(mf_errors)
+    elif data:
+        # In inherited-only mode an unrelated --data argument must not silently
+        # create authority; current data enter only through file_manifest.
+        resolved_data_root = Path(data).expanduser().resolve()
 
-    contract = l0_contract.build_initial_contract(
-        cand_id=candidate_id,
-        round_id=str(round_id_val),
-        scientific_question=sq_val.strip(),
-        source_input=source_input_contract,
-        new_hypothesis=current_round["hypothesis"].strip(),
-    )
+    if missing_fields or errors:
+        return {"contract": None, "missing_fields": sorted(set(missing_fields)),
+                "errors": errors, "round_type": round_type}
+
+    source_input_contract = None
+    if clean_manifest:
+        verified_files = [entry["path"] for entry in clean_manifest]
+        source_input_contract = l0_contract.build_source_input(
+            input_type="files",
+            files=verified_files,
+            location=resolved_data_root.as_posix() if resolved_data_root else None,
+            description=f"{len(clean_manifest)} verified file(s) from structured preplan round {str(round_id_val)}",
+            fmt=_derive_format(verified_files),
+        )
+        source_input_contract["file_manifest"] = clean_manifest
+
+    if round_type == "continuation":
+        previous_candidate_id = memory.get("source_candidate_id", "")
+        previous_round = {
+            "hypothesis": memory.get("previous_hypothesis", ""),
+            "final_decision": memory.get("previous_final_decision", ""),
+            "conclusion": memory.get("previous_conclusion", ""),
+            "memory_hash": memory_hash,
+        }
+        contract = l0_contract.build_continuation_contract(
+            candidate_id,
+            str(round_id_val),
+            memory.get("parent_round_id"),
+            previous_candidate_id,
+            sq_val.strip(),
+            source_input_contract,
+            previous_round,
+            current_round["hypothesis"].strip(),
+        )
+    else:
+        contract = l0_contract.build_initial_contract(
+            cand_id=candidate_id,
+            round_id=str(round_id_val),
+            scientific_question=sq_val.strip(),
+            source_input=source_input_contract,
+            new_hypothesis=current_round["hypothesis"].strip(),
+        )
+    contract = _current_contract(contract, inherited_inputs)
 
     data_inventory = []
     for entry in clean_manifest:
@@ -371,7 +399,6 @@ def normalize_frontmatter(
     else:
         req_text_str = request_text if request_text else (frontmatter_text + (body_text or ""))
         source_bytes = req_text_str.encode("utf-8")
-
     snapshot_sha256 = hashlib.sha256(source_bytes).hexdigest()
     snapshot_relpath = f"01_Candidates/_research_plans/{candidate_id}.md"
 
@@ -386,10 +413,5 @@ def normalize_frontmatter(
         "research_plan_snapshot_path": snapshot_relpath,
         "research_plan_snapshot_sha256": snapshot_sha256,
     }
-
-    return {
-        "contract": contract,
-        "missing_fields": [],
-        "errors": [],
-        "round_type": "initial",
-    }
+    return {"contract": contract, "missing_fields": [], "errors": [],
+            "round_type": round_type}
