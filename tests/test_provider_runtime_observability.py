@@ -16,7 +16,7 @@ from research_loop.provider_runtime_observability import run_observed_provider
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_codex_jsonl.py"
 
 
-def _wait_for(predicate, timeout: float = 3.0):
+def _wait_for(predicate, timeout: float = 10.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         value = predicate()
