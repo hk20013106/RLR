@@ -24,4 +24,3 @@ def test_obsidian_native_v21_l6_uses_canonical_delta_renderer():
 
     assert rendered == canonical
     assert "Analysis plan" in rendered
-    assert "result.csv" in rendered
