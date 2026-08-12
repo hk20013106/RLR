@@ -130,8 +130,6 @@ REQUIRED_DEPENDENCIES = [
      "needed_for": "RLR schema validation"},
     {"kind": "python", "name": "psutil", "label": "psutil",
      "needed_for": "provider process observability"},
-    {"kind": "python", "name": "mcp", "label": "official MCP Python SDK",
-     "pip": "mcp>=1.27,<2", "needed_for": "PubMed MCP readiness probe"},
 ]
 
 
