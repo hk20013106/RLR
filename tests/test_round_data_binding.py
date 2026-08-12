@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 
 import pytest
-import yaml
 
 from research_loop import l0_contract
 from research_loop.hypothesis_ledger import binding_path
@@ -29,9 +28,16 @@ def _seed_project(tmp_path: Path) -> Path:
 
 
 def _write_candidate(project: Path, cand_id: str, round_id: str, *, continuation=False):
-    rows = ["---", f"candidate_id: {cand_id}", f"round_id: '{round_id}'"]
+    rows = ["---", f"candidate_id: {cand_id}", f"round_id: {round_id}"]
     if continuation:
-        rows += ["round_type: continuation", "from_memory: true"]
+        seed = project / "08_Audit" / f"{cand_id}_seed.json"
+        seed.write_text("{}", encoding="utf-8")
+        rows += [
+            "round_type: continuation",
+            "from_memory: true",
+            f"memory_file: {seed.as_posix()}",
+            f"memory_hash: {'a' * 64}",
+        ]
     rows += ["---", ""]
     (project / "01_Candidates" / f"{cand_id}.md").write_text("\n".join(rows), encoding="utf-8")
 
