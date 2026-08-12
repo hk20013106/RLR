@@ -36,6 +36,7 @@ def test_probe_result_serializes_exact_component_contract():
         "code": "L0_RESEARCH_PUBMED_MCP_REQUIRED_TOOL_MISSING",
         "detail": "missing pubmed_fetch_fulltext",
         "consumer": "literature discovery/full-text retrieval",
+        "enforcement": "blocking",
     }
 
 
