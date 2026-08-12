@@ -147,6 +147,80 @@ def test_inventory_promotes_referenced_reserve_asset(tmp_path):
     assert manifest["selected_asset_ids"] == ["A1"]
     assert manifest["assets"][0]["selection_status"] == "selected"
     assert manifest["method_inventory"][0]["source_asset_ids"] == ["A1"]
+
+
+def test_l4b_resume_from_existing_manifest_skips_l4a_provider(monkeypatch, tmp_path):
+    """An explicit frozen manifest enters deterministic L4B without discovery."""
+    project = tmp_path / "project"
+    manifest = _persist(
+        project,
+        assets=[_asset(selection_status="selected")],
+        methods=[_method(source_asset_ids=["A1"])],
+    )
+    manifest_path = project / manifest["path"]
+    before = manifest_path.read_bytes()
+    calls = []
+
+    def forbidden_discovery(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("L4A provider discovery must not run during resume")
+
+    monkeypatch.setattr(l4_inventory, "run_discovery", forbidden_discovery)
+    artifact = bundle.run_l4b_from_manifest(
+        l4p,
+        dr,
+        project,
+        "C1",
+        manifest["path"],
+        tmp_path / "work",
+        project_id="P1",
+        round_id="1",
+        profile_id="v2.1-catalog-1",
+        fetcher=lambda url: _response(url),
+    )
+
+    assert calls == []
+    assert manifest_path.read_bytes() == before
+    assert artifact["candidate_id"] == "C1"
+    assert artifact["project_id"] == "P1"
+    assert artifact["l4a_manifest_path"] == manifest["path"]
+    assert artifact["l4a_manifest_sha256"] == manifest["manifest_sha256"]
+    assert {card["asset_id"] for card in artifact["evidence_cards"]} <= {
+        "A1"
+    }
+    assert bundle.audit_bundle(l4p, dr, project, "C1", artifact) == (True, "")
+
+
+def test_l4b_resume_revalidates_manifest_identity_and_hash(tmp_path):
+    project = tmp_path / "project"
+    manifest = _persist(
+        project,
+        assets=[_asset(selection_status="selected")],
+        methods=[_method(source_asset_ids=["A1"])],
+    )
+
+    with pytest.raises(dr.DeepResearchError, match="candidate_id"):
+        bundle.run_l4b_from_manifest(
+            l4p, dr, project, "OTHER", manifest["path"], tmp_path / "work",
+            project_id="P1",
+        )
+    with pytest.raises(dr.DeepResearchError, match="project_id"):
+        bundle.run_l4b_from_manifest(
+            l4p, dr, project, "C1", manifest["path"], tmp_path / "work",
+            project_id="OTHER",
+        )
+
+    tampered = dict(manifest)
+    tampered["claim"] = "tampered outside the immutable L4A manifest"
+    (project / manifest["path"]).write_text(
+        json.dumps(tampered, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(dr.DeepResearchError, match="SHA256"):
+        bundle.run_l4b_from_manifest(
+            l4p, dr, project, "C1", manifest["path"], tmp_path / "work",
+            project_id="P1",
+        )
     assert l4p.validate_l4a_manifest(tmp_path, manifest) == (True, "")
 
 
