@@ -1,6 +1,6 @@
 """Granular deterministic L0 readiness probes.
 
-Every result names one concrete component and its downstream consumer.  This
+Every result names one concrete component and its downstream consumer. This
 module does not decide scientific meaning and does not own the current-round
 input contract.
 """
@@ -22,6 +22,8 @@ from research_loop import deep_research
 from research_loop.hypothesis_ledger import HypothesisLedger, LedgerError, binding_path
 
 PREFLIGHT_RECEIPT_SCHEMA = "L0PreflightReceipt/v1"
+ENFORCEMENT_BLOCKING = "blocking"
+ENFORCEMENT_READINESS_ONLY = "readiness_only"
 _PUBMED_REQUIRED_TOOLS = {
     "pubmed_search_articles",
     "pubmed_fetch_articles",
@@ -36,6 +38,11 @@ class ProbeResult:
     code: str
     detail: str
     consumer: str
+    enforcement: str = ENFORCEMENT_BLOCKING
+
+    def __post_init__(self):
+        if self.enforcement not in {ENFORCEMENT_BLOCKING, ENFORCEMENT_READINESS_ONLY}:
+            raise ValueError(f"invalid probe enforcement: {self.enforcement!r}")
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -45,12 +52,14 @@ def required_pubmed_tools() -> set[str]:
     return set(_PUBMED_REQUIRED_TOOLS)
 
 
-def _pass(component: str, detail: str, consumer: str) -> ProbeResult:
-    return ProbeResult(component, "PASS", "OK", detail, consumer)
+def _pass(component: str, detail: str, consumer: str, *,
+          enforcement: str = ENFORCEMENT_BLOCKING) -> ProbeResult:
+    return ProbeResult(component, "PASS", "OK", detail, consumer, enforcement)
 
 
-def _fail(component: str, code: str, detail: str, consumer: str) -> ProbeResult:
-    return ProbeResult(component, "FAIL", code, detail, consumer)
+def _fail(component: str, code: str, detail: str, consumer: str, *,
+          enforcement: str = ENFORCEMENT_BLOCKING) -> ProbeResult:
+    return ProbeResult(component, "FAIL", code, detail, consumer, enforcement)
 
 
 def _write_read_delete_probe(directory: Path) -> tuple[bool, str]:
@@ -154,22 +163,28 @@ async def _list_pubmed_mcp_tools(config: dict) -> set[str]:
 
 
 def _pubmed_mcp_probe(project_dir: Path) -> ProbeResult:
-    consumer = "literature discovery/full-text retrieval"
+    # Target architecture requires this transport, but its RLR literature
+    # consumer is not wired in PR #15. Report readiness without pretending the
+    # dependency→consumer closure already exists.
+    consumer = "future canonical literature discovery/full-text transport"
+    enforcement = ENFORCEMENT_READINESS_ONLY
     try:
         config = _pubmed_config(project_dir)
     except ValueError as exc:
         return _fail("research.pubmed_mcp", "L0_RESEARCH_PUBMED_MCP_START_FAILED",
-                     str(exc), consumer)
+                     str(exc), consumer, enforcement=enforcement)
     command = str(config.get("command") or "")
     if not command or shutil.which(command) is None:
         return _fail(
             "research.pubmed_mcp", "L0_RESEARCH_PUBMED_MCP_START_FAILED",
             f"stdio command not found on PATH: {command or '<empty>'}", consumer,
+            enforcement=enforcement,
         )
     if importlib.util.find_spec("mcp") is None:
         return _fail(
             "research.pubmed_mcp", "L0_RESEARCH_PUBMED_MCP_START_FAILED",
             "official MCP Python SDK is not installed", consumer,
+            enforcement=enforcement,
         )
     try:
         tools = asyncio.run(_list_pubmed_mcp_tools(config))
@@ -177,22 +192,28 @@ def _pubmed_mcp_probe(project_dir: Path) -> ProbeResult:
         return _fail(
             "research.pubmed_mcp", "L0_RESEARCH_PUBMED_MCP_START_FAILED",
             f"stdio MCP initialize/list_tools failed: {exc}", consumer,
+            enforcement=enforcement,
         )
     missing = sorted(required_pubmed_tools() - tools)
     if missing:
         return _fail(
             "research.pubmed_mcp", "L0_RESEARCH_PUBMED_MCP_REQUIRED_TOOL_MISSING",
             f"missing required MCP tools: {', '.join(missing)}", consumer,
+            enforcement=enforcement,
         )
     return _pass(
         "research.pubmed_mcp",
         "stdio MCP initialized; required search/metadata/full-text tools present",
         consumer,
+        enforcement=enforcement,
     )
 
 
 def _zotero_probe() -> ProbeResult:
-    consumer = "selected literature/PDF management"
+    # Zotero is part of the target canonical workflow, but PR #15 does not add
+    # the item/PDF consumer. Keep the probe visible without a false hard gate.
+    consumer = "future selected-literature/PDF management"
+    enforcement = ENFORCEMENT_READINESS_ONLY
     request = urllib.request.Request(
         "http://127.0.0.1:23119/api/", headers={"Zotero-API-Version": "3"}
     )
@@ -206,26 +227,29 @@ def _zotero_probe() -> ProbeResult:
             return _fail(
                 "research.zotero", "L0_RESEARCH_ZOTERO_LIBRARY_UNREADABLE",
                 "Zotero Local API returned 403; local API access is disabled",
-                consumer,
+                consumer, enforcement=enforcement,
             )
         return _fail(
             "research.zotero", "L0_RESEARCH_ZOTERO_LIBRARY_UNREADABLE",
             f"Zotero Local API HTTP {exc.code}", consumer,
+            enforcement=enforcement,
         )
     except (OSError, urllib.error.URLError) as exc:
         return _fail(
             "research.zotero", "L0_RESEARCH_ZOTERO_UNREACHABLE",
             f"Zotero Local API unavailable at 127.0.0.1:23119: {exc}", consumer,
+            enforcement=enforcement,
         )
     if str(api_version) != "3":
         return _fail(
             "research.zotero", "L0_RESEARCH_ZOTERO_LIBRARY_UNREADABLE",
             f"unexpected Zotero API version: {api_version!r}", consumer,
+            enforcement=enforcement,
         )
     detail = "local API v3 readable"
     if server_id:
         detail += f"; server_id={server_id}"
-    return _pass("research.zotero", detail, consumer)
+    return _pass("research.zotero", detail, consumer, enforcement=enforcement)
 
 
 def _hypothesis_ledger_probe(project_dir: Path) -> ProbeResult:
@@ -283,7 +307,7 @@ def _evidence_store_probe(project_dir: Path) -> ProbeResult:
 
 
 def _obsidian_probe() -> ProbeResult:
-    consumer = "end-of-round human-readable projection"
+    consumer = "required L10c human-readable projection"
     raw = str(os.environ.get("OBSIDIAN_VAULT") or "").strip()
     if not raw:
         return _fail(
@@ -319,6 +343,14 @@ def run_preflight_probes(project_dir) -> list[ProbeResult]:
     ]
 
 
+def preflight_overall_status(results: list[ProbeResult]) -> str:
+    if any(r.status == "FAIL" and r.enforcement == ENFORCEMENT_BLOCKING for r in results):
+        return "FAIL"
+    if any(r.status == "FAIL" for r in results):
+        return "PASS_WITH_WARNINGS"
+    return "PASS"
+
+
 def write_preflight_receipt(project_dir, results: list[ProbeResult]) -> Path:
     project = Path(project_dir)
     path = project / "00_Preflight" / "preflight_receipt.json"
@@ -326,7 +358,7 @@ def write_preflight_receipt(project_dir, results: list[ProbeResult]) -> Path:
     payload = {
         "schema_version": PREFLIGHT_RECEIPT_SCHEMA,
         "generated_at": _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat(),
-        "overall_status": "PASS" if all(r.status == "PASS" for r in results) else "FAIL",
+        "overall_status": preflight_overall_status(results),
         "results": [r.to_dict() for r in results],
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
