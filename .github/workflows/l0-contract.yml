@@ -51,6 +51,7 @@ jobs:
           tests/test_l0_preflight_probes.py
           tests/test_l0_completion_contract.py
           tests/test_l0_manifest_input_contract.py
+          tests/test_l0_revise_finalization.py
           tests/test_cross_round_e2e.py
           tests/test_run_loop_guards.py
       - name: Check patch whitespace
