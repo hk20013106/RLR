@@ -19,6 +19,7 @@ from research_loop.delta import DELTA_PERSONA
 from research_loop.compatibility import PROFILE_V20, get_profile
 from research_loop.hypothesis_ledger import binding_path
 from research_loop.delta import artifact_for_node
+from research_loop.l0_state import L0StateError, write_round_manifest
 from research_loop.yamlio import _load_yaml_front
 from research_loop.version import VERSION
 
@@ -162,14 +163,14 @@ def cmd_aggregate_report(args):
 
     # --- Chinese report ---
     cn = []
-    cn.append(f"# \u6700\u7ec8\u62a5\u544a: {title}\n")
-    cn.append(f"**\u5019\u9009\u7f16\u53f7:** {args.cand_id}")
-    cn.append(f"**\u72b6\u6001:** {status}")
-    cn.append(f"**\u751f\u6210\u65f6\u95f4:** {_now()}")
-    cn.append(f"**\u6846\u67b6:** RLR v{__version__}\n")
-    cn.append(f"## \u79d1\u5b66\u95ee\u9898\n\n{question}\n")
-    cn.append(f"## \u4e3b\u5f20\n\n{claim}\n")
-    cn.append("> \u6ce8\uff1a\u4ee5\u4e0b delta \u5185\u5bb9\u7531\u5404 persona \u751f\u6210\uff0c\u5982\u672a\u5305\u542b `cn` \u5b57\u6bb5\u5219\u4e3a\u82f1\u6587\u539f\u6587\u3002\u4e0b\u4e00\u8f6e v0.4 \u5faa\u73af\u5c06\u8981\u6c42 agent \u540c\u65f6\u8f93\u51fa\u4e2d\u6587\u7248\u672c\u3002\n")
+    cn.append(f"# 最终报告: {title}\n")
+    cn.append(f"**候选编号:** {args.cand_id}")
+    cn.append(f"**状态:** {status}")
+    cn.append(f"**生成时间:** {_now()}")
+    cn.append(f"**框架:** RLR v{__version__}\n")
+    cn.append(f"## 科学问题\n\n{question}\n")
+    cn.append(f"## 主张\n\n{claim}\n")
+    cn.append("> 注：以下 delta 内容由各 persona 生成，如未包含 `cn` 字段则为英文原文。下一轮 v0.4 循环将要求 agent 同时输出中文版。\n")
 
     for delta_key in DELTA_DAG_ORDER:
         title_cn = SECTION_TITLES_CN.get(delta_key, delta_key)
@@ -184,8 +185,8 @@ def cmd_aggregate_report(args):
         cn.append("")
 
     cn.append("---\n")
-    cn.append(f"**\u6700\u7ec8\u51b3\u7b56:** {final}\n")
-    cn.append(f"_\u62a5\u544a\u7531 RLR v{__version__} aggregate-report (L10c Linnaeus) \u751f\u6210_")
+    cn.append(f"**最终决策:** {final}\n")
+    cn.append(f"_报告由 RLR v{__version__} aggregate-report (L10c Linnaeus) 生成_")
 
     cn_report = "\n".join(cn)
     cn_path = project_dir / f"FINAL_REPORT_CN_{args.cand_id}.md"
@@ -204,10 +205,19 @@ def cmd_aggregate_report(args):
     (project_dir / "FINAL_REPORT_CN.md").write_text(banner + cn_report, encoding="utf-8")
     _update_reports_index(project_dir, args.cand_id, status)
 
+    # L10c freezes the physical evidence state after candidate-scoped reports
+    # exist. Large files remain in place and are bound by exact path + SHA-256.
+    try:
+        manifest_path, manifest_hash = write_round_manifest(project_dir, args.cand_id)
+    except L0StateError as exc:
+        print(f"ERROR: {exc.code}: {exc.detail}", file=sys.stderr)
+        return 2
+
     found = sum(1 for v in deltas.values() if v is not None)
     print(f"FINAL_REPORT generated:")
     print(f"  EN: {en_path}")
     print(f"  CN: {cn_path}")
     print(f"  shared: {shared}")
+    print(f"  round manifest: {manifest_path} sha256={manifest_hash}")
     print(f"  deltas found: {found}/{len(DELTA_DAG_ORDER)}")
     return 0
