@@ -41,7 +41,7 @@ def _project(tmp_path: Path, cand_id="C1", status="NEEDS_EXECUTION") -> tuple[Pa
         "---\n"
         f"candidate_id: {cand_id}\n"
         "round_type: initial\n"
-        "round_id: '1'\n"
+        "round_id: 1\n"
         f"current_status: {status}\n"
         f"input_contract_path: 01_Candidates/{cand_id}.l0_input.yaml\n"
         f"input_contract_hash: {hashlib.sha256(raw).hexdigest()}\n"
