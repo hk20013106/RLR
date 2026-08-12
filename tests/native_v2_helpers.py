@@ -280,11 +280,15 @@ def seed_revise_continuation(project_dir, candidate_id="C_prev", *, write_memory
                                         "evidence": "fixture"}]} if schema_version == "2.1" else {}),
         }], "method_decision": "APPROVE", "reason": "ready",
     })
+    result_path = project / "04_Analysis_Outputs" / "result.json"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text('{"result":"fixture"}\n', encoding="utf-8")
+    result_sha = hashlib.sha256(result_path.read_bytes()).hexdigest()
     l7 = commit_v2(project, candidate_id, "L7", "Turing", {
         "schema_version": schema_version, "results": [{
             "result_key": "r1", "hypothesis_ids": [hid], "summary": "result",
             "artifact_refs": [{"path": "04_Analysis_Outputs/result.json",
-                               "sha256": "a" * 64}],
+                               "sha256": result_sha}],
         }], "scripts_run": [], "warnings": [], "failures": [],
     })
     evidence_id = l7.normalized_delta["results"][0]["evidence_id"]
