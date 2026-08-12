@@ -51,6 +51,7 @@ jobs:
             src/research_loop/l0_intake.py \
             src/research_loop/l0_plan_intake.py \
             src/research_loop/l0_state.py \
+            src/research_loop/l0_data.py \
             src/research_loop/l0_preflight.py \
             src/research_loop/gates.py \
             src/research_loop/context.py \
@@ -59,11 +60,14 @@ jobs:
             src/research_loop/commands/reporting.py \
             src/sync_to_obsidian.py \
             src/run_loop.py
-      - name: Run round data contract tests
+      - name: Run round data authority tests
         run: >-
           python -m pytest -q
           tests/test_round_data_contract.py
           tests/test_round_data_intake.py
+          tests/test_round_data_binding.py
+          tests/test_round_data_gate.py
+          tests/test_round_data_execution.py
       - name: Run targeted L0 regression tests
         run: >-
           python -m pytest -q
