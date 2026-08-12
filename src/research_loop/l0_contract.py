@@ -19,6 +19,7 @@ Leaf module: imports stdlib + PyYAML + research_loop.paths/topology (both leaves
 -> no engine import, no cycle.
 """
 import hashlib
+import re
 from pathlib import Path
 
 import yaml
@@ -27,10 +28,14 @@ from research_loop.paths import _candidate_file
 from research_loop.topology import DECISION_TRANSITIONS
 
 
+# 1.0 remains readable with its historical semantics. 1.1 adds only the
+# continuation data-declaration vocabulary; intake builders are migrated in a
+# separate TDD step so accepting 1.1 does not silently change every caller.
 L0_CONTRACT_SCHEMA_VERSION = "1.0"
-SUPPORTED_SCHEMA_VERSIONS = ("1.0",)
+SUPPORTED_SCHEMA_VERSIONS = ("1.0", "1.1")
 ROUND_TYPES = ("initial", "continuation")
 SOURCE_INPUT_TYPES = ("files", "directory", "dataset", "inline", "other")
+INHERITED_INPUT_FIELDS = ("path", "sha256", "role", "reuse_reason")
 # Remote/non-local datasets cannot be filesystem-checked; they must instead
 # carry an explicit verification status + reason. There is NO verified:false
 # escape for local file/directory inputs (those hard-fail when missing).
@@ -221,12 +226,21 @@ def validate_l0_input_contract(contract, fm, project_dir, cand_id,
         err(f"[round={rlabel}] scientific_question missing/placeholder/wrong-type "
             f"({sq!r}); give one non-empty testable question as a string")
 
-    # 4. source_input (required structured mapping)
+    # 4. source_input. Historical 1.0 requires it unconditionally. In 1.1 a
+    # continuation may be inherited-only; initial rounds still require it.
     si = contract.get("source_input")
-    if not isinstance(si, dict):
+    inherited = contract.get("inherited_inputs", []) if sv == "1.1" else []
+    source_required = sv != "1.1" or rt != "continuation" or not inherited
+    if si is None and source_required:
+        if sv == "1.1" and rt == "continuation" and not inherited:
+            err("[round=continuation] schema 1.1 requires at least one current or inherited input")
+        else:
+            err(f"[round={rlabel}] source_input must be a mapping "
+                "{input_type,files|location,description,format}, got NoneType")
+    elif si is not None and not isinstance(si, dict):
         err(f"[round={rlabel}] source_input must be a mapping "
             f"{{input_type,files|location,description,format}}, got {type(si).__name__}")
-    else:
+    elif isinstance(si, dict):
         it = si.get("input_type")
         if it not in SOURCE_INPUT_TYPES:
             err(f"[round={rlabel}] source_input.input_type illegal {it!r}; "
@@ -237,6 +251,7 @@ def validate_l0_input_contract(contract, fm, project_dir, cand_id,
         if not str(si.get("format") or "").strip():
             err(f"[round={rlabel}] source_input.format required "
                 f"(e.g. 'csv', 'fastq', 'h5ad')")
+
         def _missing(paths):
             return [f for f in paths
                     if not (Path(project_dir) / str(f)).exists()
@@ -290,6 +305,28 @@ def validate_l0_input_contract(contract, fm, project_dir, cand_id,
                     f"exist under input_type={it!r}: {imiss}; use input_type="
                     f"files with existing paths, or dataset for remote data")
 
+    # 4b. Schema 1.1 inherited declarations are selectors only. Physical
+    # authorization against the verified previous manifest belongs to l0_data,
+    # not this declaration validator.
+    if sv == "1.1":
+        if not isinstance(inherited, list):
+            err(f"[round={rlabel}] inherited_inputs must be a list")
+            inherited = []
+        for index, item in enumerate(inherited):
+            prefix = f"inherited_inputs[{index}]"
+            if not isinstance(item, dict):
+                err(f"[round={rlabel}] {prefix} must be a mapping")
+                continue
+            extra = sorted(set(item) - set(INHERITED_INPUT_FIELDS))
+            if extra:
+                err(f"[round={rlabel}] {prefix} has unsupported fields: {extra}")
+            for field in ("path", "role", "reuse_reason"):
+                if not isinstance(item.get(field), str) or _is_placeholder(item.get(field)):
+                    err(f"[round={rlabel}] {prefix}.{field} is required and must be non-placeholder text")
+            digest = item.get("sha256")
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                err(f"[round={rlabel}] {prefix}.sha256 must be a 64-character lowercase hex string")
+
     # 5. current_round.hypothesis (the new hypothesis; required non-empty)
     cur = contract.get("current_round")
     if not isinstance(cur, dict) or _is_placeholder(cur.get("hypothesis")):
@@ -319,6 +356,8 @@ def validate_l0_input_contract(contract, fm, project_dir, cand_id,
                 "not carry from_memory or a previous_round block")
         if contract.get("previous_candidate_id"):
             err("[round=initial] previous_candidate_id must be null on an initial round")
+        if sv == "1.1" and inherited:
+            err("[round=initial] inherited_inputs are continuation-only and must be empty")
     elif rt == "continuation":
         pr = contract.get("previous_round")
         if not isinstance(pr, dict) or not pr:
@@ -390,6 +429,20 @@ def render_contract_block(contract):
         lines.append(f"  verification_status: {si.get('verification_status')}")
     if "reason" in si:
         lines.append(f"  reason: {si.get('reason')}")
+    inherited = contract.get("inherited_inputs")
+    if isinstance(inherited, list) and inherited:
+        lines.append("inherited_inputs:")
+        for item in inherited:
+            if not isinstance(item, dict):
+                continue
+            lines += [
+                f"  - path: {item.get('path', '')}",
+                f"    sha256: {item.get('sha256', '')}",
+                f"    role: {item.get('role', '')}",
+                f"    reuse_reason: {item.get('reuse_reason', '')}",
+            ]
+    else:
+        lines.append("inherited_inputs: []")
     pr = contract.get("previous_round")
     if isinstance(pr, dict) and pr:
         lines += [
