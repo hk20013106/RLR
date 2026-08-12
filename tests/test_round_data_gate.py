@@ -44,7 +44,7 @@ def _candidate(project: Path, cand_id: str, data: Path) -> Path:
         "---\n"
         f"candidate_id: {cand_id}\n"
         "round_type: initial\n"
-        "round_id: '1'\n"
+        "round_id: 1\n"
         f"input_contract_path: 01_Candidates/{cand_id}.l0_input.yaml\n"
         f"input_contract_hash: {hashlib.sha256(raw).hexdigest()}\n"
         "---\n",
