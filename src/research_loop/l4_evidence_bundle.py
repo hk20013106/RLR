@@ -483,6 +483,97 @@ def run_l4b_evidence(
     return artifact
 
 
+def run_l4b_from_manifest(
+    l4p,
+    dr,
+    project_dir: str | Path,
+    candidate_id: str,
+    manifest_path: str | Path,
+    work_dir: str | Path,
+    *,
+    project_id: str = "",
+    round_id: str = "",
+    profile_id: str = "",
+    research_persona: str = "Curie",
+    fetcher=None,
+) -> dict:
+    """Resume deterministic L4B from one existing, immutable L4A manifest.
+
+    This is deliberately a path-based, explicit boundary. It never invokes
+    L4A discovery and never copies or infers a manifest from another artifact.
+    """
+    project = Path(project_dir).resolve()
+    try:
+        manifest_file = _bound_path(project, manifest_path, "L4A manifest path")
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
+        raise dr.DeepResearchError(
+            f"L4A manifest is unreadable or unsafe: {exc}"
+        ) from exc
+    if not isinstance(manifest, dict):
+        raise dr.DeepResearchError("L4A manifest must be a JSON object")
+
+    relative_path = manifest_file.relative_to(project).as_posix()
+    if str(manifest.get("path") or "") != relative_path:
+        raise dr.DeepResearchError(
+            "L4A manifest path does not match the requested project-relative path"
+        )
+    ok, reason = l4p.validate_l4a_manifest(project, manifest)
+    if not ok:
+        raise dr.DeepResearchError(f"L4A manifest validation failed: {reason}")
+
+    requested_candidate = str(candidate_id or "").strip()
+    if not requested_candidate or str(manifest.get("candidate_id") or "") != requested_candidate:
+        raise dr.DeepResearchError(
+            "L4A manifest candidate_id does not match the requested candidate"
+        )
+
+    identity = {
+        "project_id": project_id,
+        "round_id": round_id,
+        "profile_id": profile_id,
+    }
+    for field, supplied in identity.items():
+        supplied_value = str(supplied or "").strip()
+        manifest_value = str(manifest.get(field) or "").strip()
+        if supplied_value and manifest_value and supplied_value != manifest_value:
+            raise dr.DeepResearchError(
+                f"L4A manifest {field} does not match the requested L4B identity"
+            )
+
+    selected = l4p.selected_l4a_assets(manifest, require=True)
+    selected_ids = {
+        str(asset.get("asset_id") or "") for asset in selected
+    }
+    sources, _ = l4_inventory.inventory_sources(manifest)
+    outside = sorted(
+        {
+            str(asset.get("asset_id") or "")
+            for asset in sources
+            if str(asset.get("asset_id") or "") not in selected_ids
+        }
+    )
+    if outside:
+        raise dr.DeepResearchError(
+            "L4B frozen corpus contains resolver assets outside selected L4A assets: "
+            + ", ".join(outside)
+        )
+
+    return run_l4b_evidence(
+        l4p,
+        dr,
+        project,
+        requested_candidate,
+        manifest,
+        work_dir,
+        project_id=str(project_id or manifest.get("project_id") or ""),
+        round_id=str(round_id or manifest.get("round_id") or ""),
+        profile_id=str(profile_id or manifest.get("profile_id") or ""),
+        research_persona=research_persona,
+        fetcher=fetcher,
+    )
+
+
 def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bool, str]:
     project = Path(project_dir).resolve()
     if artifact.get("evidence_bundle_schema") != EVIDENCE_BUNDLE_SCHEMA:

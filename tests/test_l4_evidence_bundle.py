@@ -147,6 +147,7 @@ def test_inventory_promotes_referenced_reserve_asset(tmp_path):
     assert manifest["selected_asset_ids"] == ["A1"]
     assert manifest["assets"][0]["selection_status"] == "selected"
     assert manifest["method_inventory"][0]["source_asset_ids"] == ["A1"]
+    assert l4p.validate_l4a_manifest(tmp_path, manifest) == (True, "")
 
 
 def test_l4b_resume_from_existing_manifest_skips_l4a_provider(monkeypatch, tmp_path):
@@ -221,7 +222,6 @@ def test_l4b_resume_revalidates_manifest_identity_and_hash(tmp_path):
             l4p, dr, project, "C1", manifest["path"], tmp_path / "work",
             project_id="P1",
         )
-    assert l4p.validate_l4a_manifest(tmp_path, manifest) == (True, "")
 
 
 def test_inventory_hint_materializes_selected_exact_source(tmp_path):
