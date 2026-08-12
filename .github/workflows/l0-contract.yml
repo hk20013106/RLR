@@ -71,6 +71,7 @@ jobs:
           tests/test_l0_manifest_input_contract.py
           tests/test_l0_revise_finalization.py
           tests/test_round_data_contract.py
+          tests/test_round_data_intake.py
           tests/test_cross_round_e2e.py
           tests/test_context_isolation.py
           tests/test_run_loop_guards.py
