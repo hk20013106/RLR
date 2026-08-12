@@ -1,5 +1,6 @@
 from rlr_maintenance.observer import (
     observe_acceptance_failure,
+    observe_ci_failure,
     observe_contract_failure,
     observe_process_failure,
     observe_verification_failure,
@@ -67,6 +68,30 @@ def test_verification_failure_records_validator_identity():
         "outcome": "failed",
         "returncode": 1,
     }
+
+
+def test_ci_failure_records_check_identity_without_copying_logs():
+    event = observe_ci_failure(
+        component="github_ci",
+        check_id="CI / Test / Windows / Python 3.13",
+        conclusion="failure",
+        run_id="31622141836",
+        expected_contract="runner_nonzero_propagation",
+        rlr_revision=REVISION,
+        evidence_refs=[
+            {"kind": "github_check", "ref": "workflow-run:31622141836"}
+        ],
+        observed_at=WHEN,
+    )
+
+    assert event["event_type"] == "ci_failure"
+    assert event["observed"] == {
+        "check_id": "CI / Test / Windows / Python 3.13",
+        "conclusion": "failure",
+        "run_id": "31622141836",
+    }
+    assert "stdout" not in event["observed"]
+    assert "stderr" not in event["observed"]
 
 
 def test_acceptance_failure_keeps_compact_condition_only():
