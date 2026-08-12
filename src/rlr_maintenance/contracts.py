@@ -1,120 +1,92 @@
 """Provider-neutral contracts for the RLR software-maintenance boundary.
 
-This module owns maintenance observations only. It must not interpret scientific
-results, mutate RLR state, or depend on LoopX implementation modules.
+The maintenance boundary records compact software/runtime facts.  It does not
+interpret scientific results, mutate RLR state, or depend on LoopX internals.
+Structural validation reuses RLR's existing JSON-Schema dependency; a small
+semantic layer owns privacy, repository-path safety, and content identities.
 """
 from __future__ import annotations
 
 import hashlib
 import json
-import re
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, Iterable, Mapping
 
+import jsonschema
+
 
 MAINTENANCE_EVENT_SCHEMA = "RLRMaintenanceEvent/v1"
-
-_ALLOWED_EVENT_TYPES = {
-    "contract_failure",
-    "runtime_failure",
-    "verification_failure",
-    "ci_failure",
-    "acceptance_failure",
+_MAX_OBSERVED_BYTES = 16 * 1024
+_RAW_PRIVATE_KEYS = {
+    "stdout",
+    "stderr",
+    "raw_log",
+    "raw_logs",
+    "transcript",
+    "transcripts",
+    "credential",
+    "credentials",
+    "secret",
+    "secrets",
+    "token",
+    "tokens",
+    "authorization",
 }
-_ALLOWED_SEVERITIES = {"blocking", "warning", "info"}
-_ALLOWED_REF_KINDS = {"rlr_artifact", "github_check", "test", "pilot"}
-_ALLOWED_ROUTES = {"repair", "investigate", "monitor"}
-_HEX40 = re.compile(r"^[0-9a-fA-F]{40}$")
-_HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
 
+_REF_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "kind": {
+            "enum": ["rlr_artifact", "github_check", "test", "pilot"],
+        },
+        "ref": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    },
+    "required": ["kind", "ref"],
+    "additionalProperties": False,
+}
 
-class MaintenanceContractError(ValueError):
-    """Raised when maintenance-boundary data violates its declared contract."""
-
-
-def canonical_json(value: object) -> str:
-    """Return deterministic JSON suitable for content-derived identities."""
-    try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    except (TypeError, ValueError) as exc:
-        raise MaintenanceContractError(f"value is not canonical JSON: {exc}") from exc
-
-
-def _require_nonempty_string(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise MaintenanceContractError(f"{field} must be a non-empty string")
-    return value
-
-
-def _require_sha(value: object, field: str, pattern: re.Pattern[str]) -> str:
-    text = _require_nonempty_string(value, field)
-    if not pattern.fullmatch(text):
-        raise MaintenanceContractError(f"{field} must be a hexadecimal SHA")
-    return text.lower()
-
-
-def _is_absolute_path(value: str) -> bool:
-    return PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
-
-
-def _validate_evidence_refs(value: object, field: str) -> list[dict[str, Any]]:
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise MaintenanceContractError(f"{field} must be a list")
-
-    normalized: list[dict[str, Any]] = []
-    for index, raw in enumerate(value):
-        if not isinstance(raw, Mapping):
-            raise MaintenanceContractError(f"{field}[{index}] must be an object")
-        kind = _require_nonempty_string(raw.get("kind"), f"{field}[{index}].kind")
-        if kind not in _ALLOWED_REF_KINDS:
-            raise MaintenanceContractError(
-                f"{field}[{index}].kind must be one of {sorted(_ALLOWED_REF_KINDS)}"
-            )
-        ref = _require_nonempty_string(raw.get("ref"), f"{field}[{index}].ref")
-        if kind == "rlr_artifact" and _is_absolute_path(ref):
-            raise MaintenanceContractError(
-                f"{field}[{index}].ref for rlr_artifact must be repository-relative"
-            )
-
-        item: dict[str, Any] = {"kind": kind, "ref": ref}
-        if raw.get("sha256") not in (None, ""):
-            item["sha256"] = _require_sha(
-                raw.get("sha256"), f"{field}[{index}].sha256", _HEX64
-            )
-        normalized.append(item)
-    return normalized
-
-
-def _stable_identity_payload(event: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        key: event[key]
-        for key in sorted(event)
-        if key not in {"event_id", "dedup_fingerprint", "observed_at"}
-    }
-
-
-def _fingerprint(event: Mapping[str, Any]) -> str:
-    payload = canonical_json(_stable_identity_payload(event)).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
-def validate_maintenance_event(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate and normalize an ``RLRMaintenanceEvent/v1`` mapping.
-
-    Validation is fail-closed. The function verifies the content-derived event
-    identity rather than trusting caller-supplied identifiers.
-    """
-    if not isinstance(value, Mapping):
-        raise MaintenanceContractError("maintenance event must be an object")
-
-    required = {
+MAINTENANCE_EVENT_JSON_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+        "schema_version": {"const": MAINTENANCE_EVENT_SCHEMA},
+        "event_id": {"type": "string", "pattern": "^rme-[0-9a-f]{20}$"},
+        "event_type": {
+            "enum": [
+                "contract_failure",
+                "runtime_failure",
+                "verification_failure",
+                "ci_failure",
+                "acceptance_failure",
+            ]
+        },
+        "component": {"type": "string", "minLength": 1, "maxLength": 256},
+        "severity": {"enum": ["blocking", "warning", "info"]},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "rlr_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "project_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+        "candidate_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+        "round_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+        "observed": {"type": "object", "maxProperties": 64},
+        "expected_contract": {"type": "string", "minLength": 1, "maxLength": 256},
+        "evidence_refs": {
+            "type": "array",
+            "maxItems": 64,
+            "items": _REF_SCHEMA,
+        },
+        "source_receipts": {
+            "type": "array",
+            "maxItems": 64,
+            "items": _REF_SCHEMA,
+        },
+        "dedup_fingerprint": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+        },
+        "suggested_route": {"enum": ["repair", "investigate", "monitor"]},
+    },
+    "required": [
         "schema_version",
         "event_id",
         "event_type",
@@ -128,71 +100,150 @@ def validate_maintenance_event(value: Mapping[str, Any]) -> dict[str, Any]:
         "source_receipts",
         "dedup_fingerprint",
         "suggested_route",
-    }
-    missing = sorted(required - set(value))
-    if missing:
-        raise MaintenanceContractError(f"maintenance event missing fields: {missing}")
+    ],
+    "additionalProperties": False,
+}
 
-    if value.get("schema_version") != MAINTENANCE_EVENT_SCHEMA:
+_EVENT_VALIDATOR = jsonschema.Draft202012Validator(
+    MAINTENANCE_EVENT_JSON_SCHEMA,
+    format_checker=jsonschema.FormatChecker(),
+)
+
+
+class MaintenanceContractError(ValueError):
+    """Raised when maintenance-boundary data violates its declared contract."""
+
+
+def canonical_json(value: object) -> str:
+    """Return deterministic strict JSON for hashes and compact-size checks."""
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise MaintenanceContractError(f"value is not canonical JSON: {exc}") from exc
+
+
+def _json_path(error: jsonschema.ValidationError) -> str:
+    return "/".join(str(part) for part in error.absolute_path) or "<root>"
+
+
+def _schema_error(error: jsonschema.ValidationError) -> MaintenanceContractError:
+    where = _json_path(error)
+    if error.validator == "additionalProperties":
+        return MaintenanceContractError(f"unexpected fields at {where}: {error.message}")
+    if error.validator == "format" and where == "observed_at":
+        return MaintenanceContractError("observed_at must be timezone-aware ISO-8601 date-time")
+    return MaintenanceContractError(f"{where}: {error.message}")
+
+
+def _validate_schema(event: Mapping[str, Any]) -> None:
+    errors = sorted(
+        _EVENT_VALIDATOR.iter_errors(dict(event)),
+        key=lambda error: (list(error.absolute_path), error.message),
+    )
+    if errors:
+        raise _schema_error(errors[0])
+
+
+def _safe_repository_ref(ref: str) -> bool:
+    posix = PurePosixPath(ref)
+    windows = PureWindowsPath(ref)
+    if posix.is_absolute() or windows.is_absolute() or windows.drive:
+        return False
+    return ".." not in posix.parts and ".." not in windows.parts
+
+
+def _walk_keys(value: object) -> Iterable[str]:
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            yield str(key).lower()
+            yield from _walk_keys(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_keys(child)
+
+
+def _validate_semantics(event: Mapping[str, Any]) -> None:
+    observed = event["observed"]
+    private_keys = sorted(set(_walk_keys(observed)) & _RAW_PRIVATE_KEYS)
+    if private_keys:
         raise MaintenanceContractError(
-            f"schema_version must be {MAINTENANCE_EVENT_SCHEMA}"
+            f"observed contains raw/private fields: {', '.join(private_keys)}"
         )
 
-    event_type = _require_nonempty_string(value.get("event_type"), "event_type")
-    if event_type not in _ALLOWED_EVENT_TYPES:
+    observed_bytes = len(canonical_json(observed).encode("utf-8"))
+    if observed_bytes > _MAX_OBSERVED_BYTES:
         raise MaintenanceContractError(
-            f"event_type must be one of {sorted(_ALLOWED_EVENT_TYPES)}"
+            f"observed must remain compact (<= {_MAX_OBSERVED_BYTES} UTF-8 bytes)"
         )
 
-    severity = _require_nonempty_string(value.get("severity"), "severity")
-    if severity not in _ALLOWED_SEVERITIES:
-        raise MaintenanceContractError(
-            f"severity must be one of {sorted(_ALLOWED_SEVERITIES)}"
-        )
+    for field in ("evidence_refs", "source_receipts"):
+        for index, ref in enumerate(event[field]):
+            if ref["kind"] == "rlr_artifact" and not _safe_repository_ref(ref["ref"]):
+                raise MaintenanceContractError(
+                    f"{field}[{index}].ref for rlr_artifact must be repository-relative "
+                    "and may not traverse parent directories"
+                )
 
-    route = _require_nonempty_string(value.get("suggested_route"), "suggested_route")
-    if route not in _ALLOWED_ROUTES:
-        raise MaintenanceContractError(
-            f"suggested_route must be one of {sorted(_ALLOWED_ROUTES)}"
-        )
+    canonical_json(event)
 
-    observed = value.get("observed")
-    if not isinstance(observed, Mapping):
-        raise MaintenanceContractError("observed must be an object")
 
-    normalized: dict[str, Any] = {
-        "schema_version": MAINTENANCE_EVENT_SCHEMA,
-        "event_id": _require_nonempty_string(value.get("event_id"), "event_id"),
-        "event_type": event_type,
-        "component": _require_nonempty_string(value.get("component"), "component"),
-        "severity": severity,
-        "observed_at": _require_nonempty_string(value.get("observed_at"), "observed_at"),
-        "rlr_revision": _require_sha(value.get("rlr_revision"), "rlr_revision", _HEX40),
-        "observed": dict(observed),
-        "expected_contract": _require_nonempty_string(
-            value.get("expected_contract"), "expected_contract"
-        ),
-        "evidence_refs": _validate_evidence_refs(value.get("evidence_refs"), "evidence_refs"),
-        "source_receipts": _validate_evidence_refs(value.get("source_receipts"), "source_receipts"),
-        "dedup_fingerprint": _require_sha(
-            value.get("dedup_fingerprint"), "dedup_fingerprint", _HEX64
-        ),
-        "suggested_route": route,
-    }
+def _sha256(value: object) -> str:
+    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
-    for optional in ("project_ref", "candidate_ref", "round_ref"):
-        if optional in value and value.get(optional) not in (None, ""):
-            normalized[optional] = _require_nonempty_string(value.get(optional), optional)
 
-    expected_fingerprint = _fingerprint(normalized)
-    if normalized["dedup_fingerprint"] != expected_fingerprint:
-        raise MaintenanceContractError("dedup_fingerprint does not match event content")
-    expected_event_id = f"rme-{expected_fingerprint[:20]}"
-    if normalized["event_id"] != expected_event_id:
-        raise MaintenanceContractError("event_id does not match event content")
+def _dedup_payload(event: Mapping[str, Any]) -> dict[str, Any]:
+    """Facts defining one underlying failure across repeated observations."""
+    keys = (
+        "schema_version",
+        "event_type",
+        "component",
+        "rlr_revision",
+        "observed",
+        "expected_contract",
+        "project_ref",
+        "candidate_ref",
+        "round_ref",
+    )
+    return {key: event[key] for key in keys if key in event}
 
-    canonical_json(normalized)
-    return normalized
+
+def _occurrence_payload(event: Mapping[str, Any]) -> dict[str, Any]:
+    """All immutable occurrence content except the derived event id itself."""
+    return {key: event[key] for key in sorted(event) if key != "event_id"}
+
+
+def _expected_dedup(event: Mapping[str, Any]) -> str:
+    return _sha256(_dedup_payload(event))
+
+
+def _expected_event_id(event: Mapping[str, Any]) -> str:
+    return f"rme-{_sha256(_occurrence_payload(event))[:20]}"
+
+
+def validate_maintenance_event(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Fail closed on malformed, unsafe, or identity-inconsistent events."""
+    if not isinstance(value, Mapping):
+        raise MaintenanceContractError("maintenance event must be an object")
+
+    event = dict(value)
+    _validate_schema(event)
+    _validate_semantics(event)
+
+    expected_dedup = _expected_dedup(event)
+    if event["dedup_fingerprint"] != expected_dedup:
+        raise MaintenanceContractError("dedup_fingerprint does not match stable failure facts")
+
+    expected_event_id = _expected_event_id(event)
+    if event["event_id"] != expected_event_id:
+        raise MaintenanceContractError("event_id does not match immutable event occurrence")
+
+    return event
 
 
 def build_maintenance_event(
@@ -211,10 +262,10 @@ def build_maintenance_event(
     candidate_ref: str | None = None,
     round_ref: str | None = None,
 ) -> dict[str, Any]:
-    """Build a validated maintenance event from compact authoritative facts."""
+    """Build one immutable observation plus a stable underlying-failure id."""
     event: dict[str, Any] = {
         "schema_version": MAINTENANCE_EVENT_SCHEMA,
-        "event_id": "pending",
+        "event_id": "rme-" + "0" * 20,
         "event_type": event_type,
         "component": component,
         "severity": severity,
@@ -227,45 +278,17 @@ def build_maintenance_event(
         "dedup_fingerprint": "0" * 64,
         "suggested_route": suggested_route,
     }
-    if project_ref:
+    if project_ref is not None:
         event["project_ref"] = project_ref
-    if candidate_ref:
+    if candidate_ref is not None:
         event["candidate_ref"] = candidate_ref
-    if round_ref:
+    if round_ref is not None:
         event["round_ref"] = round_ref
 
-    # Normalize all caller-controlled fields before deriving identity.
-    provisional = dict(event)
-    provisional["event_id"] = "rme-" + "0" * 20
-    provisional["dedup_fingerprint"] = "0" * 64
+    # Validate caller-controlled structure and privacy before deriving identity.
+    _validate_schema(event)
+    _validate_semantics(event)
 
-    # Reuse the same field validators without requiring the derived values to
-    # match yet.
-    if provisional["schema_version"] != MAINTENANCE_EVENT_SCHEMA:
-        raise MaintenanceContractError("invalid schema_version")
-    if event_type not in _ALLOWED_EVENT_TYPES:
-        raise MaintenanceContractError(
-            f"event_type must be one of {sorted(_ALLOWED_EVENT_TYPES)}"
-        )
-    if severity not in _ALLOWED_SEVERITIES:
-        raise MaintenanceContractError(
-            f"severity must be one of {sorted(_ALLOWED_SEVERITIES)}"
-        )
-    if suggested_route not in _ALLOWED_ROUTES:
-        raise MaintenanceContractError(
-            f"suggested_route must be one of {sorted(_ALLOWED_ROUTES)}"
-        )
-    _require_nonempty_string(component, "component")
-    _require_nonempty_string(observed_at, "observed_at")
-    event["rlr_revision"] = _require_sha(rlr_revision, "rlr_revision", _HEX40)
-    _require_nonempty_string(expected_contract, "expected_contract")
-    if not isinstance(observed, Mapping):
-        raise MaintenanceContractError("observed must be an object")
-    event["evidence_refs"] = _validate_evidence_refs(event["evidence_refs"], "evidence_refs")
-    event["source_receipts"] = _validate_evidence_refs(event["source_receipts"], "source_receipts")
-    canonical_json(event["observed"])
-
-    fingerprint = _fingerprint(event)
-    event["dedup_fingerprint"] = fingerprint
-    event["event_id"] = f"rme-{fingerprint[:20]}"
+    event["dedup_fingerprint"] = _expected_dedup(event)
+    event["event_id"] = _expected_event_id(event)
     return validate_maintenance_event(event)
