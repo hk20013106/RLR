@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 import pytest
@@ -317,6 +318,31 @@ def test_registered_local_payload_has_first_priority(tmp_path):
     assert result["status"] == "resolved"
     assert result["receipt"]["retrieval_method"] == "registered_local_payload"
     assert calls == []
+
+
+def test_resolver_preserves_exact_source_bytes_and_hash_on_persistence(tmp_path):
+    contract = cc.build_retrieval_contract(_asset())
+    raw_payload = A1_XML.replace("><", ">\r\n<").encode("utf-8")
+
+    def fetcher(url):
+        return _response(url, payload=raw_payload.decode("utf-8"))
+
+    result = cc.resolve_contract(tmp_path, contract, fetcher=fetcher)
+
+    expected_hash = hashlib.sha256(raw_payload).hexdigest()
+    assert result["source_bytes"] == raw_payload
+    assert result["receipt"]["content_hash"] == expected_hash
+
+    state = cc.resolve_manifest(
+        tmp_path,
+        "C1",
+        {"path": "", "manifest_sha256": ""},
+        tmp_path / "work",
+        selected_assets=[_asset()],
+        fetcher=fetcher,
+    )
+    persisted = Path(state["resolutions"][0]["local_path"]).read_bytes()
+    assert persisted == raw_payload
 
 
 def test_payload_under_500_bytes_fails_closed(tmp_path):

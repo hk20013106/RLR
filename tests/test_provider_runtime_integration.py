@@ -5,12 +5,18 @@ import sys
 from pathlib import Path
 
 from research_loop import deep_research
+from research_loop import l4_inventory
 from research_loop import method_evidence
 from research_loop import method_review_navigation
 from research_loop.provider_runtime_observability import _CONTEXT
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_codex_jsonl.py"
+
+
+def test_native_l4a_inventory_provider_boundary_is_observed():
+    """The native L4A owner must share PR #14's subprocess runtime proxy."""
+    assert l4_inventory.subprocess is deep_research.subprocess
 
 
 def test_active_deep_research_provider_boundary_is_observed(tmp_path, monkeypatch):

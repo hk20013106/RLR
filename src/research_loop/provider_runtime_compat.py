@@ -53,6 +53,7 @@ def install(deep_research_module, detached_task_module, l4_pipeline_module) -> N
     # provider owner to the same proxy; otherwise the active L1/L4 wrapper can
     # bypass observation even though deep_research itself is patched.
     provider_owner_modules = (
+        "research_loop.l4_inventory",
         "research_loop.method_evidence",
         "research_loop.method_review_navigation",
     )

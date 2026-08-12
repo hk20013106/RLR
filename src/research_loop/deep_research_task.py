@@ -18,7 +18,7 @@ TASK_SCHEMA_VERSION = "DeepResearchDetachedTask/v1"
 _HANDLER_ARGUMENTS = (
     "project_dir", "cand_id", "node", "backend", "allow_host_mismatch",
     "executable", "plugin_dir", "skill_path", "skill_version", "model",
-    "timeout",
+    "timeout", "l4a_manifest",
 )
 
 

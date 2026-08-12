@@ -320,6 +320,182 @@ def validate_l4a_manifest(project_dir: str | Path, manifest: dict) -> tuple[bool
     return True, ""
 
 
+def validate_native_l4a_manifest(
+    project_dir: str | Path, manifest: dict
+) -> tuple[bool, str]:
+    """Validate the immutable native-v2 L4A handoff consumed by L4B.
+
+    ``validate_l4a_manifest`` remains deliberately readable for historical
+    metadata-only L4A artifacts.  L4B has a narrower contract: it may consume
+    only a native method-inventory manifest whose selected corpus and source
+    references are internally closed.  Keeping this stricter validator at the
+    L4B boundary prevents legacy artifacts from being silently upgraded.
+    """
+    ok, reason = validate_l4a_manifest(project_dir, manifest)
+    if not ok:
+        return False, reason
+
+    missing = [
+        field for field in ("inventory_schema", "method_inventory")
+        if field not in manifest
+    ]
+    if missing:
+        return (
+            False,
+            "LEGACY_L4A_MANIFEST_INCOMPATIBLE: native L4A resume requires "
+            + ", ".join(missing),
+        )
+
+    # Import lazily so l4_inventory can continue to use l4_pipeline's
+    # persistence helpers without creating an import cycle.
+    from research_loop import l4_inventory
+
+    if manifest.get("inventory_schema") != l4_inventory.INVENTORY_SCHEMA_VERSION:
+        return False, "NATIVE_L4A_MANIFEST_INCOMPATIBLE: unexpected inventory_schema"
+
+    required_identity = ("run_id", "candidate_id", "project_id", "round_id", "profile_id")
+    missing_identity = [
+        field for field in required_identity
+        if not str(manifest.get(field) or "").strip()
+    ]
+    if missing_identity:
+        return (
+            False,
+            "NATIVE_L4A_MANIFEST_INCOMPATIBLE: missing identity fields "
+            + ", ".join(missing_identity),
+        )
+
+    assets = manifest.get("assets")
+    selected_ids = manifest.get("selected_asset_ids")
+    methods = manifest.get("method_inventory")
+    if not isinstance(assets, list) or not assets:
+        return False, "NATIVE_L4A_MANIFEST_INCOMPATIBLE: assets must be non-empty"
+    if not isinstance(selected_ids, list) or not selected_ids:
+        return False, "NATIVE_L4A_MANIFEST_INCOMPATIBLE: selected_asset_ids must be non-empty"
+    if not isinstance(methods, list) or not methods:
+        return False, "NATIVE_L4A_MANIFEST_INCOMPATIBLE: method_inventory must be non-empty"
+
+    asset_by_id = {}
+    for index, raw_asset in enumerate(assets):
+        if not isinstance(raw_asset, dict):
+            return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: asset {index} is not an object"
+        asset_id = str(raw_asset.get("asset_id") or "").strip()
+        if not asset_id:
+            return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: asset {index} lacks asset_id"
+        if asset_id in asset_by_id:
+            return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: duplicate asset_id {asset_id}"
+        asset_by_id[asset_id] = raw_asset
+
+    selected_values = [str(value).strip() for value in selected_ids]
+    if any(not value for value in selected_values):
+        return False, "NATIVE_L4A_MANIFEST_INCOMPATIBLE: selected_asset_ids contains an empty id"
+    if len(selected_values) != len(set(selected_values)):
+        return False, "NATIVE_L4A_MANIFEST_INCOMPATIBLE: selected_asset_ids must be unique"
+    selected_set = set(selected_values)
+    if not selected_set <= set(asset_by_id):
+        missing_assets = sorted(selected_set - set(asset_by_id))
+        return (
+            False,
+            "NATIVE_L4A_MANIFEST_INCOMPATIBLE: selected asset is not registered: "
+            + ", ".join(missing_assets),
+        )
+    actual_selected = {
+        asset_id for asset_id, asset in asset_by_id.items()
+        if str(asset.get("selection_status") or "") == "selected"
+    }
+    if actual_selected != selected_set:
+        return (
+            False,
+            "NATIVE_L4A_MANIFEST_INCOMPATIBLE: selected_asset_ids do not match "
+            "asset selection_status",
+        )
+
+    method_ids = []
+    for index, method in enumerate(methods):
+        if not isinstance(method, dict):
+            return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {index} is not an object"
+        method_id = str(method.get("method_id") or "").strip()
+        if not method_id:
+            return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {index} lacks method_id"
+        if method_id in method_ids:
+            return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: duplicate method_id {method_id}"
+        method_ids.append(method_id)
+        for field in ("name", "purpose", "inventory_reason"):
+            if not str(method.get(field) or "").strip():
+                return (
+                    False,
+                    f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {method_id} lacks {field}",
+                )
+        source_ids = method.get("source_asset_ids")
+        source_hints = method.get("source_hints")
+        if not isinstance(source_ids, list) or not isinstance(source_hints, list):
+            return (
+                False,
+                f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {method_id} source fields are invalid",
+            )
+        normalized_source_ids = [str(value).strip() for value in source_ids]
+        if any(not value for value in normalized_source_ids):
+            return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {method_id} has an empty source_asset_id"
+        if len(normalized_source_ids) != len(set(normalized_source_ids)):
+            return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {method_id} source_asset_ids must be unique"
+        if source_hints and not normalized_source_ids:
+            return (
+                False,
+                f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {method_id} "
+                "source_hints must be materialized as selected assets",
+            )
+        for asset_id in normalized_source_ids:
+            if asset_id not in asset_by_id or asset_id not in selected_set:
+                return (
+                    False,
+                    f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {method_id} source_asset_ids "
+                    f"must reference selected L4A assets ({asset_id})",
+                )
+        source_ref_ids = []
+        for hint in source_hints:
+            if not isinstance(hint, dict):
+                return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {method_id} source hint is invalid"
+            source_ref_id = str(hint.get("source_ref_id") or "").strip()
+            if not source_ref_id or source_ref_id in source_ref_ids:
+                return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {method_id} source_ref_id values must be unique"
+            source_ref_ids.append(source_ref_id)
+            if not any(str(hint.get(key) or "").strip() for key in ("doi", "pmid", "pmcid", "url")):
+                return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: source hint {source_ref_id} has no exact identifier"
+            hint_asset_id = str(hint.get("asset_id") or "").strip()
+            if source_hints and not hint_asset_id:
+                return (
+                    False,
+                    f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: source hint {source_ref_id} "
+                    "lacks materialized asset_id",
+                )
+            if hint_asset_id and hint_asset_id not in normalized_source_ids:
+                return (
+                    False,
+                    f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: source hint {source_ref_id} "
+                    "is outside its method source_asset_ids",
+                )
+
+    # The projection must account for every inventory item before resolution;
+    # audit-time discovery of an omitted method is too late.
+    sources, no_source_methods = l4_inventory.inventory_sources(manifest)
+    projected_ids = {
+        str(method_id)
+        for source in sources
+        for method_id in source.get("inventory_method_ids") or []
+    }
+    projected_ids.update(
+        str(method.get("method_id") or "") for method in no_source_methods
+    )
+    expected_ids = set(method_ids)
+    if projected_ids != expected_ids:
+        return (
+            False,
+            "NATIVE_L4A_MANIFEST_INCOMPATIBLE: inventory methods cannot be fully "
+            "projected to evidence or explicit gaps",
+        )
+    return True, ""
+
+
 def frozen_l4a_catalog(manifest: dict) -> str:
     assets = []
     for raw in selected_l4a_assets(manifest, require=True):

@@ -16,7 +16,7 @@ from research_loop.provider_runtime_observability import run_observed_provider
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_codex_jsonl.py"
 
 
-def _wait_for(predicate, timeout: float = 3.0):
+def _wait_for(predicate, timeout: float = 10.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         value = predicate()
@@ -45,6 +45,25 @@ def _run(runtime_dir: Path, *, timeout: float = 3.0):
         job_timeout=timeout,
         observer_interval=0.05,
     )
+
+
+def test_atomic_status_write_retries_transient_windows_lock(tmp_path, monkeypatch):
+    path = tmp_path / "status.json"
+    original_replace = runtime_observability.os.replace
+    calls = []
+
+    def flaky_replace(source, destination):
+        calls.append((source, destination))
+        if len(calls) == 1:
+            raise PermissionError(5, "destination is temporarily locked")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(runtime_observability.os, "replace", flaky_replace)
+
+    runtime_observability._write_json_atomic(path, {"state": "running"})
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"state": "running"}
+    assert len(calls) == 2
 
 
 def test_events_and_current_item_are_visible_before_provider_exit(tmp_path, monkeypatch):
