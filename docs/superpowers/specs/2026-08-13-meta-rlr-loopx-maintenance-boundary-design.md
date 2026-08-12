@@ -76,7 +76,7 @@ Selected. It preserves single ownership on both sides and minimizes new code.
 
 ## 5. Authority model
 
-The system is split into four authorities.
+The system is split into five responsibility/authority domains.
 
 ### RLR object plane
 
