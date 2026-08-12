@@ -2,8 +2,6 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
-
 from research_loop import deep_research as dr
 from research_loop import l4_inventory
 from research_loop import l4_pipeline as l4p

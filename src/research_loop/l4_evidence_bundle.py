@@ -634,21 +634,34 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
     if manifest.get("manifest_sha256") != artifact.get("l4a_manifest_sha256"):
         return False, "L4A manifest SHA256 does not match L4B linkage"
 
+    manifest_methods = manifest.get("method_inventory") or []
+    artifact_methods = artifact.get("method_inventory") or []
+    if _canonical_json(artifact_methods) != _canonical_json(manifest_methods):
+        return False, "L4B method_inventory does not match the native L4A manifest"
+
     records = {}
+    selected_assets = {
+        str(asset.get("asset_id") or "")
+        for asset in l4p.selected_l4a_assets(manifest, require=True)
+    }
     for ref in artifact.get("papers") or []:
         try:
             path = _bound_path(project, ref["path"], "L4B paper-record path")
             record = json.loads(path.read_text(encoding="utf-8"))
         except (KeyError, ValueError, OSError, json.JSONDecodeError):
             return False, "L4B evidence bundle references an unreadable or unsafe paper record"
+        ref_asset_id = str(ref.get("asset_id") or "")
+        record_asset_id = str(record.get("asset_id") or "")
+        if ref_asset_id not in selected_assets or record_asset_id != ref_asset_id:
+            return False, "L4B paper record is not bound to a selected L4A asset"
         records[str(record.get("paper_id") or "")] = record
+
+    for ref in artifact.get("full_text_retrieval") or []:
+        if str(ref.get("paper_id") or "") not in selected_assets:
+            return False, "L4B retrieval receipt is not bound to a selected L4A asset"
 
     cards = artifact.get("evidence_cards") or []
     card_ids = []
-    selected_assets = {
-        str(asset.get("asset_id") or "")
-        for asset in l4p.selected_l4a_assets(manifest, require=True)
-    }
     for card in cards:
         card_id = str(card.get("evidence_card_id") or "")
         if not card_id or card.get("status") != "accepted":
@@ -659,6 +672,8 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
         record = records.get(str(card.get("paper_id") or ""))
         if not record:
             return False, f"L4B evidence card {card_id} references an unknown paper"
+        if str(record.get("asset_id") or "") != str(card.get("asset_id") or ""):
+            return False, f"L4B evidence card {card_id} asset identity does not match its paper"
         try:
             source_path = _bound_path(
                 project, record.get("source_payload_path"), "L4B source-payload path"
@@ -727,6 +742,9 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
             return False, "L4B evidence gap is malformed"
         if not str(gap.get("method_id") or "") or not str(gap.get("failure_reason") or ""):
             return False, f"L4B evidence gap {gap_id} lacks method or failure reason"
+        gap_asset_id = str(gap.get("asset_id") or "")
+        if gap_asset_id and gap_asset_id not in selected_assets:
+            return False, f"L4B evidence gap {gap_id} is not bound to a selected L4A asset"
         gap_ids.append(gap_id)
     if len(gap_ids) != len(set(gap_ids)):
         return False, "L4B evidence_gap_id values must be unique"
@@ -737,16 +755,8 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
     expected = {
         str(item.get("method_id") or "") for item in artifact.get("method_inventory") or []
     }
-    card_methods = [str(item.get("method_id") or "") for item in cards]
-    gap_methods = [str(item.get("method_id") or "") for item in gaps]
-    if (
-        not expected
-        or expected != covered
-        or len(card_methods) != len(set(card_methods))
-        or len(gap_methods) != len(set(gap_methods))
-        or set(card_methods) & set(gap_methods)
-    ):
-        return False, "L4B evidence bundle does not provide exactly one method outcome per inventory method"
+    if not expected or expected != covered:
+        return False, "L4B evidence bundle does not account for every inventory method"
     return True, ""
 
 

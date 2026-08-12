@@ -624,7 +624,7 @@ def test_l4b_audit_requires_exact_method_outcomes_and_selected_asset_identity(
     artifact["evidence_gaps"].append(extra_outcome)
     ok, reason = bundle.audit_bundle(l4p, dr, project, "C1", artifact)
     assert ok is False
-    assert "method outcome" in reason
+    assert "every inventory method" in reason
 
     artifact["evidence_gaps"].pop()
     artifact["evidence_cards"][0]["asset_id"] = "UNSELECTED"
