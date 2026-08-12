@@ -59,7 +59,12 @@ jobs:
             src/research_loop/commands/reporting.py \
             src/sync_to_obsidian.py \
             src/run_loop.py
-      - name: Run targeted L0 tests
+      - name: Run round data contract tests
+        run: >-
+          python -m pytest -q
+          tests/test_round_data_contract.py
+          tests/test_round_data_intake.py
+      - name: Run targeted L0 regression tests
         run: >-
           python -m pytest -q
           tests/test_l0_input_contract.py
@@ -70,8 +75,6 @@ jobs:
           tests/test_l0_completion_contract.py
           tests/test_l0_manifest_input_contract.py
           tests/test_l0_revise_finalization.py
-          tests/test_round_data_contract.py
-          tests/test_round_data_intake.py
           tests/test_cross_round_e2e.py
           tests/test_context_isolation.py
           tests/test_run_loop_guards.py
