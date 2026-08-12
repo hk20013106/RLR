@@ -131,7 +131,7 @@ REQUIRED_DEPENDENCIES = [
     {"kind": "python", "name": "psutil", "label": "psutil",
      "needed_for": "provider process observability"},
     {"kind": "python", "name": "mcp", "label": "official MCP Python SDK",
-     "pip": "mcp>=1.27,<2", "needed_for": "PubMed MCP stdio transport"},
+     "pip": "mcp>=1.27,<2", "needed_for": "PubMed MCP readiness probe"},
 ]
 
 
@@ -144,44 +144,56 @@ def _probe_as_dep(result):
         "present": result.status == "PASS",
         "error_code": result.code,
         "detail": result.detail,
+        "enforcement": result.enforcement,
     }
 
 
 def _check_dependencies(project_dir=None):
-    """Return concrete L0 readiness results as legacy `(ok, missing)` lists.
+    """Return `(ok, missing, advisory)` for the single L0 readiness authority.
 
-    The list-shaped return is retained so existing lifecycle/runner callers do
-    not need a second preflight implementation. For a real project each item is
-    a structured component probe and the full machine receipt is persisted.
+    `missing` contains only blocking failures. `advisory` contains failed
+    readiness-only probes whose future consumers are not yet wired. The full
+    machine-readable probe set is always persisted for project-aware checks.
     """
     if project_dir:
-        from research_loop.l0_preflight import run_preflight_probes, write_preflight_receipt
+        from research_loop.l0_preflight import (
+            ENFORCEMENT_READINESS_ONLY,
+            run_preflight_probes,
+            write_preflight_receipt,
+        )
 
         results = run_preflight_probes(Path(project_dir))
         write_preflight_receipt(Path(project_dir), results)
-        ok, missing = [], []
+        ok, missing, advisory = [], [], []
         for result in results:
             dep = _probe_as_dep(result)
-            (ok if dep["present"] else missing).append(dep)
+            if dep["present"]:
+                ok.append(dep)
+            elif result.enforcement == ENFORCEMENT_READINESS_ONLY:
+                advisory.append(dep)
+            else:
+                missing.append(dep)
 
-        # Project-specific simple dependencies remain supported, but they are
-        # additional to (never substitutes for) the framework-owned probes.
-        seen = {(d["kind"], d["name"]) for d in ok + missing}
+        # Project-specific declared requirements are explicitly blocking. They
+        # remain additive and never substitute for framework-owned probes.
+        seen = {(d["kind"], d["name"]) for d in ok + missing + advisory}
         for declared in _parse_declared_deps(project_dir):
             key = (declared["kind"], declared["name"])
             if key in seen:
                 continue
             dep = dict(declared)
             dep["present"] = _dep_present(dep)
+            dep["enforcement"] = "blocking"
             (ok if dep["present"] else missing).append(dep)
-        return ok, missing
+        return ok, missing, advisory
 
     items = [dict(d) for d in REQUIRED_DEPENDENCIES]
     ok, missing = [], []
     for dep in items:
         dep["present"] = _dep_present(dep)
+        dep["enforcement"] = "blocking"
         (ok if dep["present"] else missing).append(dep)
-    return ok, missing
+    return ok, missing, []
 
 
 def _slug(s):
