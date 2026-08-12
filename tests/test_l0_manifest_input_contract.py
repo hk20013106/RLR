@@ -20,7 +20,7 @@ def _project(tmp_path: Path) -> Path:
     candidates = project / "01_Candidates"
     candidates.mkdir()
     (candidates / "C1.md").write_text(
-        "---\ncandidate_id: C1\nround_id: '1'\ncurrent_status: NEW\n---\n",
+        "---\ncandidate_id: C1\nround_id: 1\ncurrent_status: NEW\n---\n",
         encoding="utf-8",
     )
     source = project / "raw.csv"
