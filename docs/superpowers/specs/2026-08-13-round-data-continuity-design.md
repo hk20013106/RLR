@@ -49,12 +49,12 @@ Newly created native candidates use `L0InputContract` schema 1.1. Existing 1.0 a
 
 Schema 1.1 keeps `source_input` for data newly declared in the current round and adds `inherited_inputs` for continuation reuse. Each inherited selector contains:
 
-- `path`: project-relative artifact path from the previous round manifest;
+- `path`: the exact path string recorded in the previous round manifest; project-owned artifacts remain project-relative while external/HPC data may be normalized absolute paths;
 - `sha256`: exact expected artifact hash;
 - `role`: caller-declared role in the current round;
 - `reuse_reason`: why this prior artifact is needed now.
 
-Only previous `source_artifacts`, `intermediate_artifacts`, and `result_artifacts` are eligible. Literature, audit files, receipts, reports, and manifests cannot become execution data through this selector.
+Only previous `source`, `intermediate`, and `result` artifacts are eligible. Literature, audit files, receipts, reports, and manifests cannot become execution data through this selector.
 
 For continuation rounds, the authorized data set is:
 
@@ -81,7 +81,7 @@ Required identity fields:
 
 Each authorized input records:
 
-- project-relative or normalized source path;
+- exact manifest/declaration path (project-relative inside the project; normalized absolute when external);
 - SHA-256;
 - byte size where locally available;
 - role;
