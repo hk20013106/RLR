@@ -115,6 +115,19 @@ def _artifact(project_dir: Path, path: Path, klass: str, *, producer_node: str =
     }
 
 
+def _input_contract_path(project_dir: Path, cand_id: str) -> Path | None:
+    """Return the exact current-round L0 contract artifact, if present.
+
+    The contract is itself evidence about how source data entered the round. It
+    must therefore be hash-bound alongside the source bytes it registers.
+    """
+    contract, artifact_path, _raw = l0_contract.load_contract(project_dir, cand_id)
+    if not isinstance(contract, dict) or artifact_path is None:
+        return None
+    path = Path(artifact_path)
+    return path if path.is_file() else None
+
+
 def _source_paths(project_dir: Path, cand_id: str) -> Iterable[Path]:
     contract, _, _ = l0_contract.load_contract(project_dir, cand_id)
     if not isinstance(contract, dict):
@@ -258,6 +271,9 @@ def build_round_manifest(project_dir, cand_id) -> dict:
             producer_receipt=producer_receipt, created_in_round=round_id,
         )
 
+    input_contract = _input_contract_path(project, cand_id)
+    if input_contract is not None:
+        add(input_contract, "audit", "L0")
     for path in _source_paths(project, cand_id):
         add(path, "source", "L0")
 
