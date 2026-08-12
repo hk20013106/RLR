@@ -593,6 +593,46 @@ def test_l4b_audit_rejects_tampered_source_payload(tmp_path):
     assert "content hash mismatch" in reason
 
 
+def test_l4b_audit_requires_exact_method_outcomes_and_selected_asset_identity(
+    tmp_path,
+):
+    project = tmp_path / "project"
+    manifest = _persist(
+        project,
+        assets=[_asset(selection_status="selected")],
+        methods=[_method(source_asset_ids=["A1"])],
+    )
+    artifact = bundle.run_l4b_evidence(
+        l4p,
+        dr,
+        project,
+        "C1",
+        manifest,
+        tmp_path / "work",
+        project_id="P1",
+        round_id="1",
+        profile_id="v2.1-catalog-1",
+        fetcher=lambda url: _response(url),
+    )
+
+    extra_outcome = {
+        "evidence_gap_id": "GAP-extra",
+        "method_id": "not-in-inventory",
+        "failure_reason": "extra outcome",
+        "status": "unresolved",
+    }
+    artifact["evidence_gaps"].append(extra_outcome)
+    ok, reason = bundle.audit_bundle(l4p, dr, project, "C1", artifact)
+    assert ok is False
+    assert "method outcome" in reason
+
+    artifact["evidence_gaps"].pop()
+    artifact["evidence_cards"][0]["asset_id"] = "UNSELECTED"
+    ok, reason = bundle.audit_bundle(l4p, dr, project, "C1", artifact)
+    assert ok is False
+    assert "selected L4A asset" in reason
+
+
 def _evidence_artifact():
     return {
         "run_id": "C1_L4_bundle",

@@ -213,6 +213,11 @@ def run_l4b_evidence(
 ) -> dict:
     """Resolve inventory sources and persist a deterministic L4B bundle."""
     project = Path(project_dir)
+    ok, reason = l4p.validate_native_l4a_manifest(project, manifest)
+    if not ok:
+        raise dr.DeepResearchError(
+            f"L4B cannot consume L4A manifest: {reason}"
+        )
     sources, no_source_methods = l4_inventory.inventory_sources(manifest)
     contracts = [cc._internal_contract(asset) for asset in sources]
     results = [
@@ -518,7 +523,7 @@ def run_l4b_from_manifest(
         raise dr.DeepResearchError(
             "L4A manifest path does not match the requested project-relative path"
         )
-    ok, reason = l4p.validate_l4a_manifest(project, manifest)
+    ok, reason = l4p.validate_native_l4a_manifest(project, manifest)
     if not ok:
         raise dr.DeepResearchError(f"L4A manifest validation failed: {reason}")
 
@@ -536,7 +541,11 @@ def run_l4b_from_manifest(
     for field, supplied in identity.items():
         supplied_value = str(supplied or "").strip()
         manifest_value = str(manifest.get(field) or "").strip()
-        if supplied_value and supplied_value != manifest_value:
+        if not supplied_value:
+            raise dr.DeepResearchError(
+                f"L4A manifest {field} is required for strict L4B resume"
+            )
+        if supplied_value != manifest_value:
             raise dr.DeepResearchError(
                 f"L4A manifest {field} does not match the requested L4B identity"
             )
@@ -545,6 +554,8 @@ def run_l4b_from_manifest(
     selected_ids = {
         str(asset.get("asset_id") or "") for asset in selected
     }
+    frozen_catalog = l4p.frozen_l4a_catalog(manifest)
+    frozen_manifest_bytes = manifest_file.read_bytes()
     sources, _ = l4_inventory.inventory_sources(manifest)
     outside = sorted(
         {
@@ -559,7 +570,7 @@ def run_l4b_from_manifest(
             + ", ".join(outside)
         )
 
-    return run_l4b_evidence(
+    artifact = run_l4b_evidence(
         l4p,
         dr,
         project,
@@ -572,6 +583,26 @@ def run_l4b_from_manifest(
         research_persona=research_persona,
         fetcher=fetcher,
     )
+    try:
+        after_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise dr.DeepResearchError(
+            f"L4B resume could not revalidate frozen L4A manifest: {exc}"
+        ) from exc
+    if manifest_file.read_bytes() != frozen_manifest_bytes:
+        raise dr.DeepResearchError(
+            "L4B resume modified the frozen L4A corpus"
+        )
+    if l4p.frozen_l4a_catalog(after_manifest) != frozen_catalog:
+        raise dr.DeepResearchError(
+            "L4B resume changed the frozen L4A corpus"
+        )
+    ok, reason = l4p.validate_native_l4a_manifest(project, after_manifest)
+    if not ok:
+        raise dr.DeepResearchError(
+            f"L4B resume invalidated the frozen L4A manifest: {reason}"
+        )
+    return artifact
 
 
 def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bool, str]:
@@ -597,7 +628,7 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (ValueError, OSError, json.JSONDecodeError):
         return False, "L4B linked L4A manifest is unreadable or unsafe"
-    ok, reason = l4p.validate_l4a_manifest(project, manifest)
+    ok, reason = l4p.validate_native_l4a_manifest(project, manifest)
     if not ok:
         return False, f"L4A manifest validation failed: {reason}"
     if manifest.get("manifest_sha256") != artifact.get("l4a_manifest_sha256"):
@@ -614,10 +645,16 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
 
     cards = artifact.get("evidence_cards") or []
     card_ids = []
+    selected_assets = {
+        str(asset.get("asset_id") or "")
+        for asset in l4p.selected_l4a_assets(manifest, require=True)
+    }
     for card in cards:
         card_id = str(card.get("evidence_card_id") or "")
         if not card_id or card.get("status") != "accepted":
             return False, "L4B accepted evidence card is malformed"
+        if str(card.get("asset_id") or "") not in selected_assets:
+            return False, f"L4B evidence card {card_id} is not bound to a selected L4A asset"
         card_ids.append(card_id)
         record = records.get(str(card.get("paper_id") or ""))
         if not record:
@@ -700,8 +737,16 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
     expected = {
         str(item.get("method_id") or "") for item in artifact.get("method_inventory") or []
     }
-    if not expected or expected - covered:
-        return False, "L4B evidence bundle does not account for every inventory method"
+    card_methods = [str(item.get("method_id") or "") for item in cards]
+    gap_methods = [str(item.get("method_id") or "") for item in gaps]
+    if (
+        not expected
+        or expected != covered
+        or len(card_methods) != len(set(card_methods))
+        or len(gap_methods) != len(set(gap_methods))
+        or set(card_methods) & set(gap_methods)
+    ):
+        return False, "L4B evidence bundle does not provide exactly one method outcome per inventory method"
     return True, ""
 
 
