@@ -3,9 +3,11 @@ import sys
 from pathlib import Path
 
 from research_loop.commands.ledger import _ledger_for
+from research_loop.common import _sha256_file
 from research_loop.delta import _delta_for_candidate
 from research_loop.delta_render import SEED_SCHEMA_KEYS
 from research_loop.hypothesis_ledger import LedgerError, binding_path
+from research_loop.l0_state import round_manifest_path, write_round_manifest
 from research_loop.ledger import (
     _branch_ledger_path, _read_branch_ledger,
     _modality_ledger_path, _read_modality_ledger,
@@ -149,14 +151,29 @@ def cmd_modality_scan(args):
 
 
 def cmd_emit_loop_memory(args):
-    """L10c: emit the next_loop_memory seed (JSON + MD) from this candidate's deltas."""
+    """L10c: emit next-loop semantic state linked to immutable round evidence."""
     project_dir = Path(args.project_dir)
+    # aggregate-report normally freezes the round manifest first.  For direct
+    # callers/legacy flows, create it here if absent; never rebuild an existing
+    # manifest after later controller receipts have appeared.
+    fm = _load_yaml_front(_candidate_file(project_dir, args.cand_id))
+    manifest_path = round_manifest_path(
+        project_dir, args.cand_id, str(fm.get("round_id") or "1"))
     try:
+        if manifest_path.exists():
+            manifest_hash = _sha256_file(manifest_path)
+        else:
+            manifest_path, manifest_hash = write_round_manifest(
+                project_dir, args.cand_id)
         mem = _build_loop_memory(project_dir, args.cand_id,
                                  getattr(args, "knowledge_store", None))
-    except LedgerError as exc:
+    except (LedgerError, Exception) as exc:
+        # Preserve the existing LedgerError-facing CLI behavior while making
+        # deterministic manifest failures equally fail closed.
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+    mem["round_manifest_path"] = manifest_path.relative_to(project_dir).as_posix()
+    mem["round_manifest_sha256"] = manifest_hash
     out_dir = project_dir / "08_Audit" / "loop_memory"
     out_dir.mkdir(parents=True, exist_ok=True)
     jp = out_dir / f"{args.cand_id}_next_loop_memory.json"
