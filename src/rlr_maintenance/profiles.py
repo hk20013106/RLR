@@ -9,6 +9,8 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from .contracts import validate_maintenance_event
+
 
 VERIFICATION_PROFILE_SCHEMA = "RLRVerificationProfile/v1"
 
@@ -150,17 +152,13 @@ def all_profiles() -> tuple[VerificationProfile, ...]:
 
 
 def profile_for_event(event: Mapping[str, Any]) -> VerificationProfile:
-    """Return the unique verification profile owning an event's contract.
+    """Route one validated event through the profile-owned contract catalog.
 
-    The event's durable ``expected_contract`` is the routing key. Profile
-    ownership is derived from each profile's own ``protected_contracts`` so the
-    maintenance boundary does not create a second contract-to-profile registry.
-    Missing or ambiguous ownership fails closed.
+    ``protected_contracts`` is the sole contract-to-profile registry.  Invalid,
+    unowned, or ambiguously owned events fail closed before verification work.
     """
-    contract = event.get("expected_contract")
-    if not isinstance(contract, str) or not contract:
-        raise KeyError("maintenance event has no expected_contract")
-
+    normalized = validate_maintenance_event(event)
+    contract = normalized["expected_contract"]
     matches = [
         profile
         for profile in all_profiles()
