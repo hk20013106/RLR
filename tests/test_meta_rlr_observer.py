@@ -1,3 +1,5 @@
+import pytest
+
 from rlr_maintenance.observer import (
     observe_acceptance_failure,
     observe_ci_failure,
@@ -11,21 +13,38 @@ REVISION = "a" * 40
 WHEN = "2026-08-13T00:00:00Z"
 
 
-def test_contract_failure_is_fact_not_patch_proposal():
+def test_contract_failure_records_stable_error_code_only():
     event = observe_contract_failure(
         component="l0_restore",
         error_code="L0_RESTORE_ARTIFACT_HASH_MISMATCH",
-        detail="03_Source_Data/input.csv",
         expected_contract="l0_restore_fail_closed",
         rlr_revision=REVISION,
-        evidence_refs=[],
+        evidence_refs=[
+            {
+                "kind": "rlr_artifact",
+                "ref": "08_Audit/round_manifests/example.json",
+            }
+        ],
         observed_at=WHEN,
     )
 
     assert event["event_type"] == "contract_failure"
-    assert event["observed"]["error_code"] == "L0_RESTORE_ARTIFACT_HASH_MISMATCH"
-    assert event["observed"]["detail"] == "03_Source_Data/input.csv"
+    assert event["observed"] == {
+        "error_code": "L0_RESTORE_ARTIFACT_HASH_MISMATCH"
+    }
     assert "fix" not in event
+
+
+def test_contract_failure_rejects_freeform_detail_channel():
+    with pytest.raises(TypeError):
+        observe_contract_failure(
+            component="l0_restore",
+            error_code="L0_RESTORE_ARTIFACT_HASH_MISMATCH",
+            detail="D:/private/research/project/file.csv",
+            expected_contract="l0_restore_fail_closed",
+            rlr_revision=REVISION,
+            observed_at=WHEN,
+        )
 
 
 def test_process_failure_keeps_program_identity_not_task_arguments_or_raw_logs():
