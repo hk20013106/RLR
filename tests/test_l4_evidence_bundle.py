@@ -127,6 +127,30 @@ def _persist(project, *, assets=None, methods=None):
     )
 
 
+def _persist_legacy_manifest(project):
+    return l4p.persist_l4a_discovery(
+        project,
+        "C1",
+        {
+            "schema_version": l4p.L4A_DISCOVERY_SCHEMA_VERSION,
+            "queries": [{
+                "query_id": "Q1",
+                "query": "legacy metadata query",
+                "purpose": "Fixture legacy L4A discovery.",
+                "status": "completed",
+                "receipt": "fixture",
+            }],
+            "assets": [_asset(selection_status="selected")],
+        },
+        _receipt(),
+        question="Which method should test H1?",
+        claim="H1 predicts differential expression.",
+        project_id="P1",
+        round_id="1",
+        profile_id="v2.1-catalog-1",
+    )
+
+
 def _response(url, payload=A1_XML):
     return {
         "requested_url": url,
@@ -194,6 +218,131 @@ def test_l4b_resume_from_existing_manifest_skips_l4a_provider(monkeypatch, tmp_p
     assert bundle.audit_bundle(l4p, dr, project, "C1", artifact) == (True, "")
 
 
+def test_l4b_resume_rejects_legacy_manifest_before_any_l4b_artifact(
+    monkeypatch, tmp_path
+):
+    project = tmp_path / "project"
+    manifest = _persist_legacy_manifest(project)
+    manifest_path = project / manifest["path"]
+    before = manifest_path.read_bytes()
+    before_paths = sorted(
+        path.relative_to(project).as_posix()
+        for path in project.rglob("*")
+        if path.is_file()
+    )
+    calls = []
+
+    monkeypatch.setattr(
+        bundle,
+        "run_l4b_evidence",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(
+        dr.DeepResearchError, match="LEGACY_L4A_MANIFEST_INCOMPATIBLE"
+    ):
+        bundle.run_l4b_from_manifest(
+            l4p,
+            dr,
+            project,
+            "C1",
+            manifest["path"],
+            tmp_path / "work",
+            project_id="P1",
+            round_id="1",
+            profile_id="v2.1-catalog-1",
+        )
+
+    assert calls == []
+    assert manifest_path.read_bytes() == before
+    assert sorted(
+        path.relative_to(project).as_posix()
+        for path in project.rglob("*")
+        if path.is_file()
+    ) == before_paths
+
+
+def test_l4b_resume_rejects_inventory_source_outside_frozen_selected_corpus(
+    monkeypatch, tmp_path
+):
+    project = tmp_path / "project"
+    manifest = _persist(
+        project,
+        assets=[_asset(selection_status="selected")],
+        methods=[_method(source_asset_ids=["A1"])],
+    )
+    tampered = dict(manifest)
+    tampered["method_inventory"] = [
+        dict(manifest["method_inventory"][0], source_asset_ids=["NEW-ASSET"])
+    ]
+    tampered["manifest_sha256"] = l4p._sha256_json(
+        {key: value for key, value in tampered.items() if key != "manifest_sha256"}
+    )
+    manifest_path = project / manifest["path"]
+    manifest_path.write_text(
+        json.dumps(tampered, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    called = []
+    monkeypatch.setattr(
+        bundle,
+        "run_l4b_evidence",
+        lambda *args, **kwargs: called.append(True),
+    )
+
+    with pytest.raises(dr.DeepResearchError, match="selected L4A assets"):
+        bundle.run_l4b_from_manifest(
+            l4p,
+            dr,
+            project,
+            "C1",
+            manifest["path"],
+            tmp_path / "work",
+            project_id="P1",
+            round_id="1",
+            profile_id="v2.1-catalog-1",
+        )
+    assert called == []
+
+
+def test_l4b_resume_rejects_frozen_corpus_mutation_during_execution(
+    monkeypatch, tmp_path
+):
+    project = tmp_path / "project"
+    manifest = _persist(
+        project,
+        assets=[_asset(selection_status="selected")],
+        methods=[_method(source_asset_ids=["A1"])],
+    )
+    manifest_path = project / manifest["path"]
+
+    def mutate_manifest(*args, **kwargs):
+        changed = dict(manifest)
+        changed["assets"] = [dict(manifest["assets"][0], title="mutated")]
+        changed["manifest_sha256"] = l4p._sha256_json(
+            {key: value for key, value in changed.items() if key != "manifest_sha256"}
+        )
+        manifest_path.write_text(
+            json.dumps(changed, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return {"run_id": "should-not-be-accepted"}
+
+    monkeypatch.setattr(bundle, "run_l4b_evidence", mutate_manifest)
+    with pytest.raises(dr.DeepResearchError, match="frozen L4A corpus"):
+        bundle.run_l4b_from_manifest(
+            l4p,
+            dr,
+            project,
+            "C1",
+            manifest["path"],
+            tmp_path / "work",
+            project_id="P1",
+            round_id="1",
+            profile_id="v2.1-catalog-1",
+        )
+
+
 def test_l4b_resume_revalidates_manifest_identity_and_hash(tmp_path):
     project = tmp_path / "project"
     manifest = _persist(
@@ -222,7 +371,7 @@ def test_l4b_resume_revalidates_manifest_identity_and_hash(tmp_path):
     with pytest.raises(dr.DeepResearchError, match="SHA256"):
         bundle.run_l4b_from_manifest(
             l4p, dr, project, "C1", manifest["path"], tmp_path / "work",
-            project_id="P1",
+            project_id="P1", round_id="1", profile_id="v2.1-catalog-1",
         )
 
 
@@ -278,6 +427,52 @@ def test_native_l4_entry_resumes_l4b_without_provider(monkeypatch, tmp_path):
 
     assert result == 0
     assert observed["called"] is True
+
+
+def test_normal_native_l4_keeps_l4a_then_l4b_order(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    manifest = _persist(
+        project,
+        assets=[_asset(selection_status="selected")],
+        methods=[_method(source_asset_ids=["A1"])],
+    )
+    calls = []
+
+    def discovery(*args, **kwargs):
+        calls.append("L4A")
+        return manifest
+
+    def resolver(*args, **kwargs):
+        calls.append("L4B")
+        return {"pipeline_stage": "L4B", "run_id": "C1_L4"}
+
+    original_run = lambda *args, **kwargs: pytest.fail(
+        "normal native L4 must not bypass the staged L4A-to-L4B path"
+    )
+    fake_dr = SimpleNamespace(
+        run_and_persist=original_run,
+        audit_evidence_pack=lambda *args, **kwargs: (True, ""),
+        _artifact=lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(l4_inventory, "run_discovery", discovery)
+    monkeypatch.setattr(bundle, "run_l4b_evidence", resolver)
+
+    bundle.install(l4p, fake_dr)
+    result = fake_dr.run_and_persist(
+        project,
+        "C1",
+        "L4",
+        "Q",
+        "H",
+        dr.RuntimeSpec("codex", "codex"),
+        tmp_path / "work",
+        project_id="P1",
+        round_id="1",
+        profile_id="v2.1-catalog-1",
+    )
+
+    assert calls == ["L4A", "L4B"]
+    assert result["pipeline_stage"] == "L4B"
 
 
 def test_inventory_hint_materializes_selected_exact_source(tmp_path):
