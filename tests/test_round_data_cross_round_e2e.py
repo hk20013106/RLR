@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from research_loop import l0_contract
 from research_loop.commands import execution
+from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
 from research_loop.gates import _audit_l0_contract
 from research_loop.hypothesis_ledger import binding_path
 from research_loop.l0_data import current_round_data_binding_path
@@ -23,7 +24,7 @@ def _project(tmp_path: Path) -> Path:
     (project / "00_Preflight").mkdir(parents=True)
     (project / "01_Candidates").mkdir(parents=True)
     binding_path(project).write_text(
-        json.dumps({"project_id": "P1", "profile_id": "v2.1-native"}),
+        json.dumps({"project_id": "P1", "profile_id": DEFAULT_NATIVE_PROFILE}),
         encoding="utf-8",
     )
     for name in ("skill_use_plan.md", "output_manifest.md", "forbidden_shortcuts.md"):
