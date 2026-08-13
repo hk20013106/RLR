@@ -79,16 +79,15 @@ class LoopXCli:
                 args.extend([flag, str(value)])
         return self.run_json(args, cwd=cwd)
 
-    def todo_complete(self, *, goal_id: str, todo_id: str, agent_id: str, evidence: str, note: str | None = None, no_follow_up: bool = False, cwd: str | Path | None = None) -> dict:
+    def todo_complete(self, *, goal_id: str, todo_id: str, agent_id: str, evidence: str, note: str | None = None, no_follow_up: bool = False, turn_instance_id: str | None = None, cwd: str | Path | None = None) -> dict:
         args = ["todo", "complete", "--goal-id", str(goal_id), "--todo-id", str(todo_id), "--agent-id", str(agent_id), "--claimed-by", str(agent_id), "--evidence", str(evidence)]
+        if turn_instance_id is not None:
+            args.extend(["--turn-instance-id", str(turn_instance_id)])
         if note is not None:
             args.extend(["--note", str(note)])
         if no_follow_up:
             args.append("--no-follow-up")
         return self.run_json(args, cwd=cwd)
-
-    def refresh_state(self, *, goal_id: str, agent_id: str, cwd: str | Path | None = None) -> dict:
-        return self.run_json(["refresh-state", "--goal-id", str(goal_id), "--agent-id", str(agent_id)], cwd=cwd)
 
     def quota_spend_slot(self, *, goal_id: str, todo_id: str, agent_id: str, capabilities: Sequence[str] = ("shell",), turn_instance_id: str | None = None, cwd: str | Path | None = None) -> dict:
         args = ["quota", "spend-slot", "--goal-id", str(goal_id), "--todo-id", str(todo_id), "--slots", "1", "--source", "heartbeat", "--execute", "--agent-id", str(agent_id)]
