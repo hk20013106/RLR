@@ -33,6 +33,26 @@ Before modifying code:
 3. Treat executable code and passing tests as more authoritative than old plans, reports, or architecture notes.
 4. Report any conflict between documentation and current code; do not silently choose the more convenient interpretation.
 
+## Architecture-first change review
+
+Before any nontrivial modification, review the proposed change against the whole
+architecture and project mission rather than reacting mechanically to the local
+symptom.
+
+Before implementation, answer these questions:
+
+1. Why is this modification necessary? Identify the violated invariant or root cause, not only the observed symptom.
+2. Which existing component owns the responsibility or contract? Fix the canonical owner rather than adding a parallel path.
+3. Does the modification directly serve the project's higher-priority goals and declared authority boundaries?
+4. Is there a more fundamental or unified solution that removes duplicated logic or authority instead of adding a workaround?
+5. Would the modification create a second source of truth, competing validator, compatibility path, fallback, or hidden authority?
+6. Is the scope minimal and coherent? Do not expand into adjacent cleanup unless it is required to close the same root cause.
+
+If a local fix would preserve contradictory authorities, accumulate compatibility
+patches, or create a patch stack, stop and redesign before implementation.
+Prefer removing or deliberately retiring superseded duplicate paths over keeping
+multiple authorities alive.
+
 ## Agent orientation
 
 For a compact architecture map, runtime entry points, authority boundaries, and
