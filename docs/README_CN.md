@@ -6,342 +6,386 @@
 
 ## 这是什么
 
-RLR（Research Loop Room）是一个**证据门禁的科学研究审查框架**。它把一个研究问题变成一条**15 步流水线**，每一步由一个独立角色（persona）执行，角色之间通过结构化数据传递信息，而不是共享上下文。RLR 不替研究者做最终判断，而是把假设、批判、方法、执行、审计和最终决策组织成可追溯流程。
+RLR（Research Loop Room）是一套**证据门禁 + 多角色隔离 + 可追溯执行**的科学研究框架。
 
-核心设计问题它要解决的是：**当 AI 同时扮演"提出假设的人"和"批判假设的人"时，批判是假的**——它不会真正攻击自己刚写的东西。RLR 用物理隔离来强制独立性：每个角色只能看到 DAG 拓扑允许它看的输入，看不到其他任何东西。
+一个研究问题进入 RLR 后，会依次经过 **15 个正式 DAG 节点（L0 → L10c）**。这些节点由 **10 个角色（persona）**分工完成：提出假设、批判假设、筛选、方法设计、方法审查、执行代码、结果审计、文献核验、证伪、生物学解释、价值判断和最终决策。
 
-一句话：**用多角色对抗 + 文献证据包 + 执行门禁，把“AI 做研究”从自由发挥变成有约束、可审计的审查流程。**
+它的核心不是“让很多 AI 一起聊天”，而是：
 
-**当前稳定版：V0.8。** V0.9 的 native v2.1 收尾功能已在当前工作树实现，
-但 80% 覆盖率发布门尚未满足，仍处于发布候选状态。
+- 每个认知角色只看到 DAG 允许它看到的信息；
+- 文献检索必须留下可验证 evidence pack，而不是手写摘要；
+- 科学数据在进入执行层前必须明确授权并绑定 hash；
+- **只有 L7 图灵（Turing）可以执行代码**；
+- 软件维护（Meta-RLR）在科学 DAG 之外，不能成为第二套科学状态系统。
 
-新项目默认绑定 `v2.1-catalog-1`；L8 为 Tukey / `L8_tukey`，L9 按 L9a →
-finalized L9a → L9b 串行。既有 profile 不被重解释。dashboard、literature
-source MCP、PaSa、完整 AI4AI 与 v2.0 清理都已后置到独立阶段。
+> **核心原则：**认知角色通过“信息不可见”实现隔离（Path B）；Turing 通过受控 workspace + 命令边界实现执行隔离（Path A）。RLR 不把 agent 进程假装成操作系统沙箱。
 
-> 根目录中文入口：[README_CN.md](../README_CN.md)。本页是中文完整说明；英文入口在仓库根目录 `README.md`。
+## 当前 main 状态
 
----
+当前 `main` 已经包含经过验证的 **V0.9 / native-v2.1 架构线**。
 
-## 版本历史
+新项目默认绑定：
 
-### V0.9 — 开发中（native v2.1 收尾）
+`v2.1-catalog-1`
 
-- 新项目绑定 `v2.1-catalog-1`，使用带 YAML frontmatter 的 persona catalog；已有 body-only `v2.1` 不被重解释。
-- 原生运行必须将 `ContextManifest/v2`、`RunReceipt/v1` 和实际 provider delta 绑定后才允许 emission；L1/L4 的 Curie 前置检索带精确 `EvidenceRunReceipt/v1.1` run ID。
-- L8 为 Tukey；L9a finalized 后才能将授权 snapshot 传入 L9b。v2.0 仅保留历史读取。
-- dashboard、literature-source MCP、PaSa、完整 AI4AI 与 v2.0 清理不属于本版本。
+PR #16 之后进入 main 的关键变化包括：
 
-### V0.8 — 当前稳定版（modular architecture）
-
-- **Engine 模块化拆分**：`engine.py` 从 4768 行减少到 477 行。所有 42 个 `cmd_*` 处理函数提取到 `src/research_loop/commands/` 下的 8 个独立命令模块：continuation、execution、ledger、lifecycle、pitfall、ranking、reporting、research。`cli.py` 现在拥有 `build_parser` 和 `main`。所有向后兼容的 import 通过 inward shim 保留。
-- **假说账本读取边界正确性**：finalized emission predicate（`FINALIZED_EMISSION_PREDICATE`）应用于 `ranking_inputs`、`materialize_authorized_context`、`verify` 和 `snapshot_candidate`。crash window 产生的 orphan emission 对 consumptive reads 不可见，且被 `verify` 报告。
-- **V2 门禁集成**：L4/L6/L7/L10b traceability gates 已接入 v2 emission path（`_emit_delta_v2`），与 v1 path 行为一致。
-- **V2 schema 兼容**：gate 函数（`gates.py`）和报告渲染（`delta_render.py`）同时支持 dict（v1）和 list（v2）`analysis_plan` 格式。
-- **测试覆盖恢复**：native-v2 gate tests 现在通过 production CLI 到达真实 gates，而非被 v1 guard 拦截。
-
-### V0.7 — canonical gated runtime
-
-- **可验证 Deep Research 证据链**：Codex 显式调用 `$academic-research-suite`；Claude 显式调用已配置的 `academic-research-skills` plugin。L1 必须保存 Results/Discussion/Conclusion，L4 必须保存 Methods 与 review-search 回执，L8.5 必须保存论文验证结果；L10 注入定位摘录，L10b 必须引用 evidence ID。
-- **L0 严格输入契约**：`normalize-l0-input` 将请求文件和显式数据位置规范化为可验证、可审计的 L0 contract；不从自然语言猜测路径、ID、决策或结论。
-- **假说排序可靠性层（shadow mode）**：对显式候选集合执行 A/B 与 B/A 的公平 pairwise 判断；顺序翻转标记为 `UNCERTAIN`，并将排序、checkpoint、evidence event、正式决策分歧和失败审计隔离写入 `08_Audit/ranking/`。它绝不改变正式 gate、候选选择或 decision。
-
-更早版本可通过 Git 历史查看；它们不是受支持的运行路径或活动模板规范。
+- **PR #16 — Round Data Continuity：**跨轮数据不再靠模糊目录或 `input_manifest.md` 传递，而是通过 `L0EvidenceBinding/v1` + `CurrentRoundDataBinding/v1` 明确选择、hash 验证和授权；N+1 可以只继承旧数据、只加入新数据，或两者组合。
+- **PR #16 — L6→L7 script contract 修复：**from-memory 的脚本声明继续保留 `name / grounding / branch_id` 等 traceability metadata；L6 gate 和 L7 resolver 共用同一套解析逻辑，不再把整个 object 错当文件名。
+- **PR #17 — Meta-RLR maintenance boundary：**增加独立的软件维护层，允许 RLR 自身故障进入 LoopX/Codex 的受限维护流程，但不增加科学 DAG 节点，也不产生第二套科学状态 authority。
+- **PR #18 — Meta-RLR scope invariant 修正：**把 Phase 1 的范围测试固定在 PR #17 自己的历史范围，避免以后正常 RLR 功能开发被误判成 Meta-RLR 越界。
+- **PR #19–#21 — promotion / governance：**验证后的 stable line 已进入 `main`；`AGENTS.md` 现在明确要求“全局优先、根因优先、单一 authority、禁止补丁堆叠”。这些属于治理变化，不是新的科学运行节点。
 
 ---
 
-## 架构（V0.9）
+# 一、角色表：每个人到底负责什么
 
-### DAG 流水线（15 个节点）
+这是理解 RLR 最重要的一张表。
 
-一个研究问题从 L0 走到 L10c，经过 15 个节点。每个节点由一个角色执行，只看该看的东西。
+| 角色 | 正式节点 | 核心职责 |
+|---|---|---|
+| **Linnaeus（林奈）** | L0、L10c | 一头一尾：L0 负责预检、跨轮恢复和当前轮数据授权；L10c 负责聚合报告、完成人类可读投影并冻结本轮证据。 |
+| **Einstein（爱因斯坦）** | L1 | 根据研究问题和已验证文献证据提出**可检验假设**，并提前写明如何证伪。 |
+| **Feynman（费曼）** | L2、L9a | 前期攻击“想法”（L2），后期攻击“结果和结论”（L9a）。他的职责就是尽量证明你错了。 |
+| **Oppenheimer（奥本海默）** | L3、L6、L10b | 三次正式裁决：L3 选假设，L6 批方法，L10b 做最终 KEEP / REVISE / DOWNGRADE / DROP 决策。 |
+| **Fisher（费舍尔）** | L4（内部 L4C） | 根据冻结的方法证据设计分析/实验方案；正式方法 delta 仍是 `L4_fisher`。 |
+| **Tukey（图基）** | L5、当前 native v2.1 的 L8 | 执行前审方法和 QC（L5）；执行后审结果、输出文件和可重复性（L8）。 |
+| **Turing（图灵）** | L7 | **唯一允许执行代码的角色。**只能运行 L6 批准的脚本，只能使用 `CurrentRoundDataBinding` 授权的数据，只能在受控 workspace 中运行。 |
+| **Curie（居里）** | L8.5；同时承担 L1/L4 前的证据检索角色 | 获取、定位和核验真实文献证据；L8.5 用 L7/L8 的实际结果去验证论文证据。 |
+| **Darwin（达尔文）** | L9b | 在 L9a 已 finalized 之后，对结果做受证据约束的生物学解释，并明确局限性。 |
+| **Jobs（乔布斯）** | L10a | 判断研究价值、论文价值和可以怎样 framing；不能替代最终科学决策。 |
 
-```
-L0  林奈         预检 + 依赖门禁（缺依赖则停止）
-       │
-L1  爱因斯坦     提出假设（前面先做深度文献检索）
-       │
-L2  费曼         盲审攻击 L1 的假设
-       │
-L3  奥本海默     裁决：选出可测试的假设
-       │
-L4  费舍尔       设计方法（前面先做方法论文综述）
-       │
-L5  图基         审查方法设计
-       │
-L6  奥本海默     批准分析方案
-       │
-L7  图灵         执行脚本（前面先做代码搜索）
-       │
-L8  图基         审计结果，验证可重复性
-       │
-L8.5 居里        文献验证：拿实际结果去查 PubMed
-       │
-L9a 费曼         证伪；必须先 finalized
-L9b 达尔文       基于授权的 L9a snapshot 作生物学解读
-       │
-L10a 乔布斯      价值评估，规划论文方向
-       │
-L10b 奥本海默    终审：KEEP / REVISE / DOWNGRADE / DROP
-       │
-L10c 林奈        聚合所有 delta，生成最终报告
-```
+### 一个特别容易混淆的兼容性点
 
-### L0 依赖契约（V0.7）
+**当前新项目（native v2.1 / `v2.1-catalog-1`）：**
 
-L0 当前有 **4 项框架级必需依赖**。这是 fail-closed 门禁：任一项缺失，循环在 L0 停止，不会进入 L1。
+- L8 = **Tukey**
+- L9 顺序 = **L9a Feynman → finalized L9a snapshot → L9b Darwin**
 
-| 依赖                        | 检测/声明方式                                                                                       | 用途                              |
-| ------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------- |
-| PyYAML                    | Python import `yaml`                                                                          | contract、frontmatter 和文献数据库 I/O |
-| Academic Research runtime | `00_Preflight/deep_research_runtime.json`：CLI + Codex skill manifest 或 Claude plugin manifest | L1/L4/L8.5 证据获取                 |
-| Zotero connector          | `127.0.0.1:23119` 或 `RLR_ZOTERO`                                                              | 文献管理和引用来源                       |
-| Obsidian vault            | 有效 `$OBSIDIAN_VAULT` 路径或 `RLR_OBSIDIAN`                                                       | 回合结束的人类可读同步                     |
+**历史 v2.0 项目：**
 
-项目还可以在 `00_Preflight/dependencies.md` 中用 `- python:`、
-`- command:` 或 `- env:` 增加依赖；这些是附加项，不会替代上述 4 项。
+- L8 = Curie
+- L9a / L9b 使用历史并行语义
 
-### 隔离机制：为什么需要，怎么实现
+所以如果你看老文档发现“L8 是 Curie”或者“L9a/L9b 并行”，那是历史 profile，不是当前新项目的默认行为。
 
-**问题**：如果 AI 同时扮演假设提出者（爱因斯坦）和假设批判者（费曼），它会倾向于不攻击自己刚写的东西。这不是 AI 的"性格"问题，而是**信息泄露**——批判者看到了提出者的推理过程，所以它的"批判"本质上是自我辩护的延伸。
+---
 
-**解决方法**：物理隔离。每个角色只能看到 DAG 允许它看的输入，看不到其他任何东西。代码里通过两种路径实现：
+# 二、每个节点到底做什么
 
-**路径 B — 认知层隔离（所有角色，除 图灵）**
+下面这张表以当前 `main` 的 `src/research_loop/topology.py`、L0/L7 gate contract 和 PR #16 之后的正式数据 authority 为准。
 
-控制器调用 `assemble-context`，把该节点允许看到的 delta 内容拼成一段纯文本，嵌入 `spawn_agent` 的 message。角色只看到这段文本，没有文件系统访问权限，看不到其他节点的 delta。
+| 节点 | 角色 | 它看到什么 | 它真正做什么 | 不能做什么 / 正式效果 |
+|---|---|---|---|---|
+| **L0** | Linnaeus | candidate frontmatter、权威 `l0_input`、运行环境；continuation 还会看到上一轮 manifest 和明确选择的 inherited refs | 现在的 L0 是 **Pre-flight + State Restore + Current-Round Data Binding**。它检查依赖/运行环境，验证当前数据；如果是 N+1，恢复上一轮冻结证据、逐个验证 path/SHA，再核对本轮选择的 `inherited_inputs`，最后冻结唯一的 `CurrentRoundDataBinding/v1`。 | **不能解释数据、不能执行代码。** blocking dependency、contract、restore、selector 或 hash 任一失败都 fail-closed。 |
+| **L1** | Einstein | 研究问题 + L0 + 已验证 pre-research evidence | 提出可检验科学假设。每个假设都必须能操作化，并至少有一个预先声明的 falsification criterion。 | 不设计方法，不执行代码。输出 hypothesis delta。 |
+| **L2** | Feynman | L1 假设 + candidate anchor | 对每个 L1 假设做盲审攻击：找混淆因素、逻辑漏洞、替代解释、诊断测试，并按 hypothesis ID 绑定。 | 不改状态，不执行代码；目标不是“帮 L1 完善”，而是尽量攻击。 |
+| **L3** | Oppenheimer | L1 + L2 | 看完“假设 + 攻击”后做第一次正式裁决：哪些值得测试，哪些应该淘汰。 | `triage-idea`。可在正式 delta 后运行 shadow ranking，但 ranking 永远只是 advisory。 |
+| **L4** | Fisher | L1/L2/L3 + 方法文献证据 | 这是正式方法设计节点，但内部已经拆成可审计的 **L4A → L4B → L4C → L4.5**：先发现文献，再构建方法证据，再由 Fisher 设计方法，最后 deterministic commit。 | 不执行分析代码。正式输出仍是 `L4_fisher` / `METHOD_PROPOSED`。 |
+| **L5** | Tukey | L4 方法 + L2 的风险/攻击 | 从 EDA/QC 角度审方法：检查每个策略是否有 QC、stop rule、failure rule，是否真正对应选中的 hypothesis。 | 不改正式状态，不执行代码。 |
+| **L6** | Oppenheimer | L4 + L5 | 第二次正式裁决：批准、修改或拒绝分析方案。对于 native/from-memory 路径，脚本必须保留结构化声明，例如 `name / grounding / branch_id`。 | `triage-method`。通过后状态到 `METHOD_APPROVED`。不能为了执行方便把 traceability object 降级成裸字符串。 |
+| **L7** | Turing | L6 批准计划 + L0 的当前轮 binding + code-search 结果 | **唯一执行节点。** `execution-gate` 只负责一次性把 `METHOD_APPROVED → NEEDS_EXECUTION`；如果 candidate 已经是 `NEEDS_EXECUTION`，canonical runner 会直接恢复到 workspace preparation，不会强行重复 gate。创建 workspace 前重新验证 binding、contract 和每个输入 hash，只 stage 已授权科学数据和已批准脚本；structured script 通过 canonical `name` 解析。 | 不得运行未批准脚本，不得访问 workspace 外文件，不得用 `input_manifest.md`、`input_alias` 或 `--file` 扩权。数据被篡改时必须在成功 workspace 创建前 fail-closed。 |
+| **L8** | Tukey（当前 native v2.1） | L7 输出 + L6 计划 + candidate | 审查 L7 声称产生的每个关键输出，检查可重复性、QC 和 evidence level。它是在“审结果”，不是重新发明一套分析。 | `EXECUTED → AUDITED`。不执行新分析代码。 |
+| **L8.5** | Curie | L7 实际结果 + L8 audit + 文献 evidence runtime | 用**实际得到的结果**去找/核验文献；对每个 active hypothesis 做一次支持/矛盾/未解决判断，引用真实 PMID/DOI 和定位 evidence ID。 | `AUDITED → UNDER_REVIEW`。不能伪造引用。 |
+| **L9a** | Feynman | L1 + L7 + L8 + L8.5 | 对最终结果做硬证伪：哪些结论真的站得住、哪些已经被数据否掉、还有哪些统计/逻辑缺口。 | 当前 native v2.1 中它必须先 finalized，L9b 才能获得授权 snapshot。 |
+| **L9b** | Darwin | L1 + L7 + L8 + L8.5 + **授权后的 finalized L9a snapshot** | 做生物学解释：解释每个 active hypothesis，但只能在已验证证据和 L9a 的约束下解释，并必须写局限性。 | 不执行代码，不做最终 decision；不能绕过 finalized L9a。 |
+| **L10a** | Jobs | L8/L8.5/L9a/L9b + candidate framing | 判断科学价值、论文潜力、故事可以讲到什么程度，以及哪里不能 overclaim。 | 只做 value assessment，不改最终状态。 |
+| **L10b** | Oppenheimer | L10a + L8 + L8.5 + L9a + L9b | 第三次正式裁决：综合执行审计、文献核验、证伪和生物学解释，给出最终决策。 | 只能是 `KEEP / REVISE / DOWNGRADE / DROP`；理由必须引用前面的审计证据。shadow ranking 仍不能代替正式决策。 |
+| **L10c** | Linnaeus | 所有允许的 finalized delta / artifact | 聚合本轮 `FINAL_REPORT.md` 与 `FINAL_REPORT_CN.md`，完成人类可读投影，并冻结本轮证据 manifest。 | 它是**本轮 finalization owner**，不能执行代码，也不能另选一个“新赢家”。 |
 
-```
-爱因斯坦 只看到：candidate frontmatter + L0 delta
-费曼     只看到：candidate frontmatter + L1 delta（爱因斯坦的假设）
-                    —— 他不知道 爱因斯坦 的推理过程，只看到结论
-奥本海默 看到：L1 + L2（假设 + 攻击），做裁决
+---
+
+# 三、L0 现在为什么不只是“依赖检查”
+
+PR #16 之后，L0 已经成为跨轮连续性的正式入口。
+
+```text
+上一轮已经冻结的 Round Manifest
+        ↓ 逐个验证 path / SHA
+L0EvidenceBinding/v1
+        ↓ 只选择明确写入 inherited_inputs 的项目
+        ┐
+        ├── + 本轮 l0_input 中的新数据声明
+        ↓
+CurrentRoundDataBinding/v1
+        ↓
+L7 再次验证
+        ↓
+Turing workspace
 ```
 
-**路径 A — 执行层隔离（只有 图灵）**
+这三个东西的职责不同：
 
-图灵 要跑代码，不能纯上下文隔离。控制器调用 `prepare-turing-workspace`，用 `shutil.copy2` 把白名单文件复制到同盘临时目录，图灵 在这个 workspace 里执行 R/Python 脚本。结果被收集打包成 L7 delta JSON。
+- `l0_input.yaml`：**声明 authority**——本轮说自己要用什么。
+- `L0EvidenceBinding/v1`：**上一轮已验证证据宇宙**——上一轮到底真实存在过什么。
+- `CurrentRoundDataBinding/v1`：**本轮执行授权**——上一轮东西很多，但这一次究竟允许哪几个进入当前科学分析。
 
-**我们不假装 `spawn_agent` 是操作系统沙箱**。路径 B 的隔离靠的是"信息不可见"——角色的上下文里根本没有不该看的内容，不是靠文件系统权限。真正的文件系统沙箱只有 图灵 的 workspace（路径 A）。
+因此：
 
-### 可验证 Deep Research（L1 / L4 / L8.5）
+- native L0 新写出的 contract 使用 schema 1.1；历史 1.0 仍可读取；
+- continuation 可为 inherited-only、new-only、inherited + new；
+- inherited file 必须精确匹配上一轮已验证的 path + SHA-256；
+- 只能继承 prior `source / intermediate / result` 作为科学数据；
+- prior `literature / audit / receipt` 不能偷偷变成分析输入；
+- 当前本地文件也必须 hash-bound；
+- remote / non-file declaration 可以记录，但在 materialize 成已验证本地文件之前不能给 L7 执行；
+- `input_manifest.md`、`input_alias`、`--file` 都不能扩大 machine authority；
+- L0 之后有人改了文件，L7 在建 workspace 前会重新 hash 验证并拒绝。
 
-| 在哪个节点之前 | 步骤      | 做什么                                                 |
-| ------- | ------- | --------------------------------------------------- |
-| L1      | 深度文献检索  | 通过 ARS 获取论文，保存可定位的 Results/Discussion/Conclusion 摘录 |
-| L4      | 方法综述    | 保存研究论文的 Methods，并保存相关综述 Results/Conclusion 或零结果检索回执 |
-| L8.5    | 结果后文献验证 | 用 L7/L8 的实际结果检索并保存支持/矛盾/未解决证据                       |
-| L7      | 代码搜索    | 搜 GitHub/Bioconductor/CRAN，复用已有 pipeline            |
-
-文献运行不再以手写摘要作为成功条件。每次运行的 CLI/skill receipt、来源数据库元数据响应、开放获取源文本（如可用）、定位摘录及 hash 都写入 `09_Literature_Database/evidence_packs/`；`assemble-context` 只接受通过该契约的 artifact。
-
-### L8.5 文献验证节点
-
-L7/L8 出结果后，L8.5（居里 的第二实例）基于**实际结果的关键词**去检索 PubMed/EuropePMC，验证结论是否与已发表文献一致。找到的论文加入可增长的文献数据库（`09_Literature_Database/`），跨轮复用，通过 Obsidian wikilink 引用。
-
-### L0 依赖门禁（硬停止）
-
-`preflight` / `check-deps` 检查所有必需依赖，任一缺失就退出码非零，**循环停止**。Academic Research 不接受环境变量自证：必须验证 `deep_research_runtime.json` 指定的 CLI，以及 Codex skill 或 Claude plugin manifest。
-
-### 安全边界
-
-- 只有 L7 图灵可以执行代码，而且只能在受控 workspace 与命令白名单内执行。
-- 认知角色没有项目文件系统访问权；角色间只通过经过 schema 校验的 delta JSON 传递状态。
-- 缺少依赖、文献证据或执行前置条件时，流程 fail-closed；不会用手写摘要或环境变量声明冒充证据。
-- RLR 不会自动合并、发布、推送或替研究者作出 KEEP / REVISE / DOWNGRADE / DROP 之外的决策。
+这条链已经经过真实 **Round N → N+1 → L7** acceptance：继承旧 intermediate + 加入新数据、未选择的上一轮 result 不进入 workspace、真实脚本同时读取两份授权输入、tamper 后 fail-closed、恢复后 clean rerun PASS。
 
 ---
 
-## 角色表
+# 四、L4 内部到底发生什么
 
-| 节点   | 角色   | 职责                                  | 隔离方式                |
-| ---- | ---- | ----------------------------------- | ------------------- |
-| L0   | 林奈   | 预检、扫描技能、验证输入数据                      | 路径 B                |
-| L1   | 爱因斯坦 | 提出科学假设                              | 路径 B                |
-| L2   | 费曼   | 盲审攻击 L1 假设，找混淆因素                    | 路径 B                |
-| L3   | 奥本海默 | 裁决假设，选出可测试的                         | 路径 B                |
-| L4   | 费舍尔  | 设计实验/分析策略                           | 路径 B                |
-| L5   | 图基   | 从 EDA/QC 角度审查方法                     | 路径 B                |
-| L6   | 奥本海默 | 批准或驳回分析方案                           | 路径 B                |
-| L7   | 图灵   | 在受控 workspace 中执行脚本                 | **路径 A**            |
-| L8   | 图基   | 审计结果，验证可重复性                         | 路径 B                |
-| L8.5 | 居里   | 文献验证，增长文献数据库                        | 路径 B                |
-| L9a  | 费曼   | 硬证伪（统计/逻辑完备性）；先 finalized          | 路径 B（不读取 L9b）       |
-| L9b  | 达尔文  | 基于授权 L9a snapshot 作生物学解读             | 路径 B（L9a finalized 后） |
-| L10a | 乔布斯  | 价值评估，规划论文方向                         | 路径 B                |
-| L10b | 奥本海默 | 终审：KEEP / REVISE / DOWNGRADE / DROP | 路径 B                |
-| L10c | 林奈   | 聚合所有 delta，生成最终报告                   | 读取所有 delta          |
+L4 在正式 DAG 中仍然只有一个节点，正式存储 key 仍是 `L4_fisher`。
 
-### V0.7 每个节点到底做什么
+但内部已经分成四个职责清楚的阶段：
 
-| 节点        | 读取                                                   | 产出                     | 正式效果                                                        |
-| --------- | ---------------------------------------------------- | ---------------------- | ----------------------------------------------------------- |
-| L0 林奈     | candidate frontmatter + 严格 L0 contract               | 输入验证、技能计划、依赖/预检审计      | 缺依赖或输入未验证则停止；通过后进入 `IDEA_PROPOSED`                          |
-| L1 爱因斯坦   | frontmatter + L0 + 定位的 Results/Discussion/Conclusion | 可测试假设、主假设              | 生成假设 delta                                                  |
-| L2 费曼     | frontmatter + L1                                     | 盲审攻击、混淆因素、诊断检验         | 不改状态                                                        |
-| L3 奥本海默   | L1 + L2                                              | 选中/拒绝假设及理由             | `triage-idea`；delta 成功写入后才可触发 shadow ranking                |
-| L4 费舍尔    | L1/L2/L3 + Methods/review evidence                   | 策略、脚本、参数、输出计划          | 提出分析方案                                                      |
-| L5 图基     | L4 + L2                                              | QC 检查点、失败规则、方法攻击       | 不改状态                                                        |
-| L6 奥本海默   | L4 + L5                                              | 分析方案批准/拒绝及修改           | `triage-method`；刻意不接入 ranking hook                          |
-| L7 图灵     | L6 + L0 + 准备好的白名单 workspace                          | 脚本退出码、输出文件、关键结果        | 唯一允许执行代码的节点；先过 `execution-gate`                             |
-| L8 图基     | L7 + L6 + frontmatter                                | 证据审计、可重复性检查、证据等级       | 进入 `AUDITED`                                                |
-| L8.5 居里   | L7 + L8 + 论文验证 evidence                              | 支持/矛盾审计和文献记录           | 进入 review                                                   |
-| L9a 费曼    | L1 + L7 + L8 + L8.5                                  | 统计/逻辑证伪                | 先 finalized；不能读取 L9b                                          |
-| L9b 达尔文   | L1 + L7 + L8 + L8.5 + 授权 L9a snapshot              | 生物学解读和局限               | 只能在 L9a finalized 后运行                                          |
-| L10a 乔布斯  | frontmatter + L8/L8.5/L9a/L9b + 定位 L1/L8.5 evidence  | 价值评估和论文框架              | 不改状态                                                        |
-| L10b 奥本海默 | L10a + L8/L8.5/L9a/L9b + evidence IDs                | 最终决策和可追溯理由             | `KEEP/REVISE/DOWNGRADE/DROP`；delta 成功写入后才可触发 shadow ranking |
-| L10c 林奈   | 所有允许读取的 delta                                        | 中英文 FINAL_REPORT 和同步输入 | 聚合报告；不执行代码，也不替 ranking 选胜者                                  |
+```text
+L3 selected hypotheses
+        ↓
+L4A  Literature Discovery
+        ↓  L4ADiscoveryManifest/v1
+L4B  Evidence Construction
+        ↓  Methods / source payload / verified anchors
+L4C  Fisher Method Design
+        ↓  L4_fisher delta
+L4.5 Deterministic Commit
+        ↓
+L5 Tukey
+```
 
-ranking 只是 L3/L10b 之后生成的 advisory signal，不参与
-`triage-idea`、`triage-method` 或正式 `decision` 转移校验。
+- **L4A：发现。**只负责 query planning、metadata discovery、identifier-first 去重、相关性选择、全文可用性记录。它**不能生成 Methods anchor**。
+- **L4B：证据构建。**消费已经冻结的 L4A corpus，调用既有 Academic Research / RLR evidence stack 获取全文、保留 source payload、提取 Methods、核验 anchor、构建 method candidate。
+- **L4C：Fisher 真正设计方法。**这是 cognitive method design。
+- **L4.5：deterministic commit。**重新验证 L4A manifest、L4B evidence 和 L4C delta hash 后才提交正式方法 projection。
 
-### V0.7 运行时分层
-
-1. **兼容/分发层：** `research_loop_v04.py` 保留历史命令和 import 路径；
-   `research_loop/cli.py` 将请求分发到 engine。
-2. **DAG 契约层：** `topology.py` 定义节点、允许输入、状态和转移；
-   `delta.py` 定义结构化输出 schema。
-3. **上下文与门禁层：** `context.py` 组装 Path B manifest；`gates.py` 执行
-   L0 输入、预研、执行和 traceability 校验。
-4. **持久化层：** `paths.py`、`yamlio.py`、`ledger.py` 与 candidate-owned
-   delta 文件提供隔离、可哈希的项目 artifact。
-5. **执行/provider 层：** `providers/` 选择 main-agent、command、headless
-   或 manual；`api.py` 提供进程内 facade；`run_loop.py` 驱动多轮和 StopPolicy。
-6. **专用能力层：** `l0_contract.py`/`l0_intake.py` 负责严格 L0 规范化；
-   `deep_research.py` 负责 ARS receipt 与不可变论文证据；`ranking.py` 负责 advisory ranking artifact，绝不写入正式 decision 状态。
+所以 L4A/L4B/L4C/L4.5 是**L4 内部阶段，不是四个新的 DAG 节点**。
 
 ---
 
-## 记忆共享（4 层）
+# 五、文献证据怎么进入 RLR
 
-1. **Delta JSON**（主，项目内）：角色间状态传递的唯一方式。
-2. **Candidate frontmatter**（只读锚点）：candidate_id、title、question、claim 被剥离后嵌入每个角色上下文。candidate body（状态/历史）不传给 subagent。
-3. **文献数据库**（跨轮，项目内）：`09_Literature_Database/`，由 `manage_literature_db.py` 管理，去重，通过 Obsidian wikilink 引用。
-4. **EverOS**（跨会话，可选）：持久技术事实。subagent 可在启动时搜索声明的 `everos_read_scopes`。
+L1、L4、L8.5 前都需要真实、可定位、可审计的 Academic Research evidence。
 
-**不是记忆机制**：没有共享上下文窗口、没有共享变量、认知层没有文件系统访问、不传 candidate body。
+| 阶段 | 文献证据用途 |
+|---|---|
+| L1 前 | 为提出假设提供 Results / Discussion / Conclusion 证据 |
+| L4 内 | 冻结 metadata corpus，并获得 primary-study Methods / review evidence |
+| L8.5 | 用 L7/L8 的真实结果去做论文支持/矛盾核验 |
 
----
+RLR 不以“AI 写了一段文献综述”作为证据成功条件。evidence pack 会绑定 runtime receipt、source metadata、可获得的原始 payload、定位摘录和 hash。
 
-## 命令
-
-| 命令                                                | 说明                                              |
-| ------------------------------------------------- | ----------------------------------------------- |
-| `demo`                                            | 生成 demo 项目，走完 15 个节点                            |
-| `new-project`                                     | 创建 V0.7 项目目录                                    |
-| `preflight`                                       | L0 预检 + 依赖门禁                                    |
-| `normalize-l0-input`                              | 将显式请求和数据位置规范化为严格 L0 contract                    |
-| `check-deps`                                      | 独立依赖检查                                          |
-| `new-candidate`                                   | 创建带拆分 frontmatter 的 candidate                   |
-| `next-step`                                       | 获取下一个 DAG 节点调度包                                 |
-| `pre-research`                                    | 打印旧研究提示或 L7 代码搜索提示（文献节点使用 `deep-research-run`）  |
-| `deep-research-run`                               | 调用配置的 Codex/Claude ARS 并持久化验证过的 evidence pack   |
-| `audit-literature-evidence` / `literature-report` | fail-closed 论文证据审计 / 定位证据报告                     |
-| `assemble-context`                                | 构建节点的隔离上下文                                      |
-| `emit-delta`                                      | 校验并写入 delta JSON                                |
-| `route`                                           | 把 candidate 交给一个角色                              |
-| `note`                                            | 追加角色笔记                                          |
-| `triage-idea`                                     | L3：假设裁决                                         |
-| `triage-method`                                   | L6：方法裁决                                         |
-| `execution-gate`                                  | 执行门禁                                            |
-| `decision`                                        | 状态变更                                            |
-| `aggregate-report`                                | L10c：生成 FINAL_REPORT                            |
-| `obsidian-sync`                                   | 同步到 Obsidian vault                              |
-| `ranking-shadow`                                  | 对显式候选运行隔离的 advisory 公平排序                        |
-| `ranking-benchmark`                               | 运行免费的 synthetic fair-vs-naive 排序 benchmark      |
-| `ranking-report`                                  | 输出 shadow ranking artifact 的 JSON 或 Markdown 报告 |
-| `list`                                            | 列出 candidate                                    |
-| `show`                                            | 查看 candidate 文件                                 |
+架构上坚持 **reuse-first adapter boundary**：成熟检索器/解析器可以接入，但必须作为明确 adapter，而不能变成第二套 evidence authority。Literature Search MCP、Zotero、GROBID、Docling、PaperQA2 等只有在存在真实 consumer 时才应该进入正式依赖关系。
 
 ---
 
-## 严格 L0 intake 与假说排序 shadow mode
+# 六、L0 依赖：blocking 和 readiness-only 要分开
 
-`normalize-l0-input` 只接受显式本地数据路径（或稳定的远程 dataset locator），把请求文件转换为经过验证的 L0 contract。`--dry-run` 不写入任何候选或 artifact；`--run-l0` 只启动 canonical runner 到 L0 为止。
+当前 L0 不再把所有“未来可能会用到”的服务都当成 blocking dependency。
+
+### 当前 blocking framework checks
+
+对应现在真实存在的 consumer，包括：
+
+- core Python / package / filesystem；
+- Academic Research runtime；
+- 已激活 Hypothesis Ledger；
+- Evidence Store / 项目证据；
+- Obsidian projection 所需条件。
+
+### 当前 readiness-only
+
+- **PubMed MCP**
+- **Zotero**
+
+它们目前只是 readiness probe；在 planned consumer 真正接上之前，WARN 不等于 L0 blocking failure。
+
+Provider/main-agent readiness 由 runner 在真正知道 active provider 配置时检查；L7 workspace/runtime readiness 继续留在 L7 execution gate。
+
+---
+
+# 七、隔离与 authority
+
+## Path B：认知层隔离
+
+认知角色只收到 controller 根据 DAG 构造出来的 allowed context。它们不能自己遍历项目目录，也不能直接去读上一轮所有文件。
+
+## Path A：Turing 执行隔离
+
+Turing 得到一个受控 workspace，里面只有：
+
+- L6 已批准的脚本；
+- DAG 允许的 support artifacts；
+- `CurrentRoundDataBinding` 明确授权并再次验证过的本地科学数据。
+
+## 当前几种 authority 不要混淆
+
+| Authority / artifact | 负责什么 |
+|---|---|
+| **Hypothesis Ledger** | 正式假设生命周期、finalized emission、跨轮 hypothesis state |
+| **candidate/frontmatter + delta** | 当前轮各节点的结构化科学状态投影 |
+| **RLRRoundEvidenceManifest/v1** | 一轮完成后冻结的物理证据清单 |
+| **L0EvidenceBinding/v1** | N+1 对上一轮证据进行完整验证后的可见集合 |
+| **CurrentRoundDataBinding/v1** | 当前轮真正允许给 L7 使用的科学数据 |
+| **loop memory** | 语义上的下一轮连续性；引用已冻结 manifest，不重新造一份物理证据清单 |
+
+---
+
+# 八、Meta-RLR：在科学 DAG 外面修 RLR 自己
+
+PR #17 新增：
+
+`src/rlr_maintenance/`
+
+它是**软件维护平面**，不是 L11，也不是一个新的 persona。
+
+```text
+RLR / CI / acceptance 出现软件故障
+        ↓
+observer 规范化成 RLRMaintenanceEvent/v1
+        ↓
+LoopX 维护 goal / todo / evidence / replan
+        ↓
+Codex 执行受限 repair
+        ↓
+RLR 自己的 tests / contracts / CI / real acceptance
+        ↓
+repair 被验证，或者拒绝 repair
+```
+
+边界非常重要：
+
+- `research_loop` 永远是科学状态和 contract authority；
+- `rlr_maintenance` 可以观察和验证 RLR，但 RLR core 不能反过来依赖 LoopX；
+- LoopX 只拥有 maintenance 状态，不拥有 hypothesis、candidate、data binding 或 scientific decision；
+- Codex 是 repair worker，不是科学 persona；
+- 修复是否成立，最终看 RLR-native tests、contracts、CI 和真实 acceptance；
+- **Windows native 是当前 RLR / Meta-RLR repair qualification 的权威运行环境**；如果错误只在 WSL/Linux 出现，它首先是 compatibility/environment evidence，不能仅凭这一点直接改 RLR production code。
+
+PR #18 只是修正这个维护层的历史 scope test，没有改变 production runtime。
+
+---
+
+# 九、Architecture-first：以后改代码先看全局
+
+`AGENTS.md` 现在明确要求所有非平凡修改在动代码前先回答：
+
+1. 为什么必须改？真正被破坏的 invariant / root cause 是什么？
+2. 这个责任原本属于哪个 canonical owner？
+3. 会不会破坏当前 authority boundary？
+4. 有没有更统一、更根本的方案，而不是加一个 workaround？
+5. 会不会出现第二套 source of truth、第二 validator、隐藏 fallback 或 compatibility patch？
+6. scope 是否最小而完整？
+
+如果局部修复会保留互相矛盾的 authority、累积 compatibility shim 或 patch stack，应先重新设计，而不是继续补。
+
+这是一条**仓库开发治理规则**，不是 RLR 科学 DAG 的新节点。
+
+---
+
+# 十、常用命令
+
+| 命令 | 作用 |
+|---|---|
+| `demo` | 创建最小 demo |
+| `new-project` | 创建 native 项目并绑定 compatibility profile / hypothesis store |
+| `new-candidate` | 创建研究 candidate |
+| `normalize-l0-input` | 把显式请求/数据声明规范化成严格 L0 contract |
+| `preflight` | 运行 L0 pre-flight/readiness |
+| `check-deps` | 单独输出依赖/ready 状态 |
+| `next-step` | 获取下一个 DAG dispatch packet |
+| `deep-research-run` | 执行配置好的 Academic Research 并保存 evidence pack |
+| `audit-literature-evidence` / `literature-report` | 证据审计 / 定位证据报告 |
+| `assemble-context` | 为一个认知节点生成 Path-B 隔离上下文 |
+| `emit-delta` | 校验并持久化节点 delta |
+| `triage-idea` | L3 假设裁决 |
+| `triage-method` | L6 方法裁决 |
+| `execution-gate` | 一次性 `METHOD_APPROVED → NEEDS_EXECUTION` 授权 |
+| `prepare-turing-workspace` | 重新验证当前数据 authority 并创建 L7 workspace |
+| `decision` | 执行允许的正式状态转换 |
+| `aggregate-report` | L10c 聚合最终报告 |
+| `obsidian-sync` | Obsidian 人类可读投影 |
+| `ranking-shadow` / `ranking-benchmark` / `ranking-report` | advisory ranking；永远不是正式 decision authority |
+| `list` / `show` | 查看 candidate |
+
+Canonical runner：
 
 ```bash
-python research_loop_v04.py normalize-l0-input \
-  --project MyProject --input request.md --data data_directory --dry-run
+python run_loop.py run PROJECT CAND
 ```
 
-Hypothesis Ranking Reliability Layer 仅是 **shadow signal**：它对一组明确给出的候选进行成对比较，每一对都执行 A/B 和 B/A 两次；结果冲突时标记 `UNCERTAIN`，绝不为了完整排名强制判胜。默认使用免费、确定性的 fake judge；真实 provider 必须显式配置。所有产物都隔离在 `08_Audit/ranking/`，不会改变 candidate status、L3/L10b 正式 decision 或任何 gate。
+`research_loop_v04.py` 继续作为历史 CLI/import compatibility shim；新代码应直接使用 `research_loop.cli`、`research_loop.engine` 或 `research_loop.api`。
+
+---
+
+# 十一、安装与最小检查
 
 ```bash
-# 独立运行 L3 或 L10b 的 shadow ranking。
-python research_loop_v04.py ranking-shadow MyProject --stage L3 \
-  --candidate C001 --candidate C002 --seed 7 --match-budget 10
-
-# 运行免费的 synthetic benchmark，并渲染已保存 artifact。
-python research_loop_v04.py ranking-benchmark --gold gold.json --seeds 1,2,3 --match-budget 10
-python research_loop_v04.py ranking-report MyProject --run <RUN_ID> --format markdown
-
-# 在 canonical run 中显式开启。只接入 L3/L10b；刻意不接入 L6。
-python run_loop.py run MyProject C001 --shadow-ranking \
-  --shadow-candidate C002 --shadow-seed 7 --shadow-match-budget 10
-```
-
-shadow ranking 的超时、失败或不完整 artifact 都会留下审计记录并 fail-soft；既有 RLR 正式决策链继续运行。
-
-## 安装与最小验证
-
-```bash
-# 安装运行依赖
 python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt   # 可选测试依赖
 
-# 可选：安装测试依赖
-python -m pip install -r requirements-dev.txt
-
-# 最小本地演示；真实研究流程仍会执行完整 L0 门禁
 python research_loop_v04.py demo
+python research_loop_v04.py --help
 python run_loop.py --help
 ```
 
-真实研究流程还需要 Academic Research runtime、Zotero connector 和
-Obsidian vault。缺少这些服务时，L0 会明确报错并停止，不会静默跳过。
+真实研究运行必须满足当前 L0 blocking contract 和后续各阶段 gate；readiness-only WARN 会被记录，但不会被静默升级成 blocking failure。
 
 ---
 
-## 文件结构
+# 十二、当前文件结构
 
-```
+```text
 research_loop/
-├── research_loop_v04.py          # 历史 CLI/import 兼容 shim，不是当前 engine 实现
+├── AGENTS.md                         # repository architecture/change discipline
+├── research_loop_v04.py              # 历史 CLI/import compatibility shim
+├── run_loop.py                       # 根 runner 入口
+├── src/run_loop.py                   # canonical multi-round runner + StopPolicy
 ├── src/research_loop/
-│   ├── cli.py                    # 稳定 CLI 分发入口
-│   ├── engine.py                 # 命令处理和编排操作
-│   ├── api.py                    # 进程内 EngineAPI facade
-│   ├── topology.py               # DAG 节点、转移和可见输入
-│   ├── context.py                # Path B 上下文组装与 manifest
-│   ├── gates.py                  # L0/L1/L7/L10 门禁和可追溯性校验
-│   ├── delta.py                  # delta schema 和 candidate-owned 解析
-│   ├── l0_contract.py            # L0 schema、validator、serializer、renderer
-│   ├── l0_intake.py              # 规则型请求/数据 normalizer
-│   ├── deep_research.py           # ARS runtime receipt、论文记录和 evidence pack
-│   ├── providers/                # main-agent、command、headless、manual provider
-│   ├── ranking.py                # shadow judge、Elo、checkpoint、evidence
-│   ├── paths.py / yamlio.py      # 安全路径和 YAML/frontmatter I/O
-│   ├── ledger.py / presearch.py  # pitfall/evidence ledger 与预研
-│   └── errors.py                 # 类型化运行时错误
-├── run_loop.py                   # 根目录兼容入口
-├── src/run_loop.py               # canonical 循环运行器
-├── src/orchestrator.py            # Provider 抽象
-├── src/manage_literature_db.py    # 文献数据库
-├── src/sync_to_obsidian.py        # Obsidian 同步
-├── docs/MAIN_AGENT_RUN.md         # 主 agent 执行协议
-├── docs/MAIN_AGENT_PROMPT.md      # 主 agent 启动提示词
-├── docs/RUNNER.md                 # 运行模式 + StopPolicy
-├── docs/DAG_TOPOLOGY.md           # DAG 依赖表
-├── templates/layers/             # 15 个 layer 模板
-├── templates/personas/           # 10 个人格模板
-└── DemoProject_v03/              # 跟踪的示例项目
+│   ├── cli.py                        # CLI dispatch
+│   ├── engine.py                     # 编排操作
+│   ├── commands/                     # 各命令 family
+│   ├── topology.py                   # DAG / persona / visibility executable truth
+│   ├── compatibility.py              # immutable compatibility profiles
+│   ├── context.py                    # Path-B context assembly
+│   ├── gates.py                      # L0/L4/L6/L7/L10 等 gate
+│   ├── delta.py                      # delta schema + shared L6 script projection
+│   ├── l0_contract.py                # L0 contract
+│   ├── l0_intake.py                  # 请求/数据 normalizer
+│   ├── l0_state.py                   # previous-round restore
+│   ├── l0_data.py                    # CurrentRoundDataBinding/v1
+│   ├── deep_research.py              # Academic Research evidence packs
+│   ├── ranking.py                    # advisory shadow ranking
+│   └── providers/                    # provider adapters
+├── src/rlr_maintenance/              # Meta-RLR maintenance boundary，科学 DAG 之外
+│   ├── contracts.py
+│   ├── observer.py
+│   ├── profiles.py
+│   ├── verification.py
+│   └── loopx_cli.py
+├── docs/DAG_TOPOLOGY.md              # DAG 详细说明
+├── docs/MAIN_AGENT_RUN.md            # 主 agent 执行协议
+├── docs/MAIN_AGENT_PROMPT.md         # 主 agent 启动提示
+├── docs/RUNNER.md                    # runner / StopPolicy
+└── templates/                        # layer / persona / project templates
 ```
 
-`research_loop_v04.py` 只是为了兼容历史测试和外部自动化而保留的文件名；
-它把调用转发给 `research_loop.cli`，不再承载当前 engine 主体。新代码应直接导入
-`research_loop.engine`、`research_loop.cli` 或 `research_loop.api`。
+真实研究项目、pilot workspace、数据库 WAL、外部 MCP 解压源码和历史运行文件不是 RLR source code，不能因为“存在于本地”就自动进入仓库。
 
-## 环境
+---
 
-- Python 3.13（标准库）+ PyYAML；R 4.6.0（L7 用）；Windows 11 / PowerShell。
-- 必需外部依赖（L0 门禁）：Academic Research skill、Zotero、Obsidian vault（`$OBSIDIAN_VAULT`）。
-- EverOS：可选，可配置端点。
+# 十三、必须保持不变的硬规则
+
+- L0 遇到 blocking dependency、非法 current input、prior-round restore 失败、inherited selector 错误或 bound-file hash mismatch 时必须 fail-closed。
+- `l0_input.yaml` 是本轮输入声明 authority；`CurrentRoundDataBinding/v1` 是本轮 L7 科学数据 execution authority。
+- `input_manifest.md`、`input_alias`、`--file` 都不能扩大 scientific data authority。
+- 只有 L7 Turing 能执行代码；只能运行批准脚本；只能在 prepared workspace 中运行。
+- 当前 native v2.1：L8 = Tukey；L9 = **L9a finalized → authorized snapshot → L9b**。
+- Hypothesis Ledger 仍是正式 hypothesis lifecycle authority。
+- L10c 负责冻结本轮 physical evidence；loop memory 只引用冻结结果，不能重新发明一份 evidence manifest。
+- Meta-RLR 永远位于科学 DAG 之外，不能拥有 scientific state。
+- 开发修改必须修 canonical owner / root cause，不能靠复制 authority、兼容 patch 或隐藏 fallback 堆起来。
+
+更详细的 executable-node 说明见：[DAG_TOPOLOGY.md](DAG_TOPOLOGY.md)。
