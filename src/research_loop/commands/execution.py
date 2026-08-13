@@ -8,7 +8,11 @@ from pathlib import Path
 
 from research_loop.commands.lifecycle import PREFLIGHT_FILES
 from research_loop.common import _append_decision, _now, _set_status, _stamp
-from research_loop.delta import _delta_for_candidate
+from research_loop.delta import (
+    _delta_for_candidate,
+    l6_analysis_plan_scripts,
+    l6_script_name,
+)
 from research_loop.l0_data import (
     L0DataError,
     current_round_data_binding_path,
@@ -103,21 +107,18 @@ def _approved_execution_scripts(project_dir, cand_id):
         data = json.loads(delta.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return [], ["missing execution script plan: unreadable L6_oppenheimer delta"]
-    plan = data.get("analysis_plan", [])
-    if isinstance(plan, dict):
-        names = plan.get("scripts", [])
-    elif isinstance(plan, list):
-        names = [name for item in plan if isinstance(item, dict)
-                 for name in item.get("scripts", [])]
-    else:
-        names = []
+    scripts = l6_analysis_plan_scripts(data)
     roots = [
         Path(project_dir) / "04_Analysis_Outputs",
         Path(project_dir) / "02_Agent_Notes" / "Turing",
     ]
     resolved, missing = [], []
-    for name in names:
-        script_name = Path(str(name)).name
+    for script in scripts:
+        declared_name = l6_script_name(script)
+        if not declared_name:
+            missing.append("invalid execution script declaration: missing string `name`")
+            continue
+        script_name = Path(declared_name).name
         matches = []
         for root in roots:
             if root.is_dir():
