@@ -12,8 +12,46 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  scope:
+    name: Change scope / docs fast path
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.classify.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Classify change scope
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            mode="full"
+          else
+            base="$PR_BASE_SHA"
+            head="$PR_HEAD_SHA"
+            changed="$RUNNER_TEMP/changed-files.txt"
+            : > "$changed"
+            if [[ -z "$base" || -z "$head" ]]; then
+              mode="full"
+            elif ! git cat-file -e "$base^{commit}" 2>/dev/null || ! git cat-file -e "$head^{commit}" 2>/dev/null; then
+              mode="full"
+            else
+              git diff --name-only "$base" "$head" > "$changed"
+              mode="$(python3 tools/ci_change_scope.py < "$changed")"
+            fi
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "L4 CI scope: $mode"
+
   targeted:
     name: Targeted runtime + L4 / Windows / Python 3.13
+    needs: scope
+    if: needs.scope.outputs.mode == 'full'
     runs-on: windows-latest
     env:
       PYTHONPATH: src
@@ -76,6 +114,8 @@ jobs:
 
   full-suite:
     name: Full suite / Windows / Python 3.13
+    needs: scope
+    if: needs.scope.outputs.mode == 'full'
     runs-on: windows-latest
     env:
       PYTHONPATH: src
