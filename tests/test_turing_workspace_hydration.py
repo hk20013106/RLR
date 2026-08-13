@@ -154,7 +154,11 @@ def test_missing_required_input_fails_cleanly_before_workspace_creation():
     project = _fixture(missing_input=True)
     result = _run("prepare-turing-workspace", str(project), "C1")
     assert result.returncode != 0
-    assert "L0_DATA_BOUND_INPUT_MISSING" in result.stderr
+    # L7 revalidates the authoritative l0_input before the binding's per-file
+    # hash loop, so a deleted local source may be caught one layer earlier as a
+    # contract-invalid missing file. The invariant is fail-closed before any
+    # workspace is created, not a specific internal error-code ordering.
+    assert "L0_DATA_CONTRACT_INVALID" in result.stderr
     assert "real.csv" in result.stderr
     assert not list(project.glob("_turing_workspace_C1_*"))
 
