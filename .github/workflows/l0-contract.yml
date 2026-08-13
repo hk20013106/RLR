@@ -68,6 +68,7 @@ jobs:
           tests/test_round_data_binding.py
           tests/test_round_data_gate.py
           tests/test_round_data_execution.py
+          tests/test_round_data_nonfile.py
       - name: Run targeted L0 regression tests
         run: >-
           python -m pytest -q
