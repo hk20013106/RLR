@@ -130,6 +130,9 @@ def _write_child_round(
         },
         "Round 2 hypothesis",
     )
+    # Low-level builders retain historical 1.0 compatibility. Native N+1
+    # declarations opt into the current schema at the intake boundary.
+    contract["schema_version"] = "1.1"
     contract["inherited_inputs"] = []
     if include_inherited:
         contract["inherited_inputs"] = [{
