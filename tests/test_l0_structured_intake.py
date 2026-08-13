@@ -44,8 +44,8 @@ def test_no_circular_import():
     assert "research_loop.l0_intake" not in sys.modules
 
 
-def test_valid_structured_preplan_produces_schema_10_contract(tmp_path):
-    """Valid structured preplan produces a valid schema-1.0 contract passing canonical validation."""
+def test_valid_structured_preplan_produces_schema_11_contract(tmp_path):
+    """Valid structured preplan produces a valid schema-1.1 contract passing canonical validation."""
     project = _new_project(tmp_path)
     data_dir = project / "data"
     data_dir.mkdir()
@@ -85,7 +85,7 @@ def test_valid_structured_preplan_produces_schema_10_contract(tmp_path):
     assert contract is not None
 
     # Contract assertions
-    assert contract["schema_version"] == "1.0"
+    assert contract["schema_version"] == "1.1"
     assert contract["round_type"] == "initial"
     assert contract["candidate_id"] == "C_TEST0001"
     assert contract["round_id"] == "1"
