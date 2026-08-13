@@ -67,21 +67,22 @@ def test_success_commits_verified_diff_before_loopx_completion(tmp_path):
     result = MetaRLRHost(loopx=loopx, codex=codex, workspace=workspace, verifier=check).run_once(event=event(), goal_id="g", agent_id="a")
     assert result.outcome == "verified"
     assert result.commit_sha == "b" * 40
-    assert [name for name, _ in loopx.calls] == ["add", "quota", "claim", "complete", "spend"]
+    assert [name for name, _ in loopx.calls] == ["add", "quota", "quota", "claim", "complete", "spend"]
     assert [name for name, _ in workspace.calls] == ["create", "inspect", "inspect", "commit"]
     assert workspace.calls[0][1]["base_revision"] == "a" * 40
     assert workspace.calls[-1][1]["changed_paths"] == ("src/x.py",)
     assert check.calls == [("l0_state_integrity", tmp_path)]
-    assert ("commit=" + "b" * 40) in loopx.calls[3][1]["evidence"]
-    assert loopx.calls[3][1]["turn_instance_id"] == loopx.calls[1][1]["turn_instance_id"]
-    assert loopx.calls[4][1]["turn_instance_id"] == loopx.calls[1][1]["turn_instance_id"]
+    assert ("commit=" + "b" * 40) in loopx.calls[4][1]["evidence"]
+    assert loopx.calls[4][1]["turn_instance_id"] == loopx.calls[2][1]["turn_instance_id"]
+    assert loopx.calls[5][1]["turn_instance_id"] == loopx.calls[2][1]["turn_instance_id"]
+    assert loopx.calls[1][1].get("turn_instance_id") is None
 
 
 def test_failed_verification_blocks_without_commit_complete_or_spend(tmp_path):
     loopx, workspace = LoopXFake(), WorkspaceFake(tmp_path)
     result = MetaRLRHost(loopx=loopx, codex=CodexFake(), workspace=workspace, verifier=verifier(False)).run_once(event=event(), goal_id="g", agent_id="a")
     assert result.outcome == "blocked"
-    assert [name for name, _ in loopx.calls] == ["add", "quota", "claim", "update"]
+    assert [name for name, _ in loopx.calls] == ["add", "quota", "quota", "claim", "update"]
     assert [name for name, _ in workspace.calls] == ["create", "inspect"]
     assert loopx.calls[-1][1]["status"] == "blocked"
 
