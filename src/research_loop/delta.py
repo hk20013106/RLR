@@ -57,6 +57,46 @@ def artifact_key_for(node: str, persona: str, *, profile_id: str | None = None) 
     return f"{node}_{persona.lower()}"
 
 
+def l6_analysis_plan_scripts(delta):
+    """Return L6 script declarations from either supported analysis-plan shape.
+
+    Historical deltas may use one mapping with ``scripts`` while native deltas
+    use a list of strategy mappings.  Consumers must share this structural
+    projection so validation and execution cannot drift on the same L6 artifact.
+    The declarations themselves are intentionally not coerced: a historical
+    bare string remains a string and a traceable native script object remains an
+    object for downstream policy checks.
+    """
+    if not isinstance(delta, dict):
+        return []
+    plan = delta.get("analysis_plan") or {}
+    if isinstance(plan, dict):
+        scripts = plan.get("scripts", [])
+        return list(scripts) if isinstance(scripts, list) else []
+    if isinstance(plan, list):
+        return [
+            script
+            for strategy in plan
+            if isinstance(strategy, dict)
+            for script in (
+                strategy.get("scripts", [])
+                if isinstance(strategy.get("scripts", []), list)
+                else []
+            )
+        ]
+    return []
+
+
+def l6_script_name(script):
+    """Return the declared script name without stringifying structured metadata."""
+    if isinstance(script, str):
+        return script
+    if isinstance(script, dict):
+        name = script.get("name")
+        return name if isinstance(name, str) else ""
+    return ""
+
+
 def _v2_candidate_delta_file(project_dir, delta_key, cand_id):
     """Return the non-overwriting v2 delta artifact path."""
     legacy = _delta_file(project_dir, delta_key)
@@ -244,8 +284,8 @@ def _validate_delta(schema, data, path=""):
       - a bare type (list/dict/str/bool/int): isinstance check only;
       - a list literal [elem_schema]: data must be a list and every element is
         validated against elem_schema (e.g. [{"id": str}] => list of objects);
-      - a dict literal {k: subschema}: data must be a dict; every declared key
-        is required (extra keys allowed) and validated against its subschema.
+      - a dict literal {k: subschema}: data must be a dict; every declared key is
+        required (extra keys allowed) and validated against its subschema.
 
     This is what lets the validator reject hypotheses=[{"foo": 1}] (element
     missing the required id/text) instead of only checking the top-level type.

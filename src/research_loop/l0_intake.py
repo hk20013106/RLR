@@ -120,6 +120,17 @@ def _provenance(request_path, request_text, inventory):
     }
 
 
+def _current_contract(contract, *, inherited_inputs=None):
+    """Promote newly normalized native intake to the current L0 schema.
+
+    Builders remain able to construct historical 1.0 fixtures/artifacts; the
+    intake boundary is where new candidate declarations opt into 1.1.
+    """
+    contract["schema_version"] = l0_contract.SUPPORTED_SCHEMA_VERSIONS[-1]
+    contract["inherited_inputs"] = list(inherited_inputs or [])
+    return contract
+
+
 def normalize_request(request_path, request_text, candidate_id, *, data=None,
                       dataset=None, memory=None, memory_hash=""):
     """Build an in-memory contract or report explicit missing/error fields."""
@@ -208,10 +219,12 @@ def normalize_request(request_path, request_text, candidate_id, *, data=None,
             candidate_id, round_id, parent_round_id, previous_candidate_id,
             extracted["scientific_question"], source_input, previous_round,
             extracted["hypothesis"])
+        contract = _current_contract(contract)
     else:
         contract = l0_contract.build_initial_contract(
             candidate_id, "1", extracted["scientific_question"], source_input,
             extracted["hypothesis"])
+        contract = _current_contract(contract)
     contract["provenance"] = _provenance(request_path, request_text, inventory)
     return {"contract": contract, "missing_fields": [], "errors": [],
             "round_type": contract["round_type"]}

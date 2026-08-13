@@ -224,8 +224,10 @@ Topic: {topic}
 
 - Only **Oppenheimer** changes candidate status.
 - Only **Turing** executes code, and only after the Execution Gate passes.
-- Execution Gate requires: `00_Preflight/skill_use_plan.md`,
-  `00_Preflight/input_manifest.md`, and an approved plan (status METHOD_APPROVED).
+- Execution Gate requires: `00_Preflight/skill_use_plan.md`, a verified
+  `CurrentRoundDataBinding`, and an approved plan (status METHOD_APPROVED).
+- `00_Preflight/input_manifest.md` and `input_alias` are human/legacy metadata;
+  neither grants scientific-data access to L7.
 - Each persona runs as an isolated subagent under the v0.9 preview topology.
 - State flows between subagents via delta JSON files only.
 
@@ -368,18 +370,23 @@ Do NOT build from scratch where a relevant skill or prior code pattern exists.
 """
     elif fname == "input_manifest.md":
         body = """
-## Input classification
+## Human-readable input catalog
 
-Classify every input as: **primary**, **fallback**, **reference-only**, or
-**forbidden**. Execution may only consume primary/fallback inputs.
+This file is a legacy/human-facing projection only. It may summarize input
+locations and classifications for review, but it is **not** a machine
+authorization source. L7 stages scientific data only from the verified
+`CurrentRoundDataBinding` produced by L0.
 
 | alias | full path | key files | format | classification | verified | notes |
 |-------|-----------|-----------|--------|----------------|----------|-------|
-_READ EACH input alias from candidate frontmatter. One row per input. Fill ALL columns. Do NOT leave template rows._
+_Optional review rows. Keep them accurate, but do not use them to grant L7 access._
 
-## Required inputs for execution
+## Execution authority
 
-_MUST match the input_verified dict in L0 delta. Every alias must have: path, files, format, classification, verified, notes._
+`l0_input.yaml` declares current-round data. For continuations, selected
+verified inherited path/SHA references are combined with current declarations
+and frozen into `CurrentRoundDataBinding`. `input_alias` and rows in this file
+cannot add, remove, or override that authorization.
 """
     elif fname == "output_manifest.md":
         body = """
