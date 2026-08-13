@@ -68,33 +68,33 @@ def test_blocked_writeback_uses_todo_update_not_completion(tmp_path):
     ]
 
 
-def test_complete_refresh_then_spend_use_documented_path_a_commands(tmp_path):
+def test_complete_then_spend_use_native_turn_settlement(tmp_path):
     executable, argv_file = _fake_loopx(tmp_path, {"ok": True})
     client = LoopXCli(executable=executable)
+    turn_id = "meta-rlr:abc123"
     client.todo_complete(
         goal_id="g", todo_id="todo_event", agent_id="codex-maintainer",
         evidence="profile=l0_state_integrity passed=true",
         note="bounded repair independently verified", no_follow_up=True,
+        turn_instance_id=turn_id,
     )
     assert _argv(argv_file) == [
         "--format", "json", "todo", "complete", "--goal-id", "g",
         "--todo-id", "todo_event", "--agent-id", "codex-maintainer",
         "--claimed-by", "codex-maintainer",
         "--evidence", "profile=l0_state_integrity passed=true",
+        "--turn-instance-id", turn_id,
         "--note", "bounded repair independently verified", "--no-follow-up",
     ]
-    client.refresh_state(goal_id="g", agent_id="codex-maintainer")
-    assert _argv(argv_file) == [
-        "--format", "json", "refresh-state", "--goal-id", "g",
-        "--agent-id", "codex-maintainer",
-    ]
+    assert not hasattr(client, "refresh_state")
     client.quota_spend_slot(
         goal_id="g", todo_id="todo_event", agent_id="codex-maintainer",
-        capabilities=("shell",),
+        capabilities=("shell",), turn_instance_id=turn_id,
     )
     assert _argv(argv_file) == [
         "--format", "json", "quota", "spend-slot", "--goal-id", "g",
         "--todo-id", "todo_event", "--slots", "1", "--source", "heartbeat",
         "--execute", "--agent-id", "codex-maintainer",
+        "--turn-instance-id", turn_id,
         "--available-capability", "shell",
     ]
