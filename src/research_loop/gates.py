@@ -7,7 +7,11 @@ from pathlib import Path
 
 from research_loop.paths import _candidate_file, _pre_research_file
 from research_loop.yamlio import _load_yaml_front
-from research_loop.delta import _delta_for_candidate
+from research_loop.delta import (
+    _delta_for_candidate,
+    l6_analysis_plan_scripts,
+    l6_script_name,
+)
 from research_loop import l0_contract
 from research_loop.l0_data import L0DataError, write_current_round_data_binding
 from research_loop.l0_state import L0StateError, restore_previous_round
@@ -131,22 +135,11 @@ def _l6_script_branches(project_dir, cand_id):
     out = {}
     if p and p.exists():
         try:
-            analysis_plan = json.loads(
-                p.read_text(encoding="utf-8")).get("analysis_plan") or {}
-            if isinstance(analysis_plan, dict):
-                scripts = analysis_plan.get("scripts", [])
-            elif isinstance(analysis_plan, list):
-                scripts = [
-                    script
-                    for strategy in analysis_plan
-                    if isinstance(strategy, dict)
-                    for script in strategy.get("scripts", [])
-                ]
-            else:
-                scripts = []
-            for s in scripts:
-                if isinstance(s, dict) and s.get("name"):
-                    out[s["name"]] = s.get("branch_id")
+            delta = json.loads(p.read_text(encoding="utf-8"))
+            for script in l6_analysis_plan_scripts(delta):
+                name = l6_script_name(script)
+                if isinstance(script, dict) and name:
+                    out[name] = script.get("branch_id")
         except Exception:
             pass
     return out
@@ -195,41 +188,35 @@ def _audit_l6_traceability(project_dir, cand_id, delta):
     fm = _load_yaml_front(cf) if cf and cf.exists() else {}
     if not fm.get("from_memory"):
         return True, ""
-    analysis_plan = delta.get("analysis_plan") or {}
-    if isinstance(analysis_plan, dict):
-        scripts = analysis_plan.get("scripts", [])
-    elif isinstance(analysis_plan, list):
-        scripts = [
-            script
-            for strategy in analysis_plan
-            if isinstance(strategy, dict)
-            for script in strategy.get("scripts", [])
-        ]
-    else:
-        scripts = []
+    scripts = l6_analysis_plan_scripts(delta)
     mc_dir = Path(project_dir) / "09_Literature_Database" / "method_cards"
     for s in scripts:
         if isinstance(s, str):
             return False, (f"L6 script {s!r} is a bare string; must be an object with "
                            f"grounding/branch_id/data_modality")
+        if not isinstance(s, dict):
+            return False, f"L6 script declaration must be an object, got {type(s).__name__}"
+        name = l6_script_name(s)
+        if not name:
+            return False, "L6 script object missing non-empty `name`"
         g = s.get("grounding") or {}
         gtype = g.get("type")
         if gtype == "method_card":
             ids = g.get("method_card_ids", []) or []
             if not ids or not all((mc_dir / f"{i}.json").exists() for i in ids):
-                return False, f"L6 script {s.get('name')!r}: method_card grounding refs missing cards"
+                return False, f"L6 script {name!r}: method_card grounding refs missing cards"
         elif gtype == "internal_critique":
             ref = g.get("critique_delta_ref", "")
             if not _critique_ref_valid(project_dir, cand_id, ref):
-                return False, f"L6 script {s.get('name')!r}: critique_delta_ref {ref!r} not found"
+                return False, f"L6 script {name!r}: critique_delta_ref {ref!r} not found"
         elif gtype == "prior_reuse":
             if not g.get("reused_from"):
-                return False, f"L6 script {s.get('name')!r}: prior_reuse missing reused_from"
+                return False, f"L6 script {name!r}: prior_reuse missing reused_from"
         else:
-            return False, (f"L6 script {s.get('name')!r}: grounding.type must be one of "
+            return False, (f"L6 script {name!r}: grounding.type must be one of "
                            f"method_card|internal_critique|prior_reuse")
         if not s.get("branch_id"):
-            return False, f"L6 script {s.get('name')!r}: missing branch_id"
+            return False, f"L6 script {name!r}: missing branch_id"
     return True, ""
 
 
