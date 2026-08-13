@@ -17,6 +17,7 @@ on:
       - "src/run_loop.py"
       - "tests/test_l0_*.py"
       - "tests/test_round_data_*.py"
+      - "tests/test_l6_l7_script_contract.py"
       - "tests/test_cross_round_e2e.py"
       - "tests/test_context_isolation.py"
       - "tests/test_run_loop_guards.py"
@@ -70,6 +71,7 @@ jobs:
           tests/test_round_data_execution.py
           tests/test_round_data_nonfile.py
           tests/test_round_data_cross_round_e2e.py
+          tests/test_l6_l7_script_contract.py
       - name: Run targeted L0 regression tests
         run: >-
           python -m pytest -q
