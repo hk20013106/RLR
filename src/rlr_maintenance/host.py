@@ -160,11 +160,10 @@ class MetaRLRHost:
             evidence=evidence,
             note="bounded repair independently verified and committed",
             no_follow_up=True,
+            turn_instance_id=turn_id,
             cwd=self._loopx_cwd,
         )
         _require_ok(completed, "todo complete")
-        refreshed = self._loopx.refresh_state(goal_id=goal_id, agent_id=agent_id, cwd=self._loopx_cwd)
-        _require_ok(refreshed, "refresh-state")
         spent = self._loopx.quota_spend_slot(
             goal_id=goal_id,
             todo_id=todo_id,
