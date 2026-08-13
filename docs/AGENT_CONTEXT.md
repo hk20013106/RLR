@@ -21,21 +21,25 @@ citations, datasets, hashes, lineage, or computed results.
 ## Runtime map
 
 ```text
-run_loop.py                 public runner shim
-research_loop_v04.py        public engine CLI / import-compatibility shim
-src/run_loop.py             loop runner, main-agent orchestration protocol
-src/research_loop/engine.py command dispatch, gates, persistence
-src/research_loop/topology.py executable DAG, transitions, authority metadata
-src/research_loop/context.py scoped cognitive-context assembly
-src/research_loop/delta.py  committed-v2 artifact resolution (no v1 runtime fallback)
-src/research_loop/hypothesis_contracts.py Draft 2020-12 node delta v2 schemas
-src/research_loop/hypothesis_ledger.py append-only SQLite facts, projections, queries
-src/research_loop/hypothesis_migration.py temporary historical compatibility code
-src/research_loop/gates.py  boundary gates and traceability checks
-src/research_loop/l0_contract.py strict L0 contract and authoritative validator
-src/research_loop/deep_research.py ARS evidence receipts/packs
-src/research_loop/providers/ optional non-main-agent providers
-src/research_loop/api.py    runner-to-engine in-process CLI-compatible facade
+run_loop.py                         public runner shim
+research_loop_v04.py                public engine CLI / compatibility shim
+src/run_loop.py                     loop runner and main-agent protocol
+src/research_loop/engine.py         command dispatch, gates, persistence
+src/research_loop/topology.py       executable DAG and authority metadata
+src/research_loop/context.py        scoped cognitive-context assembly
+src/research_loop/delta.py          committed-v2 artifact resolution
+src/research_loop/hypothesis_contracts.py node delta v2 schemas
+src/research_loop/hypothesis_ledger.py append-only hypothesis facts
+src/research_loop/gates.py          boundary gates and traceability checks
+src/research_loop/l0_contract.py    authoritative L0 validator
+src/research_loop/deep_research.py  general ARS evidence receipts/packs
+src/research_loop/l4_pipeline.py    staged L4 persistence and commit boundary
+src/research_loop/l4_inventory.py   L4A method inventory and exact identifiers
+src/research_loop/l4_closed_corpus.py exact-source resolver service
+src/research_loop/l4_evidence_bundle.py deterministic L4B bundle and L4.5 path gate
+src/research_loop/method_contracts.py Fisher/L5/L6 method contracts
+src/research_loop/providers/        optional non-main-agent providers
+src/research_loop/api.py            runner-to-engine facade
 ```
 
 Run public commands from the repository root:
@@ -141,7 +145,7 @@ Before L1, L4, and L8.5, run:
 python research_loop_v04.py deep-research-run PROJECT CANDIDATE --node NODE
 ```
 
-When the caller cannot wait for a long nested Codex run, use the detached
+When the caller cannot wait for a long nested provider run, use the detached
 wrapper around that same command:
 
 ```powershell
@@ -156,10 +160,37 @@ no crash-recovery scheduler: if an operating-system termination leaves a task
 at `running` indefinitely, inspect `stdout.log` and `stderr.log`, then start a
 new task.
 
-The Academic Research Skills path persists source-located evidence, receipts,
-metadata, and an evidence pack. `assemble-context` fails closed when required
-evidence is missing or invalid. L7 instead has its own code-search step for
-existing pipelines; do not substitute one for the other.
+### Staged L4 responsibility model
+
+New L4 runs separate inventory, evidence, and design:
+
+```text
+L4A cognitive: method inventory + exact source identifiers
+L4B deterministic: exact-source retrieval + Methods extraction
+L4C cognitive: Fisher components, candidates, and implementation requirements
+L4.5 deterministic: lineage + required-path evidence audit
+```
+
+Important boundaries:
+
+- L4A must preserve known DOI/PMID/PMCID/stable URLs even when ordinary
+  literature ranking changes.
+- L4B must not create components, candidates, eligibility, alternatives, or
+  `required` flags.
+- L4B emits accepted evidence cards and truthful evidence gaps.
+- A retrieval gap does not by itself invalidate L4B; integrity violations do.
+- Fisher alone declares `execution_required` candidates.
+- L4.5 requires accepted evidence only for Fisher-declared required
+  implementation paths, not every optional alternative.
+- L6 remains final method-selection authority; L7 remains execution authority.
+
+See [`L4_METHOD_EVIDENCE.md`](L4_METHOD_EVIDENCE.md) for artifact and user-PDF
+details.
+
+The general Academic Research Skills path persists source-located evidence,
+receipts, metadata, and evidence packs. `assemble-context` fails closed when
+required evidence is missing or invalid. L7 instead has its own code-search
+step for existing pipelines; do not substitute one for the other.
 
 Separate observed inputs, computed results, and interpretation in all deltas
 and reports. A passing synthetic test is evidence of software behavior only,
@@ -169,7 +200,7 @@ not a scientific conclusion.
 
 For Codex, Claude, Antigravity, or similar hosts, the normal mode is
 **main-agent mode**: the host agent orchestrates the DAG itself. It does not
-use a Python provider for those cognitive steps.
+use a Python provider for cognitive nodes.
 
 ```text
 preflight / check-deps
@@ -242,6 +273,7 @@ logic.
 - [`AGENTS.md`](../AGENTS.md)
 - [`DAG_TOPOLOGY.md`](DAG_TOPOLOGY.md)
 - [`MAIN_AGENT_RUN.md`](MAIN_AGENT_RUN.md)
+- [`L4_METHOD_EVIDENCE.md`](L4_METHOD_EVIDENCE.md)
 - [`README.md`](../README.md)
 - [`src/research_loop/topology.py`](../src/research_loop/topology.py)
 - [`src/research_loop/context.py`](../src/research_loop/context.py)

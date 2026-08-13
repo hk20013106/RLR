@@ -276,6 +276,15 @@ def install(deep_research_module) -> None:
         profile_id="",
         research_persona="Curie",
     ):
+        pre_persist_validator = getattr(dr, "_l4b_pre_persist_validator", None)
+        if (
+            node == "L4"
+            and payload.get("method_components") is not None
+            and callable(pre_persist_validator)
+        ):
+            # Validate the complete provider payload before _split() can hide
+            # navigation papers from the frozen-corpus boundary.
+            pre_persist_validator(project_dir, candidate_id, payload)
         if node != "L4" or not payload.get("method_components"):
             return original_persist(
                 project_dir,

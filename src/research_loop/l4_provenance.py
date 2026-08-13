@@ -13,6 +13,18 @@ from research_loop.user_sources import verify_registered_source
 
 
 _IDENTITY_FIELDS = ("project_id", "round_id", "profile_id")
+_REVIEW_TYPES = {
+    "review", "systematic_review", "systematic review", "meta_analysis",
+    "meta analysis", "meta-analysis", "review/meta-analysis",
+}
+_REVIEW_ROLES = {"review", "systematic_review", "meta_analysis"}
+_REVIEW_STATUS_ALIASES = {
+    "relevant_review_found": "completed",
+    "relevant_review_located": "completed",
+    "review_located": "completed",
+    "no_relevant_review_found": "none_found",
+    "zero_results": "none_found",
+}
 
 
 def _raise(dr, message: str) -> None:
@@ -33,6 +45,7 @@ def _require_unique(dr, records: list[dict], key: str) -> None:
 
 
 def _validate_provider_payload(l4p, dr, payload: Any) -> None:
+    """Validate a payload after the shared L4A adapter has run."""
     if not isinstance(payload, dict):
         _raise(dr, "L4A payload must be a JSON object")
     validator = Draft202012Validator(l4p.l4a_discovery_schema())
@@ -56,13 +69,13 @@ def _provider_payload_from_manifest(l4p, dr, manifest: dict) -> dict:
         metadata = asset.get("source_metadata_response")
         if not isinstance(metadata, dict):
             _raise(dr, "L4A manifest source_metadata_response must be a JSON object")
-        asset["source_metadata_response"] = l4p._canonical_json(metadata)
+        asset["source_metadata_response"] = metadata
         assets.append(asset)
-    return {
+    return l4p._canonicalize_l4a_provider_payload({
         "schema_version": manifest.get("schema_version"),
         "queries": manifest.get("queries"),
         "assets": assets,
-    }
+    })
 
 
 def _validate_manifest_semantics(l4p, dr, manifest: dict) -> None:
@@ -194,6 +207,14 @@ def _normalized_url(value: Any) -> str:
     )
 
 
+def _normalized_role(value: Any) -> str:
+    return str(value or "").strip().casefold().replace("-", "_")
+
+
+def _is_review_record(record: dict) -> bool:
+    return _normalized_role(record.get("paper_type")) in _REVIEW_TYPES
+
+
 def _normalized_title(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
 
@@ -240,12 +261,43 @@ def _selected_identities(l4p, manifest: dict) -> list[dict]:
             "doi": _normalized_doi(item.get("doi")),
             "pmid": _normalized_pmid(item.get("pmid")),
             "url": _normalized_url(item.get("url")),
+            "role": _normalized_role(item.get("role")) or "unspecified",
             "title_year": (
                 _normalized_title(item.get("title")),
                 str(item.get("year") or "").strip(),
             ),
         }
         for item in selected
+    ]
+
+
+def _matching_selected_asset_ids(
+    selected: list[dict],
+    *,
+    doi: str,
+    pmid: str,
+    url: str,
+    title_year: tuple[str, str],
+) -> list[str]:
+    for key, value in (("doi", doi), ("pmid", pmid), ("url", url)):
+        if value:
+            owners = _identifier_owners(selected, key, value)
+            if owners:
+                return sorted(owners)
+    if title_year[0]:
+        return sorted(
+            str(item.get("asset_id") or "")
+            for item in selected
+            if item.get("title_year") == title_year
+        )
+    return []
+
+
+def _identifier_owners(selected: list[dict], key: str, value: str) -> list[str]:
+    return [
+        str(item.get("asset_id") or "")
+        for item in selected
+        if value and item.get(key) == value
     ]
 
 
@@ -256,8 +308,60 @@ def _matches_one_selected_asset(
     pmid: str,
     url: str,
     title_year: tuple[str, str],
-) -> tuple[bool, bool]:
+) -> tuple[bool, dict]:
     supplied = {"doi": doi, "pmid": pmid, "url": url}
+    strong_owners = {
+        key: _identifier_owners(selected, key, value)
+        for key, value in (("doi", doi), ("pmid", pmid))
+        if value and _identifier_owners(selected, key, value)
+    }
+    strong_asset_ids = {
+        asset_id for owners in strong_owners.values() for asset_id in owners
+    }
+    if len(strong_asset_ids) > 1:
+        return False, {
+            "asset_ids": sorted(strong_asset_ids),
+            "fields": {
+                key.upper(): {"supplied": value, "asset_ids": owners}
+                for key, owners in strong_owners.items()
+                for value in (supplied[key],)
+            },
+        }
+
+    if len(strong_asset_ids) == 1:
+        asset_id = next(iter(strong_asset_ids))
+        item = next(item for item in selected if item.get("asset_id") == asset_id)
+        conflicts = {}
+        for key, value in supplied.items():
+            frozen = str(item.get(key) or "")
+            if value and frozen and frozen != value:
+                conflicts[key.upper()] = {
+                    "supplied": value,
+                    "frozen": frozen,
+                    "asset_ids": _identifier_owners(selected, key, value),
+                }
+        hard_conflicts = {
+            key: value
+            for key, value in conflicts.items()
+            if key in {"DOI", "PMID"} or value["asset_ids"]
+        }
+        if hard_conflicts:
+            return False, {
+                "asset_ids": sorted(
+                    {asset_id}
+                    | {
+                        other_id
+                        for value in hard_conflicts.values()
+                        for other_id in value["asset_ids"]
+                    }
+                ),
+                "fields": hard_conflicts,
+            }
+        # DOI/PMID uniquely identify this frozen asset. A different URL is
+        # accepted only when no other frozen asset owns it (for example, the
+        # real L4B PMC full-text URL for the PubMed-selected A1 record).
+        return True, {}
+
     if doi:
         primary_key, primary_value = "doi", doi
     elif pmid:
@@ -271,16 +375,192 @@ def _matches_one_selected_asset(
         item for item in selected if item.get(primary_key) == primary_value
     ]
     if not primary_matches:
-        return False, False
+        return False, {}
+    return True, {}
 
-    for item in primary_matches:
-        conflicts = any(
-            value and item.get(key) and item.get(key) != value
-            for key, value in supplied.items()
+
+def _paper_identity(
+    record: dict,
+    reference: dict,
+    *,
+    doi: str,
+    pmid: str,
+    url: str,
+    title_year: tuple[str, str],
+) -> str:
+    title = str(record.get("title") or reference.get("title") or "").strip()
+    year = str(
+        record.get("year")
+        or (record.get("metadata") or {}).get("year")
+        or reference.get("year")
+        or title_year[1]
+        or ""
+    ).strip()
+    return (
+        f"doi={doi or '<none>'}; pmid={pmid or '<none>'}; "
+        f"url={url or '<none>'}; title={title or '<none>'!r}; "
+        f"year={year or '<none>'}"
+    )
+
+
+def _format_identifier_conflict(identity: str, details: dict) -> str:
+    fields = []
+    for label, values in sorted((details.get("fields") or {}).items()):
+        supplied = values.get("supplied") or "<none>"
+        frozen = values.get("frozen")
+        frozen_text = f"; frozen={frozen!r}" if frozen else ""
+        owners = ",".join(values.get("asset_ids") or []) or "<none>"
+        fields.append(
+            f"{label}: supplied={supplied!r}{frozen_text}; "
+            f"matching_assets={owners}"
         )
-        if not conflicts:
-            return True, False
-    return False, True
+    asset_ids = ",".join(details.get("asset_ids") or []) or "<none>"
+    return (
+        f"L4B paper {identity} has conflicting identifiers across frozen "
+        f"L4A assets [{asset_ids}]: "
+        f"{'; '.join(fields) or '<no field details>'}"
+    )
+
+
+def _validate_review_search_contract(
+    dr,
+    manifest: dict,
+    artifact: dict,
+    selected: list[dict],
+) -> None:
+    review = artifact.get("review_search")
+    if not isinstance(review, dict) or not str(review.get("receipt") or "").strip():
+        _raise(
+            dr,
+            "L4B review_search must include a truthful receipt for the frozen corpus",
+        )
+    status = str(review.get("status") or "").strip().casefold()
+    status = _REVIEW_STATUS_ALIASES.get(status, status)
+    if status not in {"completed", "none_found", "not_retained"}:
+        _raise(dr, f"L4B review_search status is invalid for frozen corpus: {status or '<empty>'}")
+    selected_reviews = [
+        item for item in selected if item.get("role") in _REVIEW_ROLES
+    ]
+    if not selected_reviews and status != "not_retained":
+        _raise(
+            dr,
+            "L4B frozen L4A catalog has no selected review; review_search "
+            "must use status=not_retained and must not search online",
+        )
+
+
+def _validate_frozen_paper(
+    l4p,
+    dr,
+    project: Path,
+    candidate_id: str,
+    selected: list[dict],
+    reference: dict,
+    record: dict,
+) -> None:
+    reference_source = str(reference.get("user_source_id") or "").strip()
+    record_source = str(record.get("user_source_id") or "").strip()
+    if reference_source and record_source and reference_source != record_source:
+        _raise(dr, "L4B paper reference has conflicting user_source_id")
+    user_source_id = reference_source or record_source
+
+    doi = _coalesced_identifier(
+        dr, "DOI", reference, record, _normalized_doi
+    )
+    pmid = _coalesced_identifier(
+        dr, "PMID", reference, record, _normalized_pmid
+    )
+    url = _coalesced_identifier(
+        dr, "URL", reference, record, _normalized_url
+    )
+    title_year = _title_year(record or reference)
+    matching_ids = _matching_selected_asset_ids(
+        selected,
+        doi=doi,
+        pmid=pmid,
+        url=url,
+        title_year=title_year,
+    )
+
+    if user_source_id:
+        sha256 = str(record.get("user_source_sha256") or "").strip()
+        ok, reason = verify_registered_source(
+            project, candidate_id, user_source_id, sha256
+        )
+        if not ok:
+            _raise(dr, reason)
+        if _is_review_record(record) and not any(
+            item.get("asset_id") in matching_ids and item.get("role") in _REVIEW_ROLES
+            for item in selected
+        ):
+            _raise(
+                dr,
+                f"L4B review {record.get('title') or '<untitled>'!r} is not a "
+                "selected review in the frozen L4A catalog",
+            )
+        return
+
+    accepted, conflict_details = _matches_one_selected_asset(
+        selected,
+        doi=doi,
+        pmid=pmid,
+        url=url,
+        title_year=title_year,
+    )
+    if conflict_details:
+        _raise(
+            dr,
+            _format_identifier_conflict(
+                _paper_identity(
+                    record,
+                    reference,
+                    doi=doi,
+                    pmid=pmid,
+                    url=url,
+                    title_year=title_year,
+                ),
+                conflict_details,
+            ),
+        )
+    if _is_review_record(record) and not any(
+        item.get("asset_id") in matching_ids and item.get("role") in _REVIEW_ROLES
+        for item in selected
+    ):
+        _raise(
+            dr,
+            f"L4B review {record.get('title') or '<untitled>'!r} is not a "
+            "selected review in the frozen L4A catalog",
+        )
+    if not accepted:
+        identity = doi or pmid or url or f"{title_year[0]}|{title_year[1]}"
+        _raise(
+            dr,
+            f"L4B paper {identity or '<unidentified>'} is outside the frozen L4A corpus",
+        )
+
+
+def _validate_frozen_payload(
+    l4p,
+    dr,
+    project_dir: str | Path,
+    candidate_id: str,
+    payload: dict,
+    manifest: dict,
+) -> None:
+    project = Path(project_dir)
+    selected = _selected_identities(l4p, manifest)
+    if payload.get("method_components"):
+        _validate_review_search_contract(dr, manifest, payload, selected)
+    for paper in payload.get("papers") or []:
+        if not isinstance(paper, dict):
+            _raise(dr, "L4B paper records must be objects")
+        reference = {
+            key: paper.get(key, "")
+            for key in ("doi", "pmid", "url", "user_source_id")
+        }
+        _validate_frozen_paper(
+            l4p, dr, project, candidate_id, selected, reference, paper
+        )
 
 
 def _validate_frozen_corpus(
@@ -293,55 +573,15 @@ def _validate_frozen_corpus(
     project = Path(project_dir)
     candidate_id = str(artifact.get("candidate_id") or "")
     selected = _selected_identities(l4p, manifest)
+    if artifact.get("method_components"):
+        _validate_review_search_contract(dr, manifest, artifact, selected)
     for reference in artifact.get("papers") or []:
         if not isinstance(reference, dict):
             _raise(dr, "L4B paper references must be objects")
         record = _read_paper_record(dr, project, reference)
-        reference_source = str(reference.get("user_source_id") or "").strip()
-        record_source = str(record.get("user_source_id") or "").strip()
-        if reference_source and record_source and reference_source != record_source:
-            _raise(dr, "L4B paper reference has conflicting user_source_id")
-        user_source_id = reference_source or record_source
-        if user_source_id:
-            sha256 = str(record.get("user_source_sha256") or "").strip()
-            ok, reason = verify_registered_source(
-                project,
-                candidate_id,
-                user_source_id,
-                sha256,
-            )
-            if not ok:
-                _raise(dr, reason)
-            continue
-
-        doi = _coalesced_identifier(
-            dr, "DOI", reference, record, _normalized_doi
+        _validate_frozen_paper(
+            l4p, dr, project, candidate_id, selected, reference, record
         )
-        pmid = _coalesced_identifier(
-            dr, "PMID", reference, record, _normalized_pmid
-        )
-        url = _coalesced_identifier(
-            dr, "URL", reference, record, _normalized_url
-        )
-        title_year = _title_year(record or reference)
-        accepted, conflicting = _matches_one_selected_asset(
-            selected,
-            doi=doi,
-            pmid=pmid,
-            url=url,
-            title_year=title_year,
-        )
-        if conflicting:
-            _raise(
-                dr,
-                "L4B paper has conflicting identifiers across frozen L4A assets",
-            )
-        if not accepted:
-            identity = doi or pmid or url or f"{title_year[0]}|{title_year[1]}"
-            _raise(
-                dr,
-                f"L4B paper {identity or '<unidentified>'} is outside the frozen L4A corpus",
-            )
 
 
 def install(l4p, dr, lineage_module) -> None:
@@ -380,11 +620,12 @@ def install(l4p, dr, lineage_module) -> None:
     ):
         if not str(candidate_id or "").strip():
             _raise(dr, "L4A candidate_id must be non-empty")
-        _validate_provider_payload(l4p, dr, payload)
+        canonical_payload = l4p._canonicalize_l4a_provider_payload(payload)
+        _validate_provider_payload(l4p, dr, canonical_payload)
         artifact = original_persist_discovery(
             project_dir,
             candidate_id,
-            payload,
+            canonical_payload,
             runtime_receipt,
             question=question,
             claim=claim,
@@ -417,6 +658,22 @@ def install(l4p, dr, lineage_module) -> None:
         return original_persist_linkage(project_dir, artifact)
 
     l4p._persist_l4b_linkage = persist_l4b_linkage
+
+    def validate_l4b_payload_before_persistence(project_dir, candidate_id, payload):
+        context = getattr(dr, "_l4b_frozen_manifest_context", None)
+        if not context:
+            return
+        context_project, context_candidate, manifest = context
+        if (
+            Path(project_dir).resolve() != Path(context_project).resolve()
+            or str(candidate_id) != str(context_candidate)
+        ):
+            _raise(dr, "L4B frozen manifest context does not match the payload project or candidate")
+        _validate_frozen_payload(
+            l4p, dr, project_dir, str(candidate_id), payload, manifest
+        )
+
+    dr._l4b_pre_persist_validator = validate_l4b_payload_before_persistence
 
     original_commit = l4p.commit_l45_method_projection
 

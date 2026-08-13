@@ -18,7 +18,7 @@ TASK_SCHEMA_VERSION = "DeepResearchDetachedTask/v1"
 _HANDLER_ARGUMENTS = (
     "project_dir", "cand_id", "node", "backend", "allow_host_mismatch",
     "executable", "plugin_dir", "skill_path", "skill_version", "model",
-    "timeout",
+    "timeout", "l4a_manifest",
 )
 
 
@@ -138,7 +138,7 @@ def start_task(args: argparse.Namespace) -> dict:
             task_id,
         ]
         stdout_log = (task_dir / "stdout.log").open("w", encoding="utf-8")
-        stderr_log = (task_dir / "stderr.log").open("w", encoding="utf-8")
+        stderr_log = (task_dir / "worker_stderr.log").open("w", encoding="utf-8")
         popen_kwargs = {
             "cwd": request["working_directory"],
             "stdin": subprocess.DEVNULL,
@@ -181,7 +181,7 @@ def run_worker(
     """Run the existing handler unchanged and record its complete CLI output."""
     task_dir = _task_dir(project_dir, task_id)
     stdout_path = task_dir / "stdout.log"
-    stderr_path = task_dir / "stderr.log"
+    stderr_path = task_dir / "worker_stderr.log"
     returncode = 3
     try:
         request = _read_json(task_dir / "request.json", f"task {task_id} request")

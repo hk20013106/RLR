@@ -66,6 +66,10 @@ def _add_deep_research_run_arguments(parser):
                         help="override configured ARS package version")
     parser.add_argument("--model")
     parser.add_argument("--timeout", type=int)
+    parser.add_argument(
+        "--l4a-manifest",
+        help="resume native L4B from an existing project-relative L4A manifest",
+    )
 
 def build_parser():
     p = argparse.ArgumentParser(

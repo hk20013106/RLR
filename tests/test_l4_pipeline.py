@@ -1,9 +1,11 @@
 import json
+import math
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from jsonschema import Draft202012Validator
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -46,6 +48,7 @@ def _asset(
         "url": url,
         "title": title,
         "year": year,
+        "role": "method",
         "journal": "Methods Journal",
         "abstract": "A metadata-only abstract.",
         "source_database": "Europe PMC",
@@ -130,6 +133,11 @@ def _linked_evidence(manifest):
                 "method_ids": ["M01"],
             }
         ],
+        "review_search": {
+            "query": "frozen catalog review",
+            "status": "not_retained",
+            "receipt": "No selected review in frozen L4A catalog; review navigation not retained.",
+        },
     }
 
 
@@ -186,6 +194,16 @@ def test_l4a_provider_schema_closes_every_object_schema():
     assert metadata_schema == {"type": "string", "minLength": 2}
 
 
+def test_l4a_provider_schema_requires_every_asset_property_for_codex_strict():
+    schema = l4p.l4a_discovery_schema()
+    asset = schema["properties"]["assets"]["items"]
+
+    # Codex structured outputs reject a closed object when a declared property
+    # is omitted from required, even when the application treats it as legacy-
+    # optional during persistence.
+    assert set(asset["required"]) == set(asset["properties"])
+
+
 def test_l4a_persistence_parses_and_preserves_heterogeneous_source_metadata(tmp_path):
     project = tmp_path / "project"
     source_metadata = {
@@ -210,13 +228,177 @@ def test_l4a_persistence_parses_and_preserves_heterogeneous_source_metadata(tmp_
     assert l4p.validate_l4a_manifest(project, artifact) == (True, "")
 
 
-@pytest.mark.parametrize("metadata", ["not-json", "[]", "null", "\"text\""])
+def test_l4a_persistence_accepts_structured_and_fenced_metadata_inputs(tmp_path):
+    structured = {
+        "id": "asset-001",
+        "title": "Example method paper",
+        "database_fields": {"is_open": True, "result_type": "article"},
+    }
+    fenced = "```json\n{\"title\":\"Example method paper\",\"id\":\"asset-001\"}\n```"
+
+    structured_asset = _asset()
+    structured_asset["source_metadata_response"] = structured
+    fenced_asset = _asset()
+    fenced_asset["source_metadata_response"] = fenced
+
+    structured_artifact = l4p.persist_l4a_discovery(
+        tmp_path / "structured",
+        "C1",
+        _discovery_payload(structured_asset),
+        _receipt(),
+        question="Q",
+        claim="H",
+    )
+    fenced_artifact = l4p.persist_l4a_discovery(
+        tmp_path / "fenced",
+        "C1",
+        _discovery_payload(fenced_asset),
+        _receipt(),
+        question="Q",
+        claim="H",
+    )
+
+    assert structured_artifact["assets"][0]["source_metadata_response"] == structured
+    assert fenced_artifact["assets"][0]["source_metadata_response"] == {
+        "id": "asset-001",
+        "title": "Example method paper",
+    }
+
+
+def test_l4a_provider_adapter_serializes_metadata_deterministically():
+    payload = _discovery_payload(_asset())
+    payload["assets"][0]["source_metadata_response"] = {
+        "z": 1,
+        "a": {"second": True, "first": "value"},
+    }
+
+    normalized = l4p._canonicalize_l4a_provider_payload(payload)
+
+    assert normalized["assets"][0]["source_metadata_response"] == (
+        '{"a":{"first":"value","second":true},"z":1}'
+    )
+
+
+def test_l4a_schema_provenance_and_persistence_share_canonical_metadata(tmp_path):
+    metadata = {
+        "z": 1,
+        "a": {"second": True, "first": "value"},
+    }
+    asset = _asset()
+    asset["source_metadata_response"] = metadata
+    payload = _discovery_payload(asset)
+    canonical_payload = l4p._canonicalize_l4a_provider_payload(payload)
+    schema_errors = list(
+        Draft202012Validator(l4p.l4a_discovery_schema()).iter_errors(canonical_payload)
+    )
+
+    artifact = l4p.persist_l4a_discovery(
+        tmp_path,
+        "C1",
+        payload,
+        _receipt(),
+        question="Q",
+        claim="H",
+    )
+    persisted = artifact["assets"][0]["source_metadata_response"]
+
+    assert schema_errors == []
+    assert persisted == json.loads(
+        canonical_payload["assets"][0]["source_metadata_response"]
+    )
+    assert l4p.validate_l4a_manifest(tmp_path, artifact) == (True, "")
+
+
+def test_l4a_metadata_hash_is_stable_after_canonicalization():
+    first = {"b": {"z": 2, "a": 1}, "a": "value"}
+    second = {"a": "value", "b": {"a": 1, "z": 2}}
+    payloads = [_discovery_payload(_asset()) for _ in (first, second)]
+    for payload, metadata in zip(payloads, (first, second)):
+        payload["assets"][0]["source_metadata_response"] = metadata
+
+    wires = [
+        l4p._canonicalize_l4a_provider_payload(payload)["assets"][0][
+            "source_metadata_response"
+        ]
+        for payload in payloads
+    ]
+
+    assert wires[0] == wires[1]
+    assert l4p._sha256_bytes(wires[0].encode("utf-8")) == l4p._sha256_bytes(
+        wires[1].encode("utf-8")
+    )
+
+
+def test_l4a_legacy_adapter_uses_shared_metadata_canonicalizer():
+    from research_loop.l4_pipeline_compat import _legacy_evidence_to_discovery
+
+    payload = {
+        "papers": [{
+            "title": "Legacy paper",
+            "source_database": "Europe PMC",
+            "source_metadata_response": {
+                "z": 1,
+                "a": "value",
+            },
+        }],
+    }
+
+    discovery = _legacy_evidence_to_discovery(payload)
+
+    assert discovery["assets"][0]["source_metadata_response"] == {
+        "z": 1,
+        "a": "value",
+    }
+    canonical = l4p._canonicalize_l4a_provider_payload(discovery)
+    assert canonical["assets"][0]["source_metadata_response"] == (
+        '{"a":"value","z":1}'
+    )
+
+
+def test_l4a_prompt_states_metadata_wire_contract():
+    prompt = l4p.build_l4a_prompt("Q", "H")
+
+    assert "complete database metadata object encoded as one canonical JSON string" in prompt
+    assert "Python repr" in prompt
+    assert "Markdown fences" in prompt
+    assert "explanatory text" in prompt
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    ["not-json", "", "[]", "null", "\"text\"", None, [], 7, True],
+)
 def test_l4a_persistence_rejects_invalid_source_metadata_json(tmp_path, metadata):
+    asset = _asset()
+    asset["source_metadata_response"] = metadata
     with pytest.raises(dr.DeepResearchError, match="source_metadata_response"):
         l4p.persist_l4a_discovery(
             tmp_path / "project",
             "C1",
-            _discovery_payload(_asset(source_metadata_response=metadata)),
+            _discovery_payload(asset),
+            _receipt(),
+            question="Q",
+            claim="H",
+        )
+
+
+@pytest.mark.parametrize("metadata", [
+    {"value": math.nan},
+    {"value": math.inf},
+    {"value": -math.inf},
+    '{"value":NaN}',
+    '{"value":Infinity}',
+    '{"value":-Infinity}',
+])
+def test_l4a_persistence_rejects_nan_and_infinity_metadata(tmp_path, metadata):
+    asset = _asset()
+    asset["source_metadata_response"] = metadata
+
+    with pytest.raises(dr.DeepResearchError, match="source_metadata_response"):
+        l4p.persist_l4a_discovery(
+            tmp_path,
+            "C1",
+            _discovery_payload(asset),
             _receipt(),
             question="Q",
             claim="H",

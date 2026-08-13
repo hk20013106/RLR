@@ -303,9 +303,11 @@ def _stage_instruction(node: str) -> str:
                 "For every claim, extract located Results, Discussion, and Conclusion evidence "
                 "from primary research papers.")
     if node == "L4":
-        return ("Run a method literature review. Extract located Methods from primary studies. "
-                "Also execute a review query; capture Results and Conclusion from each relevant "
-                "review, or record a zero-result review-search receipt.")
+        return ("Construct L4B evidence only from the supplied frozen L4A handoff and "
+                "formally registered local sources. Do not perform online literature or "
+                "review searches and do not add new paper records. Extract located Methods "
+                "from selected primary or method sources; use selected review sources only "
+                "for navigation, or record the required no-review receipt.")
     if node == "L8.5":
         return ("Run post-result literature verification. For every L7/L8 finding, record a "
                 "located paper-based confirmation, contradiction, or unresolved verdict.")
@@ -510,10 +512,18 @@ def persist_run(
         paper_id = _paper_id(paper)
         source_path = ""
         source_payload = str(paper.get("source_payload") or "")
+        source_bytes = source_payload.encode("utf-8")
+        source_hash = hashlib.sha256(source_bytes).hexdigest() if source_bytes else ""
         if paper.get("open_access") and source_payload:
-            ext = ".html" if "html" in str(paper.get("content_type", "")).lower() else ".txt"
+            content_type = str(paper.get("content_type", "")).casefold()
+            if "xml" in content_type or "jats" in content_type:
+                ext = ".xml"
+            elif "html" in content_type:
+                ext = ".html"
+            else:
+                ext = ".txt"
             source_file = sources_dir / f"{paper_id}{ext}"
-            source_file.write_text(source_payload, encoding="utf-8")
+            source_file.write_bytes(source_bytes)
             source_path = str(source_file.relative_to(project_dir)).replace("\\", "/")
         extracts = []
         for index, extract in enumerate(paper.get("extracts", []), 1):
@@ -524,7 +534,7 @@ def persist_run(
                 "locator": extract["locator"],
                 "extraction_method": extract.get("extraction_method", "source-located"),
                 "verification_status": extract.get("verification_status", "located"),
-                "source_hash": _sha(source_payload) if source_payload else "",
+                "source_hash": source_hash,
             })
         record = {
             "schema_version": SCHEMA_VERSION, "paper_id": paper_id,
@@ -535,7 +545,7 @@ def persist_run(
             "source_metadata_response": paper["source_metadata_response"],
             "metadata_response_hash": _sha(json.dumps(paper["source_metadata_response"],
                                                         ensure_ascii=False, sort_keys=True)),
-            "open_access": bool(paper.get("open_access")), "content_hash": _sha(source_payload) if source_payload else "",
+            "open_access": bool(paper.get("open_access")), "content_hash": source_hash,
             "source_payload_path": source_path, "evidence_extracts": extracts,
         }
         paper_file = papers_dir / f"{paper_id}.json"

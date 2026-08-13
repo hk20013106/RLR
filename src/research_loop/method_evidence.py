@@ -81,6 +81,9 @@ def _method_candidate_schema():
 
 
 def _extend_l4_schema(schema: dict) -> dict:
+    schema["properties"]["review_search"]["properties"]["status"] = {
+        "enum": ["completed", "none_found", "not_retained"],
+    }
     extract = schema["properties"]["papers"]["items"]["properties"]["extracts"]["items"]
     extract["properties"].update({
         "anchor_id": {"type": "string"},
@@ -367,9 +370,11 @@ section must be `Methods` or a Methods subsection; Results and Discussion text
 from those papers is not a method anchor.
 MUST NOT use a primary-study Results, Discussion, abstract, table, or review
 extract as a method anchor; assign those extracts `navigation_only` fields.
-The output MUST include a `review_search` object with a truthful query and
-receipt. If no relevant review was found, set a zero-result status and record
-the actual search receipt; never omit or invent this receipt.
+Do not perform online literature or review searches in L4B. The output MUST
+include a `review_search` object with a truthful receipt. If the frozen L4A
+catalog has no selected asset with `role=review`, set `status` to
+`not_retained`, explain that no selected review was retained, and emit no
+review paper. A selected review may be used only as navigation evidence.
 The `method_components` array MUST contain at least one component with
 `required: true`; every required component must have an eligible candidate
 with a real accepted method anchor, or a truthful source-blocked candidate.
@@ -533,7 +538,7 @@ with a real accepted method anchor, or a truthful source-blocked candidate.
         if artifact.get("status") != "completed" or receipt.get("exit_code") != 0:
             return False, "evidence pack has no successful skill receipt"
         review = artifact.get("review_search") or {}
-        if review.get("status") not in {"completed", "none_found"} or not review.get("receipt"):
+        if review.get("status") not in {"completed", "none_found", "not_retained"} or not review.get("receipt"):
             return False, "L4 requires a review search receipt or documented zero-result search"
         root = Path(project_dir)
         accepted_anchors = set()

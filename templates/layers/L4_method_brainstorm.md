@@ -1,12 +1,20 @@
-# L4 — Method Candidate Catalog
+# L4 — Fisher Method Design
 
 ## Purpose
 
-Build a comparison pool of feasible analysis or experimental methods for the selected hypotheses. L4 does not approve the final method: L5 critiques every eligible candidate, and L6 selects the executable strategy.
+Design a comparison pool of feasible analysis or experimental methods for the selected hypotheses. L4C/Fisher does not approve the final method: L5 critiques candidates and L6 selects the executable strategy.
+
+The authorized L4 evidence context now contains:
+
+- a method inventory produced by L4A;
+- accepted `evidence_cards` produced deterministically by L4B;
+- unresolved `evidence_gaps` produced deterministically by L4B.
+
+L4B has not defined method components, candidates, eligibility, or required execution paths. Those judgments belong here.
 
 ## Required structure
 
-For every required method component, retain all serious alternatives. Each method candidate must state:
+Define the method components needed by the study. For every serious method candidate, state:
 
 1. stable `method_id` and the component/hypotheses addressed;
 2. analytical purpose;
@@ -18,39 +26,30 @@ For every required method component, retain all serious alternatives. Each metho
 8. limitations and failure modes;
 9. feasible alternatives;
 10. status: `eligible`, `ineligible`, or `needs_user_source`;
-11. evidence-anchor IDs, source kinds, and located source references;
-12. whether a user-supplied PDF is required.
+11. `execution_required`: whether this candidate is a Fisher-declared implementation path needed to cover a required component;
+12. accepted `evidence_card_ids` supporting the candidate;
+13. unresolved `evidence_gap_ids` relevant to the candidate;
+14. compatible legacy `method_anchor_ids` when available.
 
 A method name plus a citation is not a sufficient method description.
 
 ## Evidence boundary
 
-- Accept located anchors from primary Methods, method papers, protocols, Supplementary Methods, official documentation, versioned code, or a verified user-supplied PDF.
-- Reviews may guide method discovery and comparison, but do not independently satisfy a method anchor.
-- Abstract headings, table mentions, placeholder full-text payloads, and unlocated summaries do not count.
-- Keep raw excerpts in the evidence store and reference them by anchor/evidence ID rather than copying large passages into the method plan.
+- Treat only an L4B card with `status: accepted` as strong method evidence.
+- An evidence gap is not an anchor and must never be presented as accepted evidence.
+- An eligible candidate with `execution_required: true` must reference at least one accepted evidence card.
+- Optional alternatives may remain in the comparison catalog without an accepted card, but their evidence gaps and limitations must be explicit.
+- Do not mark every plausible alternative as execution-required.
+- Reviews, abstracts, table mentions, placeholders, and unlocated summaries do not become method evidence merely because they are relevant.
+- Keep raw excerpts in the evidence store and reference card/anchor IDs instead of copying large passages into the method plan.
 
-## User-supplied PDF
+## Source-blocked candidates
 
-When a necessary source is not openly available, state exactly which candidate/component is blocked and give the registration command:
-
-```powershell
-python scripts/import_literature_pdf.py <project_dir> <candidate_id> `
-  --file "D:\papers\paper.pdf" `
-  [--doi "10.xxxx/xxxx" | --pmid "12345678" | --url "https://..."]
-```
-
-Registration stores the PDF under:
-
-```text
-09_Literature_Database/user_sources/<candidate_id>/
-```
-
-Registration alone never satisfies L4. ARS must extract located Methods text, and RLR must verify the candidate binding, PDF SHA256, locator, and extract-to-source consistency.
+Use `needs_user_source` only when a genuinely necessary candidate cannot be audited from the exact sources already attempted by L4B. State which evidence gap or legally obtained local source is needed. Registration alone never satisfies the gate; a later L4B run must produce an accepted evidence card.
 
 ## Handoff
 
-Provide the complete candidate catalog and evidence references for L5. Do not silently delete ineligible alternatives, approve a final plan, run code, or imply that a proposed method has succeeded.
+Provide the complete candidate catalog and evidence references for L5. Do not silently delete alternatives, approve a final plan, run code, or imply that a proposed method has succeeded.
 
 ## Full-mode role
 

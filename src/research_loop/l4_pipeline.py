@@ -62,11 +62,18 @@ def l4a_discovery_schema() -> dict:
         "url": {"type": "string"},
         "title": {"type": "string", "minLength": 1},
         "year": {"type": "integer"}, "journal": {"type": "string"},
+        "role": {
+            "enum": [
+                "primary", "method", "protocol", "review", "navigation",
+                "other", "unspecified",
+            ]
+        },
         "abstract": {"type": "string"},
         "source_database": {"type": "string", "minLength": 1},
-        # Codex structured outputs require every object to be closed.  The
-        # database response is intentionally heterogeneous, so the provider
-        # returns its canonical JSON representation and RLR parses it below.
+        # Provider wire form after the shared raw-result adapter. Codex
+        # structured outputs require every object to be closed, while database
+        # metadata is heterogeneous; the semantic object is therefore carried
+        # as canonical JSON text here and restored to an object for persistence.
         "source_metadata_response": {"type": "string", "minLength": 2},
         "open_access_status": {"enum": ["open", "closed", "unknown"]},
         "full_text_status": {"enum": ["available_local", "available_oa", "metadata_only", "manual_required"]},
@@ -81,6 +88,10 @@ def l4a_discovery_schema() -> dict:
     asset = {
         "type": "object", "additionalProperties": False,
         "properties": asset_properties,
+        # Codex structured outputs require every declared property to be
+        # required.  Historical persisted manifests are normalized with
+        # ``role=unspecified`` before they are validated at the persistence
+        # boundary.
         "required": list(asset_properties),
     }
     return {
@@ -116,21 +127,48 @@ def _asset_identity(asset: dict) -> str:
 
 
 def _parse_source_metadata_response(value: Any, *, asset_id: str = "") -> dict[str, Any]:
-    if not isinstance(value, str) or not value.strip():
+    if isinstance(value, dict):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        text = value.strip()
+        fenced = re.fullmatch(
+            r"```[ \t]*(?:json)?[ \t]*\r?\n?(.*?)\r?\n?```",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if fenced:
+            text = fenced.group(1).strip()
+
+        def reject_non_json_constant(constant: str) -> None:
+            raise ValueError(f"non-standard JSON constant {constant}")
+
+        try:
+            parsed = json.loads(text, parse_constant=reject_non_json_constant)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise _deep_research.DeepResearchError(
+                f"L4A source_metadata_response for asset {asset_id or '<unknown>'} "
+                "must be valid JSON"
+            ) from exc
+    else:
         raise _deep_research.DeepResearchError(
             f"L4A source_metadata_response for asset {asset_id or '<unknown>'} "
-            "must be a non-empty JSON string"
+            "must be a non-empty JSON object or JSON string"
         )
 
-    def reject_non_json_constant(constant: str) -> None:
-        raise ValueError(f"non-standard JSON constant {constant}")
-
     try:
-        parsed = json.loads(value, parse_constant=reject_non_json_constant)
-    except (json.JSONDecodeError, ValueError) as exc:
+        parsed = json.loads(
+            json.dumps(
+                parsed,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        )
+    except (TypeError, ValueError) as exc:
         raise _deep_research.DeepResearchError(
             f"L4A source_metadata_response for asset {asset_id or '<unknown>'} "
-            "must be valid JSON"
+            "must be JSON-serializable"
         ) from exc
     if not isinstance(parsed, dict):
         raise _deep_research.DeepResearchError(
@@ -140,7 +178,34 @@ def _parse_source_metadata_response(value: Any, *, asset_id: str = "") -> dict[s
     return parsed
 
 
+def _canonicalize_l4a_provider_payload(payload: Any) -> Any:
+    """Validate raw L4A metadata and convert it to the strict provider wire form.
+
+    The adapter is the single ingress boundary for compatible object/string
+    forms. It only emits a canonical JSON string after the value has decoded to
+    an object; ordinary text and non-object JSON never reach schema validation.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("assets"), list):
+        return payload
+    normalized = dict(payload)
+    normalized_assets = []
+    for raw in payload["assets"]:
+        if not isinstance(raw, dict) or "source_metadata_response" not in raw:
+            normalized_assets.append(raw)
+            continue
+        asset = dict(raw)
+        metadata = _parse_source_metadata_response(
+            asset["source_metadata_response"],
+            asset_id=str(asset.get("asset_id") or ""),
+        )
+        asset["source_metadata_response"] = _canonical_json(metadata)
+        normalized_assets.append(asset)
+    normalized["assets"] = normalized_assets
+    return normalized
+
+
 def _normalize_l4a_assets(assets: list[Any]) -> list[dict]:
+    """Restore canonical provider strings to persisted metadata objects."""
     normalized = []
     for index, raw in enumerate(assets):
         if not isinstance(raw, dict):
@@ -148,6 +213,7 @@ def _normalize_l4a_assets(assets: list[Any]) -> list[dict]:
                 f"L4A asset at index {index} must be an object"
             )
         asset = dict(raw)
+        asset.setdefault("role", "unspecified")
         asset["source_metadata_response"] = _parse_source_metadata_response(
             asset.get("source_metadata_response"),
             asset_id=str(asset.get("asset_id") or ""),
@@ -254,11 +320,192 @@ def validate_l4a_manifest(project_dir: str | Path, manifest: dict) -> tuple[bool
     return True, ""
 
 
+def validate_native_l4a_manifest(
+    project_dir: str | Path, manifest: dict
+) -> tuple[bool, str]:
+    """Validate the immutable native-v2 L4A handoff consumed by L4B.
+
+    ``validate_l4a_manifest`` remains deliberately readable for historical
+    metadata-only L4A artifacts.  L4B has a narrower contract: it may consume
+    only a native method-inventory manifest whose selected corpus and source
+    references are internally closed.  Keeping this stricter validator at the
+    L4B boundary prevents legacy artifacts from being silently upgraded.
+    """
+    ok, reason = validate_l4a_manifest(project_dir, manifest)
+    if not ok:
+        return False, reason
+
+    missing = [
+        field for field in ("inventory_schema", "method_inventory")
+        if field not in manifest
+    ]
+    if missing:
+        return (
+            False,
+            "LEGACY_L4A_MANIFEST_INCOMPATIBLE: native L4A resume requires "
+            + ", ".join(missing),
+        )
+
+    # Import lazily so l4_inventory can continue to use l4_pipeline's
+    # persistence helpers without creating an import cycle.
+    from research_loop import l4_inventory
+
+    if manifest.get("inventory_schema") != l4_inventory.INVENTORY_SCHEMA_VERSION:
+        return False, "NATIVE_L4A_MANIFEST_INCOMPATIBLE: unexpected inventory_schema"
+
+    required_identity = ("run_id", "candidate_id", "project_id", "round_id", "profile_id")
+    missing_identity = [
+        field for field in required_identity
+        if not str(manifest.get(field) or "").strip()
+    ]
+    if missing_identity:
+        return (
+            False,
+            "NATIVE_L4A_MANIFEST_INCOMPATIBLE: missing identity fields "
+            + ", ".join(missing_identity),
+        )
+
+    assets = manifest.get("assets")
+    selected_ids = manifest.get("selected_asset_ids")
+    methods = manifest.get("method_inventory")
+    if not isinstance(assets, list) or not assets:
+        return False, "NATIVE_L4A_MANIFEST_INCOMPATIBLE: assets must be non-empty"
+    if not isinstance(selected_ids, list) or not selected_ids:
+        return False, "NATIVE_L4A_MANIFEST_INCOMPATIBLE: selected_asset_ids must be non-empty"
+    if not isinstance(methods, list) or not methods:
+        return False, "NATIVE_L4A_MANIFEST_INCOMPATIBLE: method_inventory must be non-empty"
+
+    asset_by_id = {}
+    for index, raw_asset in enumerate(assets):
+        if not isinstance(raw_asset, dict):
+            return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: asset {index} is not an object"
+        asset_id = str(raw_asset.get("asset_id") or "").strip()
+        if not asset_id:
+            return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: asset {index} lacks asset_id"
+        if asset_id in asset_by_id:
+            return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: duplicate asset_id {asset_id}"
+        asset_by_id[asset_id] = raw_asset
+
+    selected_values = [str(value).strip() for value in selected_ids]
+    if any(not value for value in selected_values):
+        return False, "NATIVE_L4A_MANIFEST_INCOMPATIBLE: selected_asset_ids contains an empty id"
+    if len(selected_values) != len(set(selected_values)):
+        return False, "NATIVE_L4A_MANIFEST_INCOMPATIBLE: selected_asset_ids must be unique"
+    selected_set = set(selected_values)
+    if not selected_set <= set(asset_by_id):
+        missing_assets = sorted(selected_set - set(asset_by_id))
+        return (
+            False,
+            "NATIVE_L4A_MANIFEST_INCOMPATIBLE: selected asset is not registered: "
+            + ", ".join(missing_assets),
+        )
+    actual_selected = {
+        asset_id for asset_id, asset in asset_by_id.items()
+        if str(asset.get("selection_status") or "") == "selected"
+    }
+    if actual_selected != selected_set:
+        return (
+            False,
+            "NATIVE_L4A_MANIFEST_INCOMPATIBLE: selected_asset_ids do not match "
+            "asset selection_status",
+        )
+
+    method_ids = []
+    for index, method in enumerate(methods):
+        if not isinstance(method, dict):
+            return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {index} is not an object"
+        method_id = str(method.get("method_id") or "").strip()
+        if not method_id:
+            return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {index} lacks method_id"
+        if method_id in method_ids:
+            return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: duplicate method_id {method_id}"
+        method_ids.append(method_id)
+        for field in ("name", "purpose", "inventory_reason"):
+            if not str(method.get(field) or "").strip():
+                return (
+                    False,
+                    f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {method_id} lacks {field}",
+                )
+        source_ids = method.get("source_asset_ids")
+        source_hints = method.get("source_hints")
+        if not isinstance(source_ids, list) or not isinstance(source_hints, list):
+            return (
+                False,
+                f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {method_id} source fields are invalid",
+            )
+        normalized_source_ids = [str(value).strip() for value in source_ids]
+        if any(not value for value in normalized_source_ids):
+            return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {method_id} has an empty source_asset_id"
+        if len(normalized_source_ids) != len(set(normalized_source_ids)):
+            return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {method_id} source_asset_ids must be unique"
+        if source_hints and not normalized_source_ids:
+            return (
+                False,
+                f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {method_id} "
+                "source_hints must be materialized as selected assets",
+            )
+        for asset_id in normalized_source_ids:
+            if asset_id not in asset_by_id or asset_id not in selected_set:
+                return (
+                    False,
+                    f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {method_id} source_asset_ids "
+                    f"must reference selected L4A assets ({asset_id})",
+                )
+        source_ref_ids = []
+        for hint in source_hints:
+            if not isinstance(hint, dict):
+                return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {method_id} source hint is invalid"
+            source_ref_id = str(hint.get("source_ref_id") or "").strip()
+            if not source_ref_id or source_ref_id in source_ref_ids:
+                return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: method {method_id} source_ref_id values must be unique"
+            source_ref_ids.append(source_ref_id)
+            if not any(str(hint.get(key) or "").strip() for key in ("doi", "pmid", "pmcid", "url")):
+                return False, f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: source hint {source_ref_id} has no exact identifier"
+            hint_asset_id = str(hint.get("asset_id") or "").strip()
+            if source_hints and not hint_asset_id:
+                return (
+                    False,
+                    f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: source hint {source_ref_id} "
+                    "lacks materialized asset_id",
+                )
+            if hint_asset_id and hint_asset_id not in normalized_source_ids:
+                return (
+                    False,
+                    f"NATIVE_L4A_MANIFEST_INCOMPATIBLE: source hint {source_ref_id} "
+                    "is outside its method source_asset_ids",
+                )
+
+    # The projection must account for every inventory item before resolution;
+    # audit-time discovery of an omitted method is too late.
+    sources, no_source_methods = l4_inventory.inventory_sources(manifest)
+    projected_ids = {
+        str(method_id)
+        for source in sources
+        for method_id in source.get("inventory_method_ids") or []
+    }
+    projected_ids.update(
+        str(method.get("method_id") or "") for method in no_source_methods
+    )
+    expected_ids = set(method_ids)
+    if projected_ids != expected_ids:
+        return (
+            False,
+            "NATIVE_L4A_MANIFEST_INCOMPATIBLE: inventory methods cannot be fully "
+            "projected to evidence or explicit gaps",
+        )
+    return True, ""
+
+
 def frozen_l4a_catalog(manifest: dict) -> str:
+    assets = []
+    for raw in selected_l4a_assets(manifest, require=True):
+        asset = dict(raw)
+        asset.setdefault("role", "unspecified")
+        assets.append(asset)
     return _canonical_json({
         "schema_version": L4A_DISCOVERY_SCHEMA_VERSION,
         "selected_asset_ids": list(manifest.get("selected_asset_ids") or []),
-        "assets": selected_l4a_assets(manifest, require=True),
+        "assets": assets,
     })
 
 
@@ -271,7 +518,13 @@ Selected hypothesis/claim: {claim}
 
 Search for method, protocol, software, diagnostic, and alternative-method
 literature. Return metadata only, matching the supplied JSON schema. Record
-actual query receipts and source metadata. Do not emit source payloads,
+actual query receipts and source metadata. Classify every asset with role
+primary, method, protocol, review, navigation, other, or unspecified. For
+source_metadata_response, return
+the complete database metadata object encoded as one canonical JSON string:
+UTF-8, sorted keys, compact separators, finite JSON numbers only, and no
+leading/trailing whitespace. Do not use Python repr, Markdown fences, or
+explanatory text. Do not emit source payloads,
 verbatim extracts, method components, method candidates, method anchors, or a
 final analysis plan. Never invent identifiers, availability, or receipts.
 """
@@ -353,17 +606,40 @@ def install(deep_research_module) -> None:
         )
         catalog = frozen_l4a_catalog(manifest)
         frozen_claim = (
-            f"{claim}\n\n=== FROZEN L4A DISCOVERY CORPUS ===\n{catalog}\n"
-            "Use only these selected records as the discovery corpus. Resolve "
-            "their full text and registered local sources, but do not silently "
-            "add new literature records."
+            f"{claim}\n\n=== FROZEN L4B HANDOFF ===\n"
+            "This L4B run is closed over the exact L4A selected-asset catalog "
+            "below. MUST NOT perform online literature searches, follow-up "
+            "review searches, add new citations, or create new online paper "
+            "records. Use only the selected records in this catalog and "
+            "formally registered local sources. Full-text resolution may use "
+            "an alias URL for the same selected DOI/PMID; it does not add a "
+            "paper. A review or navigation paper is admissible only when a "
+            "selected catalog asset has role=review. If no selected asset has "
+            "role=review, do not search for one and return a review_search "
+            "receipt with status=not_retained explaining that no selected "
+            "review was retained; emit no review paper. Review/navigation "
+            "extracts must never claim method anchors.\n\n"
+            "=== FROZEN L4A DISCOVERY CORPUS (complete selected catalog) ===\n"
+            f"{catalog}\n"
         )
-        artifact = original(
-            project_dir, candidate_id, node, question, frozen_claim, spec,
-            work_dir, skill_version, result_context, project_id=project_id,
-            round_id=round_id, profile_id=profile_id,
-            research_persona=research_persona,
+        previous_context = getattr(
+            _deep_research, "_l4b_frozen_manifest_context", None
         )
+        _deep_research._l4b_frozen_manifest_context = (
+            Path(project_dir).resolve(), str(candidate_id), manifest
+        )
+        try:
+            artifact = original(
+                project_dir, candidate_id, node, question, frozen_claim, spec,
+                work_dir, skill_version, result_context, project_id=project_id,
+                round_id=round_id, profile_id=profile_id,
+                research_persona=research_persona,
+            )
+        finally:
+            if previous_context is None:
+                delattr(_deep_research, "_l4b_frozen_manifest_context")
+            else:
+                _deep_research._l4b_frozen_manifest_context = previous_context
         artifact.update({
             "pipeline_schema": PIPELINE_SCHEMA_VERSION,
             "pipeline_stage": "L4B",

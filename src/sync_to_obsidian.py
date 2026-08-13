@@ -1,88 +1,78 @@
 #!/usr/bin/env python3
-"""Sync RLR v0.4.5 project to Obsidian vault - human-readable format.
+# -*- coding: utf-8 -*-
+"""
+sync_to_obsidian.py — RLR project → Obsidian human-readable knowledge base.
 
 A REQUIRED step of the loop: run after aggregate-report at the end of EVERY
 round (run_loop drives it automatically at L10c; in main-agent mode the host
-agent must run it per the protocol).
+agent must run it per the protocol).  Converts machine JSON deltas into readable
+Markdown notes, converts PDF figures to PNG, writes per-round summaries, and
+updates an index.
 
-Run after aggregate-report. Produces:
-- 02_Agent_Notes/<persona>/L<n>_<persona>_NOTE.md  (human-readable delta summary)
-- 05_Decision_Log/ROUND_SUMMARY_<cand>.md           (one-page round summary)
-- 03_Figures/                                        (PDF/PNG copied from results)
-- 01_Candidates/                                     (renamed with readable title)
-- FINAL_REPORT.md / FINAL_REPORT_CN.md              (already generated)
+Usage:
+    python sync_to_obsidian.py PROJECT_DIR [--vault VAULT_DIR]
+                                    [--results RESULTS_DIR]
+                                    [--cand CAND_ID]
+
+VAULT resolution order:
+    1. --vault CLI argument
+    2. $OBSIDIAN_VAULT environment variable
+
+RESULTS resolution order:
+    1. --results CLI argument
+    2. $RLR_RESULTS_DIR environment variable
+    3. PROJECT_DIR/04_Analysis_Outputs
 """
 
-import json
-import os
-import shutil
-import re
-import sys
+import os, sys, json, shutil, re
 from pathlib import Path
 
 from research_loop.compatibility import PROFILE_V20, get_profile
-from research_loop.delta import _delta_for_candidate, artifact_for_node
+from research_loop.delta import artifact_for_node
+from research_loop.delta_render import _format_delta_body
 from research_loop.hypothesis_ledger import binding_path
+from research_loop.topology import DELTA_DAG_ORDER
 
-# --- config (no hard-coded local paths) ---
-# Vault comes from --vault or $OBSIDIAN_VAULT (validated at runtime). Results
-# come from --results or $RLR_RESULTS_DIR, defaulting to the project's own
-# 04_Analysis_Outputs/. Nothing is created if no real vault is configured.
 
-def _resolve_vault(vault_arg):
-    """Vault path from --vault, else $OBSIDIAN_VAULT. Empty string -> None."""
-    v = (vault_arg or os.environ.get("OBSIDIAN_VAULT") or "").strip()
-    return v or None
+def _resolve_vault(cli_vault=None):
+    """Return vault path from CLI or environment. None if neither set."""
+    return cli_vault or os.environ.get("OBSIDIAN_VAULT") or None
 
 
 def _is_obsidian_vault(path):
-    return (Path(path) / ".obsidian").is_dir()
+    """True iff path is an existing directory containing .obsidian/."""
+    p = Path(path)
+    return p.is_dir() and (p / ".obsidian").is_dir()
 
-PERSONAS = {
-    "Linnaeus": ("L0", "Catalog Master"),
-    "Einstein": ("L1", "Conceptual Explorer"),
-    "Feynman": ("L2", "Idea Falsifier"),
-    "Oppenheimer": ("L3", "Triage Judge"),
-    "Fisher": ("L4", "Method Designer"),
-    "Tukey": ("L5", "QC Critic"),
-    "Turing": ("L7", "Code Executor"),
-    "Curie": ("L8", "Evidence Auditor"),
-    "Darwin": ("L9b", "Biology Interpreter"),
-    "Jobs": ("L10a", "Value Assessor"),
-}
 
-DAG_ORDER = [
-    "L0_linnaeus", "L1_einstein", "L2_feynman", "L3_oppenheimer",
-    "L4_fisher", "L5_tukey", "L6_oppenheimer", "L7_turing",
-    "L8_curie", "L8.5_curie", "L9a_feynman", "L9b_darwin",
-    "L10a_jobs", "L10b_oppenheimer",
-]
+# Canonical DAG order, labels, and storage keys come from the runtime topology.
+DAG_ORDER = DELTA_DAG_ORDER
 
-DELTA_PERSONA = {
-    "L0_linnaeus": "Linnaeus", "L1_einstein": "Einstein",
-    "L2_feynman": "Feynman", "L3_oppenheimer": "Oppenheimer",
-    "L4_fisher": "Fisher", "L5_tukey": "Tukey",
-    "L6_oppenheimer": "Oppenheimer", "L7_turing": "Turing",
-    "L8_curie": "Curie", "L8.5_curie": "Curie", "L9a_feynman": "Feynman",
-    "L9b_darwin": "Darwin", "L10a_jobs": "Jobs",
-    "L10b_oppenheimer": "Oppenheimer",
-}
-
-LAYER_TITLES_EN = {
+NODE_TITLES = {
     "L0_linnaeus": "L0 - Preflight (Linnaeus)",
-    "L1_einstein": "L1 - Hypotheses (Einstein)",
-    "L2_feynman": "L2 - Falsification (Feynman)",
-    "L3_oppenheimer": "L3 - Triage (Oppenheimer)",
-    "L4_fisher": "L4 - Method Design (Fisher)",
-    "L5_tukey": "L5 - QC Checkpoints (Tukey)",
-    "L6_oppenheimer": "L6 - Method Approval (Oppenheimer)",
+    "L1_einstein": "L1 - Idea Generation (Einstein)",
+    "L2_feynman": "L2 - Idea Critique (Feynman)",
+    "L3_oppenheimer": "L3 - Candidate Decision (Oppenheimer)",
+    "L4_fisher": "L4 - Method Proposal (Fisher)",
+    "L5_tukey": "L5 - Method Critique (Tukey)",
+    "L6_oppenheimer": "L6 - Analysis Plan (Oppenheimer)",
     "L7_turing": "L7 - Execution (Turing)",
     "L8_curie": "L8 - Evidence Audit (Curie)",
+    "L8_tukey": "L8 - Evidence Audit (Tukey)",
     "L8.5_curie": "L8.5 - Literature Verification (Curie)",
-    "L9a_feynman": "L9a - Result Falsification (Feynman)",
-    "L9b_darwin": "L9b - Biology Interpretation (Darwin)",
+    "L9a_feynman": "L9a - Result Critique (Feynman)",
+    "L9b_darwin": "L9b - Biological Interpretation (Darwin)",
     "L10a_jobs": "L10a - Value Assessment (Jobs)",
     "L10b_oppenheimer": "L10b - Final Decision (Oppenheimer)",
+}
+
+PERSONA = {
+    "L0_linnaeus": "Linnaeus", "L1_einstein": "Einstein", "L2_feynman": "Feynman",
+    "L3_oppenheimer": "Oppenheimer", "L4_fisher": "Fisher", "L5_tukey": "Tukey",
+    "L6_oppenheimer": "Oppenheimer", "L7_turing": "Turing", "L8_curie": "Curie",
+    "L8_tukey": "Tukey",
+    "L8.5_curie": "Curie", "L9a_feynman": "Feynman", "L9b_darwin": "Darwin",
+    "L10a_jobs": "Jobs", "L10b_oppenheimer": "Oppenheimer",
 }
 
 
@@ -90,159 +80,202 @@ def _project_profile(project_dir):
     path = binding_path(project_dir)
     if not path.is_file():
         return get_profile(PROFILE_V20)
-    try:
-        return get_profile(str(json.loads(path.read_text(encoding="utf-8"))["profile_id"]))
-    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"invalid project profile binding: {exc}") from exc
-
-
-def load_delta(project_dir, delta_key, cand_id):
-    profile = _project_profile(project_dir)
-    storage_key = (artifact_for_node(profile, "L8").storage_key
-                   if delta_key == "L8_curie" else delta_key)
-    p = _delta_for_candidate(project_dir, storage_key, cand_id)
-    if p is None:
-        return None
-    if p.exists():
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
-            print(f"WARNING: corrupted delta {p}: {e}", file=sys.stderr)
-            return None
-    return None
+    return get_profile(str(json.loads(path.read_text(encoding="utf-8"))["profile_id"]))
 
 
 def _display_artifact(profile, delta_key):
-    node = delta_key.split("_", 1)[0]
-    descriptor = artifact_for_node(profile, node)
-    title = LAYER_TITLES_EN.get(delta_key, delta_key)
-    if node == "L8":
-        title = f"L8 - Evidence Audit ({descriptor.display_persona})"
-    return descriptor.display_persona, descriptor.storage_key, title
+    if delta_key == "L8_curie":
+        artifact = artifact_for_node(profile, "L8")
+        title = f"L8 - Evidence Audit ({artifact.display_persona})"
+        return artifact.display_persona, artifact.storage_key, title
+    return PERSONA[delta_key], delta_key, NODE_TITLES[delta_key]
 
 
-def fmt_list(lst):
-    if not lst:
-        return "_none_"
-    if isinstance(lst, list):
-        return ", ".join(str(x) for x in lst)
-    return str(lst)
+def load_delta(project_dir, delta_key, cand_id):
+    """Find and load delta JSON. Handles both legacy flat and v0.6 candidate-scoped."""
+    persona = PERSONA[delta_key]
+    storage_key = delta_key
+    if delta_key == "L8_curie":
+        _persona, storage_key, _title = _display_artifact(
+            _project_profile(project_dir), delta_key
+        )
+        persona = _persona
+    agent_dir = Path(project_dir) / "02_Agent_Notes" / persona
+    # v0.6 candidate-scoped preferred
+    matches = list(agent_dir.glob(f"{cand_id}_{storage_key}_delta*.json"))
+    if matches:
+        return json.loads(matches[0].read_text(encoding="utf-8"))
+    # legacy fallback only when payload itself belongs to this candidate
+    legacy = agent_dir / f"{storage_key}_delta.json"
+    if legacy.exists():
+        try:
+            payload = json.loads(legacy.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+        if payload.get("candidate_id") == cand_id:
+            return payload
+    return None
+
+
+def fmt_list(items, prefix="- "):
+    if not items: return "_none_"
+    if isinstance(items, list): return "\n".join(f"{prefix}{x}" for x in items)
+    return str(items)
+
+
+def fmt_dict(d):
+    if not d: return "_none_"
+    if isinstance(d, dict): return "\n".join(f"- **{k}:** {v}" for k,v in d.items())
+    return str(d)
 
 
 def fmt_delta_note(delta_key, delta):
-    """Convert a delta JSON into a human-readable Markdown note."""
-    if delta is None:
-        return "_No delta found._"
-    if isinstance(delta, dict) and "_error" in delta:
-        return f"_Error: {delta['_error']}_"
+    """Convert a delta dict to human-readable Markdown.
 
-    # Use CN field if available AND it has the same structure as the top-level
+    Native v2.x deltas use the same canonical renderer as FINAL_REPORT. This
+    prevents Obsidian from maintaining a second schema interpretation that can
+    drift from the active RLR contracts. The historical formatter below remains
+    only for legacy deltas.
+    """
+    if isinstance(delta, dict) and str(delta.get("schema_version") or "").startswith("2."):
+        return _format_delta_body(delta_key, delta).rstrip()
+
     d = delta
-    if isinstance(delta, dict) and "cn" in delta and isinstance(delta["cn"], dict):
-        cn = delta["cn"]
-        # Only use cn if its fields have compatible types (lists stay lists)
-        for k, v in delta.items():
-            if k == "cn":
-                continue
-            if isinstance(v, list) and k in cn and not isinstance(cn[k], list):
-                d = delta  # fallback to English
-                break
-        else:
-            d = cn if cn else delta
+    # prefer Chinese if available
+    if delta.get("cn") and isinstance(delta["cn"], dict):
+        d = {**delta, **delta["cn"]}
     L = []
 
     if delta_key == "L0_linnaeus":
-        L.append(f"**Skills:** {fmt_list(d.get('skills_found'))}")
-        L.append(f"**Gaps:** {fmt_list(d.get('skills_gaps'))}")
-        L.append(f"**Input verified:**")
-        for k, v in (d.get('input_verified') or {}).items():
-            L.append(f"  - {k}: {v}")
-        L.append(f"**Environment:**")
-        for k, v in (d.get('environment') or {}).items():
-            L.append(f"  - {k}: {v}")
+        L.append("## Input Verification\n")
+        L.append(fmt_dict(d.get("input_verified")))
+        L.append("\n## Environment\n")
+        L.append(fmt_dict(d.get("environment")))
+        L.append("\n## Skills Found\n")
+        for s in d.get("skills_found", []):
+            if isinstance(s, dict):
+                L.append(f"- **{s.get('name','')}** ({s.get('version','')}) — {s.get('scope','')}")
+            else: L.append(f"- {s}")
+        L.append("\n## Skill Gaps\n")
+        L.append(fmt_list(d.get("skills_gaps")))
+        L.append("\n## Skill Use Plan\n")
+        for s in d.get("skill_use_plan", []):
+            if isinstance(s, dict): L.append(f"- {s.get('skill','')}: {s.get('how','')}")
+            else: L.append(f"- {s}")
+        L.append("\n## Forbidden Shortcuts\n")
+        L.append(fmt_list(d.get("forbidden_shortcuts")))
 
     elif delta_key == "L1_einstein":
+        L.append("## Hypotheses\n")
         for h in d.get("hypotheses", []):
-            L.append(f"- **{h.get('id','?')}:** {h.get('text','')} _(testable={h.get('testable','?')})_")
-            L.append(f"  - {h.get('rationale','')}")
-        L.append(f"\n**Primary:** {d.get('primary_hypothesis','')}")
-        L.append(f"**Uncertainty:** {d.get('key_uncertainty','')}")
+            if isinstance(h, dict):
+                L.append(f"### {h.get('id','?')}: {h.get('text','')}")
+                L.append(f"- **Testable:** {h.get('testable','')}")
+                L.append(f"- **Novelty:** {h.get('novelty','')}")
+                L.append(f"- **Impact:** {h.get('impact','')}")
+            else: L.append(f"- {h}")
+        L.append(f"\n**Primary hypothesis:** {d.get('primary_hypothesis','')}")
+        L.append(f"\n**Key uncertainty:** {d.get('key_uncertainty','')}")
 
     elif delta_key == "L2_feynman":
+        L.append("## Attacks\n")
         for a in d.get("attacks", []):
-            L.append(f"- **[{a.get('severity','?')}]** {a.get('hypothesis_id','?')}: {a.get('text','')}")
-        L.append(f"\n**Confounders:**")
+            L.append(f"- **[{a.get('severity','')}]** {a.get('text','')}")
+        L.append("\n## Confounders\n")
         for c in d.get("confounders", []):
-            L.append(f"- [{c.get('severity','?')}] {c.get('name','')}: {c.get('text','')}")
+            L.append(f"- {c.get('confounder','')}: {c.get('why_it_matters','')}")
+        L.append("\n## Diagnostic Tests\n")
+        for t in d.get("diagnostic_tests", []):
+            L.append(f"- **{t.get('test','')}** — {t.get('expected','')}")
         L.append(f"\n**Verdict:** {d.get('verdict','')}")
 
     elif delta_key == "L3_oppenheimer":
-        L.append(f"**Selected:** {fmt_list(d.get('selected'))}")
-        L.append(f"**Rejected:** {fmt_list(d.get('rejected'))}")
-        L.append(f"**Reason:** {d.get('reason','')}")
+        L.append(f"**Decision:** {d.get('decision','')}")
+        L.append(f"\n**Selected:** {fmt_list(d.get('selected'))}")
+        L.append(f"\n**Rejected:** {fmt_list(d.get('rejected'))}")
+        L.append(f"\n**Reason:** {d.get('reason','')}")
 
     elif delta_key == "L4_fisher":
+        L.append("## Strategies\n")
         for s in d.get("strategies", []):
-            L.append(f"- **{s.get('id','?')}: {s.get('name','')}** (n={s.get('samples','?')})")
-            L.append(f"  - Steps: {fmt_list(s.get('steps'))}")
-        L.append(f"\n**Recommended:** {d.get('recommended','')}")
-        L.append(f"**Scripts needed:**")
-        for s in d.get("scripts_needed", []):
-            L.append(f"- {s.get('name','')}: {s.get('purpose','')}")
+            L.append(f"### {s.get('id','')}: {s.get('name','')}")
+            L.append(f"**Samples:** {s.get('samples','')}")
+            L.append("**Steps:**")
+            for step in s.get("steps", []): L.append(f"1. {step}")
+        L.append("\n## Scripts Needed\n")
+        for s in d.get("scripts_needed", []): L.append(f"- {s.get('name','')}: {s.get('purpose','')}")
+        L.append(f"\n## Parameters\n{fmt_dict(d.get('parameters'))}")
+        L.append(f"\n## Outputs\n{fmt_list(d.get('outputs'))}")
 
     elif delta_key == "L5_tukey":
-        L.append(f"**QC checkpoints:**")
-        for q in d.get("qc_checkpoints", []):
-            L.append(f"- {q.get('name','')}: {q.get('text','')}")
-        L.append(f"\n**Failure stop rules:**")
-        for f in d.get("failure_stop_rules", []):
-            L.append(f"- {f.get('name','')}: {f.get('text','')}")
+        L.append("## Assumption Attacks\n")
+        for a in d.get("attacks", []):
+            L.append(f"- **[{a.get('severity','')}]** {a.get('text','')}")
+        L.append("\n## QC Checkpoints\n")
+        for q in d.get("qc_checkpoints", []): L.append(f"- {q.get('text','')}")
+        L.append("\n## Stop Rules\n")
+        for r in d.get("failure_stop_rules", []): L.append(f"- {r.get('text','')}")
 
     elif delta_key == "L6_oppenheimer":
-        L.append(f"**Approved:** {d.get('approved_strategy','')}")
         ap = d.get("analysis_plan", {})
-        L.append(f"**Scripts:** {fmt_list(ap.get('scripts'))}")
-        L.append(f"**Parameters:** {ap.get('parameters',{})}")
-        L.append(f"**Outputs:** {fmt_list(ap.get('outputs'))}")
+        if isinstance(ap, list):
+            for strategy in ap:
+                if not isinstance(strategy, dict):
+                    continue
+                L.append(f"## Analysis Plan — {strategy.get('strategy_id','')}\n")
+                L.append("**Scripts:**")
+                for s in strategy.get("scripts", []): L.append(f"- {s}")
+                L.append(f"\n**Parameters:**\n{fmt_dict(strategy.get('parameters'))}")
+                out = strategy.get("output", "")
+                if isinstance(out, dict):
+                    L.append(f"\n**Output:**\n{fmt_dict(out)}")
+                else:
+                    L.append(f"\n**Output:** {out}")
+        else:
+            L.append("## Analysis Plan\n")
+            L.append("**Scripts:**")
+            for s in ap.get("scripts", []): L.append(f"- {s}")
+            L.append(f"\n**Parameters:**\n{fmt_dict(ap.get('parameters'))}")
+            L.append(f"\n**Expected outputs:**\n{fmt_list(ap.get('expected_outputs'))}")
+            L.append(f"\n**Decision rule:** {ap.get('decision_rule','')}")
 
     elif delta_key == "L7_turing":
-        for s in d.get("scripts_run", []):
-            L.append(f"- **{s.get('name','')}** exit={s.get('exit_code','?')}")
-            L.append(f"  - Output: {fmt_list(s.get('output_files'))}")
-        L.append(f"\n**Key results:**")
-        for k, v in (d.get("key_results") or {}).items():
-            L.append(f"  - **{k}:** {v}")
-        if d.get("warnings"):
-            L.append(f"\n**Warnings:** {fmt_list(d.get('warnings'))}")
+        L.append("## Scripts Run\n")
+        for s in d.get("scripts_run", []): L.append(f"- {s}")
+        L.append("\n## Key Results\n")
+        for k,v in (d.get("key_results") or {}).items(): L.append(f"- **{k}:** {v}")
+        L.append(f"\n**Warnings:** {fmt_list(d.get('warnings'))}")
+        L.append(f"\n**Failures:** {fmt_list(d.get('failures'))}")
 
     elif delta_key == "L8_curie":
+        L.append(f"**Evidence Level:** {d.get('evidence_level','')}")
+        L.append("\n## Evidence Verified\n")
         for e in d.get("evidence_verified", []):
-            L.append(f"- {e.get('file','')}: {e.get('check','')} = {e.get('result','')}")
-        L.append(f"\n**Evidence level:** {d.get('evidence_level','')}")
-        if d.get("caveats"):
-            L.append(f"**Caveats:** {fmt_list(d.get('caveats'))}")
+            L.append(f"- **{e.get('file','')}** — {e.get('check','')}: {e.get('result','')}")
+        L.append(f"\n## Caveats\n{fmt_list(d.get('caveats'))}")
 
     elif delta_key == "L8.5_curie":
-        L.append(f"**Searched Keywords:** {fmt_list(d.get('searched_keywords'))}")
-        L.append(f"\n**Papers Found:**")
+        L.append(f"**Searched:** {fmt_list(d.get('searched_keywords'))}")
+        L.append("\n## Papers\n")
         for p in d.get("papers", []):
-            L.append(f"- **PMID {p.get('pmid','?')}: {p.get('title','')}**")
-            L.append(f"  - Relevance: {p.get('relevance','')}")
-            L.append(f"  - Comparison: {p.get('comparison','')}")
-            L.append(f"  - Abstract: {p.get('abstract','')}")
-        L.append(f"\n**Summary:** {d.get('summary','')}")
+            L.append(f"### PMID {p.get('pmid','')}: {p.get('title','')}")
+            L.append(f"**Comparison:** {p.get('comparison','')}")
+        L.append(f"\n## Summary\n{d.get('summary','')}")
 
     elif delta_key == "L9a_feynman":
-        for r in d.get("falsification_risks", []):
-            L.append(f"- **[{r.get('severity','?')}]** {r.get('name','')} _(resolvable={r.get('resolvable','?')})_: {r.get('text','')}")
-        L.append(f"\n**Survives:** {fmt_list(d.get('survives'))}")
-        L.append(f"**Falsified:** {fmt_list(d.get('falsified'))}")
+        L.append("## Falsification Risks\n")
+        L.append(fmt_list(d.get("falsification_risks")))
+        L.append("\n## Alternative Explanations\n")
+        L.append(fmt_list(d.get("alternative_explanations")))
+        L.append(f"\n**Survives:** {d.get('survives','')}")
+        L.append(f"**Falsified:** {d.get('falsified','')}")
 
     elif delta_key == "L9b_darwin":
+        L.append("## Module Interpretations\n")
         for m in d.get("module_interpretations", []):
-            L.append(f"- **{m.get('module','')}:** {m.get('meaning','')}")
-            L.append(f"  - Genes: {fmt_list(m.get('genes'))}")
-            L.append(f"  - Evidence: {m.get('evidence','')}")
+            L.append(f"### {m.get('module','')}")
+            L.append(f"**Function:** {m.get('function','')}")
+            L.append(f"**Genes:** {', '.join(m.get('genes',[]))}")
         L.append(f"\n**Convergent evolution:** {d.get('convergent_evolution','')}")
         L.append(f"**Limitations:** {fmt_list(d.get('limitations'))}")
 
@@ -581,7 +614,6 @@ if __name__ == "__main__":
     p.add_argument("--cand", default=None, help="specific candidate ID")
     args = p.parse_args()
     sys.exit(sync_project(args.project_dir, args.vault, args.results, args.cand))
-
 
 
 

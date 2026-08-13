@@ -1,0 +1,93 @@
+name: L0 contract CI
+
+on:
+  pull_request:
+    branches:
+      - codex/l4a-source-metadata-contract
+    paths:
+      - "run_loop.py"
+      - "src/research_loop/l0_*.py"
+      - "src/research_loop/common.py"
+      - "src/research_loop/gates.py"
+      - "src/research_loop/context.py"
+      - "src/research_loop/commands/execution.py"
+      - "src/research_loop/commands/continuation.py"
+      - "src/research_loop/commands/reporting.py"
+      - "src/sync_to_obsidian.py"
+      - "src/run_loop.py"
+      - "tests/test_l0_*.py"
+      - "tests/test_round_data_*.py"
+      - "tests/test_l6_l7_script_contract.py"
+      - "tests/test_cross_round_e2e.py"
+      - "tests/test_context_isolation.py"
+      - "tests/test_run_loop_guards.py"
+      - "tests/test_root_run_loop_entrypoint.py"
+      - "tests/test_obsidian_native_projection.py"
+      - "requirements*.txt"
+      - ".github/workflows/l0-contract.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  l0-contract:
+    name: L0 state + preflight / Windows / Python 3.13
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Compile L0 modules
+        shell: bash
+        run: |
+          python -m py_compile \
+            run_loop.py \
+            src/research_loop/l0_contract.py \
+            src/research_loop/l0_intake.py \
+            src/research_loop/l0_plan_intake.py \
+            src/research_loop/l0_state.py \
+            src/research_loop/l0_data.py \
+            src/research_loop/l0_preflight.py \
+            src/research_loop/gates.py \
+            src/research_loop/context.py \
+            src/research_loop/commands/execution.py \
+            src/research_loop/commands/continuation.py \
+            src/research_loop/commands/reporting.py \
+            src/sync_to_obsidian.py \
+            src/run_loop.py
+      - name: Run round data authority tests
+        run: >-
+          python -m pytest -q
+          tests/test_round_data_contract.py
+          tests/test_round_data_intake.py
+          tests/test_round_data_binding.py
+          tests/test_round_data_gate.py
+          tests/test_round_data_execution.py
+          tests/test_round_data_nonfile.py
+          tests/test_round_data_cross_round_e2e.py
+          tests/test_l6_l7_script_contract.py
+      - name: Run targeted L0 regression tests
+        run: >-
+          python -m pytest -q
+          tests/test_l0_input_contract.py
+          tests/test_l0_intake.py
+          tests/test_l0_structured_intake.py
+          tests/test_l0_state_restore.py
+          tests/test_l0_preflight_probes.py
+          tests/test_l0_completion_contract.py
+          tests/test_l0_manifest_input_contract.py
+          tests/test_l0_revise_finalization.py
+          tests/test_cross_round_e2e.py
+          tests/test_context_isolation.py
+          tests/test_run_loop_guards.py
+          tests/test_root_run_loop_entrypoint.py
+          tests/test_obsidian_native_projection.py
+      - name: Check patch whitespace
+        shell: bash
+        run: git diff --check ${{ github.event.pull_request.base.sha }} HEAD

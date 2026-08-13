@@ -3,9 +3,13 @@ import sys
 from pathlib import Path
 
 from research_loop.commands.ledger import _ledger_for
+from research_loop.common import _sha256_file
 from research_loop.delta import _delta_for_candidate
 from research_loop.delta_render import SEED_SCHEMA_KEYS
 from research_loop.hypothesis_ledger import LedgerError, binding_path
+from research_loop.l0_state import (
+    L0StateError, load_round_manifest, round_manifest_path, verify_round_manifest,
+)
 from research_loop.ledger import (
     _branch_ledger_path, _read_branch_ledger,
     _modality_ledger_path, _read_modality_ledger,
@@ -57,10 +61,6 @@ def _build_loop_memory(project_dir, cand_id, knowledge_store=None):
         "previous_hypothesis": previous_hypothesis,
         "final_reason": l10.get("reason", ""),
         "next_round_hypothesis": l10.get("next_round_hypothesis", ""),
-        # v1.0 input-contract seed fields: decision and conclusion are kept as
-        # SEPARATE clean fields (no "DROP: reason" munge). new_hypothesis is
-        # stored distinct from previous_hypothesis. round_id/parent_round_id link
-        # the continuation's contract to this round.
         "previous_final_decision": l10.get("decision", ""),
         "previous_conclusion": l10.get("reason", ""),
         "new_hypothesis": l10.get("next_round_hypothesis", ""),
@@ -77,9 +77,9 @@ def _build_loop_memory(project_dir, cand_id, knowledge_store=None):
         "method_card_ids": _list_card_ids(project_dir, cand_id, "method_cards"),
         "hashes": {},
     }
-    # v2 binds continuation context to an immutable event cursor.  It never
-    # asks the shared ledger for whatever happens to be current in another
-    # project after this memory has been emitted.
+    # v2 binds continuation context to an immutable event cursor. It never asks
+    # the shared ledger for whatever happens to be current in another project
+    # after this memory has been emitted.
     if binding_path(project_dir).exists():
         try:
             ledger = _ledger_for(project_dir, knowledge_store)
@@ -149,14 +149,31 @@ def cmd_modality_scan(args):
 
 
 def cmd_emit_loop_memory(args):
-    """L10c: emit the next_loop_memory seed (JSON + MD) from this candidate's deltas."""
+    """Emit semantic continuation state linked to the already-finalized round.
+
+    L10c is the sole owner of round-manifest creation. This command only consumes
+    and verifies that frozen manifest; direct/legacy callers must finalize L10c
+    first rather than silently inventing a manifest here.
+    """
     project_dir = Path(args.project_dir)
+    fm = _load_yaml_front(_candidate_file(project_dir, args.cand_id))
+    round_id = str(fm.get("round_id") or "1")
+    manifest_path = round_manifest_path(project_dir, args.cand_id, round_id)
     try:
+        manifest = load_round_manifest(manifest_path)
+        verify_round_manifest(
+            project_dir, manifest,
+            expected_candidate=str(args.cand_id), expected_round=round_id,
+        )
+        manifest_hash = _sha256_file(manifest_path)
         mem = _build_loop_memory(project_dir, args.cand_id,
                                  getattr(args, "knowledge_store", None))
-    except LedgerError as exc:
+    except (LedgerError, L0StateError, OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+
+    mem["round_manifest_path"] = manifest_path.relative_to(project_dir).as_posix()
+    mem["round_manifest_sha256"] = manifest_hash
     out_dir = project_dir / "08_Audit" / "loop_memory"
     out_dir.mkdir(parents=True, exist_ok=True)
     jp = out_dir / f"{args.cand_id}_next_loop_memory.json"

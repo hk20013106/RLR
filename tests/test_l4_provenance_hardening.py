@@ -27,6 +27,7 @@ def _asset(
         "url": url,
         "title": title,
         "year": year,
+        "role": "method",
         "journal": "Methods Journal",
         "abstract": "Metadata only.",
         "source_database": "Europe PMC",

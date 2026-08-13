@@ -292,11 +292,7 @@ from research_loop.commands.research import (  # inward shim (Phase 7d)
 
 
 
-
-
-
 # --- 2. Pre-research injection mode-aware logic ---
-
 
 
 
@@ -346,11 +342,8 @@ from research_loop.commands.research import (  # inward shim (Phase 7d)
 
 
 
-
-
 from research_loop.commands.execution import (  # inward shim (Phase 7d)
-    cmd_execution_gate, _registered_candidate_inputs,
-    _approved_execution_scripts, cmd_prepare_turing_workspace,
+    cmd_execution_gate, _approved_execution_scripts, cmd_prepare_turing_workspace,
 )
 
 
@@ -389,13 +382,11 @@ from research_loop.ledger import (  # inward shim (Phase 3a)
 
 
 
-
 from research_loop.commands.continuation import (  # inward shim (Phase 7c)
     _list_card_ids, _build_loop_memory, _write_exec_manifest,
     _loop_memory_to_md, cmd_branch_status, cmd_modality_scan,
     cmd_emit_loop_memory,
 )
-
 
 
 
@@ -475,4 +466,3 @@ from research_loop.commands.ranking import (  # inward shim (Phase 7b)
 )
 
 from research_loop.cli import build_parser, main  # inward shim (Phase 8)
-

@@ -26,6 +26,7 @@ def _payload():
                 "url": "https://example.org/paper",
                 "title": "Example paper",
                 "year": 2026,
+                "role": "method",
                 "journal": "Methods",
                 "abstract": "Metadata only.",
                 "source_database": "Europe PMC",

@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from research_loop import deep_research, deep_research_task
+from research_loop import l4_evidence_bundle, l4_pipeline
 from research_loop.common import _now
 from research_loop.compatibility import PROFILE_V20, get_profile
 from research_loop.delta import _delta_for_candidate, artifact_for_node
@@ -483,6 +484,46 @@ def cmd_deep_research_run(args):
     if not cf.exists():
         print(f"ERROR: candidate not found: {args.cand_id}", file=sys.stderr)
         return 2
+    l4a_manifest = str(getattr(args, "l4a_manifest", "") or "").strip()
+    if l4a_manifest and args.node != "L4":
+        print("ERROR: --l4a-manifest is valid only for --node L4", file=sys.stderr)
+        return 2
+    if l4a_manifest:
+        fm = _load_yaml_front(cf)
+        try:
+            profile, binding = _bound_profile(project_dir)
+            _, node_map, _ = topology_for_profile(profile.profile_id)
+            research_persona = str(
+                node_map[args.node].get("research_persona") or ""
+            )
+            if not research_persona:
+                raise deep_research.DeepResearchError(
+                    f"{args.node} has no declared research persona"
+                )
+            run_dir = project_dir / "08_Audit" / "deep_research_runtime" / args.cand_id / "L4"
+            artifact = l4_evidence_bundle.run_l4b_from_manifest(
+                l4_pipeline,
+                deep_research,
+                project_dir,
+                args.cand_id,
+                l4a_manifest,
+                run_dir,
+                project_id=str(binding["project_id"]),
+                round_id=str(fm.get("round_id") or "1"),
+                profile_id=profile.profile_id,
+                research_persona=research_persona,
+            )
+            ok, reason = deep_research.audit_evidence_pack(
+                project_dir, args.cand_id, "L4", run_id=artifact["run_id"]
+            )
+        except (deep_research.DeepResearchError, KeyError, ValueError) as exc:
+            print(f"ERROR: L4B resume failed: {exc}", file=sys.stderr)
+            return 3
+        if not ok:
+            print(f"ERROR: L4B evidence gate failed: {reason}", file=sys.stderr)
+            return 3
+        print(json.dumps(artifact, ensure_ascii=False, indent=2))
+        return 0
     try:
         spec, skill_version = _deep_research_spec_from_args(args)
     except deep_research.DeepResearchError as exc:
