@@ -2,397 +2,349 @@
 
 [English](README.md) | [中文](docs/README_CN.md)
 
-**RLR turns a single research question into a structured, evidence-gated multi-agent debate.**
+**RLR turns a scientific question into a structured, evidence-gated, multi-agent research loop.**
 
-You give it a scientific question. RLR walks it through a 15-step pipeline (L0 → L10c) where 10 expert personas — each acting as an isolated subagent — generate hypotheses, critique them, design methods, execute code, audit evidence, verify against literature, and reach a final KEEP / REVISE / DROP decision. No single agent sees the full picture; each sees only what the DAG allows. This prevents bias contamination (e.g., the agent proposing a hypothesis never sees the critique of its own idea until a decision is made).
+RLR has **15 formal DAG nodes (L0 → L10c)** and **10 expert personas**. Each cognitive node sees only the information allowed by the DAG. Literature evidence is acquired through verifiable evidence packs, scientific data are authorized explicitly before execution, and only Turing (L7) may run code in a controlled workspace.
 
-L1, L4, and L8.5 run a verifiable Academic Research Skills (ARS) pass before their node; L7 separately searches reusable code. Each literature run stores a versioned evidence pack rather than trusting a prose summary. Missing evidence or dependencies stops the loop instead of being silently ignored.
+> **Core principle:** cognitive agents are isolated by information invisibility (Path B). Turing is isolated by an allowlisted workspace and command boundary (Path A). RLR does not pretend that an agent process is an operating-system sandbox.
 
-> **Core principle:** cognitive agents are isolated by information invisibility (Path B). The execution agent (Turing) is isolated by a controlled workspace + command allowlist (Path A). We do not pretend `spawn_agent` is an OS sandbox.
+## Current main status
 
-**Stable version: V0.8.** The V0.9 native-v2.1 closeout is implemented in
-this worktree but is not yet released because its 80% coverage gate is still
-open.
+`main` now contains the validated **V0.9 / native-v2.1 architecture line**.
 
-**Canonical runtime path:** `python run_loop.py run PROJECT CAND` drives the V0.9 candidate
-engine (`research_loop_v04.py`, filename retained for import stability). As of
-v0.9, `assemble-context` **enforces the deep-research gate** on the literature
-deep-research stages **L1, L4, and L8.5**: they **fail closed (rc=3)** unless a
-successful ARS CLI receipt, source-database metadata record, and required
-located evidence sections are persisted under `09_Literature_Database/evidence_packs/`.
-The runner re-raises this as a hard stop; it never treats a handwritten
-pre-research note or an environment-variable attestation as proof. The old `rlr_v05b.py` prototype is **LEGACY** (its
-gate was promoted into the canonical engine).
+The default native profile is `v2.1-catalog-1`. The current mainline includes:
 
-**Current additions:** L0 now accepts a strict, auditable normalized input
-contract, and the optional Hypothesis Ranking Reliability Layer produces a
-separate advisory ranking artifact. Neither addition changes an existing
-formal gate or decision.
+- **Round-data continuity (PR #16):** continuation rounds can explicitly reuse verified prior artifacts, combine them with new data, freeze a single `CurrentRoundDataBinding/v1`, and guarantee that L7 stages only currently authorized scientific inputs.
+- **L6 → L7 script-contract unification (PR #16):** structured script declarations retain traceability metadata (`name`, `grounding`, `branch_id`), while L6 gates and L7 execution resolve script names through the same contract owner.
+- **Meta-RLR maintenance boundary (PR #17):** RLR software/runtime failures can enter an external maintenance loop without adding a scientific DAG node or a second scientific-state owner.
+- **Meta-RLR historical scope correction (PR #18):** the Phase-1 architecture invariant is pinned to the exact qualified PR #17 range rather than treating all future RLR changes as Meta-RLR changes.
+- **Promotion and governance (PRs #19–#21):** the validated stable line was promoted to `main`, and `AGENTS.md` now explicitly requires architecture-first, root-cause-first changes instead of patch stacks or parallel authorities.
 
-## Installation and smoke test
-
-```bash
-# Runtime dependency
-python -m pip install -r requirements.txt
-
-# Optional test dependencies
-python -m pip install -r requirements-dev.txt
-
-# Minimal local smoke test (does not replace the real dependency gate)
-python research_loop_v04.py demo
-python research_loop_v04.py --help
-python run_loop.py --help
-```
-
-The `demo` command is the smallest local verification path. A real research
-run still requires the Academic Research runtime, a Zotero connector, and an
-Obsidian vault. These are checked by the L0 gate; missing services stop the
-run with an actionable error instead of being silently skipped.
+PRs #19–#21 are governance/promotion changes; they do **not** add scientific runtime semantics.
 
 ---
 
-## Version history
+## The scientific DAG
 
-### V0.9 — IN DEVELOPMENT (native v2.1 closeout)
+Current native sequence:
 
-- **Native profile binding.** New projects bind `v2.1-catalog-1`; existing
-  `v2.1` and `v2.0-legacy` projects retain their original contract meanings.
-- **Serial review and provenance.** Native L9 is L9a → finalized L9a → L9b;
-  `ContextManifest/v2`, `RunReceipt/v1`, and `EvidenceRunReceipt/v1.1` bind
-  visible context, provider output, persona catalog, and evidence runs.
-- **YAML persona catalog.** New projects use the validated `persona-catalog-1`
-  metadata while preserving the legacy body-only templates for old projects.
-- **Deferred work.** Literature-source MCP, PaSa, full AI4AI governance,
-  dashboard work, and v2.0 removal are separate post-v0.9 phases.
+```text
+L0 → L1 → L2 → L3 → L4 → L5 → L6 → L7 → L8 → L8.5
+   → L9a → finalized L9a snapshot → L9b → L10a → L10b → L10c
+```
 
-### V0.8 — CURRENT STABLE (modular architecture)
+Historical `v2.0-legacy` projects retain their historical topology. New projects use the native `v2.1-catalog-1` profile.
 
-- **Engine modular extraction.** `engine.py` reduced from 4768 lines to 477 lines. All 42 `cmd_*` handlers extracted into 8 dedicated command modules under `src/research_loop/commands/`: continuation, execution, ledger, lifecycle, pitfall, ranking, reporting, research. `cli.py` now owns `build_parser` and `main`. All backward-compatible imports preserved via inward shims.
-- **Hypothesis ledger read-boundary correctness.** Finalized emission predicate (`FINALIZED_EMISSION_PREDICATE`) applied to `ranking_inputs`, `materialize_authorized_context`, `verify`, and `snapshot_candidate`. Orphan emissions (from crashes between `commit_delta` and `finalize_emission`) are now invisible to consumptive reads and flagged by `verify`.
-- **V2 gate integration.** L4/L6/L7/L10b traceability gates are now wired into the v2 emission path (`_emit_delta_v2`), matching the v1 path behavior.
-- **V2 schema compatibility.** Gate functions (`gates.py`) and report rendering (`delta_render.py`) handle both dict (v1) and list (v2) `analysis_plan` shapes.
-- **Test coverage restored.** Native-v2 gate tests now reach real gates via production CLI instead of hitting the v1 guard.
+### Persona / role table
 
-### V0.7 — canonical gated runtime
+This is the shortest way to understand who does what.
 
-- **Added verifiable Deep Research evidence packs.** Codex explicitly invokes `$academic-research-suite`; Claude invokes the configured `academic-research-skills` plugin. L1 requires Results/Discussion/Conclusion, L4 requires Methods plus a review-search receipt, and L8.5 requires paper-based result verification. L10 receives located extracts and L10b cites evidence IDs.
-- **Added strict L0 intake.** `normalize-l0-input` builds a validated, auditable contract from a request file and explicit data location without guessing paths, IDs, decisions, or conclusions.
-- **Added the Hypothesis Ranking Reliability Layer (shadow mode).** It uses paired fair judgments, deterministic scheduling, checkpoints, evidence events, and disagreement reporting under `08_Audit/ranking/`; it never changes formal RLR decisions or gates.
+| Persona | Formal node(s) | Core responsibility |
+|---|---|---|
+| **Linnaeus** | L0, L10c | Opens and closes the round: verifies readiness/data/continuity at L0; aggregates reports and freezes round evidence at L10c. |
+| **Einstein** | L1 | Generates explicit, testable scientific hypotheses with predeclared falsification criteria. |
+| **Feynman** | L2, L9a | Attacks ideas early (L2) and hard-falsifies result-level claims late (L9a). |
+| **Oppenheimer** | L3, L6, L10b | Makes the three formal scientific judgments: hypothesis triage, method approval, final KEEP/REVISE/DOWNGRADE/DROP decision. |
+| **Fisher** | L4 (cognitive L4C inside staged L4) | Designs the analysis/experimental strategy using frozen method evidence. |
+| **Tukey** | L5, L8 in native v2.1 | Challenges method/QC assumptions before execution and audits reproducibility/results after execution. |
+| **Turing** | L7 | The **only** persona allowed to execute code; runs approved scripts only against binding-authorized data in the controlled workspace. |
+| **Curie** | L8.5; also the evidence-research persona before L1/L4 | Acquires/locates literature evidence and verifies actual results against published literature. |
+| **Darwin** | L9b | Produces bounded biological interpretation after receiving the authorized finalized L9a snapshot. |
+| **Jobs** | L10a | Assesses scientific/practical value and frames manuscript direction without changing the formal decision. |
 
-Earlier releases are available through Git history. They are not supported
-runtime paths or active template specifications.
+**Important compatibility note:** current native v2.1 uses **Tukey at L8** and serial **L9a → finalized snapshot → L9b**. Historical v2.0 used Curie at L8 and parallel L9 behavior.
 
 ---
 
-## How it works
+## What each node actually does
 
-### The DAG (15 nodes, L0 → L10c)
+The table below is the reader-facing description of the executable topology in `src/research_loop/topology.py` and the current gate/data contracts.
 
-```
-                    ┌─────────────────────────────────────────────────────┐
-                    │              PRE-RESEARCH (before node)                │
-                    │  L1/L4/L8.5: ARS evidence packs (Codex or Claude)      │
-                    │  L7: code search              (GitHub/Bioconductor)  │
-                    └─────────────────────────────────────────────────────┘
+| Node | Persona | What it reads / depends on | What it actually does | Formal boundary |
+|---|---|---|---|---|
+| **L0** | Linnaeus | Candidate frontmatter, authoritative `l0_input`, runtime/readiness state; for continuations, prior round manifest + selected inherited refs | Runs **pre-flight + state restore + current-round data binding**. Verifies current local files, restores and hash-verifies prior evidence for continuation rounds, verifies selected `inherited_inputs`, and freezes exactly one `CurrentRoundDataBinding/v1`. It does **not** interpret data. | Fail-closed on blocking readiness, contract, restore, selector, or hash errors; successful L0 moves the round from `NEW` toward hypothesis generation. |
+| **L1** | Einstein | Candidate question/frontmatter + L0 + verified pre-research evidence | Generates testable hypotheses. Each proposal must be operationalizable and include at least one predeclared falsification criterion. | Produces the hypothesis delta; does not design methods or execute code. |
+| **L2** | Feynman | L1 hypotheses + candidate anchor | Blindly attacks every L1 hypothesis: confounders, logical weaknesses, diagnostic tests, severity, and exhaustive verdicts are bound to hypothesis IDs. | Critique only; no status change and no execution. |
+| **L3** | Oppenheimer | L1 + L2 | Triages the debate: selects hypotheses worth testing and rejects weak ones with explicit reasons. | `triage-idea` produces the formal hypothesis selection. Optional ranking may run afterward as advisory-only shadow output. |
+| **L4** | Fisher | Selected hypotheses + L1/L2/L3 + method evidence | Formal method-planning node. Internally executes the auditable **L4A → L4B → L4C → L4.5** pipeline: discovery, evidence construction, Fisher method design, deterministic commit. | Produces `L4_fisher` / `METHOD_PROPOSED`; no code execution. |
+| **L5** | Tukey | L4 plan + L2 attacks | Reviews every selected hypothesis/strategy from an EDA/QC perspective; defines QC checkpoints, failure rules, and method attacks bound to hypothesis/strategy IDs. | Method critique only; does not change status. |
+| **L6** | Oppenheimer | L4 + L5 | Approves, revises, or rejects the analysis plan. For native/from-memory plans, approved script declarations remain structured traceability objects carrying canonical `name`, `grounding`, and `branch_id`. | `triage-method`; successful approval reaches `METHOD_APPROVED`. |
+| **L7** | Turing | L6-approved plan + L0/current data binding + code-search results | Executes **only approved scripts**. `execution-gate` is the one-time transition from `METHOD_APPROVED` to `NEEDS_EXECUTION`; an already-`NEEDS_EXECUTION` candidate resumes directly at workspace preparation. Before creating a workspace, RLR revalidates the binding and every bound file hash, stages only authorized files, resolves approved structured scripts by canonical name, then executes in the controlled workspace. | Only execution node. Tampered/missing bound data fail before a successful workspace is created; successful execution reaches `EXECUTED`. |
+| **L8** | Tukey (native v2.1) | L7 outputs + L6 plan + candidate anchor | Audits every claimed output, reproducibility, QC, and evidence level. It verifies execution rather than rerunning or inventing analysis. | `EXECUTED → AUDITED`; no new code execution. |
+| **L8.5** | Curie | L7 actual results + L8 audit + verified literature runtime | Searches/uses real literature based on **actual results**, assesses each active hypothesis once, and cites source-located evidence IDs plus real PMIDs/DOIs. | Literature verification; `AUDITED → UNDER_REVIEW`. |
+| **L9a** | Feynman | L1 + L7 + L8 + L8.5 | Performs hard statistical/logical falsification of the result-level claims: identifies surviving claims, falsified claims, risks, and missing proof. | Native v2.1 serial first review stage; must be finalized before L9b is authorized. |
+| **L9b** | Darwin | L1 + L7 + L8 + L8.5 + **authorized finalized L9a snapshot** | Produces biological interpretation for each active hypothesis, bounded by verified evidence and explicit limitations. | Cannot run before the finalized L9a snapshot is authorized; no execution and no formal status decision. |
+| **L10a** | Jobs | L8/L8.5/L9a/L9b + candidate framing | Assesses scientific value, practical/manuscript potential, and how strongly the work can be framed without overclaiming. | Value assessment only. |
+| **L10b** | Oppenheimer | L10a + L8 + L8.5 + L9a + L9b | Makes the final formal scientific decision and must justify it using the audited/falsified/verified evidence. | `KEEP`, `REVISE`, `DOWNGRADE`, or `DROP`. Optional ranking afterward remains advisory only. |
+| **L10c** | Linnaeus | All permitted finalized deltas/artifacts | Aggregates the round into `FINAL_REPORT.md` and `FINAL_REPORT_CN.md`, completes the required human-readable projection, and freezes round evidence. | Finalization owner; does not execute code or invent a new scientific winner. |
 
- L0   Linnaeus  ──►  L1   Einstein  ──►  L2   Feynman  ──►  L3   Oppenheimer
- (gate)            (hypotheses)        (attack)            (triage)
-   │
-   └─►  L4   Fisher  ──►  L5   Tukey  ──►  L6   Oppenheimer  ──►  L7   Turing
-        (method)          (QC)            (approve)             (execute)
-                                                         │
-   L8   Tukey  ──►  L8.5 Curie  ──►  L9a  Feynman  ──►  L9b  Darwin  ──►  L10a Jobs
-   (audit)          (lit-verify)        (falsify)             (biology)      (value)
-                                                                                │
-                                                                         L10b Oppenheimer
-                                                                             (decide)
-                                                                   │
-                                                                   └─► L10c Linnaeus
-                                                                       (report)
-```
+### Why L0 is now more than a dependency check
 
-- **L0** is a boot gate + dependency gate. If a required dependency is missing, the loop STOPS.
-- **L7 (Turing)** is the only node that runs code. All others are cognitive.
-- **L8.5** verifies computed results against published literature.
-- **L9a and L9b** are serial in native v2.1: L9b sees only the finalized,
-  ledger-authorized L9a snapshot. Historical v2.0 remains read-only.
-- **L10c** aggregates everything into a final report.
+PR #16 made round-to-round data continuity explicit:
 
-### L0 dependency contract (V0.7)
-
-L0 currently has **four framework-level required dependencies**. The gate is
-fail-closed: one missing item stops the loop before L1.
-
-| Dependency | Detection / attestation | Used for |
-|------------|-------------------------|----------|
-| PyYAML | Python import `yaml` | Contract, frontmatter, and literature-database I/O |
-| Academic Research runtime | `00_Preflight/deep_research_runtime.json`: configured CLI + Codex skill manifest or Claude plugin manifest | L1/L4/L8.5 evidence acquisition |
-| Zotero connector | `127.0.0.1:23119` or `RLR_ZOTERO` | Reference-manager and citation source |
-| Obsidian vault | Existing `$OBSIDIAN_VAULT` path or `RLR_OBSIDIAN` | End-of-round human-readable sync |
-
-Projects may add more required entries in
-`00_Preflight/dependencies.md` using `- python:`, `- command:`, or `- env:`;
-those entries are additive, not replacements for the four framework checks.
-
-### What is isolation and why does it matter?
-
-In a normal AI conversation, one agent sees everything — the hypothesis, the critique, the method, the results. This causes bias: if you wrote the hypothesis, you're predisposed to defend it when you see the critique.
-
-RLR solves this with two isolation mechanisms:
-
-**Path B — context invisibility (cognitive agents).** Before each agent runs, the controller calls `assemble-context` to build a plain-text block containing only the deltas the DAG allows for that node. The agent sees only this text. It has no filesystem access and no visibility into other nodes' work. For example, Einstein (L1) never sees Feynman's critique (L2) — only Oppenheimer (L3) sees both, and only after Einstein has already committed its hypotheses.
-
-**Path A — controlled workspace (Turing only).** Turing needs to run code, so it can't be fully isolated by context alone. Instead, the controller copies allowlisted files via `shutil.copy2` into a temporary directory on the same disk. Turing executes R/Python scripts there. Results are collected and packaged into an L7 delta JSON. Turing never touches the project directory directly.
-
-The key insight: **Path B isolates by making information invisible; Path A isolates by constraining the workspace.** Neither pretends that `spawn_agent` is an operating-system sandbox.
-
-### Personas
-
-| Node | Persona | Role | Isolation |
-|------|---------|------|-----------|
-| L0 | Linnaeus | Preflight: verify dependencies, scan skills, check input data | Path B |
-| L1 | Einstein | Generate scientific hypotheses from the research question | Path B |
-| L2 | Feynman | Blind-critique L1 hypotheses: find flaws, confounders, missing controls | Path B |
-| L3 | Oppenheimer | Triage: select testable hypotheses, reject weak ones | Path B |
-| L4 | Fisher | Design analysis strategies and scripts | Path B |
-| L5 | Tukey | Critique method design from EDA/QC perspective | Path B |
-| L6 | Oppenheimer | Approve or reject the analysis plan | Path B |
-| L7 | Turing | Execute approved scripts in a controlled workspace | **Path A** |
-| L8 | Tukey | Audit execution results, verify reproducibility | Path B |
-| L8.5 | Curie | Verify L7/L8 results against PubMed/EuropePMC | Path B |
-| L9a | Feynman | Hard falsification of results (statistical/logical) | Path B |
-| L9b | Darwin | Biological interpretation of results after finalized L9a | Path B |
-| L10a | Jobs | Assess value, frame manuscript direction | Path B |
-| L10b | Oppenheimer | Final decision: KEEP / REVISE / DOWNGRADE / DROP | Path B |
-| L10c | Linnaeus | Aggregate all deltas into FINAL_REPORT | Reads all deltas |
-
-### v0.9 node-by-node contract
-
-| Node | Reads | Produces | Formal effect |
-|------|-------|----------|---------------|
-| L0 Linnaeus | Candidate frontmatter + strict L0 contract | Input verification, skill plan, dependency/preflight audit | Stops on missing dependency or unverified input; advances to `IDEA_PROPOSED` |
-| L1 Einstein | Candidate frontmatter + L0 + Results/Discussion/Conclusion evidence | Testable hypotheses and primary hypothesis | Generates the hypothesis delta |
-| L2 Feynman | Candidate frontmatter + L1 | Blind attacks, confounders, diagnostic tests | No status change |
-| L3 Oppenheimer | L1 + L2 | Selected/rejected hypotheses and rationale | `triage-idea`; optional shadow ranking runs after delta write only |
-| L4 Fisher | L1 + L2 + L3 + Methods/review evidence | Strategies, scripts, parameters, outputs | Proposes the analysis plan |
-| L5 Tukey | L4 + L2 | QC checkpoints, failure rules, method attacks | No status change |
-| L6 Oppenheimer | L4 + L5 | Approved/rejected method plan and modifications | `triage-method`; not a ranking hook |
-| L7 Turing | L6 + L0 + prepared allowlisted workspace | Script exit codes, output files, key results | Only node allowed to execute code; `execution-gate` precedes it |
-| L8 Tukey | L7 + L6 + frontmatter | Evidence audit, reproducibility checks, evidence level | Advances to `AUDITED` |
-| L8.5 Curie | L7 + L8 + paper-based verification evidence | Confirmation/contradiction audit and literature records | Advances to review |
-| L9a Feynman | L1 + L7 + L8 + L8.5 | Statistical/logical falsification | Finalized before L9b |
-| L9b Darwin | L1 + L7 + L8 + L8.5 + authorized L9a | Biological interpretation and limitations | Cannot run before finalized L9a |
-| L10a Jobs | Frontmatter + L8/L8.5/L9a/L9b + located L1/L8.5 evidence | Value assessment and manuscript framing | No status change |
-| L10b Oppenheimer | L10a + L8/L8.5/L9a/L9b + located evidence | Final decision and cited evidence IDs | `KEEP/REVISE/DOWNGRADE/DROP`; optional shadow ranking runs after delta write |
-| L10c Linnaeus | All permitted deltas | English/Chinese FINAL_REPORT and sync inputs | Aggregates; does not execute code or choose a new winner |
-
-The ranking layer is an advisory signal attached after successful L3/L10b delta
-emission. It does not participate in `triage-idea`, `triage-method`, or
-`decision` transition validation.
-
-### V0.7 runtime layers
-
-1. **Compatibility/dispatch:** `research_loop_v04.py` preserves the historical
-   command/import path; `research_loop/cli.py` dispatches to the engine.
-2. **DAG contract:** `topology.py` defines nodes, allowed inputs, statuses, and
-   transitions; `delta.py` defines structured output schemas.
-3. **Context and gates:** `context.py` builds Path B manifests; `gates.py`
-   enforces L0 input, pre-research, execution, and traceability checks.
-4. **Persistence:** `paths.py`, `yamlio.py`, `ledger.py`, and candidate-owned
-   delta files provide isolated, hashable project artifacts.
-5. **Execution/providers:** `providers/` selects main-agent, command,
-   headless, or manual execution; `api.py` exposes the same operations in
-   process; `run_loop.py` drives rounds and StopPolicy.
-6. **Specialized layers:** `l0_contract.py`/`l0_intake.py` own strict L0
-   normalization; `deep_research.py` owns ARS receipts and immutable paper evidence;
-   `ranking.py` owns advisory ranking artifacts and never writes
-   formal decision state.
-
-### State transfer: delta JSON
-
-Agents don't share a context window or filesystem. The only way state moves between them is through structured delta JSON files. The candidate file stays read-only throughout.
-
-Each agent outputs a delta with a strict schema (validated by `emit-delta` before writing). Example — Einstein's delta:
-
-```json
-{
-  "hypotheses": [{"id": "H1", "text": "...", "testable": true, "rationale": "..."}],
-  "key_uncertainty": "...",
-  "primary_hypothesis": "H1"
-}
+```text
+previous round manifest
+        ↓ verify all registered path/SHA evidence
+L0EvidenceBinding/v1
+        ↓ select only explicit inherited_inputs
+        ┐
+        ├── + current-round l0_input declarations
+        ↓
+CurrentRoundDataBinding/v1
+        ↓
+L7 binding revalidation
+        ↓
+Turing workspace
 ```
 
-Delta schemas live in `research_loop/delta.py` and are validated by the engine;
-the historical shim only re-exports the same surface.
+`l0_input.yaml` is the declaration authority. `L0EvidenceBinding/v1` represents the verified prior-round evidence universe. `CurrentRoundDataBinding/v1` is the **narrower current-round scientific-input authorization**.
 
-### Memory layers
+Important consequences:
 
-1. **Delta JSON** — primary state transfer between agents, project-internal.
-2. **Candidate frontmatter** — read-only anchor (question, claim) embedded in every agent's context.
-3. **Literature database** — cross-round, papers found during pre-research and L8.5, deduplicated and reused.
-4. **EverOS** — optional cross-session durable memory for technical facts (not project state).
+- native L0 writers use schema 1.1; historical schema 1.0 remains readable;
+- continuation rounds may be inherited-only, new-only, or inherited + new;
+- inherited files must match verified prior `source`, `intermediate`, or `result` path + SHA-256 exactly;
+- prior `literature`, `audit`, and `receipt` artifacts cannot silently become execution data;
+- current local files are hash-bound;
+- remote/non-file declarations may be represented, but cannot be executed until materialized as verified local files;
+- `input_manifest.md`, `input_alias`, and `--file` do **not** create or expand scientific-data authority;
+- L7 revalidates the current binding before workspace creation, so post-L0 tampering fails closed.
+
+This path has been exercised in a real Round N → N+1 → L7 acceptance pilot, including inherited + new data, exclusion of unselected prior data, actual script reads, and tamper fail-closed tests.
+
+---
+
+## Internal L4 method-planning pipeline
+
+L4 remains **one formal DAG node** (`L4_fisher`) but internally has four auditable stages:
+
+```text
+L3 selected hypotheses
+        ↓
+L4A  Literature Discovery
+        ↓  L4ADiscoveryManifest/v1
+L4B  Evidence Construction
+        ↓  verified Methods/source payload/anchors
+L4C  Fisher Method Design
+        ↓  L4_fisher delta
+L4.5 Deterministic Commit
+        ↓
+L5 Tukey
+```
+
+- **L4A — discovery only:** query planning, metadata discovery, identifier-first deduplication, relevance selection, full-text availability. It cannot fabricate method anchors.
+- **L4B — evidence construction:** consumes the frozen L4A selection and uses the existing Academic Research/RLR evidence stack for full-text retrieval, Methods extraction, source-payload retention, anchor validation, and method candidates.
+- **L4C — Fisher cognition:** designs the actual method/analysis plan.
+- **L4.5 — deterministic commit:** revalidates the exact L4A manifest, L4B evidence, and L4C delta hash before persisting the formal method projection.
+
+These are internal responsibilities, **not four new DAG nodes**.
+
+---
+
+## Literature evidence
+
+Before L1, L4, and L8.5, RLR uses verifiable Academic Research evidence rather than trusting handwritten summaries.
+
+- **L1:** located Results/Discussion/Conclusion evidence for hypothesis generation.
+- **L4:** frozen metadata discovery plus primary-study Methods and review-search evidence.
+- **L8.5:** result-driven verification against located published evidence.
+
+Evidence packs retain runtime receipts, source metadata, available source payload, located excerpts, and hashes. Missing required evidence fails closed.
+
+RLR follows a **reuse-first adapter boundary**: mature search/retrieval/parser systems should be attached behind explicit adapters rather than reimplemented as a second evidence authority. Literature Search MCP, Zotero, GROBID, Docling, PaperQA2, etc. are not made base authorities merely because an adapter is planned.
+
+---
+
+## L0 readiness and dependency model
+
+Current L0 separates **blocking dependencies** from **readiness-only probes**.
+
+Blocking framework-owned checks correspond to real current consumers, including:
+
+- core Python/packages and filesystem requirements;
+- Academic Research runtime;
+- activated hypothesis ledger;
+- evidence-store/project evidence availability;
+- Obsidian projection requirements.
+
+**PubMed MCP and Zotero are currently readiness-only probes**, not heavy blocking base dependencies, until their planned direct consumers are wired. Provider/main-agent readiness is runner-bound because the active provider configuration is known at invocation time. L7 execution/workspace readiness remains deferred to the L7 gate.
+
+A warning from a readiness-only probe is not equivalent to a blocking L0 failure.
+
+---
+
+## Isolation and authority
+
+### Path B — cognitive isolation
+
+Cognitive personas receive only a controller-built context containing DAG-authorized inputs. They do not independently walk the project filesystem or previous-round directories.
+
+### Path A — Turing execution isolation
+
+Turing receives a controlled workspace containing approved scripts, required support artifacts, and only the local scientific files authorized by `CurrentRoundDataBinding`.
+
+### Formal authorities
+
+Different artifacts have different jobs; they are not interchangeable registries:
+
+- **Hypothesis Ledger:** formal hypothesis lifecycle and finalized-emission authority.
+- **Candidate/frontmatter + deltas:** round-local scientific state projections.
+- **RLRRoundEvidenceManifest/v1:** frozen physical evidence for a completed round.
+- **L0EvidenceBinding/v1:** verified prior-round evidence exposed to a continuation.
+- **CurrentRoundDataBinding/v1:** exact scientific data authorized for the current round/L7.
+- **Loop memory:** semantic continuation state that references an already-frozen round manifest.
+
+---
+
+## Meta-RLR maintenance plane (outside the scientific DAG)
+
+PR #17 added `src/rlr_maintenance/` as a **separate software-maintenance boundary**. It is not L11, not a hidden RLR node, and not a second scientific-state owner.
+
+```text
+RLR / CI / acceptance failure
+        ↓ observe + normalize
+RLRMaintenanceEvent/v1
+        ↓
+LoopX maintenance state
+        ↓ bounded repair task
+Codex repair worker
+        ↓
+RLR-native tests / contracts / CI / real acceptance
+        ↓
+qualified repair or no repair
+```
+
+Boundary rules:
+
+- `research_loop` remains authoritative for scientific state and contracts;
+- `rlr_maintenance` may observe/verify RLR, but RLR core must not depend on LoopX/maintenance state;
+- LoopX owns maintenance goal/todo/evidence/replan state only;
+- Codex is the bounded repair worker, not a new scientific persona;
+- RLR-native tests, contracts, CI, and real acceptance pilots remain repair authority;
+- **native Windows is the authoritative runtime for RLR/Meta-RLR repair qualification**; WSL/Linux-only failures are compatibility/environment evidence until reproduced or classified appropriately on Windows.
+
+PR #18 fixed the historical Meta-RLR scope test so it verifies the exact qualified PR #17 implementation range instead of treating later legitimate RLR changes as Meta-RLR violations.
+
+---
+
+## Architecture-first change discipline
+
+`AGENTS.md` now requires every nontrivial modification to start from the full architecture and project mission:
+
+1. identify the violated invariant/root cause, not only the symptom;
+2. locate the existing canonical owner;
+3. preserve declared authority boundaries;
+4. prefer one unified/root solution over duplicated logic or workaround paths;
+5. reject second sources of truth, hidden fallbacks, or compatibility patch stacks;
+6. keep scope minimal and coherent.
+
+This is a repository-development rule; it does not add a scientific DAG node.
 
 ---
 
 ## Commands
 
+Common runtime commands:
+
 | Command | Description |
-|---------|-------------|
-| `demo` | Generate a demo project walking all 15 nodes |
-| `new-project` | Create a project folder |
-| `new-candidate` | Create a candidate with split frontmatter |
-| `preflight` | L0 boot gate + dependency gate (STOPS if deps missing) |
-| `normalize-l0-input` | Normalize an explicit request and data location into the strict L0 contract |
-| `check-deps` | Standalone dependency check |
-| `next-step` | Get next DAG node (JSON) |
-| `pre-research` | Print the legacy research prompt / L7 code-search prompt (literature stages use `deep-research-run`) |
-| `deep-research-run` | Invoke configured Codex/Claude ARS and persist a verified evidence pack |
-| `audit-literature-evidence` / `literature-report` | Fail-closed evidence audit / source-located report |
-| `assemble-context` | Build isolated context for a node (Path B) |
-| `emit-delta` | Validate and save a delta JSON |
-| `triage-idea` | L3: select/reject hypotheses |
-| `triage-method` | L6: approve/reject analysis plan |
-| `execution-gate` | Reject execution unless preflight + approved plan exist |
-| `prepare-turing-workspace` | Build isolated workspace for L7 (Path A) |
-| `decision` | Oppenheimer status change |
-| `aggregate-report` | L10c: generate FINAL_REPORT (EN + CN) |
-| `obsidian-sync` | Sync to Obsidian vault |
-| `ranking-shadow` | Run an isolated, advisory fair ranking for explicit candidates |
-| `ranking-benchmark` | Run the free synthetic fair-vs-naive ranking benchmark |
-| `ranking-report` | Render a shadow-ranking artifact as JSON or Markdown |
-| `list` / `show` | List candidates / show a candidate |
+|---|---|
+| `demo` | Generate a minimal demo project |
+| `new-project` | Create a native project and bind its compatibility profile / hypothesis store |
+| `new-candidate` | Create a candidate/research question |
+| `normalize-l0-input` | Normalize explicit request/data declarations into the strict L0 contract |
+| `preflight` | Run L0 pre-flight/readiness checks |
+| `check-deps` | Standalone dependency/readiness report |
+| `next-step` | Return the next DAG dispatch packet |
+| `deep-research-run` | Run configured Academic Research and persist a verified evidence pack |
+| `audit-literature-evidence` / `literature-report` | Audit / render source-located literature evidence |
+| `assemble-context` | Build isolated Path-B context for one node |
+| `emit-delta` | Validate and persist a node delta |
+| `triage-idea` | L3 hypothesis selection |
+| `triage-method` | L6 method approval/rejection |
+| `execution-gate` | One-time `METHOD_APPROVED → NEEDS_EXECUTION` execution authorization |
+| `prepare-turing-workspace` | Revalidate current data authority and build the L7 workspace |
+| `decision` | Apply an allowed formal status transition |
+| `aggregate-report` | L10c final report aggregation |
+| `obsidian-sync` | Human-readable Obsidian projection |
+| `ranking-shadow` / `ranking-benchmark` / `ranking-report` | Advisory hypothesis-ranking layer; never formal decision authority |
+| `list` / `show` | Inspect candidates |
+
+Canonical runner:
+
+```bash
+python run_loop.py run PROJECT CAND
+```
+
+The historical `research_loop_v04.py` filename remains as a compatibility CLI/import shim; new code should use `research_loop.cli`, `research_loop.engine`, or `research_loop.api` directly.
 
 ---
 
-## Strict L0 intake and advisory hypothesis ranking
-
-All production projects use an activated append-only hypothesis ledger. Set
-`RLR_HYPOTHESIS_STORE` or pass `--knowledge-store` explicitly. Native projects
-are activated by `new-project`; legacy v1 projects are blocked until a complete
-project-level migration is committed:
+## Installation and quick check
 
 ```bash
-python research_loop_v04.py hypothesis-migrate MyProject \
-  --knowledge-store shared-hypotheses.sqlite --dry-run
-python research_loop_v04.py hypothesis-migrate MyProject \
-  --knowledge-store shared-hypotheses.sqlite \
-  --resolution resolution.json --resolved-by researcher-id
+python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt   # optional test dependencies
+
+python research_loop_v04.py demo
+python research_loop_v04.py --help
+python run_loop.py --help
 ```
 
-The SQLite ledger is authoritative. Delta receipts, current state, graph views,
-ranking inputs, loop-memory, and authorized node context are immutable or
-rebuildable projections. Runtime resolution accepts only hash-matched,
-receipt-backed delta v2 files; v1 remains untouched as migration evidence.
-
-`normalize-l0-input` converts a request file plus an explicit local path (or a
-stable remote dataset locator) into a validated L0 contract. It does not infer
-paths, IDs, decisions, or conclusions from prose. `--dry-run` writes nothing;
-`--run-l0` stops the canonical runner at L0.
-
-```bash
-python research_loop_v04.py normalize-l0-input \
-  --project MyProject --input request.md --data data_directory --dry-run
-```
-
-The **Hypothesis Ranking Reliability Layer** is shadow-only: it ranks an
-explicit candidate set with paired A/B and B/A judgments, marks reversals as
-`UNCERTAIN`, and writes versioned artifacts, checkpoints, reports, evidence
-events, and formal-decision disagreement signals under
-`08_Audit/ranking/`. It uses deterministic fake judges by default; a configured
-RLR provider is opt-in. Its output never changes candidate selection, status,
-or gate pass/fail.
-
-```bash
-# Run an isolated L3 or L10b shadow ranking.
-python research_loop_v04.py ranking-shadow MyProject --stage L3 \
-  --candidate C001 --candidate C002 --seed 7 --match-budget 10
-
-# Exercise the free synthetic benchmark and render a saved artifact.
-python research_loop_v04.py ranking-benchmark --gold gold.json --seeds 1,2,3 --match-budget 10
-python research_loop_v04.py ranking-report MyProject --run <RUN_ID> --format markdown
-
-# Opt in during a canonical run. L3/L10b only; L6 is deliberately excluded.
-python run_loop.py run MyProject C001 --shadow-ranking \
-  --shadow-candidate C002 --shadow-seed 7 --shadow-match-budget 10
-```
-
-Shadow failures, partial artifacts, and timeouts are audit-recorded and
-fail-soft: the existing RLR decision path continues unchanged.
+A real research run must satisfy the current L0 blocking contracts and later stage-specific gates; readiness-only warnings are reported but are not silently promoted into blockers.
 
 ---
 
-## Quick start
+## File structure (current architecture)
 
-```bash
-# 1. Create a native-v2 project
-python research_loop_v04.py new-project MyProject \
-  --knowledge-store shared-hypotheses.sqlite
-
-# 2. Create a candidate (your research question)
-python research_loop_v04.py new-candidate MyProject --title "..." \
-  --question "..." --claim "..." --input "..." \
-  --knowledge-store shared-hypotheses.sqlite
-
-# 3. Run preflight (L0 gate — stops if deps missing)
-python research_loop_v04.py preflight MyProject <CAND_ID>
-
-# 4. Run the loop (main-agent mode)
-python run_loop.py print-main-agent-prompt MyProject <CAND_ID>
-# Paste the output into your host agent (Claude Code / Codex / etc.)
-```
-
-See [MAIN_AGENT_RUN.md](docs/MAIN_AGENT_RUN.md) and [MAIN_AGENT_PROMPT.md](docs/MAIN_AGENT_PROMPT.md) for the full orchestration protocol.
-
----
-
-## File structure
-
-```
+```text
 research_loop/
-├── research_loop_v04.py          # Historical CLI/import compatibility shim
+├── AGENTS.md                         # repository architecture/change discipline
+├── research_loop_v04.py              # historical CLI/import compatibility shim
+├── run_loop.py                       # root runner entry point
+├── src/run_loop.py                   # canonical multi-round runner + StopPolicy
 ├── src/research_loop/
-│   ├── cli.py                    # Stable CLI dispatch surface
-│   ├── engine.py                 # Command handlers and orchestration operations
-│   ├── api.py                    # In-process EngineAPI facade
-│   ├── topology.py               # DAG nodes, transitions, visibility inputs
-│   ├── context.py                # Path B context assembly and manifests
-│   ├── gates.py                  # L0/L1/L7/L10 traceability and status gates
-│   ├── delta.py                  # Delta schemas and candidate-owned resolution
-│   ├── l0_contract.py            # L0 schema, validator, serializer, renderer
-│   ├── l0_intake.py              # Rule-based request/data normalizer
-│   ├── deep_research.py           # ARS runtime receipts, paper records, evidence packs
-│   ├── providers/                # main-agent, command, headless, manual providers
-│   ├── ranking.py                # Shadow fair judge, Elo, checkpoint, evidence
-│   ├── paths.py / yamlio.py      # Safe paths and YAML/frontmatter I/O
-│   ├── ledger.py / presearch.py  # Pitfall/evidence ledgers and pre-research
-│   └── errors.py                 # Typed runtime errors
-├── run_loop.py                   # Root compatibility entry point
-├── src/run_loop.py               # Canonical multi-round runner and StopPolicy
-├── src/manage_literature_db.py   # Growable literature database
-├── src/sync_to_obsidian.py       # End-of-round Obsidian sync
-├── docs/MAIN_AGENT_RUN.md        # Main-agent execution protocol
-├── docs/MAIN_AGENT_PROMPT.md     # Paste-ready startup prompt
-├── docs/RUNNER.md                # Runner modes + StopPolicy
-├── docs/DAG_TOPOLOGY.md          # Full DAG dependency table
-└── templates/                    # Layer + persona templates
+│   ├── cli.py                        # stable CLI dispatch
+│   ├── engine.py                     # orchestration operations
+│   ├── commands/                     # extracted command families
+│   ├── topology.py                   # executable DAG/persona/visibility truth
+│   ├── compatibility.py              # immutable project profiles
+│   ├── context.py                    # Path-B context assembly
+│   ├── gates.py                      # L0/L4/L6/L7/L10 traceability/status gates
+│   ├── delta.py                      # delta schemas + shared L6 script projection
+│   ├── l0_contract.py                # L0 contract schema/validation
+│   ├── l0_intake.py                  # request/data normalization
+│   ├── l0_state.py                   # previous-round restore/state binding
+│   ├── l0_data.py                    # CurrentRoundDataBinding/v1
+│   ├── deep_research.py              # Academic Research receipts/evidence packs
+│   ├── ranking.py                    # advisory shadow ranking
+│   └── providers/                    # main-agent/command/headless/manual providers
+├── src/rlr_maintenance/              # Meta-RLR maintenance boundary; outside DAG
+│   ├── contracts.py
+│   ├── observer.py
+│   ├── profiles.py
+│   ├── verification.py
+│   └── loopx_cli.py
+├── docs/DAG_TOPOLOGY.md              # detailed reader-facing DAG description
+├── docs/MAIN_AGENT_RUN.md            # orchestration protocol
+├── docs/MAIN_AGENT_PROMPT.md         # main-agent startup prompt
+├── docs/RUNNER.md                    # runner modes / StopPolicy
+└── templates/                        # layer/persona/project templates
 ```
 
-`research_loop_v04.py` remains in the repository because tests and external
-automation use its historical path. It delegates to `research_loop.cli` and
-does not contain the current engine body; new code should import
-`research_loop.engine`, `research_loop.cli`, or `research_loop.api` directly.
-
-Live research projects are gitignored (generated output, not source).
+Generated research projects and large runtime artifacts are not source code and should not be promoted into the repository merely because they exist locally.
 
 ---
 
 ## Hard invariants
 
-- **L0 dependency gate: missing dependency STOPS the loop — never skip.**
-- Only Oppenheimer changes candidate status.
-- Only Turing executes code, only after the execution gate passes.
-- Candidate file is read-only; state flows only through delta JSON.
-- Native v2.1 runs finalize L9a before L9b; L9b reads only the
-  cursor-authorized L9a snapshot. Historical v2.0 verification remains
-  parallel and mutually invisible.
-- End-of-round Obsidian sync is required.
+- L0 fails closed on blocking readiness, invalid current input, failed prior-round restore, invalid inherited selection, or bound-file hash mismatch.
+- `l0_input.yaml` is the input declaration authority; `CurrentRoundDataBinding/v1` is the current-round execution-data authority.
+- `input_manifest.md`, `input_alias`, and `--file` cannot expand scientific-data authority.
+- Only Turing/L7 executes code, only approved scripts, only in the prepared workspace.
+- Native v2.1 L8 is Tukey; native review order is **L9a → finalized authorized snapshot → L9b**.
+- Hypothesis Ledger remains the formal hypothesis lifecycle authority.
+- L10c owns round finalization and frozen round evidence; loop memory references that frozen evidence rather than replacing it.
+- Meta-RLR is outside the scientific DAG and cannot own scientific state.
+- Repository changes should fix the canonical owner/root cause rather than accumulate duplicate authorities or compatibility patch stacks.
+
+For the full executable-node overview, see [docs/DAG_TOPOLOGY.md](docs/DAG_TOPOLOGY.md).
