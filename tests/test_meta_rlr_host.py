@@ -36,6 +36,9 @@ class WorkspaceFake:
         self.calls.append(("create", kwargs)); return SimpleNamespace(path=self.root, base_sha=kwargs["base_revision"], branch="meta-rlr/test")
     def inspect(self, work):
         self.calls.append(("inspect", {})); return SimpleNamespace(base_sha=work.base_sha, head_sha=work.base_sha, changed_paths=("src/x.py",))
+    def commit_verified(self, work, *, changed_paths, message):
+        self.calls.append(("commit", {"changed_paths": tuple(changed_paths), "message": message}))
+        return "b" * 40
 
 
 class CodexFake:
@@ -61,20 +64,25 @@ def test_no_run_stops_before_claim_and_model(tmp_path):
     assert codex.calls == [] and check.calls == []
 
 
-def test_success_order_and_exact_revision(tmp_path):
+def test_success_commits_verified_diff_before_loopx_completion(tmp_path):
     loopx, workspace, codex, check = LoopXFake(), WorkspaceFake(tmp_path), CodexFake(), verifier(True)
     result = MetaRLRHost(loopx=loopx, codex=codex, workspace=workspace, verifier=check).run_once(event=event(), goal_id="g", agent_id="a")
     assert result.outcome == "verified"
+    assert result.commit_sha == "b" * 40
     assert [name for name, _ in loopx.calls] == ["add", "quota", "claim", "complete", "refresh", "spend"]
+    assert [name for name, _ in workspace.calls] == ["create", "inspect", "inspect", "commit"]
     assert workspace.calls[0][1]["base_revision"] == "a" * 40
+    assert workspace.calls[-1][1]["changed_paths"] == ("src/x.py",)
     assert check.calls == [("l0_state_integrity", tmp_path)]
+    assert ("commit=" + "b" * 40) in loopx.calls[3][1]["evidence"]
 
 
-def test_failed_verification_blocks_without_complete_or_spend(tmp_path):
-    loopx = LoopXFake()
-    result = MetaRLRHost(loopx=loopx, codex=CodexFake(), workspace=WorkspaceFake(tmp_path), verifier=verifier(False)).run_once(event=event(), goal_id="g", agent_id="a")
+def test_failed_verification_blocks_without_commit_complete_or_spend(tmp_path):
+    loopx, workspace = LoopXFake(), WorkspaceFake(tmp_path)
+    result = MetaRLRHost(loopx=loopx, codex=CodexFake(), workspace=workspace, verifier=verifier(False)).run_once(event=event(), goal_id="g", agent_id="a")
     assert result.outcome == "blocked"
     assert [name for name, _ in loopx.calls] == ["add", "quota", "claim", "update"]
+    assert [name for name, _ in workspace.calls] == ["create", "inspect"]
     assert loopx.calls[-1][1]["status"] == "blocked"
 
 
