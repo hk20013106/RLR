@@ -7,6 +7,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE_SHA = "d6352c0ceeb649efa892e36acc66f209d33920be"
+PHASE1_HEAD_SHA = "73d01596bf2c48ad9bab361ca969ccd173439502"
 _ALLOWED_CHANGED_PREFIXES = (
     "src/rlr_maintenance/",
     "tests/test_meta_rlr_",
@@ -54,20 +55,27 @@ def test_maintenance_uses_external_loopx_boundary_not_python_modules():
     assert offenders == []
 
 
-def test_phase1_change_scope_stays_outside_rlr_core_when_base_is_available():
-    available = subprocess.run(
-        ["git", "cat-file", "-e", f"{BASE_SHA}^{{commit}}"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        shell=False,
-    )
-    if available.returncode != 0:
-        pytest.skip("base commit is unavailable in this shallow checkout")
+def test_phase1_change_scope_stays_outside_rlr_core_when_commits_are_available():
+    """Permanently verify the exact qualified PR #17 implementation range.
+
+    This is a historical architecture invariant for Meta-RLR Phase 1, not a
+    restriction on every future descendant feature branch.  Pinning both ends
+    prevents later unrelated RLR work from being misclassified as Phase 1 scope.
+    """
+    for commit in (BASE_SHA, PHASE1_HEAD_SHA):
+        available = subprocess.run(
+            ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            shell=False,
+        )
+        if available.returncode != 0:
+            pytest.skip("qualified Meta-RLR Phase 1 commits are unavailable in this checkout")
 
     diff = subprocess.run(
-        ["git", "diff", "--name-only", f"{BASE_SHA}...HEAD"],
+        ["git", "diff", "--name-only", f"{BASE_SHA}...{PHASE1_HEAD_SHA}"],
         cwd=ROOT,
         capture_output=True,
         text=True,
