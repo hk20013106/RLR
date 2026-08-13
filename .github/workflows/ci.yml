@@ -9,8 +9,59 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  scope:
+    name: Change scope / docs fast path
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.classify.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify change scope
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            base="$PR_BASE_SHA"
+            head="$PR_HEAD_SHA"
+          elif [[ "$EVENT_NAME" == "push" ]]; then
+            base="$PUSH_BEFORE_SHA"
+            head="$CURRENT_SHA"
+          else
+            base=""
+            head=""
+          fi
+
+          changed="$RUNNER_TEMP/changed-files.txt"
+          : > "$changed"
+          if [[ -z "$base" || -z "$head" || "$base" =~ ^0+$ ]]; then
+            mode="full"
+          elif ! git cat-file -e "$base^{commit}" 2>/dev/null || ! git cat-file -e "$head^{commit}" 2>/dev/null; then
+            mode="full"
+          else
+            git diff --name-only "$base" "$head" > "$changed"
+            mode="$(python3 tools/ci_change_scope.py < "$changed")"
+          fi
+
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "CI scope: $mode"
+
+          if [[ "$mode" == "docs-only" ]]; then
+            git diff --check "$base" "$head"
+          fi
+
   test:
     name: Test / Windows / Python 3.13
+    needs: scope
+    if: needs.scope.outputs.mode == 'full'
     runs-on: windows-latest
     defaults:
       run:
