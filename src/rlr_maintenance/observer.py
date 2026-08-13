@@ -33,7 +33,6 @@ def observe_contract_failure(
     *,
     component: str,
     error_code: str,
-    detail: str,
     expected_contract: str,
     rlr_revision: str,
     observed_at: str,
@@ -41,16 +40,14 @@ def observe_contract_failure(
     source_receipts: Iterable[Mapping[str, Any]] = (),
     severity: str = "blocking",
 ) -> dict[str, Any]:
-    observed = {"error_code": str(error_code)}
-    if detail:
-        observed["detail"] = str(detail)
+    """Record only the stable contract error code; details remain in evidence refs."""
     return build_maintenance_event(
         event_type="contract_failure",
         component=component,
         severity=severity,
         observed_at=observed_at,
         rlr_revision=rlr_revision,
-        observed=observed,
+        observed={"error_code": str(error_code)},
         expected_contract=expected_contract,
         evidence_refs=evidence_refs,
         source_receipts=source_receipts,
