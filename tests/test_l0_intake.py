@@ -178,7 +178,7 @@ def test_dry_run_and_pending_dataset_do_not_write(tmp_path):
     dry_run = _run("normalize-l0-input", "--project", str(project),
                    "--input", str(request), "--data", str(data_file), "--dry-run")
     assert dry_run.returncode == 0, dry_run.stderr
-    assert "schema_version: '1.0'" in dry_run.stdout
+    assert "schema_version: '1.1'" in dry_run.stdout
     assert not list((project / "01_Candidates").glob("*.l0_input.yaml"))
 
     pending = _run("normalize-l0-input", "--project", str(project),
