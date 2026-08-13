@@ -143,12 +143,18 @@ def _current_file_records(project: Path, source: dict | None) -> tuple[list[dict
             "reason": description,
         })
 
-    if source.get("input_type") == "dataset" and not raw_paths:
+    # Keep the binding vocabulary aligned with the authoritative L0 contract.
+    # dataset/inline/other are all legal non-file source types.  Represent them
+    # here rather than rejecting a contract that the declaration validator has
+    # already accepted.  L7 remains a separate consumer boundary and requires
+    # regular files before execution.
+    input_type = str(source.get("input_type") or "")
+    if input_type in {"dataset", "inline", "other"} and not raw_paths:
         non_files.append({
             "origin": "current_round",
-            "kind": "dataset",
+            "kind": input_type,
             "location": str(source.get("location") or ""),
-            "role": "dataset",
+            "role": input_type,
             "description": description,
             "verification_status": str(source.get("verification_status") or ""),
             "reason": str(source.get("reason") or ""),
@@ -259,7 +265,7 @@ def build_current_round_data_binding(project_dir, cand_id, evidence_binding=None
     if not authorized and not non_files:
         raise L0DataError(
             "L0_DATA_NO_AUTHORIZED_INPUTS",
-            "current round has neither local authorized files nor a declared non-file dataset",
+            "current round has neither local authorized files nor a declared non-file input",
         )
 
     payload: dict[str, Any] = {
