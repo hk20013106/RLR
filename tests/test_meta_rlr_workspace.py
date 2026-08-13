@@ -10,6 +10,7 @@ class GitFake:
     def __init__(self):
         self.base = "a" * 40
         self.committed = False
+        self.branch = "meta-rlr/abc123-9fafe5188c01"
         self.calls = []
 
     def __call__(self, command, **kwargs):
@@ -26,7 +27,25 @@ class GitFake:
         if args == ["rev-parse", "HEAD"]:
             sha = "b" * 40 if self.committed else self.base
             return SimpleNamespace(returncode=0, stdout=sha + "\n", stderr="")
+        if args == ["rev-parse", "HEAD^"]:
+            return SimpleNamespace(returncode=0, stdout=self.base + "\n", stderr="")
+        if args == ["rev-parse", "--abbrev-ref", "HEAD"]:
+            return SimpleNamespace(returncode=0, stdout=self.branch + "\n", stderr="")
+        if args[:2] == ["rev-list", "--count"]:
+            return SimpleNamespace(returncode=0, stdout="1\n", stderr="")
+        if args[:3] == ["show", "-s", "--format=%B"]:
+            body = (
+                "fix: bounded repair\n\n"
+                "Meta-RLR-Repair-Key: abc123\n"
+                "Meta-RLR-Event-ID: rme-1234567890abcdef1234\n"
+                "Meta-RLR-Todo-ID: todo_event\n"
+                "Meta-RLR-Turn-ID: meta-rlr:recover123\n"
+                "Meta-RLR-Profile-ID: l0_state_integrity\n"
+            )
+            return SimpleNamespace(returncode=0, stdout=body, stderr="")
         if args[:2] == ["diff", "--name-only"]:
+            if args[-1] == "HEAD":
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
             return SimpleNamespace(returncode=0, stdout="src/a.py\n", stderr="")
         if args[:3] == ["ls-files", "--others", "--exclude-standard"]:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -59,3 +78,25 @@ def test_preexisting_worktree_identity_fails_closed(tmp_path):
     (tmp_path / "worktrees" / dirname).mkdir(parents=True)
     with pytest.raises(GitWorkspaceError, match="already exists"):
         manager.create(base_revision="event-revision", event_token="abc123", todo_id="todo_event")
+
+
+def test_existing_verified_commit_recovers_public_binding(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    fake = GitFake()
+    fake.committed = True
+    manager = GitWorkspace(repo_root=repo, workspace_parent=tmp_path / "worktrees", runner=fake)
+    branch, dirname = manager._identity("abc123", "todo_event")
+    fake.branch = branch
+    (tmp_path / "worktrees" / dirname).mkdir(parents=True)
+
+    work = manager.find_existing(base_revision="event-revision", repair_key="abc123")
+    assert work is not None
+    binding = manager.read_verified_commit(work)
+    assert binding.commit_sha == "b" * 40
+    assert binding.base_sha == "a" * 40
+    assert binding.changed_paths == ("src/a.py",)
+    assert binding.repair_key == "abc123"
+    assert binding.todo_id == "todo_event"
+    assert binding.turn_instance_id == "meta-rlr:recover123"
+    assert binding.profile_id == "l0_state_integrity"
