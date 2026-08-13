@@ -19,8 +19,6 @@ def _command_prefix(executable: str | Sequence[str]) -> tuple[str, ...]:
 
 
 class LoopXCli:
-    """Fail-closed adapter around the documented LoopX JSON CLI."""
-
     def __init__(self, executable: str | Sequence[str] = "loopx", registry: str | None = None) -> None:
         self._executable = _command_prefix(executable)
         self._registry = str(registry) if registry else None
@@ -61,8 +59,10 @@ class LoopXCli:
         args.extend(self._capability_args(capabilities))
         return self.run_json(args, cwd=cwd)
 
-    def quota_should_run(self, *, goal_id: str, agent_id: str, capabilities: Sequence[str] = ("shell",), cwd: str | Path | None = None) -> dict:
+    def quota_should_run(self, *, goal_id: str, agent_id: str, capabilities: Sequence[str] = ("shell",), turn_instance_id: str | None = None, cwd: str | Path | None = None) -> dict:
         args = ["quota", "should-run", "--goal-id", str(goal_id), "--agent-id", str(agent_id)]
+        if turn_instance_id is not None:
+            args.extend(["--turn-instance-id", str(turn_instance_id)])
         args.extend(self._capability_args(capabilities))
         return self.run_json(args, cwd=cwd)
 
@@ -90,7 +90,9 @@ class LoopXCli:
     def refresh_state(self, *, goal_id: str, agent_id: str, cwd: str | Path | None = None) -> dict:
         return self.run_json(["refresh-state", "--goal-id", str(goal_id), "--agent-id", str(agent_id)], cwd=cwd)
 
-    def quota_spend_slot(self, *, goal_id: str, todo_id: str, agent_id: str, capabilities: Sequence[str] = ("shell",), cwd: str | Path | None = None) -> dict:
+    def quota_spend_slot(self, *, goal_id: str, todo_id: str, agent_id: str, capabilities: Sequence[str] = ("shell",), turn_instance_id: str | None = None, cwd: str | Path | None = None) -> dict:
         args = ["quota", "spend-slot", "--goal-id", str(goal_id), "--todo-id", str(todo_id), "--slots", "1", "--source", "heartbeat", "--execute", "--agent-id", str(agent_id)]
+        if turn_instance_id is not None:
+            args.extend(["--turn-instance-id", str(turn_instance_id)])
         args.extend(self._capability_args(capabilities))
         return self.run_json(args, cwd=cwd)
