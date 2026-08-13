@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from research_loop import l0_contract
 from research_loop.commands import execution
 from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
@@ -45,7 +47,6 @@ def _write_parent_round(project: Path) -> tuple[str, Path, Path, Path, str]:
     }]
     contract = l0_contract.build_initial_contract(
         parent, "1", "Round 1 question?", source_input, "Round 1 hypothesis")
-    contract["schema_version"] = "1.1"
     raw = l0_contract.serialize_contract(contract)
     contract_path = project / "01_Candidates" / f"{parent}.l0_input.yaml"
     contract_path.write_bytes(raw)
@@ -86,7 +87,10 @@ def _write_child_round(
     prior_result: Path,
     manifest_path: Path,
     manifest_sha: str,
-) -> tuple[str, Path]:
+    *,
+    include_inherited: bool,
+    include_new: bool,
+) -> tuple[str, Path | None]:
     child = "CROUND2"
     memory = project / "08_Audit" / "loop_memory" / f"{parent}_next_loop_memory.json"
     memory.parent.mkdir(parents=True)
@@ -102,33 +106,38 @@ def _write_child_round(
     }), encoding="utf-8")
     memory_hash = _sha(memory)
 
-    new_data = project / "round2_new.csv"
-    new_data.write_text("sample,new_value\nA,7\n", encoding="utf-8")
-    source_input = l0_contract.build_source_input(
-        input_type="files", files=[str(new_data)], location=str(project),
-        description="round 2 new data", fmt="csv")
-    source_input["file_manifest"] = [{
-        "role": "new_data", "path": str(new_data),
-        "bytes": new_data.stat().st_size, "sha256": _sha(new_data),
-    }]
+    new_data = None
+    source_input = None
+    if include_new:
+        new_data = project / "round2_new.csv"
+        new_data.write_text("sample,new_value\nA,7\n", encoding="utf-8")
+        source_input = l0_contract.build_source_input(
+            input_type="files", files=[str(new_data)], location=str(project),
+            description="round 2 new data", fmt="csv")
+        source_input["file_manifest"] = [{
+            "role": "new_data", "path": str(new_data),
+            "bytes": new_data.stat().st_size, "sha256": _sha(new_data),
+        }]
+
     contract = l0_contract.build_continuation_contract(
         child, "2", "1", parent, "Round 2 question?", source_input,
         {
             "candidate_id": parent,
             "hypothesis": "Round 1 hypothesis",
             "final_decision": "REVISE",
-            "conclusion": "Reuse the verified result with new data",
+            "conclusion": "Reuse verified evidence in the next round",
             "memory_hash": memory_hash,
         },
         "Round 2 hypothesis",
     )
-    contract["schema_version"] = "1.1"
-    contract["inherited_inputs"] = [{
-        "path": prior_result.relative_to(project).as_posix(),
-        "sha256": _sha(prior_result),
-        "role": "prior_result",
-        "reuse_reason": "reanalyze the verified prior result with new data",
-    }]
+    contract["inherited_inputs"] = []
+    if include_inherited:
+        contract["inherited_inputs"] = [{
+            "path": prior_result.relative_to(project).as_posix(),
+            "sha256": _sha(prior_result),
+            "role": "prior_result",
+            "reuse_reason": "reanalyze the verified prior result",
+        }]
     raw = l0_contract.serialize_contract(contract)
     (project / "01_Candidates" / f"{child}.l0_input.yaml").write_bytes(raw)
     (project / "01_Candidates" / f"{child}.md").write_text(
@@ -151,28 +160,7 @@ def _write_child_round(
     return child, new_data
 
 
-def test_round_n_manifest_to_n_plus_1_turing_workspace(tmp_path, monkeypatch):
-    project = _project(tmp_path)
-    parent, unselected_parent_source, prior_result, manifest_path, manifest_sha = (
-        _write_parent_round(project)
-    )
-    child, new_data = _write_child_round(
-        project, parent, prior_result, manifest_path, manifest_sha)
-
-    ok, reason = _audit_l0_contract(project, child)
-    assert ok, reason
-
-    binding_path_value = current_round_data_binding_path(project, child)
-    binding = json.loads(binding_path_value.read_text(encoding="utf-8"))
-    assert {(item["origin"], item["role"]) for item in binding["authorized_inputs"]} == {
-        ("inherited", "prior_result"),
-        ("current_round", "new_data"),
-    }
-    authorized_paths = {item["path"] for item in binding["authorized_inputs"]}
-    assert prior_result.relative_to(project).as_posix() in authorized_paths
-    assert new_data.relative_to(project).as_posix() in authorized_paths
-    assert unselected_parent_source.relative_to(project).as_posix() not in authorized_paths
-
+def _prepare_workspace(project: Path, child: str, monkeypatch) -> tuple[int, Path | None]:
     l0_delta = project / "l0.json"
     l6_delta = project / "l6.json"
     l0_delta.write_text("{}", encoding="utf-8")
@@ -185,15 +173,92 @@ def test_round_n_manifest_to_n_plus_1_turing_workspace(tmp_path, monkeypatch):
 
     rc = execution.cmd_prepare_turing_workspace(SimpleNamespace(
         project_dir=str(project), cand_id=child, clean=False, file=[]))
-    assert rc == 0
+    workspaces = list(project.glob(f"_turing_workspace_{child}_*"))
+    return rc, workspaces[0] if workspaces else None
 
-    workspace = next(project.glob(f"_turing_workspace_{child}_*"))
+
+@pytest.mark.parametrize(
+    ("mode", "include_inherited", "include_new"),
+    [
+        ("inherited-only", True, False),
+        ("new-only", False, True),
+        ("combined", True, True),
+    ],
+)
+def test_round_n_manifest_to_n_plus_1_turing_workspace(
+    tmp_path, monkeypatch, mode, include_inherited, include_new,
+):
+    project = _project(tmp_path)
+    parent, unselected_parent_source, prior_result, manifest_path, manifest_sha = (
+        _write_parent_round(project)
+    )
+    child, new_data = _write_child_round(
+        project, parent, prior_result, manifest_path, manifest_sha,
+        include_inherited=include_inherited, include_new=include_new)
+
+    ok, reason = _audit_l0_contract(project, child)
+    assert ok, f"{mode}: {reason}"
+
+    binding_path_value = current_round_data_binding_path(project, child)
+    binding = json.loads(binding_path_value.read_text(encoding="utf-8"))
+    expected = set()
+    if include_inherited:
+        expected.add(("inherited", "prior_result"))
+    if include_new:
+        expected.add(("current_round", "new_data"))
+    assert {(item["origin"], item["role"]) for item in binding["authorized_inputs"]} == expected
+
+    authorized_paths = {item["path"] for item in binding["authorized_inputs"]}
+    prior_rel = prior_result.relative_to(project).as_posix()
+    parent_source_rel = unselected_parent_source.relative_to(project).as_posix()
+    assert (prior_rel in authorized_paths) is include_inherited
+    if new_data is not None:
+        assert new_data.relative_to(project).as_posix() in authorized_paths
+    assert parent_source_rel not in authorized_paths
+
+    rc, workspace = _prepare_workspace(project, child, monkeypatch)
+    assert rc == 0, mode
+    assert workspace is not None
+
     ws_manifest = json.loads(
         (workspace / "WORKSPACE_MANIFEST.json").read_text(encoding="utf-8"))
     staged_originals = {
         Path(item["original_path"]).resolve() for item in ws_manifest["staged_files"]
     }
-    assert prior_result.resolve() in staged_originals
-    assert new_data.resolve() in staged_originals
+    assert (prior_result.resolve() in staged_originals) is include_inherited
+    if new_data is not None:
+        assert new_data.resolve() in staged_originals
     assert unselected_parent_source.resolve() not in staged_originals
     assert not (workspace / "inputs" / "input_manifest.md").exists()
+
+
+def test_selected_prior_artifact_tamper_fails_at_n_plus_1_l0(tmp_path):
+    project = _project(tmp_path)
+    parent, _parent_source, prior_result, manifest_path, manifest_sha = _write_parent_round(project)
+    child, _new_data = _write_child_round(
+        project, parent, prior_result, manifest_path, manifest_sha,
+        include_inherited=True, include_new=False)
+    prior_result.write_text("tampered\n", encoding="utf-8")
+
+    ok, reason = _audit_l0_contract(project, child)
+
+    assert ok is False
+    assert "L0_RESTORE_ARTIFACT_HASH_MISMATCH" in reason
+    assert not current_round_data_binding_path(project, child).exists()
+
+
+def test_current_n_plus_1_file_tamper_fails_before_l7_workspace(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    parent, _parent_source, prior_result, manifest_path, manifest_sha = _write_parent_round(project)
+    child, new_data = _write_child_round(
+        project, parent, prior_result, manifest_path, manifest_sha,
+        include_inherited=False, include_new=True)
+    ok, reason = _audit_l0_contract(project, child)
+    assert ok, reason
+    assert new_data is not None
+    new_data.write_text("tampered\n", encoding="utf-8")
+
+    rc, workspace = _prepare_workspace(project, child, monkeypatch)
+
+    assert rc == 1
+    assert workspace is None
