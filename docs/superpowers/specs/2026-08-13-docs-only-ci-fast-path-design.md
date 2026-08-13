@@ -15,7 +15,7 @@ Everything else is `full`. In particular, `AGENTS.md`, `.github/**`, `src/**`, `
 
 ## Architecture
 
-Use one repository-owned classifier as the canonical owner of this policy. Both `.github/workflows/ci.yml` and `.github/workflows/l4-evidence-ci.yml` consume the same classifier output.
+`tools/ci_change_scope.py` is the single repository-owned classifier for this policy. Both `.github/workflows/ci.yml` and `.github/workflows/l4-evidence-ci.yml` consume the same classifier output.
 
 The workflows continue to trigger normally. A lightweight Ubuntu scope job checks out full history, computes the exact changed files, and emits `docs-only` or `full`. Heavy Windows jobs use job-level `if` conditions. This intentionally avoids workflow-level `paths-ignore`: a workflow skipped by path filtering can leave a required check pending, whereas a conditionally skipped job reports success.
 
@@ -27,9 +27,7 @@ For `docs-only` changes:
 
 - skip the Windows/Python full CI test job;
 - skip L4 targeted and L4 full-regression jobs;
-- run lightweight documentation validation in the CI scope job:
-  - `git diff --check` for whitespace errors;
-  - validate local relative Markdown link targets in the changed README/docs Markdown files using only the Python standard library available on the Ubuntu runner.
+- run `git diff --check` in the lightweight standard CI scope job.
 
 No dependency installation, coverage run, provider/L4 regression, or full pytest run occurs.
 
@@ -54,4 +52,4 @@ For any `full` change, existing heavy verification semantics remain unchanged:
 
 ## Verification
 
-The classifier has focused tests for docs-only, mixed, workflow, source/test, and empty input cases. The CI optimization PR itself must run the pre-existing full GitHub regression because it modifies `.github/**` and tests. After merge, the fast path is considered operational when a future docs-only PR reports the lightweight scope/docs check and the heavy jobs as skipped rather than executing Python regression suites.
+The classifier has focused tests for docs-only, mixed, workflow, governance, and empty input cases. The CI optimization PR itself must run the pre-existing full GitHub regression because it modifies `.github/**` and tests. After merge, the fast path is operational when a future docs-only PR reports the lightweight scope check and the heavy jobs as skipped rather than executing Python regression suites.
