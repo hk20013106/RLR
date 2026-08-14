@@ -12,7 +12,8 @@ class L:
     def quota_spend_slot(self, **k): self.calls.append(("spend",k)); return {"ok":True}
 class W:
     def __init__(self,p): self.p=Path(p)
-    def create(self, **k): return SimpleNamespace(path=self.p,base_sha="a"*40)
+    def find_existing(self, **k): return None
+    def create(self, **k): return SimpleNamespace(path=self.p,base_sha="a"*40,repair_key=k["event_token"])
     def inspect(self,w): return SimpleNamespace(head_sha=w.base_sha,changed_paths=("src/x.py",))
     def commit_verified(self,w,**k): return "b"*40
 class C:
