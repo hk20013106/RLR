@@ -1,7 +1,7 @@
 # Meta-RLR Phase 2 — Local One-Turn Host Design
 
 Date: 2026-08-13
-Status: implementation design
+Status: implementation design, corrected against pinned LoopX 0.4.5
 
 ## 1. Purpose
 
@@ -20,7 +20,7 @@ The goal is not to create another agent framework, scheduler, database, or scien
 
 Development happens in GitHub: source control, code review, ordinary CI, and Draft PRs.
 
-Formal Meta-RLR execution happens locally on Windows. GitHub Actions is not a maintenance scheduler and does not own the loop lifecycle. A local invocation may publish a verified Draft PR to GitHub, but GitHub is not required to decide whether a local maintenance turn should run.
+Formal Meta-RLR execution happens locally on Windows. GitHub Actions is not a maintenance scheduler and does not own the loop lifecycle. A local invocation may later publish a verified Draft PR to GitHub, but GitHub is not required to decide whether a local maintenance turn should run.
 
 ```text
 GitHub                       Local Windows runtime
@@ -36,274 +36,295 @@ source / PR / CI             ---------------------
                                     └─ next local wake reads fresh state
 ```
 
-## 3. Architecture-first review
+## 3. Authority model
 
-### 3.1 Why is Phase 2 necessary?
+- **RLR** owns scientific truth and software verification contracts.
+- **LoopX** owns maintenance goal/todo/claim/quota/history/settlement state.
+- **Codex** owns semantic diagnosis and bounded code editing only.
+- **Git** owns source identity, branches, commits, and worktrees.
+- **GitHub** owns remote repository/PR/CI/merge state when publication is requested.
+- **Meta-RLR Host** owns only local sequencing and fail-closed boundary checks.
 
-Phase 1 proved the semantic boundary but still required manual glue to perform a real repair sequence. The violated architectural invariant is continuity: maintenance state is durable in LoopX, but no RLR-owned adapter currently executes one fresh LoopX turn end-to-end. Without this host, each repair requires a human to reconstruct the same protocol manually.
+The host owns no durable state.
 
-### 3.2 Who owns each responsibility?
+## 4. Reuse decision
 
-- RLR owns scientific truth and software verification contracts.
-- LoopX owns maintenance goal/todo/claim/evidence/quota/history/replan state.
-- Codex owns semantic diagnosis and bounded code editing.
-- Git owns source identity, branches, commits, and worktrees.
-- GitHub owns remote repository/PR/CI/merge state when publication is requested.
-- The Phase 2 host owns only local sequencing and fail-closed boundary checks.
+Phase 2 reuses the pinned LoopX 0.4.5 direct-CLI Path A surface. It does not adopt a second orchestrator and does not import LoopX Python internals.
 
-### 3.3 Is there a more fundamental reusable solution?
+Reused wheels:
 
-Yes: use LoopX's documented Path A custom-runtime protocol instead of creating a Meta-RLR scheduler/state machine. At pinned LoopX 0.4.5, the compatibility baseline is direct CLI orchestration:
+- LoopX JSON CLI for todo/quota/claim/completion/settlement;
+- native `git worktree` and Git commit identity;
+- Codex CLI `exec` for bounded coding work;
+- existing `RLRMaintenanceEvent/v1` validation;
+- existing verification profile routing and `run_profile()`.
+
+Rejected:
+
+- another scheduler/state database;
+- GitHub Actions as runtime controller;
+- a permanent local daemon with its own timing policy;
+- a third-party agent orchestrator that duplicates LoopX/Git authority;
+- LoopX experimental typed Turn in parallel with the already-qualified direct CLI path;
+- automatic merge or automatic scientific-contract changes.
+
+## 5. Corrected LoopX Path A settlement contract
+
+Pinned LoopX 0.4.5 source is the authority for the CLI contract.
+
+There is **no `refresh-state` command** in the pinned production interface. Earlier Phase 2 draft text that described `complete → refresh → spend` was incorrect and is superseded by this design.
+
+The settlement sequence is:
 
 ```text
-fresh quota decision
-→ claim
-→ bounded agent action
-→ independent validation
-→ todo writeback
-→ refresh
-→ spend
+quota should-run without turn id
+        ↓
+confirm current frontier todo
+        ↓
+derive deterministic turn_instance_id
+        ↓
+quota should-run with the same turn id
+        ↓
+confirm the same frontier todo again
+        ↓
+claim
+        ↓
+bounded repair + independent verification
+        ↓
+todo complete(turn_instance_id)
+        ↓
+quota spend-slot(turn_instance_id)
 ```
 
-LoopX's experimental typed Turn adapter is deliberately not adopted in Phase 2 because the already-qualified direct CLI path is the compatibility baseline and avoids a new dependency on LoopX Python internals.
+The first unscoped quota read prevents the host from creating a settlement identity for an unrelated frontier todo. The second scoped quota call binds the exact event/todo turn to LoopX's native heartbeat settlement identity before write-capable execution begins.
 
-### 3.4 What existing wheels are reused?
+LoopX 0.4.5 natively supports idempotent replay for both sides of settlement:
 
-- LoopX CLI JSON lifecycle and quota/todo/refresh/spend contracts.
-- Native `git worktree` for source isolation.
-- Codex CLI `exec` for non-interactive bounded coding work.
-- Existing `RLRMaintenanceEvent/v1` validator and observers.
-- Existing verification profiles and `run_profile()` executor.
-- Git/GitHub for revision and Draft PR authority.
+- completing an already-completed todo under the same completion turn key is an idempotent replay;
+- spending a slot under an already-settled identical heartbeat identity is an idempotent replay.
 
-No third-party orchestrator is introduced. Products that already own session scheduling, todo state, worktree lifecycle, or PR automation would duplicate LoopX or Git authority.
+Meta-RLR therefore must not create its own settlement journal.
 
-## 4. Selected architecture
+## 6. One-turn host model
 
-### 4.1 Host model
+The host is one-shot and stateless. One invocation processes at most one maintenance event/todo.
 
-The Phase 2 host is **one-shot and stateless**. One invocation evaluates one fresh LoopX frontier and performs at most one executable maintenance todo.
+Fresh path:
 
 ```text
-local wake
-  ↓
-preflight exact repo state + validated event
-  ↓
-LoopX quota should-run (fresh JSON)
-  ├─ no execution obligation → NOOP / exit
-  ↓
-resolve one runnable todo without inventing policy
-  ↓
+validated maintenance event
+        ↓
+probe for recoverable verified Git commit
+        ↓ none
+idempotent LoopX todo add
+        ↓
+unscoped quota should-run
+        ├─ no run → NOOP
+        ├─ different todo → DEFER
+        ↓ exact event todo selected
+derive deterministic turn id
+        ↓
+scoped quota should-run(turn id)
+        ├─ no run → NOOP
+        ├─ frontier changed → DEFER
+        ↓ same todo selected
 claim exact todo
-  ↓
-create isolated git worktree from exact observed RLR revision
-  ↓
-Codex bounded repair
-  ↓
-inspect real git diff / changed paths
-  ↓
-route event → existing RLR verification profile
-  ↓
-run independent verification
-  ├─ FAIL → LoopX blocked/update; never complete/spend/publish
-  ↓ PASS
-LoopX complete with compact evidence
-  ↓
-refresh-state
-  ↓
-quota spend-slot
-  ↓
-optional controlled Draft PR publication
-  ↓
+        ↓
+create isolated worktree at exact event revision
+        ↓
+Codex bounded edit
+        ↓
+inspect real Git diff
+        ↓
+route event to existing RLR verification profile
+        ↓
+run independent RLR verification
+        ├─ fail → blocked writeback; no complete/spend
+        ↓ pass
+Host creates one verified Git commit with machine-readable provenance
+        ↓
+todo complete(turn id)
+        ↓
+quota spend-slot(turn id)
+        ↓
 exit
 ```
 
-There is no `while True` loop in the host. A later local wake starts from fresh LoopX state.
+There is no `while True` loop. A later local wake starts from fresh LoopX and Git facts.
 
-### 4.2 No new durable state
+## 7. Event-bound todo identity
 
-Forbidden host-owned persistence includes:
+The host creates a stable, public-safe todo text from:
 
-- `meta_rlr_state.json`
-- host SQLite databases
-- repair queues
-- copied LoopX todo/history stores
-- cached quota packets across invocations
-- raw Codex transcripts as maintenance truth
+- `dedup_fingerprint` prefix;
+- component;
+- expected contract.
 
-Durable authority remains:
+LoopX `todo add` remains the todo identity/dedup authority. Pinned LoopX returns the existing active todo when the normalized text already exists; Meta-RLR does not implement a parallel todo registry.
 
-- LoopX: maintenance lifecycle.
-- Git/GitHub: source and PR state.
-- RLR: contract/verification truth.
+After `todo add`, the host accepts execution only when LoopX's fresh quota frontier selects exactly that returned `todo_id`.
 
-A process crash must not require replaying model conversation state. The next wake reads LoopX and repository facts again.
+## 8. Deterministic turn identity
 
-## 5. Local storage boundaries
+The host derives one deterministic settlement id from the maintenance event id and LoopX todo id. The same id is used for:
 
-Three filesystem roles must remain distinct even when they live on one Windows machine:
+- scoped `quota should-run`;
+- verified Git commit provenance;
+- `todo complete`;
+- `quota spend-slot`;
+- crash recovery replay.
 
-1. **Source checkout** — normal RLR Git checkout used to identify the current authoritative revision.
-2. **LoopX control project/root** — LoopX-owned local durable state and registry. It is not copied into repair worktrees or committed to RLR.
-3. **Repair worktree** — disposable Git worktree rooted at the exact observed RLR revision and dedicated to one claimed maintenance todo.
+The host never invents a new turn id when recovering the same verified repair.
 
-The host must not solve state separation by inventing a second registry. It accepts explicit paths and passes the LoopX registry through the CLI's documented `--registry` argument.
+## 9. Local storage boundaries
 
-## 6. Turn input contract
+Three filesystem roles remain distinct:
 
-Phase 2 consumes an already-normalized `RLRMaintenanceEvent/v1`. Observation remains Phase 1 authority; the host does not scrape arbitrary logs or reinterpret scientific artifacts.
+1. **Source checkout** — normal RLR Git checkout used to resolve the event revision.
+2. **LoopX control project/root** — LoopX-owned durable registry/state/history.
+3. **Repair worktree** — isolated Git worktree rooted at the exact observed RLR revision.
 
-Required invocation facts:
+LoopX state is not copied into RLR worktrees and is not committed to RLR. The host does not create its own database, queue, transaction journal, or cached quota packet store.
 
-- validated maintenance event;
-- local RLR source repository root;
-- LoopX project/control root;
-- LoopX goal id;
-- registered maintenance agent id;
-- optional explicit LoopX registry path;
-- workspace parent for repair worktrees;
-- publication mode, default off.
+## 10. Codex boundary
 
-### Revision binding
-
-The first Phase 2 implementation is intentionally strict:
-
-- the event's `rlr_revision` must resolve in the local repository;
-- the repair worktree is created from that exact revision;
-- the host never silently rebases a failure onto a newer revision;
-- stale-event reconciliation is a later explicit workflow, not an implicit compatibility path.
-
-This gives causal auditability: the code being repaired is exactly the code that emitted the failure event.
-
-## 7. LoopX integration contract
-
-The host consumes only documented external CLI JSON contracts. `research_loop` never imports LoopX; `rlr_maintenance` never imports LoopX Python internals.
-
-`LoopXCli` is extended with narrow wrappers for the documented lifecycle only:
-
-- `status`
-- `quota should-run`
-- `todo claim`
-- `todo update` / blocked writeback when needed
-- `todo complete`
-- `refresh-state`
-- `quota spend-slot`
-
-Every write is bound to explicit `goal_id`, `todo_id`, and `agent_id`/`claimed_by` where the CLI contract requires them. Non-zero exits, malformed JSON, missing required fields, and ambiguous lifecycle facts fail closed.
-
-### Todo selection
-
-LoopX remains the work-frontier authority. The host must not invent project-specific priority policy.
-
-- If the fresh quota packet identifies exactly one executable/runnable todo, that todo may be selected deterministically.
-- If multiple runnable candidates exist, the maintenance agent may perform a read-only steering selection using a structured Codex response. The selected id must be a member of the fresh LoopX runnable set before claim.
-- The host never converts array order into hidden business priority when LoopX explicitly leaves the final steering choice to the agent.
-- No write-capable repair begins before successful claim.
-
-## 8. Codex boundary
-
-Codex is an external coding worker, not a maintenance state owner.
-
-The Phase 2 adapter uses non-interactive `codex exec` in the repair worktree. The current upstream CLI supports an explicit working directory, sandbox selection, ephemeral sessions, output schema, and output-last-message file. The adapter must use a workspace-write sandbox and must never use the dangerous bypass-approvals-and-sandbox flag.
+Codex is an external coding worker, not a state owner.
 
 The worker receives only:
 
-- compact current objective/todo;
+- one bounded objective/todo;
 - validated maintenance event facts;
 - expected RLR contract;
 - verification profile id and forbidden shortcuts;
-- exact worktree root;
-- repository architecture instructions already present in `AGENTS.md`.
+- the isolated worktree root;
+- repository architecture rules already present in `AGENTS.md`.
 
-The worker does not receive authority to mark LoopX todos complete, spend quota, or merge GitHub PRs. Model completion text is never success evidence.
+Codex may edit the worktree. It may not:
 
-### Structured worker result
+- commit;
+- push;
+- merge;
+- modify LoopX state;
+- mark a todo complete;
+- spend quota;
+- weaken tests or scientific policy to manufacture success.
 
-The Codex final response is constrained to a small schema such as:
+Model completion text is advisory only. Git diff and RLR verification remain authoritative.
 
-```json
-{
-  "status": "changed|no_change|blocked",
-  "summary": "public-safe bounded summary",
-  "tests_requested": ["..."],
-  "blocker": null
-}
+## 11. Git workspace contract
+
+`GitWorkspace` owns Git mechanics only:
+
+- resolve the exact event revision;
+- create deterministic event/todo repair branch and worktree;
+- inspect real HEAD, changed paths, and dirty paths;
+- stage exactly the verified path set;
+- create the verified commit after verification;
+- read a recoverable verified commit on a later process invocation.
+
+It does not edit LoopX state and does not decide whether verification passed.
+
+## 12. Verified commit provenance
+
+A successful Host-created repair commit contains public machine-readable trailers:
+
+```text
+Meta-RLR-Repair-Key: <dedup prefix>
+Meta-RLR-Event-ID: <event id>
+Meta-RLR-Todo-ID: <LoopX todo id>
+Meta-RLR-Turn-ID: <deterministic turn instance id>
+Meta-RLR-Profile-ID: <verification profile id>
 ```
 
-This response is advisory. Git diff and RLR verification remain authoritative.
+These trailers bind source state to a maintenance turn. They are **not proof that the repair is still valid**.
 
-## 9. Worktree and source-isolation contract
+Before returning success, `GitWorkspace.commit_verified()` reads the commit back through the same recovery parser and verifies that the commit identity, changed-path set, event, todo, turn, and profile match what the Host intended to commit.
 
-`GitWorkspace` owns only Git mechanics:
+## 13. Crash recovery contract
 
-- verify repository existence;
-- resolve exact base SHA;
-- create a deterministic-but-collision-safe repair branch name from event/todo identity;
-- create a worktree outside the source checkout;
-- record the start SHA;
-- read changed paths and final HEAD/diff status;
-- refuse destructive cleanup of pre-existing paths/branches.
+Phase 2 recovery deliberately covers the trustworthy post-verification crash window:
 
-It must not edit LoopX state or run RLR verification.
+```text
+RLR verification PASS
+        ↓
+verified commit created
+        ↓
+process crashes before/during LoopX settlement
+```
 
-The initial implementation does not silently reuse an existing repair branch/worktree with ambiguous state. A collision is a fail-closed recovery condition to be inspected or handled by a later explicit resume contract.
+On the next invocation for the same event, before creating/claiming a new todo, the Host searches only the deterministic repair-worktree namespace for that event repair key.
 
-## 10. Verification and success
+A recoverable commit must satisfy all of the following:
 
-The host calls `profile_for_event(event)` and then `run_profile(profile_id, repair_worktree)`.
+1. exactly one matching repair worktree exists;
+2. worktree branch identity matches Meta-RLR naming;
+3. worktree is clean;
+4. HEAD is exactly one commit above the event base revision;
+5. commit parent equals the exact event revision;
+6. required Meta-RLR trailers are present and unique;
+7. trailer event id equals the current event;
+8. trailer profile id equals current `profile_for_event()` routing;
+9. trailer todo id is a valid LoopX todo id;
+10. trailer turn id equals the Host's deterministic event/todo turn id;
+11. changed-path set is non-empty.
 
-Success requires all of the following:
+Even after all provenance checks pass, the Host **reruns the RLR verification profile** against the recovered worktree. Only a fresh verification PASS allows settlement replay.
 
-1. Event validation passed.
-2. LoopX authorized execution and exact todo claim succeeded.
-3. Codex process completed without host-level failure.
-4. Real repository state was inspected after Codex.
-5. No forbidden host-owned paths or authority boundaries were violated.
-6. The RLR verification profile passed.
-7. LoopX completion/writeback succeeded.
-8. State refresh succeeded.
-9. Quota spend succeeded only after validated writeback.
+Recovery then performs:
 
-A Codex `status=changed` response alone is not success. A clean diff may be valid only when the worker truthfully reports `no_change` and independent verification proves the event is already resolved; otherwise it is blocked/no-progress, not a completed repair.
+```text
+todo complete(same turn id)
+        ↓
+quota spend-slot(same turn id)
+```
 
-## 11. Failure semantics
+LoopX's native idempotency makes this safe whether the prior process crashed before completion, after completion, or after spend receipt creation.
 
-The host fails closed at each irreversible boundary.
+If an existing worktree is dirty, has multiple commits, has wrong provenance, or otherwise cannot be proven to be the exact verified repair, Phase 2 fails closed. It does not resume an ambiguous Codex editing session.
 
-- Quota says no run → no Codex call, no claim, no spend.
+## 14. Verification and success
+
+Fresh repair success requires:
+
+1. event validation passes;
+2. unscoped LoopX frontier selects the event-bound todo;
+3. scoped LoopX frontier under the deterministic turn id still selects the same todo;
+4. exact todo claim succeeds;
+5. worktree base equals the event revision;
+6. Codex completes without host-level failure;
+7. real Git diff exists and Codex did not move HEAD;
+8. the RLR verification profile passes;
+9. changed paths remain identical after verification;
+10. Host creates and reads back the provenance-bound verified commit;
+11. LoopX `todo complete` succeeds under the same turn id;
+12. LoopX `quota spend-slot` succeeds under the same turn id.
+
+A Codex `status=changed` response alone is never success evidence.
+
+## 15. Failure semantics
+
+- Recovery provenance cannot be proven → fail closed; do not settle.
+- Recovery re-verification fails → do not settle.
+- Unscoped quota says no run → no claim/Codex/spend.
+- Unscoped quota selects another todo → defer with no write-capable action.
+- Scoped quota says no run or changes frontier → no claim/Codex/spend.
 - Claim fails → no Codex call.
 - Worktree creation fails → no Codex call.
-- Codex fails → no todo completion, no spend.
-- Verification fails → no todo completion, no spend, no publication.
-- LoopX writeback fails → no spend, no publication.
-- Refresh fails → no spend, no publication.
-- Spend fails after completion → report accounting failure; do not fabricate success.
-- Publication fails after verified completion → local repair remains verified, publication is a separate failed boundary and must not rewrite verification truth.
+- Codex fails → no completion/spend.
+- Verification fails → no completion/spend/publication.
+- Verified commit creation/readback fails → no completion/spend.
+- Todo completion fails → no spend.
+- Spend fails after completion → report accounting failure; never fabricate success.
 
-Raw stdout/stderr, credentials, private paths, and full transcripts are not copied into LoopX evidence. Existing digest/bounded evidence principles are preserved.
+Raw stdout/stderr, credentials, private paths, and full Codex transcripts are not maintenance truth.
 
-## 12. Publication boundary
+## 16. Publication boundary
 
-GitHub publication is optional and downstream of local verification.
+GitHub publication is optional and downstream of local verification. It is not required for the Phase 2a local one-turn host.
 
-When enabled, a narrow publisher may:
+A later narrow publisher may push an already-verified repair branch and create a **Draft PR**. It must never merge, force-push `main`, or become the loop scheduler/state owner.
 
-- verify the repair branch and commit identity;
-- push that branch;
-- create a **Draft PR**;
-- record the returned PR reference as compact evidence.
-
-It must never:
-
-- merge;
-- force-push;
-- update `main`;
-- bypass failed verification;
-- turn GitHub into the loop scheduler/state owner.
-
-Phase 2 tests may use a fake publisher. Real GitHub publication is qualified separately on Windows after the local turn is proven.
-
-## 13. Proposed module boundaries
+## 17. Module boundaries
 
 ```text
 src/rlr_maintenance/
@@ -311,55 +332,32 @@ src/rlr_maintenance/
 ├── observer.py        # existing observation authority
 ├── profiles.py        # existing profile/routing authority
 ├── verification.py    # existing independent verifier
-├── loopx_cli.py       # extend documented lifecycle wrappers
-├── codex_cli.py       # new external Codex adapter
-├── workspace.py       # new Git worktree boundary
-└── host.py            # new one-turn coordinator; no durable state
+├── loopx_cli.py       # external pinned LoopX CLI boundary
+├── codex_cli.py       # external Codex adapter
+├── workspace.py       # Git worktree + verified-commit/recovery boundary
+└── host.py            # stateless one-turn coordinator
 
 meta_rlr.py            # thin local CLI entry point
 ```
 
-A publication adapter is added only if it stays narrow and independent; otherwise publication remains explicitly outside Phase 2a rather than being forced into `host.py`.
+No daemon, scheduler, database, or second state store is added.
 
-## 14. Rejected designs
+## 18. Phase 2 scope
 
-### GitHub Actions as runtime controller
-Rejected. Formal runtime is local Windows; GitHub is source/PR/CI authority, not maintenance scheduling authority.
-
-### Permanent local daemon with its own timer
-Rejected. LoopX already owns quota/scheduler hints. The host performs one turn and exits.
-
-### New Meta-RLR database/queue
-Rejected. Duplicates LoopX.
-
-### LoopX Python imports
-Rejected. Violates provider-neutral external boundary and pin portability.
-
-### Experimental `loopx turn run-once` in Phase 2
-Rejected for now. Direct CLI is the qualified compatibility baseline. The typed Turn path can be evaluated later as a deliberate replacement, never run in parallel with the direct sequence.
-
-### Third-party agent orchestrator
-Rejected. Existing orchestrators commonly duplicate session, scheduling, todo, worktree, or PR authority already owned by LoopX/Git.
-
-### Automatic merge or automatic scientific-contract change
-Rejected. Human approval remains required for merge and for intentional RLR DAG/contract policy changes.
-
-## 15. Phase 2 scope
-
-### In scope
+In scope:
 
 - local one-turn coordinator;
-- fresh LoopX quota/claim/writeback/refresh/spend flow;
-- isolated repair worktree;
+- LoopX todo/frontier/claim/completion/spend lifecycle;
+- two-stage quota binding;
+- isolated exact-revision repair worktree;
 - non-interactive bounded Codex worker;
-- exact event-revision binding;
 - existing verification profile routing/execution;
-- structured local turn receipt/result;
+- Host-created provenance-bound verified commit;
+- post-verification crash recovery and idempotent LoopX settlement replay;
 - thin local CLI;
-- tests for all fail-closed boundaries;
-- optional Draft PR publication only after verification if it remains architecturally narrow.
+- fail-closed architecture and regression tests.
 
-### Out of scope
+Out of scope:
 
 - GitHub-driven wake/scheduling;
 - continuous daemon;
@@ -367,30 +365,31 @@ Rejected. Human approval remains required for merge and for intentional RLR DAG/
 - automatic RLR scientific DAG changes;
 - automatic contract-policy changes;
 - LoopX source modification;
-- second maintenance state store;
+- second maintenance state store or transaction journal;
 - stale-event auto-rebase;
-- automatic architecture-drift synthesis/dreaming policy;
-- literature/fetch-tool redesign unrelated to the maintenance turn.
+- resume of ambiguous pre-verification Codex sessions;
+- unrelated literature/fetch-tool redesign.
 
-## 16. Acceptance criteria
+## 19. Acceptance criteria
 
 Phase 2 code is ready for a real local pilot only when automated tests prove:
 
-1. No `research_loop → rlr_maintenance` or LoopX internal dependency is introduced.
-2. A no-run quota packet causes zero Codex invocations and zero writes/spend.
-3. Exactly one runnable todo can be claimed and executed.
-4. Multiple candidates cannot be silently auto-prioritized by host policy.
-5. Claim failure prevents worktree/Codex execution.
-6. Worktree base equals the event's exact RLR revision.
-7. Codex is invoked with a bounded working root and without dangerous sandbox bypass.
-8. Verification failure prevents complete/spend/publish.
-9. Successful verification is followed by complete → refresh → spend in that order.
-10. Raw logs/transcripts/private paths are not persisted as LoopX evidence.
-11. Restarting the host requires no host-owned session database.
-12. Full RLR regression remains green.
-13. GitHub CI is green on the Draft PR.
-14. A later Windows acceptance proves the real pinned LoopX CLI + real Codex CLI + real RLR verification path before merge approval.
+1. No `research_loop → rlr_maintenance` or LoopX-internal dependency is introduced.
+2. A recoverable verified commit is reverified and settled without rerunning Codex.
+3. Invalid/dirty/ambiguous recovery state fails closed.
+4. A no-run unscoped quota packet causes zero Codex invocations and zero spend.
+5. The Host creates no settlement turn until the unscoped frontier selects the event-bound todo.
+6. The scoped quota call uses a deterministic turn id and must still select the same todo.
+7. Worktree base equals the event's exact RLR revision.
+8. Codex is invoked only after claim and cannot commit/push/merge.
+9. Verification failure prevents verified commit, complete, and spend.
+10. Successful verification is followed by a provenance-bound local commit, then `complete(turn id) → spend(turn id)`.
+11. The verified commit is read back through the recovery parser before success.
+12. No raw transcript/private path becomes LoopX maintenance truth.
+13. Full RLR regression remains green.
+14. GitHub CI is green on the Draft PR.
+15. Native Windows acceptance proves the real pinned LoopX CLI + real Codex CLI + real RLR verification + crash-recovery settlement path before merge approval.
 
-## 17. Coherence check
+## 20. Coherence check
 
-The design preserves the Phase 1 authority model rather than replacing it. The only new responsibility is local sequencing across already-owned boundaries. Every durable fact has exactly one owner, every success claim is independently verified, and every downstream write is ordered after the prerequisite evidence. GitHub is deliberately absent from the core run loop, while local Windows remains the authoritative execution environment.
+The design preserves Phase 1 rather than replacing it. The only new responsibility is local sequencing across already-owned boundaries. LoopX remains the sole maintenance lifecycle authority, Git remains source/recovery authority, RLR remains verification authority, and the Host remains disposable. Crash recovery reuses Git provenance plus LoopX's native idempotent settlement instead of introducing a Meta-RLR state database or compatibility patch stack.
