@@ -201,12 +201,42 @@ class GitWorkspace:
             profile_id=trailers["profile_id"],
         )
 
-    def commit_verified(self, work: RepairWorkspace, *, changed_paths: Sequence[str], message: str) -> str:
+    def commit_verified(
+        self,
+        work: RepairWorkspace,
+        *,
+        changed_paths: Sequence[str],
+        message: str,
+        event_id: str,
+        todo_id: str,
+        turn_instance_id: str,
+        profile_id: str,
+    ) -> str:
         expected = tuple(sorted(set(str(x) for x in changed_paths)))
         if not expected:
             raise GitWorkspaceError("no verified changed paths")
         if not message.strip() or "\n" in message or len(message) > 200:
             raise ValueError("invalid commit message")
+        if not work.repair_key:
+            raise GitWorkspaceError("repair worktree has no recovery key")
+        binding_text = "\n".join(
+            (
+                f"Meta-RLR-Repair-Key: {work.repair_key}",
+                f"Meta-RLR-Event-ID: {event_id}",
+                f"Meta-RLR-Todo-ID: {todo_id}",
+                f"Meta-RLR-Turn-ID: {turn_instance_id}",
+                f"Meta-RLR-Profile-ID: {profile_id}",
+            )
+        )
+        trailers = self._repair_trailers(binding_text)
+        if trailers["event_id"] != event_id or not re.fullmatch(r"rme-[0-9a-f]{20}", event_id):
+            raise GitWorkspaceError("invalid Meta-RLR event id")
+        if trailers["todo_id"] != todo_id or not re.fullmatch(r"todo_[A-Za-z0-9_-]+", todo_id):
+            raise GitWorkspaceError("invalid LoopX todo id")
+        if trailers["turn_instance_id"] != turn_instance_id or not re.fullmatch(r"meta-rlr:[!-~]+", turn_instance_id):
+            raise GitWorkspaceError("invalid Meta-RLR turn id")
+        if trailers["profile_id"] != profile_id or not re.fullmatch(r"[A-Za-z0-9_.-]+", profile_id):
+            raise GitWorkspaceError("invalid verification profile id")
         current = self.inspect(work)
         if current.head_sha != work.base_sha:
             raise GitWorkspaceError("worker changed HEAD")
@@ -216,8 +246,18 @@ class GitWorkspace:
         staged = self._safe_paths(self._stdout(self._run(work.path, ["diff", "--cached", "--name-only"])))
         if staged != expected:
             raise GitWorkspaceError("staged paths differ from verified paths")
-        self._run(work.path, ["commit", "-m", message])
+        self._run(work.path, ["commit", "-m", message, "-m", binding_text])
         commit_sha = self._stdout(self._run(work.path, ["rev-parse", "HEAD"]))
         if not re.fullmatch(r"[0-9a-f]{40}", commit_sha) or commit_sha == work.base_sha:
             raise GitWorkspaceError("verified commit missing")
+        binding = self.read_verified_commit(work)
+        if (
+            binding.commit_sha != commit_sha
+            or binding.changed_paths != expected
+            or binding.event_id != event_id
+            or binding.todo_id != todo_id
+            or binding.turn_instance_id != turn_instance_id
+            or binding.profile_id != profile_id
+        ):
+            raise GitWorkspaceError("verified commit provenance readback mismatch")
         return commit_sha
