@@ -12,6 +12,9 @@ class GitWorkspaceError(RuntimeError):
     pass
 
 
+_LOOPX_TODO_ID_PATTERN = re.compile(r"^todo_[a-z0-9_-]{3,64}$")
+
+
 @dataclass(frozen=True)
 class RepairWorkspace:
     path: Path
@@ -184,7 +187,7 @@ class GitWorkspace:
             raise GitWorkspaceError("repair commit recovery key mismatch")
         if not re.fullmatch(r"rme-[0-9a-f]{20}", trailers["event_id"]):
             raise GitWorkspaceError("invalid Meta-RLR event id trailer")
-        if not re.fullmatch(r"todo_[A-Za-z0-9_-]+", trailers["todo_id"]):
+        if not _LOOPX_TODO_ID_PATTERN.fullmatch(trailers["todo_id"]):
             raise GitWorkspaceError("invalid LoopX todo id trailer")
         if not re.fullmatch(r"meta-rlr:[!-~]+", trailers["turn_instance_id"]):
             raise GitWorkspaceError("invalid Meta-RLR turn id trailer")
@@ -231,7 +234,7 @@ class GitWorkspace:
         trailers = self._repair_trailers(binding_text)
         if trailers["event_id"] != event_id or not re.fullmatch(r"rme-[0-9a-f]{20}", event_id):
             raise GitWorkspaceError("invalid Meta-RLR event id")
-        if trailers["todo_id"] != todo_id or not re.fullmatch(r"todo_[A-Za-z0-9_-]+", todo_id):
+        if trailers["todo_id"] != todo_id or not _LOOPX_TODO_ID_PATTERN.fullmatch(todo_id):
             raise GitWorkspaceError("invalid LoopX todo id")
         if trailers["turn_instance_id"] != turn_instance_id or not re.fullmatch(r"meta-rlr:[!-~]+", turn_instance_id):
             raise GitWorkspaceError("invalid Meta-RLR turn id")
