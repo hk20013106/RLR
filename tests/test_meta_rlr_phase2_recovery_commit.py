@@ -21,8 +21,7 @@ class C:
 def test_verified_commit_is_reverified_and_settled_without_codex(tmp_path):
     e=observe_contract_failure(component="l0_restore",error_code="L0_STATE_HASH_MISMATCH",expected_contract="l0_restore_fail_closed",rlr_revision="a"*40,observed_at="2026-08-13T22:00:00+08:00")
     lx=L(); v=lambda p,r: SimpleNamespace(passed=True)
-    control=tmp_path/"control"
-    result=MetaRLRHost(loopx=lx,codex=C(),workspace=W(tmp_path,e["event_id"]),verifier=v,loopx_cwd=control).run_once(event=e,goal_id="g",agent_id="a")
+    result=MetaRLRHost(loopx=lx,codex=C(),workspace=W(tmp_path,e["event_id"]),verifier=v,loopx_cwd=tmp_path/"control").run_once(event=e,goal_id="g",agent_id="a")
     expected_turn=_turn_instance_id(e["event_id"],"todo_event")
     assert result.outcome=="recovered"
     assert result.commit_sha=="b"*40
@@ -30,4 +29,4 @@ def test_verified_commit_is_reverified_and_settled_without_codex(tmp_path):
     assert all(k["turn_instance_id"]==expected_turn for _,k in lx.calls)
     assert lx.calls[1][1]["delivery_outcome"]=="outcome_progress"
     assert lx.calls[1][1]["delivery_workspace_path"]==tmp_path
-    assert lx.calls[1][1]["project"]==control
+    assert "project" not in lx.calls[1][1]
