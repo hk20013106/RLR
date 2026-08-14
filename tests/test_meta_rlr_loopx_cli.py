@@ -20,7 +20,7 @@ def _write_fake_loopx(tmp_path: Path, body: str) -> tuple[str, str]:
     return str(script), str(argv_file)
 
 
-def test_quota_should_run_uses_documented_json_cli_contract(tmp_path):
+def test_unconfigured_quota_should_run_preserves_documented_json_cli_contract(tmp_path):
     script, argv_file = _write_fake_loopx(
         tmp_path,
         "print(json.dumps({'ok': True, 'route': 'ready_for_host'}))\n",
@@ -39,6 +39,67 @@ def test_quota_should_run_uses_documented_json_cli_contract(tmp_path):
     assert recorded[4:] == [
         "--goal-id", "meta-rlr",
         "--agent-id", "codex-maintainer",
+        "--available-capability", "shell",
+    ]
+
+
+def test_quota_should_run_adds_configured_runtime_profile_and_scan_root(tmp_path):
+    script, argv_file = _write_fake_loopx(
+        tmp_path,
+        "print(json.dumps({'ok': True, 'route': 'ready_for_host'}))\n",
+    )
+    scan_root = tmp_path / "public-acceptance-root"
+    client = LoopXCli(
+        executable=(sys.executable, script),
+        quota_runtime_profile="outer_controller",
+        quota_scan_root=scan_root,
+    )
+
+    client.quota_should_run(
+        goal_id="meta-rlr",
+        agent_id="meta-rlr-native-windows",
+        capabilities=("shell",),
+    )
+
+    recorded = json.loads(Path(argv_file).read_text(encoding="utf-8"))
+    assert recorded == [
+        "--format", "json", "quota", "should-run",
+        "--goal-id", "meta-rlr",
+        "--agent-id", "meta-rlr-native-windows",
+        "--runtime-profile", "outer_controller",
+        "--scan-root", str(scan_root),
+        "--available-capability", "shell",
+    ]
+
+
+def test_scoped_quota_should_run_keeps_turn_id_with_configured_context(tmp_path):
+    script, argv_file = _write_fake_loopx(
+        tmp_path,
+        "print(json.dumps({'ok': True, 'route': 'ready_for_host'}))\n",
+    )
+    scan_root = tmp_path / "public-acceptance-root"
+    turn_id = "meta-rlr:event-123:todo-456"
+    client = LoopXCli(
+        executable=(sys.executable, script),
+        quota_runtime_profile="outer_controller",
+        quota_scan_root=scan_root,
+    )
+
+    client.quota_should_run(
+        goal_id="meta-rlr",
+        agent_id="meta-rlr-native-windows",
+        capabilities=("shell",),
+        turn_instance_id=turn_id,
+    )
+
+    recorded = json.loads(Path(argv_file).read_text(encoding="utf-8"))
+    assert recorded == [
+        "--format", "json", "quota", "should-run",
+        "--goal-id", "meta-rlr",
+        "--agent-id", "meta-rlr-native-windows",
+        "--runtime-profile", "outer_controller",
+        "--scan-root", str(scan_root),
+        "--turn-instance-id", turn_id,
         "--available-capability", "shell",
     ]
 

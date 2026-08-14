@@ -19,9 +19,17 @@ def _command_prefix(executable: str | Sequence[str]) -> tuple[str, ...]:
 
 
 class LoopXCli:
-    def __init__(self, executable: str | Sequence[str] = "loopx", registry: str | None = None) -> None:
+    def __init__(
+        self,
+        executable: str | Sequence[str] = "loopx",
+        registry: str | None = None,
+        quota_runtime_profile: str | None = None,
+        quota_scan_root: str | Path | None = None,
+    ) -> None:
         self._executable = _command_prefix(executable)
         self._registry = str(registry) if registry else None
+        self._quota_runtime_profile = str(quota_runtime_profile) if quota_runtime_profile else None
+        self._quota_scan_root = str(quota_scan_root) if quota_scan_root else None
 
     def _base_command(self) -> list[str]:
         command = [*self._executable, "--format", "json"]
@@ -61,6 +69,10 @@ class LoopXCli:
 
     def quota_should_run(self, *, goal_id: str, agent_id: str, capabilities: Sequence[str] = ("shell",), turn_instance_id: str | None = None, cwd: str | Path | None = None) -> dict:
         args = ["quota", "should-run", "--goal-id", str(goal_id), "--agent-id", str(agent_id)]
+        if self._quota_runtime_profile is not None:
+            args.extend(["--runtime-profile", self._quota_runtime_profile])
+        if self._quota_scan_root is not None:
+            args.extend(["--scan-root", self._quota_scan_root])
         if turn_instance_id is not None:
             args.extend(["--turn-instance-id", str(turn_instance_id)])
         args.extend(self._capability_args(capabilities))
