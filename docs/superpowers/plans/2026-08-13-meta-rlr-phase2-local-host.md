@@ -5,123 +5,126 @@ Design: `docs/superpowers/specs/2026-08-13-meta-rlr-phase2-local-host-design.md`
 
 ## Goal
 
-Implement the smallest local Windows-oriented host that executes exactly one LoopX-governed Meta-RLR maintenance turn using the existing Phase 1 observation and verification boundary.
+Implement the smallest local Windows-oriented Host that executes exactly one LoopX-governed Meta-RLR software-maintenance turn using the existing Phase 1 observation and verification boundary.
 
-The implementation reuses LoopX Path A, native Git worktrees, Codex CLI, and existing RLR verification profiles. It must not add a scheduler, database, scientific DAG node, LoopX internal dependency, GitHub runtime controller, automatic merge, or compatibility fallback.
+Reuse LoopX Path A, native Git worktrees, Codex CLI, and existing RLR verification profiles. Do not add a scheduler, database, scientific DAG node, LoopX-internal dependency, GitHub runtime controller, automatic merge, or compatibility fallback.
 
 ## Frozen architectural constraints
 
 1. RLR scientific DAG and `src/research_loop/` business logic are out of scope.
-2. LoopX remains the only durable maintenance state owner.
-3. Git/GitHub remains source/PR authority; GitHub is not the runtime scheduler.
-4. The Host owns no durable state and runs one bounded turn only.
+2. LoopX remains the only durable maintenance lifecycle/writeback/settlement owner.
+3. Git/GitHub remain source/PR authorities; GitHub is not the runtime scheduler.
+4. The Host is one-shot and owns no durable state.
 5. Event revision and repair worktree base must match exactly.
 6. Codex cannot commit, push, merge, mutate LoopX, or count its own output as verification.
-7. Independent RLR verification is required before any success settlement.
-8. Verification failure cannot complete a todo, spend quota, or publish.
-9. LoopX 0.4.5 pinned source is the CLI contract authority.
-10. There is no Phase 2 `refresh-state` step. The canonical settlement is `todo complete(turn_id) → quota spend-slot(turn_id)`.
-11. The Host must use two-stage quota authorization: unscoped frontier read first, scoped `turn_instance_id` read second.
-12. Crash recovery reuses Git verified-commit provenance plus LoopX native idempotent settlement; no Host journal/database is allowed.
-13. Production changes require RED tests, targeted verification, then full regression.
+7. Independent RLR verification is required before success settlement.
+8. LoopX pinned commit `80877982216577174e3e7c7cca9804c5a3a3148b` is the CLI contract authority.
+9. Fresh execution uses two-stage quota authorization: unscoped frontier first, then scoped `turn_instance_id`.
+10. Canonical successful settlement is `todo complete(turn_id) → refresh-state(turn_id, outcome_progress, repair worktree) → quota spend-slot(turn_id)`.
+11. `refresh-state` is the durable writeback required by LoopX before turn-scoped spend; it must not be bypassed or emulated in Meta-RLR.
+12. Crash recovery reuses Git verified-commit provenance plus LoopX native idempotent completion/refresh/spend replay; no Host journal/database is allowed.
+13. Production changes require RED tests, minimal GREEN implementation, targeted verification, then full regression.
 14. No auto-merge.
 
-## Phase A — Ground and freeze contracts
+## Phase A — Ground contracts and reuse
 
 ### A1. Baseline review
 
-Inspect `AGENTS.md`, Phase 1 Meta-RLR contracts/tests, current `main`, `loopx_cli.py`, RLR verification profiles, and root CLI conventions.
+Inspect `AGENTS.md`, current `main`, Phase 1 Meta-RLR code/tests, existing verification profiles, and root CLI conventions.
 
 Acceptance:
 
-- no scientific/runtime authority needs to move;
-- Phase 2 can remain under `src/rlr_maintenance/`;
-- no duplicate validator/profile registry is needed.
+- no scientific/runtime authority moves;
+- Phase 2 remains under `src/rlr_maintenance/`;
+- no duplicate validator/profile/state registry is introduced.
 
 ### A2. Reuse survey
 
-Confirm from pinned LoopX 0.4.5 source/docs that direct CLI Path A is the compatibility baseline and already owns todo/quota/claim/completion/settlement state.
+Confirm pinned LoopX direct CLI Path A is the compatibility baseline and already owns todo, quota, claim, completion, refresh writeback, and spend.
 
-Confirm Codex CLI provides non-interactive bounded execution.
+Confirm Codex CLI provides bounded non-interactive execution.
 
-Reject third-party orchestrators that duplicate LoopX scheduling/todo/session state or Git worktree authority.
+Reject third-party orchestrators that duplicate LoopX lifecycle state or Git worktree authority.
 
-### A3. Correct the early settlement assumption
+### A3. Verify settlement from source, not draft assumptions
 
-Verify the real pinned LoopX CLI rather than relying on draft documentation.
+Pinned LoopX source/docs prove:
 
-Result:
+- `refresh-state` is a registered production CLI command;
+- custom-runner Path A requires writeback then refresh then spend;
+- turn-scoped `refresh-state` requires an accountable `delivery_outcome`;
+- accountable outcomes are `outcome_progress` and `primary_goal_outcome`;
+- Meta-RLR uses `outcome_progress` for one verified software repair;
+- `quota spend-slot` requires the matching accountable refresh-state writeback/receipt;
+- completion, refresh writeback, and spend are replayable under the same settlement identity.
 
-- `refresh-state` is not a production command and must not be wrapped or emulated;
-- `todo complete` accepts the settlement turn identity;
-- `quota spend-slot` accepts the same turn identity;
-- both completion and spend support idempotent replay for the same identity.
-
-This correction replaces the early draft sequence `complete → refresh → spend` with `complete(turn_id) → spend(turn_id)`.
+Any earlier Phase 2 draft claiming that `refresh-state` does not exist is superseded.
 
 ## Phase B — TDD contracts
 
-### B1. LoopX external boundary tests
+### B1. LoopX external boundary
 
-Require only documented direct-CLI wrappers:
+Tests require wrappers for:
 
 - `quota should-run` with and without `turn_instance_id`;
 - `todo add`;
 - `todo claim`;
-- blocked todo update;
+- blocked `todo update`;
 - `todo complete(turn_instance_id)`;
+- `refresh-state(todo_id, turn_instance_id, delivery_outcome, delivery_workspace_path)`;
 - `quota spend-slot(turn_instance_id)`.
 
 Assertions:
 
-- argv uses lists and `shell=False`;
-- registry remains explicit;
+- argv list + `shell=False`;
+- explicit registry remains supported;
 - malformed/non-object/non-zero output fails closed;
 - no LoopX Python internals are imported;
-- no wrapper is added for nonexistent `refresh-state`.
+- turn-scoped refresh accepts only accountable delivery outcomes;
+- the same turn id crosses complete, refresh, and spend.
 
-### B2. Codex adapter tests
+### B2. Codex adapter
 
 Require:
 
 - `codex exec`;
-- exact worktree cwd;
+- exact repair-worktree cwd;
 - workspace-write sandbox;
 - ephemeral/non-interactive execution;
 - structured bounded final result;
 - no dangerous sandbox bypass;
-- no raw transcript persisted as maintenance truth.
+- no raw transcript as maintenance truth.
 
-### B3. Git workspace tests
+### B3. Git workspace and recovery
 
 Require:
 
-- exact event revision resolution;
-- deterministic event/todo branch/worktree identity;
+- exact event revision;
+- deterministic event/todo worktree identity;
 - collision fail-closed behavior;
 - changed paths derived from Git;
-- verified commit created only from the independently verified path set;
-- verified commit carries public Meta-RLR provenance trailers;
-- the production commit is immediately read back through the same recovery parser;
-- recovery accepts only one clean commit directly above the event base revision;
-- dirty, ambiguous, wrong-parent, wrong-provenance state fails closed.
+- Host commits exactly the verified path set;
+- commit includes public Meta-RLR provenance trailers;
+- commit is immediately read back through the recovery parser;
+- recovery accepts only one clean commit directly above the event base;
+- dirty/ambiguous/wrong-parent/wrong-provenance state fails closed.
 
-### B4. Host frontier tests
+### B4. Host frontier
 
 Require:
 
-1. recovery probe occurs before creating a new maintenance todo;
-2. if there is no recoverable commit, LoopX idempotent `todo add` returns the event-bound todo;
-3. first `quota should-run` is unscoped;
-4. no-run stops without claim/Codex/spend;
-5. a different frontier todo causes defer with no write-capable action;
-6. only after the event todo is selected does the Host derive `turn_instance_id`;
-7. second `quota should-run(turn_id)` must still select the same todo;
+1. recovery probe before fresh todo creation;
+2. idempotent LoopX todo add if no recovery exists;
+3. first quota read unscoped;
+4. no-run stops before claim/Codex;
+5. different frontier defers;
+6. only matching event todo permits deterministic turn creation;
+7. second quota read uses that turn id and must preserve the same frontier;
 8. only then may claim occur.
 
-### B5. Host success/failure tests
+### B5. Host success/failure order
 
-Fresh success order:
+Fresh success:
 
 ```text
 recovery probe
@@ -136,43 +139,41 @@ recovery probe
 → Git re-inspection
 → provenance-bound verified commit
 → todo complete(turn_id)
+→ refresh-state(turn_id, outcome_progress, repair worktree)
 → quota spend-slot(turn_id)
 ```
 
-Failure assertions:
+Failure gates:
 
-- claim failure → no Codex;
-- worktree failure → no Codex;
-- Codex failure → no complete/spend;
-- worker-changed HEAD → no verification success;
-- empty diff → blocked;
-- verification fail → no verified commit/complete/spend;
+- claim/worktree failure → no Codex;
+- Codex failure → no success settlement;
+- worker HEAD movement/empty diff → blocked;
+- verification failure → no verified commit/complete/refresh/spend;
 - post-verification diff mutation → blocked;
-- commit/readback fail → no complete/spend;
-- completion fail → no spend.
+- commit/readback failure → no complete/refresh/spend;
+- completion failure → no refresh/spend;
+- refresh failure → no spend.
 
-### B6. Crash-recovery tests
+### B6. Crash recovery
 
-Construct a recovery state representing:
+Represent the post-verification crash window:
 
 ```text
-scoped LoopX turn already authorized
-+ exact verified Git commit already created
+scoped LoopX turn exists
++ exact provenance-bound verified Git commit exists
 + process crashed before/during settlement
 ```
 
 Require:
 
-- Host does not call Codex;
-- commit event id matches the current maintenance event;
-- commit profile id matches current `profile_for_event()`;
-- commit todo id is a valid LoopX todo id;
-- commit turn id equals the deterministic current event/todo turn id;
-- recovered commit is reverified by RLR;
-- only a fresh verification PASS allows `complete(turn_id) → spend(turn_id)` replay;
-- no Host database/journal is consulted.
+- no Codex rerun;
+- event/profile/base/todo/turn provenance matches current facts;
+- recovered commit is independently reverified;
+- fresh verification PASS replays `complete → refresh → spend` under the same turn id;
+- same repair worktree is supplied as delivery workspace;
+- no Host journal/database is consulted.
 
-### B7. Architecture tests
+### B7. Architecture guards
 
 Prohibit:
 
@@ -180,91 +181,61 @@ Prohibit:
 - LoopX Python internal imports;
 - daemon/scheduler/database/state-store modules;
 - GitHub workflow as Meta-RLR runtime owner;
-- automatic merge authority;
+- automatic merge;
 - duplicate state/provenance authority.
 
 ## Phase C — Minimal implementation
 
 ### C1. `LoopXCli`
 
-Keep `run_json()` as the only subprocess/JSON parser. Add only pinned Path A lifecycle wrappers.
+Keep `run_json()` as the only subprocess/JSON parser. Add only pinned direct-CLI lifecycle wrappers, including accountable `refresh_state()`.
 
 ### C2. `CodexCli`
 
-External process adapter only. It constructs safe argv, runs Codex in the repair worktree, parses the bounded final result, and returns no durable raw transcript.
+External worker adapter only. It builds safe argv, runs in the isolated worktree, parses bounded output, and persists no raw transcript as truth.
 
 ### C3. `GitWorkspace`
 
-Own only Git mechanics:
-
-- exact base resolution;
-- create isolated repair worktree;
-- inspect real HEAD/diff;
-- stage exactly verified paths;
-- create provenance-bound verified commit;
-- read and validate a recoverable verified commit.
+Own only Git mechanics: exact base, worktree, inspection, exact verified staging, provenance-bound commit, and verified-commit recovery readback.
 
 ### C4. `MetaRLRHost`
 
-Own only sequencing:
-
-- validate event;
-- route to existing verification profile;
-- recovery probe;
-- fresh todo/frontier flow when no recovery exists;
-- two-stage quota binding;
-- claim;
-- Codex;
-- independent RLR verification;
-- verified commit;
-- LoopX settlement.
+Own sequencing only: validate event, route profile, recovery probe, fresh frontier, claim, Codex, independent RLR verification, verified commit, complete, refresh, spend.
 
 The Host persists no state.
 
 ### C5. Local CLI
 
-Provide only an explicit one-shot command:
+Expose one explicit command only:
 
 ```powershell
 python meta_rlr.py run-once `
   --event <event.json> `
   --repo <RLR checkout> `
-  --loopx-project <control root> `
+  --loopx-project <LoopX control root> `
   --goal-id <goal> `
   --agent-id <agent> `
   --workspace-parent <path> `
   [--registry <path>]
 ```
 
+`--loopx-project` is a CLI working/control root, not authority to override LoopX's registered goal project. `refresh-state` therefore lets LoopX resolve its project from the registry and separately receives the repair worktree as `delivery_workspace_path`.
+
 No permanent loop or GitHub wake controller is introduced.
 
-## Phase D — Automated verification
+## Phase D — Automated qualification
 
 ### D1. Targeted Phase 2 tests
 
-Run all `tests/test_meta_rlr_*` relevant to:
-
-- LoopX CLI;
-- Codex CLI;
-- workspace/recovery;
-- Host/frontier;
-- architecture.
-
-RED failures must correspond to missing/incorrect Phase 2 behavior, not test defects.
+Run relevant `tests/test_meta_rlr_*` for LoopX, Codex, Host/frontier, workspace/recovery, and architecture.
 
 ### D2. Existing Meta-RLR regression
-
-Run:
 
 ```powershell
 python -m pytest tests/test_meta_rlr_*.py -q
 ```
 
-Phase 1 must remain intact.
-
 ### D3. Full RLR regression
-
-Run:
 
 ```powershell
 python -m pytest -q
@@ -272,67 +243,67 @@ python run_loop.py --help
 python meta_rlr.py --help
 ```
 
-No product claim is made until the exact PR head passes.
+No completion claim until the exact PR head passes.
 
-### D4. Diff/architecture review
+### D4. Diff/coherence review
 
-Verify exact PR diff contains no:
+Verify no:
 
-- `src/research_loop/**` business-logic change;
+- `src/research_loop/**` business-logic changes;
 - LoopX vendoring;
 - second scheduler/database;
 - GitHub runtime workflow;
-- auto-merge;
+- automatic merge;
 - compatibility fallback;
 - unrelated refactor.
 
-If found, redesign rather than justify afterward.
+If found, redesign instead of rationalizing the drift.
 
 ## Phase E — Draft PR qualification
 
-Keep PR #25 Draft through automated code qualification.
+Keep PR #25 Draft through automated qualification.
 
-The PR must state:
+PR evidence must state:
 
 - local Windows runtime is authoritative;
 - GitHub CI is development verification only;
-- LoopX direct CLI pin assumptions;
-- crash recovery uses Git + LoopX native idempotency;
+- pinned LoopX direct CLI is the integration contract;
+- real settlement includes accountable refresh-state before spend;
+- crash recovery uses Git provenance + LoopX idempotent settlement;
 - no automatic merge;
-- real Windows acceptance remains required.
+- native Windows acceptance remains required.
 
 ## Phase F — Native Windows real acceptance
 
-After the exact code head is GREEN in GitHub CI, run the real pinned LoopX + Codex + Git + RLR path on native Windows.
+After an exact Phase 2 code head is GREEN, run the real pinned LoopX + Codex + Git + RLR path on native Windows.
 
 Minimum acceptance:
 
-1. isolated RLR checkout at a controlled failing revision;
-2. valid `RLRMaintenanceEvent/v1` bound to that revision;
-3. real LoopX maintenance goal/agent using pinned direct CLI;
-4. one `meta_rlr.py run-once` fresh repair;
-5. prove unscoped frontier then scoped turn binding then one claim;
-6. prove Codex modifies only the isolated worktree;
-7. prove RLR verification is independent;
-8. prove failed verification cannot commit/complete/spend;
-9. prove success creates exactly one provenance-bound verified commit;
-10. prove success completes and spends under the same turn id;
-11. simulate process interruption after verified commit but before settlement;
-12. invoke a fresh process and prove recovery re-verifies the commit, skips Codex, and safely replays complete/spend under the same turn id;
-13. prove repeated settlement does not double-complete/double-spend;
-14. prove no Host-owned session database or transcript is required.
-
-Draft PR publication, if later enabled, remains a separate downstream boundary and must stop before merge.
+1. controlled failing RLR revision;
+2. valid event bound to that exact revision;
+3. real pinned LoopX goal/agent;
+4. one fresh `meta_rlr.py run-once` repair;
+5. prove unscoped then scoped quota and one claim;
+6. prove Codex edits only the repair worktree;
+7. prove independent RLR verification;
+8. prove failed verification cannot commit/complete/refresh/spend;
+9. prove success creates one provenance-bound verified commit;
+10. prove completion uses the scoped turn id;
+11. prove `refresh-state` creates the accountable writeback for the same todo/turn and repair worktree;
+12. prove spend succeeds only after that refresh;
+13. simulate crash after verified commit at settlement boundaries;
+14. fresh process re-verifies, skips Codex, and safely replays complete/refresh/spend;
+15. repeated replay does not duplicate effects/quota;
+16. prove no Host-owned session database or transcript is required.
 
 ## Completion gate
 
-Phase 2 becomes eligible for merge review only when:
+Phase 2 is eligible for merge review only when:
 
-- design and implementation are coherent;
-- exact PR head targeted tests pass;
-- all Meta-RLR tests pass;
+- design and implementation are coherent with pinned LoopX source;
+- exact PR head Meta-RLR tests pass;
 - full RLR regression passes;
 - GitHub CI passes;
-- native Windows real LoopX + Codex + RLR fresh-turn and crash-recovery acceptance passes;
-- no production code was changed merely for stale compatibility;
+- native Windows real fresh-turn + crash-recovery acceptance passes;
+- no production code was changed for stale compatibility;
 - no second authority or automatic merge was introduced.
