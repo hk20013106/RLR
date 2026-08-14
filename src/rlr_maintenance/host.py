@@ -104,6 +104,7 @@ class MetaRLRHost:
         todo_id: str,
         turn_id: str,
         commit_sha: str,
+        worktree_path: str | Path,
         outcome: str,
     ) -> MetaRLRTurnResult:
         evidence = f"profile={profile_id} passed=true commit={commit_sha} event={event['event_id']}"
@@ -118,6 +119,17 @@ class MetaRLRHost:
             cwd=self._loopx_cwd,
         )
         _require_ok(completed, "todo complete")
+        refreshed = self._loopx.refresh_state(
+            goal_id=goal_id,
+            todo_id=todo_id,
+            agent_id=agent_id,
+            turn_instance_id=turn_id,
+            delivery_outcome="outcome_progress",
+            delivery_workspace_path=Path(worktree_path),
+            capabilities=self._capabilities,
+            cwd=self._loopx_cwd,
+        )
+        _require_ok(refreshed, "refresh-state")
         spent = self._loopx.quota_spend_slot(
             goal_id=goal_id,
             todo_id=todo_id,
@@ -172,6 +184,7 @@ class MetaRLRHost:
             todo_id=todo_id,
             turn_id=turn_id,
             commit_sha=str(getattr(binding, "commit_sha")),
+            worktree_path=work.path,
             outcome="recovered",
         )
 
@@ -265,5 +278,6 @@ class MetaRLRHost:
             todo_id=todo_id,
             turn_id=turn_id,
             commit_sha=commit_sha,
+            worktree_path=work.path,
             outcome="verified",
         )
