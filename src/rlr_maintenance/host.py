@@ -104,6 +104,7 @@ class MetaRLRHost:
         todo_id: str,
         turn_id: str,
         commit_sha: str,
+        worktree_path: str | Path,
         outcome: str,
     ) -> MetaRLRTurnResult:
         evidence = f"profile={profile_id} passed=true commit={commit_sha} event={event['event_id']}"
@@ -113,18 +114,28 @@ class MetaRLRHost:
             agent_id=agent_id,
             evidence=evidence,
             note="bounded repair independently verified and committed",
-            no_follow_up=True,
+            no_follow_up=False,
             turn_instance_id=turn_id,
             cwd=self._loopx_cwd,
         )
         _require_ok(completed, "todo complete")
+        refreshed = self._loopx.refresh_state(
+            goal_id=goal_id,
+            agent_id=agent_id,
+            todo_id=todo_id,
+            turn_instance_id=turn_id,
+            delivery_workspace_path=worktree_path,
+            capabilities=self._capabilities,
+            cwd=self._loopx_cwd,
+        )
+        _require_ok(refreshed, "refresh-state")
         spent = self._loopx.quota_spend_slot(
             goal_id=goal_id,
             todo_id=todo_id,
             agent_id=agent_id,
             capabilities=self._capabilities,
             turn_instance_id=turn_id,
-            cwd=self._loopx_cwd,
+            cwd=worktree_path,
         )
         _require_ok(spent, "quota spend-slot")
         return MetaRLRTurnResult(outcome=outcome, event_id=event["event_id"], todo_id=todo_id, profile_id=profile_id, commit_sha=commit_sha)
@@ -164,6 +175,22 @@ class MetaRLRHost:
         receipt = self._verifier(profile_id, work.path)
         if getattr(receipt, "passed", False) is not True:
             return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=todo_id, profile_id=profile_id, commit_sha=getattr(binding, "commit_sha", None), reason="recovery_verification_failed")
+        scoped = self._loopx.quota_should_run(
+            goal_id=goal_id,
+            agent_id=agent_id,
+            capabilities=self._capabilities,
+            turn_instance_id=turn_id,
+            cwd=self._loopx_cwd,
+        )
+        _require_ok(scoped, "quota should-run")
+        selected = _selected_todo(scoped)
+        settled_frontier_replay = (
+            selected is None
+            and scoped.get("should_run") is True
+            and scoped.get("decision") == "autonomous_replan_required"
+        )
+        if scoped.get("should_run") is not True or (selected != todo_id and not settled_frontier_replay):
+            return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=todo_id, profile_id=profile_id, commit_sha=getattr(binding, "commit_sha", None), reason="recovery_frontier_mismatch")
         return self._settle_verified(
             event=event,
             profile_id=profile_id,
@@ -172,6 +199,7 @@ class MetaRLRHost:
             todo_id=todo_id,
             turn_id=turn_id,
             commit_sha=str(getattr(binding, "commit_sha")),
+            worktree_path=work.path,
             outcome="recovered",
         )
 
@@ -265,5 +293,6 @@ class MetaRLRHost:
             todo_id=todo_id,
             turn_id=turn_id,
             commit_sha=commit_sha,
+            worktree_path=work.path,
             outcome="verified",
         )

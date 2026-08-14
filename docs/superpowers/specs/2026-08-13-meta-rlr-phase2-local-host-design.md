@@ -72,7 +72,7 @@ Rejected:
 
 Pinned LoopX 0.4.5 source is the authority for the CLI contract.
 
-There is **no `refresh-state` command** in the pinned production interface. Earlier Phase 2 draft text that described `complete → refresh → spend` was incorrect and is superseded by this design.
+`refresh-state` is part of the pinned production interface. In a turn-scoped settlement it is LoopX's durable settlement writeback receipt, not a second scheduler and not Host-owned state.
 
 The settlement sequence is:
 
@@ -93,14 +93,19 @@ bounded repair + independent verification
         ↓
 todo complete(turn_instance_id)
         ↓
+refresh-state(turn_instance_id, accountable delivery outcome, verified repair worktree)
+        ↓
 quota spend-slot(turn_instance_id)
 ```
 
 The first unscoped quota read prevents the host from creating a settlement identity for an unrelated frontier todo. The second scoped quota call binds the exact event/todo turn to LoopX's native heartbeat settlement identity before write-capable execution begins.
 
-LoopX 0.4.5 natively supports idempotent replay for both sides of settlement:
+The completion must not assert terminal `--no-follow-up`: terminal closure would make the subsequent quota spend invalid. The Host invokes the spend from the verified delivery worktree and supplies the configured scan root only to quota commands; it supplies neither a runtime profile nor a scan root to `refresh-state`.
+
+LoopX 0.4.5 natively supports idempotent replay for all settlement steps:
 
 - completing an already-completed todo under the same completion turn key is an idempotent replay;
+- writing back an already-recorded accountable refresh-state receipt under the same identity is an idempotent replay;
 - spending a slot under an already-settled identical heartbeat identity is an idempotent replay.
 
 Meta-RLR therefore must not create its own settlement journal.
@@ -139,11 +144,13 @@ inspect real Git diff
 route event to existing RLR verification profile
         ↓
 run independent RLR verification
-        ├─ fail → blocked writeback; no complete/spend
+        ├─ fail → blocked writeback; no complete/refresh/spend
         ↓ pass
 Host creates one verified Git commit with machine-readable provenance
         ↓
 todo complete(turn id)
+        ↓
+durable refresh-state writeback(turn id, verified repair worktree)
         ↓
 quota spend-slot(turn id)
         ↓
@@ -171,6 +178,7 @@ The host derives one deterministic settlement id from the maintenance event id a
 - scoped `quota should-run`;
 - verified Git commit provenance;
 - `todo complete`;
+- `refresh-state` durable writeback;
 - `quota spend-slot`;
 - crash recovery replay.
 
@@ -274,6 +282,8 @@ Recovery then performs:
 
 ```text
 todo complete(same turn id)
+        ↓
+refresh-state(same turn id, recovered verified worktree)
         ↓
 quota spend-slot(same turn id)
 ```
@@ -382,8 +392,8 @@ Phase 2 code is ready for a real local pilot only when automated tests prove:
 6. The scoped quota call uses a deterministic turn id and must still select the same todo.
 7. Worktree base equals the event's exact RLR revision.
 8. Codex is invoked only after claim and cannot commit/push/merge.
-9. Verification failure prevents verified commit, complete, and spend.
-10. Successful verification is followed by a provenance-bound local commit, then `complete(turn id) → spend(turn id)`.
+9. Verification failure prevents verified commit, complete, refresh, and spend.
+10. Successful verification is followed by a provenance-bound local commit, then `complete(turn id) → durable refresh-state writeback(turn id) → spend(turn id)`.
 11. The verified commit is read back through the recovery parser before success.
 12. No raw transcript/private path becomes LoopX maintenance truth.
 13. Full RLR regression remains green.

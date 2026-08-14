@@ -104,6 +104,82 @@ def test_scoped_quota_should_run_keeps_turn_id_with_configured_context(tmp_path)
     ]
 
 
+def test_refresh_state_uses_explicit_durable_settlement_writeback_contract(tmp_path):
+    script, argv_file = _write_fake_loopx(
+        tmp_path,
+        "print(json.dumps({'ok': True, 'settlement_result': {'ok': True}}))\n",
+    )
+    worktree = tmp_path / "verified-repair-worktree"
+    client = LoopXCli(
+        executable=(sys.executable, script),
+        quota_runtime_profile="outer_controller",
+        quota_scan_root=tmp_path / "quota-scan-root",
+    )
+
+    packet = client.refresh_state(
+        goal_id="meta-rlr",
+        agent_id="meta-rlr-native-windows",
+        todo_id="todo-123",
+        turn_instance_id="meta-rlr:event-123:todo-123",
+        delivery_workspace_path=worktree,
+        capabilities=("shell", "git"),
+    )
+
+    recorded = json.loads(Path(argv_file).read_text(encoding="utf-8"))
+    assert packet["ok"] is True
+    assert recorded == [
+        "--format", "json", "refresh-state",
+        "--goal-id", "meta-rlr",
+        "--agent-id", "meta-rlr-native-windows",
+        "--todo-id", "todo-123",
+        "--turn-instance-id", "meta-rlr:event-123:todo-123",
+        "--classification", "validated_progress",
+        "--delivery-batch-scale", "single_surface",
+        "--delivery-outcome", "outcome_progress",
+        "--delivery-workspace-path", str(worktree),
+        "--available-capability", "shell",
+        "--available-capability", "git",
+    ]
+    assert "--runtime-profile" not in recorded
+    assert "--scan-root" not in recorded
+
+
+def test_quota_spend_slot_uses_configured_scan_root_without_runtime_profile(tmp_path):
+    script, argv_file = _write_fake_loopx(
+        tmp_path,
+        "print(json.dumps({'ok': True, 'settlement_result': {'ok': True}}))\n",
+    )
+    scan_root = tmp_path / "public-acceptance-root"
+    client = LoopXCli(
+        executable=(sys.executable, script),
+        quota_runtime_profile="outer_controller",
+        quota_scan_root=scan_root,
+    )
+
+    client.quota_spend_slot(
+        goal_id="meta-rlr",
+        todo_id="todo-123",
+        agent_id="meta-rlr-native-windows",
+        turn_instance_id="meta-rlr:event-123:todo-123",
+        capabilities=("shell",),
+    )
+
+    recorded = json.loads(Path(argv_file).read_text(encoding="utf-8"))
+    assert recorded == [
+        "--format", "json", "quota", "spend-slot",
+        "--goal-id", "meta-rlr",
+        "--todo-id", "todo-123",
+        "--slots", "1",
+        "--source", "heartbeat",
+        "--execute",
+        "--agent-id", "meta-rlr-native-windows",
+        "--scan-root", str(scan_root),
+        "--turn-instance-id", "meta-rlr:event-123:todo-123",
+        "--available-capability", "shell",
+    ]
+    assert "--runtime-profile" not in recorded
+
+
 def test_agent_onboard_uses_other_agent_without_hidden_permissions(tmp_path):
     script, argv_file = _write_fake_loopx(
         tmp_path,
@@ -169,3 +245,18 @@ def test_nonzero_loopx_exit_never_synthesizes_success(tmp_path):
 
     with pytest.raises(LoopXError, match="exit code 7"):
         client.quota_should_run(goal_id="g", agent_id="a")
+
+
+def test_loopx_json_boundary_forces_utf8_for_windows_child_process(monkeypatch):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs)
+        return type("Completed", (), {"returncode": 0, "stdout": '{"ok": true}', "stderr": ""})()
+
+    monkeypatch.setattr("rlr_maintenance.loopx_cli.subprocess.run", fake_run)
+
+    LoopXCli().quota_should_run(goal_id="g", agent_id="a")
+
+    assert captured["env"]["PYTHONIOENCODING"] == "utf-8"
+    assert captured["env"]["PYTHONUTF8"] == "1"

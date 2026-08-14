@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -40,7 +41,10 @@ class LoopXCli:
     def run_json(self, args: Sequence[str], *, cwd: str | Path | None = None) -> dict:
         command = self._base_command()
         command.extend(str(item) for item in args)
-        completed = subprocess.run(command, cwd=Path(cwd) if cwd is not None else None, text=True, encoding="utf-8", capture_output=True, shell=False)
+        environment = dict(os.environ)
+        environment["PYTHONIOENCODING"] = "utf-8"
+        environment["PYTHONUTF8"] = "1"
+        completed = subprocess.run(command, cwd=Path(cwd) if cwd is not None else None, text=True, encoding="utf-8", capture_output=True, shell=False, env=environment)
         if completed.returncode != 0:
             raise LoopXError(f"LoopX command failed with exit code {completed.returncode}")
         raw = (completed.stdout or "").strip()
@@ -101,8 +105,38 @@ class LoopXCli:
             args.append("--no-follow-up")
         return self.run_json(args, cwd=cwd)
 
+    def refresh_state(
+        self,
+        *,
+        goal_id: str,
+        agent_id: str,
+        todo_id: str,
+        turn_instance_id: str,
+        delivery_workspace_path: str | Path,
+        capabilities: Sequence[str] = ("shell",),
+        classification: str = "validated_progress",
+        delivery_batch_scale: str = "single_surface",
+        delivery_outcome: str = "outcome_progress",
+        cwd: str | Path | None = None,
+    ) -> dict:
+        args = [
+            "refresh-state",
+            "--goal-id", str(goal_id),
+            "--agent-id", str(agent_id),
+            "--todo-id", str(todo_id),
+            "--turn-instance-id", str(turn_instance_id),
+            "--classification", str(classification),
+            "--delivery-batch-scale", str(delivery_batch_scale),
+            "--delivery-outcome", str(delivery_outcome),
+            "--delivery-workspace-path", str(delivery_workspace_path),
+        ]
+        args.extend(self._capability_args(capabilities))
+        return self.run_json(args, cwd=cwd)
+
     def quota_spend_slot(self, *, goal_id: str, todo_id: str, agent_id: str, capabilities: Sequence[str] = ("shell",), turn_instance_id: str | None = None, cwd: str | Path | None = None) -> dict:
         args = ["quota", "spend-slot", "--goal-id", str(goal_id), "--todo-id", str(todo_id), "--slots", "1", "--source", "heartbeat", "--execute", "--agent-id", str(agent_id)]
+        if self._quota_scan_root is not None:
+            args.extend(["--scan-root", self._quota_scan_root])
         if turn_instance_id is not None:
             args.extend(["--turn-instance-id", str(turn_instance_id)])
         args.extend(self._capability_args(capabilities))

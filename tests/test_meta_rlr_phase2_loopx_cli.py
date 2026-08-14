@@ -68,14 +68,14 @@ def test_blocked_writeback_uses_todo_update_not_completion(tmp_path):
     ]
 
 
-def test_complete_then_spend_use_native_turn_settlement(tmp_path):
+def test_complete_refresh_then_spend_use_native_turn_settlement(tmp_path):
     executable, argv_file = _fake_loopx(tmp_path, {"ok": True})
     client = LoopXCli(executable=executable)
     turn_id = "meta-rlr:abc123"
     client.todo_complete(
         goal_id="g", todo_id="todo_event", agent_id="codex-maintainer",
         evidence="profile=l0_state_integrity passed=true",
-        note="bounded repair independently verified", no_follow_up=True,
+        note="bounded repair independently verified", no_follow_up=False,
         turn_instance_id=turn_id,
     )
     assert _argv(argv_file) == [
@@ -84,9 +84,23 @@ def test_complete_then_spend_use_native_turn_settlement(tmp_path):
         "--claimed-by", "codex-maintainer",
         "--evidence", "profile=l0_state_integrity passed=true",
         "--turn-instance-id", turn_id,
-        "--note", "bounded repair independently verified", "--no-follow-up",
+        "--note", "bounded repair independently verified",
     ]
-    assert not hasattr(client, "refresh_state")
+    client.refresh_state(
+        goal_id="g", todo_id="todo_event", agent_id="codex-maintainer",
+        turn_instance_id=turn_id, delivery_workspace_path=tmp_path,
+        capabilities=("shell",),
+    )
+    assert _argv(argv_file) == [
+        "--format", "json", "refresh-state", "--goal-id", "g",
+        "--agent-id", "codex-maintainer", "--todo-id", "todo_event",
+        "--turn-instance-id", turn_id,
+        "--classification", "validated_progress",
+        "--delivery-batch-scale", "single_surface",
+        "--delivery-outcome", "outcome_progress",
+        "--delivery-workspace-path", str(tmp_path),
+        "--available-capability", "shell",
+    ]
     client.quota_spend_slot(
         goal_id="g", todo_id="todo_event", agent_id="codex-maintainer",
         capabilities=("shell",), turn_instance_id=turn_id,

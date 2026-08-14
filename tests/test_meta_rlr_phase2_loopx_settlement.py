@@ -26,7 +26,14 @@ def test_turn_settlement_reuses_one_loopx_identity(monkeypatch):
     )
     assert "--turn-instance-id" in calls[-1]
     assert turn_id in calls[-1]
-    assert not hasattr(client, "refresh_state")
+    client.refresh_state(
+        goal_id="g", todo_id="todo_event", agent_id="codex-maintainer",
+        turn_instance_id=turn_id, delivery_workspace_path="D:/verified-repair-worktree",
+        capabilities=("shell",),
+    )
+    assert calls[-1][3] == "refresh-state"
+    assert "--turn-instance-id" in calls[-1]
+    assert turn_id in calls[-1]
     client.quota_spend_slot(
         goal_id="g", todo_id="todo_event", agent_id="codex-maintainer",
         capabilities=("shell",), turn_instance_id=turn_id,

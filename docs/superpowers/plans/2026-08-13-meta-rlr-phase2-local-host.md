@@ -18,9 +18,9 @@ The implementation reuses LoopX Path A, native Git worktrees, Codex CLI, and exi
 5. Event revision and repair worktree base must match exactly.
 6. Codex cannot commit, push, merge, mutate LoopX, or count its own output as verification.
 7. Independent RLR verification is required before any success settlement.
-8. Verification failure cannot complete a todo, spend quota, or publish.
+8. Verification failure cannot complete a todo, write the durable refresh receipt, spend quota, or publish.
 9. LoopX 0.4.5 pinned source is the CLI contract authority.
-10. There is no Phase 2 `refresh-state` step. The canonical settlement is `todo complete(turn_id) → quota spend-slot(turn_id)`.
+10. The canonical settlement is `todo complete(turn_id) → refresh-state(turn_id) → quota spend-slot(turn_id)`. `refresh-state` is LoopX-owned durable settlement writeback, not a Host scheduler or second state authority.
 11. The Host must use two-stage quota authorization: unscoped frontier read first, scoped `turn_instance_id` read second.
 12. Crash recovery reuses Git verified-commit provenance plus LoopX native idempotent settlement; no Host journal/database is allowed.
 13. Production changes require RED tests, targeted verification, then full regression.
@@ -52,12 +52,12 @@ Verify the real pinned LoopX CLI rather than relying on draft documentation.
 
 Result:
 
-- `refresh-state` is not a production command and must not be wrapped or emulated;
-- `todo complete` accepts the settlement turn identity;
-- `quota spend-slot` accepts the same turn identity;
-- both completion and spend support idempotent replay for the same identity.
+- `refresh-state` accepts the same settlement identity and writes the required durable receipt;
+- `todo complete` accepts the settlement turn identity without terminal no-follow-up closure during settlement;
+- `quota spend-slot` accepts the same turn identity and must run from the verified delivery worktree;
+- completion, durable writeback, and spend support idempotent replay for the same identity.
 
-This correction replaces the early draft sequence `complete → refresh → spend` with `complete(turn_id) → spend(turn_id)`.
+This correction restores the authoritative sequence `complete(turn_id) → durable refresh-state writeback(turn_id) → spend(turn_id)`.
 
 ## Phase B — TDD contracts
 
@@ -78,7 +78,7 @@ Assertions:
 - registry remains explicit;
 - malformed/non-object/non-zero output fails closed;
 - no LoopX Python internals are imported;
-- no wrapper is added for nonexistent `refresh-state`.
+- the wrapper issues explicit classification, delivery scale, outcome, worktree provenance, and capability arguments for `refresh-state`.
 
 ### B2. Codex adapter tests
 
@@ -143,13 +143,13 @@ Failure assertions:
 
 - claim failure → no Codex;
 - worktree failure → no Codex;
-- Codex failure → no complete/spend;
+- Codex failure → no complete/refresh/spend;
 - worker-changed HEAD → no verification success;
 - empty diff → blocked;
-- verification fail → no verified commit/complete/spend;
+- verification fail → no verified commit/complete/refresh/spend;
 - post-verification diff mutation → blocked;
-- commit/readback fail → no complete/spend;
-- completion fail → no spend.
+- commit/readback fail → no complete/refresh/spend;
+- completion or refresh failure → no later settlement step.
 
 ### B6. Crash-recovery tests
 
@@ -169,7 +169,7 @@ Require:
 - commit todo id is a valid LoopX todo id;
 - commit turn id equals the deterministic current event/todo turn id;
 - recovered commit is reverified by RLR;
-- only a fresh verification PASS allows `complete(turn_id) → spend(turn_id)` replay;
+- only a fresh verification PASS allows `complete(turn_id) → refresh-state(turn_id) → spend(turn_id)` replay;
 - no Host database/journal is consulted.
 
 ### B7. Architecture tests
@@ -314,11 +314,11 @@ Minimum acceptance:
 5. prove unscoped frontier then scoped turn binding then one claim;
 6. prove Codex modifies only the isolated worktree;
 7. prove RLR verification is independent;
-8. prove failed verification cannot commit/complete/spend;
+8. prove failed verification cannot commit/complete/refresh/spend;
 9. prove success creates exactly one provenance-bound verified commit;
-10. prove success completes and spends under the same turn id;
+10. prove success completes, writes durable refresh-state, and spends under the same turn id;
 11. simulate process interruption after verified commit but before settlement;
-12. invoke a fresh process and prove recovery re-verifies the commit, skips Codex, and safely replays complete/spend under the same turn id;
+12. invoke a fresh process and prove recovery re-verifies the commit, skips Codex, and safely replays complete/refresh/spend under the same turn id;
 13. prove repeated settlement does not double-complete/double-spend;
 14. prove no Host-owned session database or transcript is required.
 
