@@ -94,9 +94,95 @@ class MetaRLRHost:
         _require_ok(packet, "todo update")
         return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=todo_id, profile_id=profile_id, reason=reason)
 
+    def _settle_verified(
+        self,
+        *,
+        event: Mapping[str, Any],
+        profile_id: str,
+        goal_id: str,
+        agent_id: str,
+        todo_id: str,
+        turn_id: str,
+        commit_sha: str,
+        outcome: str,
+    ) -> MetaRLRTurnResult:
+        evidence = f"profile={profile_id} passed=true commit={commit_sha} event={event['event_id']}"
+        completed = self._loopx.todo_complete(
+            goal_id=goal_id,
+            todo_id=todo_id,
+            agent_id=agent_id,
+            evidence=evidence,
+            note="bounded repair independently verified and committed",
+            no_follow_up=True,
+            turn_instance_id=turn_id,
+            cwd=self._loopx_cwd,
+        )
+        _require_ok(completed, "todo complete")
+        spent = self._loopx.quota_spend_slot(
+            goal_id=goal_id,
+            todo_id=todo_id,
+            agent_id=agent_id,
+            capabilities=self._capabilities,
+            turn_instance_id=turn_id,
+            cwd=self._loopx_cwd,
+        )
+        _require_ok(spent, "quota spend-slot")
+        return MetaRLRTurnResult(outcome=outcome, event_id=event["event_id"], todo_id=todo_id, profile_id=profile_id, commit_sha=commit_sha)
+
+    def _recover_verified_commit(
+        self,
+        *,
+        event: Mapping[str, Any],
+        profile: object,
+        goal_id: str,
+        agent_id: str,
+    ) -> MetaRLRTurnResult | None:
+        repair_key = str(event["dedup_fingerprint"])[:12]
+        try:
+            work = self._workspace.find_existing(base_revision=event["rlr_revision"], repair_key=repair_key)
+        except GitWorkspaceError:
+            return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=None, profile_id=getattr(profile, "profile_id"), reason="recovery_probe_failed")
+        if work is None:
+            return None
+        try:
+            binding = self._workspace.read_verified_commit(work)
+        except GitWorkspaceError:
+            return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=None, profile_id=getattr(profile, "profile_id"), reason="recovery_commit_invalid")
+        todo_id = str(getattr(binding, "todo_id", ""))
+        turn_id = str(getattr(binding, "turn_instance_id", ""))
+        profile_id = str(getattr(profile, "profile_id"))
+        expected_turn = _turn_instance_id(str(event["event_id"]), todo_id) if todo_id else ""
+        if (
+            getattr(binding, "event_id", None) != event["event_id"]
+            or getattr(binding, "profile_id", None) != profile_id
+            or getattr(binding, "base_sha", None) != getattr(work, "base_sha", None)
+            or not getattr(binding, "changed_paths", ())
+            or not todo_id
+            or turn_id != expected_turn
+        ):
+            return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=todo_id or None, profile_id=profile_id, reason="recovery_binding_mismatch")
+        receipt = self._verifier(profile_id, work.path)
+        if getattr(receipt, "passed", False) is not True:
+            return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=todo_id, profile_id=profile_id, commit_sha=getattr(binding, "commit_sha", None), reason="recovery_verification_failed")
+        return self._settle_verified(
+            event=event,
+            profile_id=profile_id,
+            goal_id=goal_id,
+            agent_id=agent_id,
+            todo_id=todo_id,
+            turn_id=turn_id,
+            commit_sha=str(getattr(binding, "commit_sha")),
+            outcome="recovered",
+        )
+
     def run_once(self, *, event: Mapping[str, Any], goal_id: str, agent_id: str) -> MetaRLRTurnResult:
         normalized = validate_maintenance_event(event)
         profile = profile_for_event(normalized)
+
+        recovered = self._recover_verified_commit(event=normalized, profile=profile, goal_id=goal_id, agent_id=agent_id)
+        if recovered is not None:
+            return recovered
+
         added = self._loopx.todo_add_agent(
             goal_id=goal_id,
             text=_todo_text(normalized),
@@ -108,19 +194,34 @@ class MetaRLRHost:
         todo_id = added.get("todo_id")
         if not isinstance(todo_id, str) or not todo_id:
             raise MetaRLRHostError("LoopX todo add did not return a todo_id")
+
+        frontier = self._loopx.quota_should_run(
+            goal_id=goal_id,
+            agent_id=agent_id,
+            capabilities=self._capabilities,
+            turn_instance_id=None,
+            cwd=self._loopx_cwd,
+        )
+        _require_ok(frontier, "quota should-run")
+        if frontier.get("should_run") is not True:
+            return MetaRLRTurnResult(outcome="noop", event_id=normalized["event_id"], todo_id=todo_id, profile_id=profile.profile_id, reason=str(frontier.get("state") or "quota_no_run"))
+        if _selected_todo(frontier) != todo_id:
+            return MetaRLRTurnResult(outcome="deferred", event_id=normalized["event_id"], todo_id=todo_id, profile_id=profile.profile_id, reason="different_frontier_todo")
+
         turn_id = _turn_instance_id(normalized["event_id"], todo_id)
-        quota = self._loopx.quota_should_run(
+        scoped = self._loopx.quota_should_run(
             goal_id=goal_id,
             agent_id=agent_id,
             capabilities=self._capabilities,
             turn_instance_id=turn_id,
             cwd=self._loopx_cwd,
         )
-        _require_ok(quota, "quota should-run")
-        if quota.get("should_run") is not True:
-            return MetaRLRTurnResult(outcome="noop", event_id=normalized["event_id"], todo_id=todo_id, profile_id=profile.profile_id, reason=str(quota.get("state") or "quota_no_run"))
-        if _selected_todo(quota) != todo_id:
-            return MetaRLRTurnResult(outcome="deferred", event_id=normalized["event_id"], todo_id=todo_id, profile_id=profile.profile_id, reason="different_frontier_todo")
+        _require_ok(scoped, "quota should-run")
+        if scoped.get("should_run") is not True:
+            return MetaRLRTurnResult(outcome="noop", event_id=normalized["event_id"], todo_id=todo_id, profile_id=profile.profile_id, reason=str(scoped.get("state") or "scoped_quota_no_run"))
+        if _selected_todo(scoped) != todo_id:
+            return MetaRLRTurnResult(outcome="deferred", event_id=normalized["event_id"], todo_id=todo_id, profile_id=profile.profile_id, reason="frontier_changed_after_binding")
+
         claimed = self._loopx.todo_claim(goal_id=goal_id, todo_id=todo_id, agent_id=agent_id, cwd=self._loopx_cwd)
         _require_ok(claimed, "todo claim")
         try:
@@ -149,28 +250,20 @@ class MetaRLRHost:
                 work,
                 changed_paths=after.changed_paths,
                 message=f"fix: repair {normalized['component']} contract",
+                event_id=normalized["event_id"],
+                todo_id=todo_id,
+                turn_instance_id=turn_id,
+                profile_id=profile.profile_id,
             )
         except GitWorkspaceError:
             return self._block(event=normalized, profile_id=profile.profile_id, goal_id=goal_id, agent_id=agent_id, todo_id=todo_id, reason="verified_commit_failed")
-        evidence = f"profile={profile.profile_id} passed=true commit={commit_sha} event={normalized['event_id']}"
-        completed = self._loopx.todo_complete(
+        return self._settle_verified(
+            event=normalized,
+            profile_id=profile.profile_id,
             goal_id=goal_id,
-            todo_id=todo_id,
             agent_id=agent_id,
-            evidence=evidence,
-            note="bounded repair independently verified and committed",
-            no_follow_up=True,
-            turn_instance_id=turn_id,
-            cwd=self._loopx_cwd,
-        )
-        _require_ok(completed, "todo complete")
-        spent = self._loopx.quota_spend_slot(
-            goal_id=goal_id,
             todo_id=todo_id,
-            agent_id=agent_id,
-            capabilities=self._capabilities,
-            turn_instance_id=turn_id,
-            cwd=self._loopx_cwd,
+            turn_id=turn_id,
+            commit_sha=commit_sha,
+            outcome="verified",
         )
-        _require_ok(spent, "quota spend-slot")
-        return MetaRLRTurnResult(outcome="verified", event_id=normalized["event_id"], todo_id=todo_id, profile_id=profile.profile_id, commit_sha=commit_sha)
