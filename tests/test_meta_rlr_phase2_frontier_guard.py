@@ -9,7 +9,6 @@ class L:
     def quota_should_run(self, **k): self.calls.append(("quota",k)); return {"ok":True,"should_run":True,"agent_lane_next_action":{"todo_id":"todo_event"}}
     def todo_claim(self, **k): self.calls.append(("claim",k)); return {"ok":True}
     def todo_complete(self, **k): self.calls.append(("complete",k)); return {"ok":True}
-    def refresh_state(self, **k): self.calls.append(("refresh",k)); return {"ok":True}
     def quota_spend_slot(self, **k): self.calls.append(("spend",k)); return {"ok":True}
 class W:
     def __init__(self,p): self.p=Path(p)
@@ -23,11 +22,9 @@ class C:
 def test_unbound_frontier_precedes_bound_settlement_guard(tmp_path):
     e=observe_contract_failure(component="l0_restore",error_code="L0_STATE_HASH_MISMATCH",expected_contract="l0_restore_fail_closed",rlr_revision="a"*40,observed_at="2026-08-13T22:00:00+08:00")
     lx=L(); v=lambda p,r: SimpleNamespace(passed=True)
-    result=MetaRLRHost(loopx=lx,codex=C(),workspace=W(tmp_path),verifier=v,loopx_cwd=tmp_path/"control").run_once(event=e,goal_id="g",agent_id="a")
+    result=MetaRLRHost(loopx=lx,codex=C(),workspace=W(tmp_path),verifier=v).run_once(event=e,goal_id="g",agent_id="a")
     assert result.outcome=="verified"
     q=[k for n,k in lx.calls if n=="quota"]
     assert len(q)==2 and q[0].get("turn_instance_id") is None and q[1].get("turn_instance_id")
-    assert [n for n,_ in lx.calls][-3:]==["complete","refresh","spend"]
-    turn_id=lx.calls[-3][1]["turn_instance_id"]
-    assert lx.calls[-2][1]["turn_instance_id"]==turn_id
-    assert lx.calls[-1][1]["turn_instance_id"]==turn_id
+    assert [n for n,_ in lx.calls][-2:]==["complete","spend"]
+    assert lx.calls[-2][1]["turn_instance_id"]==lx.calls[-1][1]["turn_instance_id"]

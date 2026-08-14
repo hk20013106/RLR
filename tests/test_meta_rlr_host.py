@@ -1,7 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from rlr_maintenance.host import MetaRLRHost, MetaRLRHostError
+from rlr_maintenance.host import MetaRLRHost
 from rlr_maintenance.observer import observe_contract_failure
 
 
@@ -10,10 +10,9 @@ def event():
 
 
 class LoopXFake:
-    def __init__(self, should_run=True, selected="todo_event", refresh_ok=True):
+    def __init__(self, should_run=True, selected="todo_event"):
         self.should_run = should_run
         self.selected = selected
-        self.refresh_ok = refresh_ok
         self.calls = []
     def todo_add_agent(self, **kwargs):
         self.calls.append(("add", kwargs)); return {"ok": True, "todo_id": "todo_event"}
@@ -25,8 +24,6 @@ class LoopXFake:
         self.calls.append(("update", kwargs)); return {"ok": True}
     def todo_complete(self, **kwargs):
         self.calls.append(("complete", kwargs)); return {"ok": True}
-    def refresh_state(self, **kwargs):
-        self.calls.append(("refresh", kwargs)); return {"ok": self.refresh_ok}
     def quota_spend_slot(self, **kwargs):
         self.calls.append(("spend", kwargs)); return {"ok": True}
 
@@ -71,10 +68,10 @@ def test_no_run_stops_before_claim_and_model(tmp_path):
 
 def test_success_commits_verified_diff_before_loopx_completion(tmp_path):
     loopx, workspace, codex, check = LoopXFake(), WorkspaceFake(tmp_path), CodexFake(), verifier(True)
-    result = MetaRLRHost(loopx=loopx, codex=codex, workspace=workspace, verifier=check, loopx_cwd=tmp_path / "control").run_once(event=event(), goal_id="g", agent_id="a")
+    result = MetaRLRHost(loopx=loopx, codex=codex, workspace=workspace, verifier=check).run_once(event=event(), goal_id="g", agent_id="a")
     assert result.outcome == "verified"
     assert result.commit_sha == "b" * 40
-    assert [name for name, _ in loopx.calls] == ["add", "quota", "quota", "claim", "complete", "refresh", "spend"]
+    assert [name for name, _ in loopx.calls] == ["add", "quota", "quota", "claim", "complete", "spend"]
     assert [name for name, _ in workspace.calls] == ["find", "create", "inspect", "inspect", "commit"]
     assert workspace.calls[1][1]["base_revision"] == "a" * 40
     assert workspace.calls[-1][1]["changed_paths"] == ("src/x.py",)
@@ -83,36 +80,19 @@ def test_success_commits_verified_diff_before_loopx_completion(tmp_path):
     assert workspace.calls[-1][1]["profile_id"] == "l0_state_integrity"
     assert check.calls == [("l0_state_integrity", tmp_path)]
     assert ("commit=" + "b" * 40) in loopx.calls[4][1]["evidence"]
-    turn_id = loopx.calls[2][1]["turn_instance_id"]
-    assert loopx.calls[4][1]["turn_instance_id"] == turn_id
-    assert loopx.calls[5][1]["turn_instance_id"] == turn_id
-    assert loopx.calls[6][1]["turn_instance_id"] == turn_id
-    assert loopx.calls[5][1]["delivery_outcome"] == "outcome_progress"
-    assert loopx.calls[5][1]["delivery_workspace_path"] == tmp_path
-    assert "project" not in loopx.calls[5][1]
-    assert workspace.calls[-1][1]["turn_instance_id"] == turn_id
+    assert loopx.calls[4][1]["turn_instance_id"] == loopx.calls[2][1]["turn_instance_id"]
+    assert loopx.calls[5][1]["turn_instance_id"] == loopx.calls[2][1]["turn_instance_id"]
+    assert workspace.calls[-1][1]["turn_instance_id"] == loopx.calls[2][1]["turn_instance_id"]
     assert loopx.calls[1][1].get("turn_instance_id") is None
 
 
-def test_failed_verification_blocks_without_commit_complete_refresh_or_spend(tmp_path):
+def test_failed_verification_blocks_without_commit_complete_or_spend(tmp_path):
     loopx, workspace = LoopXFake(), WorkspaceFake(tmp_path)
     result = MetaRLRHost(loopx=loopx, codex=CodexFake(), workspace=workspace, verifier=verifier(False)).run_once(event=event(), goal_id="g", agent_id="a")
     assert result.outcome == "blocked"
     assert [name for name, _ in loopx.calls] == ["add", "quota", "quota", "claim", "update"]
     assert [name for name, _ in workspace.calls] == ["find", "create", "inspect"]
     assert loopx.calls[-1][1]["status"] == "blocked"
-
-
-def test_refresh_failure_prevents_quota_spend(tmp_path):
-    loopx, workspace = LoopXFake(refresh_ok=False), WorkspaceFake(tmp_path)
-    try:
-        MetaRLRHost(loopx=loopx, codex=CodexFake(), workspace=workspace, verifier=verifier(True), loopx_cwd=tmp_path / "control").run_once(event=event(), goal_id="g", agent_id="a")
-    except MetaRLRHostError:
-        pass
-    else:
-        raise AssertionError("refresh failure must fail closed")
-    assert [name for name, _ in loopx.calls][-2:] == ["complete", "refresh"]
-    assert all(name != "spend" for name, _ in loopx.calls)
 
 
 def test_different_frontier_todo_defers(tmp_path):

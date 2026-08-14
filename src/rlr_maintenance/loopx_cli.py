@@ -89,41 +89,6 @@ class LoopXCli:
             args.append("--no-follow-up")
         return self.run_json(args, cwd=cwd)
 
-    def refresh_state(
-        self,
-        *,
-        goal_id: str,
-        agent_id: str,
-        todo_id: str,
-        turn_instance_id: str,
-        delivery_outcome: str,
-        delivery_workspace_path: str | Path,
-        project: str | Path | None = None,
-        capabilities: Sequence[str] = ("shell",),
-        cwd: str | Path | None = None,
-    ) -> dict:
-        if delivery_outcome not in {"outcome_progress", "primary_goal_outcome"}:
-            raise ValueError("turn-scoped LoopX refresh requires an accountable delivery outcome")
-        args = [
-            "refresh-state",
-            "--goal-id",
-            str(goal_id),
-            "--agent-id",
-            str(agent_id),
-            "--todo-id",
-            str(todo_id),
-            "--turn-instance-id",
-            str(turn_instance_id),
-            "--delivery-outcome",
-            str(delivery_outcome),
-            "--delivery-workspace-path",
-            str(delivery_workspace_path),
-        ]
-        if project is not None:
-            args.extend(["--project", str(project)])
-        args.extend(self._capability_args(capabilities))
-        return self.run_json(args, cwd=cwd)
-
     def quota_spend_slot(self, *, goal_id: str, todo_id: str, agent_id: str, capabilities: Sequence[str] = ("shell",), turn_instance_id: str | None = None, cwd: str | Path | None = None) -> dict:
         args = ["quota", "spend-slot", "--goal-id", str(goal_id), "--todo-id", str(todo_id), "--slots", "1", "--source", "heartbeat", "--execute", "--agent-id", str(agent_id)]
         if turn_instance_id is not None:
