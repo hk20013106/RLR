@@ -66,7 +66,22 @@ def test_worktree_uses_event_revision_and_host_commits_verified_paths(tmp_path):
     assert next(call for call in fake.calls if call[1:3] == ["worktree", "add"])[-1] == "a" * 40
     inspection = manager.inspect(work)
     assert inspection.changed_paths == ("src/a.py",)
-    assert manager.commit_verified(work, changed_paths=inspection.changed_paths, message="fix: bounded repair") == "b" * 40
+    assert manager.commit_verified(
+        work,
+        changed_paths=inspection.changed_paths,
+        message="fix: bounded repair",
+        event_id="rme-1234567890abcdef1234",
+        todo_id="todo_event",
+        turn_instance_id="meta-rlr:recover123",
+        profile_id="l0_state_integrity",
+    ) == "b" * 40
+    commit_call = next(call for call in fake.calls if call[1] == "commit")
+    commit_text = "\n".join(commit_call)
+    assert "Meta-RLR-Repair-Key: abc123" in commit_text
+    assert "Meta-RLR-Event-ID: rme-1234567890abcdef1234" in commit_text
+    assert "Meta-RLR-Todo-ID: todo_event" in commit_text
+    assert "Meta-RLR-Turn-ID: meta-rlr:recover123" in commit_text
+    assert "Meta-RLR-Profile-ID: l0_state_integrity" in commit_text
 
 
 def test_preexisting_worktree_identity_fails_closed(tmp_path):
