@@ -89,7 +89,7 @@ def test_success_commits_verified_diff_before_loopx_completion(tmp_path):
     assert loopx.calls[6][1]["turn_instance_id"] == turn_id
     assert loopx.calls[5][1]["delivery_outcome"] == "outcome_progress"
     assert loopx.calls[5][1]["delivery_workspace_path"] == tmp_path
-    assert loopx.calls[5][1]["project"] == tmp_path / "control"
+    assert "project" not in loopx.calls[5][1]
     assert workspace.calls[-1][1]["turn_instance_id"] == turn_id
     assert loopx.calls[1][1].get("turn_instance_id") is None
 
