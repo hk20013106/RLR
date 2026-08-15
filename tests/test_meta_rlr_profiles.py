@@ -84,6 +84,16 @@ def test_profile_routing_requires_a_valid_maintenance_event():
         profile_for_event({"expected_contract": "runner_nonzero_propagation"})
 
 
+def test_provider_runtime_profile_owns_only_execution_integrity():
+    profile = get_profile("provider_runtime_integrity")
+
+    assert profile.protected_contracts == ("provider_runtime_execution_integrity",)
+    assert profile_for_event(
+        _event("provider_runtime_execution_integrity")
+    ).profile_id == "provider_runtime_integrity"
+    assert any(step.step_id == "provider_runtime_regression" for step in profile.required_validation)
+
+
 def test_unowned_expected_contract_fails_closed_without_second_registry():
     with pytest.raises(KeyError, match="maps to 0 verification profiles"):
         profile_for_event(_event("unowned_contract"))
