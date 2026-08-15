@@ -122,6 +122,8 @@ _PROFILES = {
                 "tests/test_meta_rlr_contracts.py",
                 "tests/test_meta_rlr_observer.py",
                 "tests/test_meta_rlr_autowake.py",
+                "tests/test_maintenance_autowake_adapter.py",
+                "tests/test_meta_rlr_architecture.py",
                 "-q",
             ),
             _pytest_step(
