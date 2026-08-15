@@ -145,10 +145,12 @@ def test_autowake_emits_canonical_event_and_calls_existing_meta_cli(tmp_path, mo
     assert result.worktree_path == repair_worktree
     assert result.commit_sha == "b" * 40
     assert len(calls) == 1
-    command = calls[0][0]
+    command, command_kwargs = calls[0]
     assert "meta_rlr.py" in Path(command[1]).name
     assert command[2] == "run-once"
     assert "--quota-scan-root" in command
+    assert command_kwargs["env"][autowake.AUTOWAKE_CONFIG_ENV] == str(config)
+    assert command_kwargs["env"][autowake.AUTOWAKE_RETRY_GUARD_ENV] == "1"
 
     event = validate_maintenance_event(json.loads(result.event_path.read_text(encoding="utf-8")))
     assert event["event_type"] == "runtime_failure"
