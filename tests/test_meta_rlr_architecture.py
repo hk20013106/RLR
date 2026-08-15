@@ -45,6 +45,14 @@ def test_research_loop_never_depends_on_maintenance_or_loopx():
     assert offenders == []
 
 
+def test_phase3_composes_maintenance_only_at_public_runtime_boundary():
+    imports = _imports(ROOT / "research_loop_v04.py")
+
+    assert "rlr_maintenance.autowake_adapter" in imports
+    assert "research_loop" in imports
+    assert "research_loop.cli" in imports
+
+
 def test_maintenance_uses_external_loopx_boundary_not_python_modules():
     offenders = []
     for path in sorted((ROOT / "src" / "rlr_maintenance").rglob("*.py")):
