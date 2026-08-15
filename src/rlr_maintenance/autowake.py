@@ -127,15 +127,25 @@ def _load_config(path: Path) -> _AutoWakeConfig:
     )
 
 
-def _current_revision(repo_root: Path, runner) -> str:
-    completed = runner(
-        ["git", "rev-parse", "HEAD"],
+def _run_git(repo_root: Path, runner, *args: str):
+    return runner(
+        ["git", *args],
         cwd=repo_root,
         text=True,
         encoding="utf-8",
         capture_output=True,
         shell=False,
     )
+
+
+def _current_revision(repo_root: Path, runner) -> str:
+    status = _run_git(repo_root, runner, "status", "--porcelain")
+    if int(getattr(status, "returncode", 1)) != 0:
+        raise RuntimeError("cannot inspect failing RLR checkout")
+    if str(getattr(status, "stdout", "") or "").strip():
+        raise RuntimeError("automatic repair requires a clean RLR code checkout")
+
+    completed = _run_git(repo_root, runner, "rev-parse", "HEAD")
     if int(getattr(completed, "returncode", 1)) != 0:
         raise RuntimeError("cannot resolve failing RLR revision")
     revision = str(getattr(completed, "stdout", "")).strip().lower()
