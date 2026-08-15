@@ -16,7 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, MutableMapping
 
-from .contracts import build_maintenance_event, validate_maintenance_event
+from .contracts import validate_maintenance_event
+from .observer import observe_provider_runtime_failure
 from .workspace import GitWorkspace, GitWorkspaceError
 
 
@@ -199,19 +200,16 @@ def _event_for_failure(
 ) -> dict:
     node = str(handler_args.get("node") or "unknown")
     candidate = handler_args.get("cand_id")
-    event = build_maintenance_event(
-        event_type="runtime_failure",
+    event = observe_provider_runtime_failure(
         component=f"deep_research_provider:{node}",
-        severity="blocking",
-        observed_at=str(status.get("updated_at") or ""),
-        rlr_revision=revision,
-        observed={
-            "task_id": task_id,
-            "provider_state": str(status.get("state") or "unknown"),
-            "termination_reason": str(status.get("termination_reason") or "unknown"),
-            "worker_exit_code": int(returncode),
-        },
+        task_id=task_id,
+        provider_state=str(status.get("state") or "unknown"),
+        termination_reason=str(status.get("termination_reason") or "unknown"),
+        worker_exit_code=int(returncode),
         expected_contract=PROVIDER_RUNTIME_CONTRACT,
+        rlr_revision=revision,
+        observed_at=str(status.get("updated_at") or ""),
+        candidate_ref=str(candidate) if isinstance(candidate, str) and candidate else None,
         evidence_refs=(
             {
                 "kind": "rlr_artifact",
@@ -224,8 +222,6 @@ def _event_for_failure(
                 ).as_posix(),
             },
         ),
-        suggested_route="repair",
-        candidate_ref=str(candidate) if isinstance(candidate, str) and candidate else None,
     )
     existing = _existing_event(
         project_dir / "08_Audit" / "meta_rlr" / "events",
