@@ -34,6 +34,30 @@ def test_verified_commit_is_reverified_and_settled_without_codex(tmp_path):
     assert lx.calls[3][1]["cwd"] == tmp_path
 
 
+def test_recovery_scoped_guard_precedes_fresh_verification(tmp_path):
+    e=observe_contract_failure(component="l0_restore",error_code="L0_STATE_HASH_MISMATCH",expected_contract="l0_restore_fail_closed",rlr_revision="a"*40,observed_at="2026-08-13T22:00:00+08:00")
+    order=[]
+
+    class OrderedLoopX(L):
+        def quota_should_run(self, **kwargs):
+            order.append("scoped")
+            return super().quota_should_run(**kwargs)
+
+    def verify(profile_id, repo_root):
+        order.append("verify")
+        return SimpleNamespace(passed=True)
+
+    result=MetaRLRHost(
+        loopx=OrderedLoopX(),
+        codex=C(),
+        workspace=W(tmp_path,e["event_id"]),
+        verifier=verify,
+    ).run_once(event=e,goal_id="g",agent_id="a")
+
+    assert result.outcome=="recovered"
+    assert order == ["scoped", "verify"]
+
+
 class CrashWindowLoopX(L):
     def __init__(self, crash_step=None):
         super().__init__()
