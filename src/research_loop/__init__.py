@@ -77,7 +77,8 @@ _l4_closed_corpus.install(_l4_pipeline_module, deep_research)
 
 # Provider observability is installed after all scientific Deep Research/L4
 # wrappers so it supervises the final runtime boundary without changing their
-# contracts, validators, persistence, or authority.
+# contracts, validators, persistence, or authority. Meta-RLR composition is
+# deliberately outside this scientific package.
 from research_loop import deep_research_task as _deep_research_task_module
 from research_loop.provider_runtime_observability import (
     install as _install_provider_runtime_observability,
@@ -85,17 +86,11 @@ from research_loop.provider_runtime_observability import (
 from research_loop.provider_runtime_compat import (
     install as _install_provider_runtime_compat,
 )
-from research_loop.maintenance_autowake_adapter import (
-    install as _install_maintenance_autowake,
-)
 
 _install_provider_runtime_observability(deep_research, _deep_research_task_module)
 _install_provider_runtime_compat(
     deep_research, _deep_research_task_module, _l4_pipeline_module
 )
-# Phase 3 is deliberately installed last at the detached runtime boundary. It
-# observes the final provider status and delegates repair to existing Meta-RLR.
-_install_maintenance_autowake(_deep_research_task_module)
 
 from research_loop import hypothesis_contracts as hypothesis_contracts
 from research_loop.method_contracts import install as _install_method_contracts
@@ -167,7 +162,6 @@ del _install_l4_registry_projection_integrity
 del _install_l4_inventory_projection, _install_l4_evidence_bundle
 del _install_l4_runtime_compat, _install_l45_context_binding
 del _install_provider_runtime_observability, _install_provider_runtime_compat
-del _install_maintenance_autowake
 del _deep_research_task_module
 del _l4_pipeline_module, _l4_lineage_module
 del _l4_provenance_module, _l4_inventory_module
