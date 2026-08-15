@@ -282,7 +282,14 @@ def _runtime_schema() -> dict:
                 "type": "string",
                 "enum": ["supports", "contradicts", "unresolved"],
             },
-            "evidence_ids": {"type": "array", "items": {"type": "string"}},
+            "evidence_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "For L8.5, use the exact DOI, PMID, or stable URL from the cited "
+                    "paper; RLR binds it only to that paper's located evidence IDs."
+                ),
+            },
         },
         "required": ["finding", "verdict", "evidence_ids"],
     }
@@ -361,6 +368,12 @@ def build_invocation(spec: RuntimeSpec, node: str, question: str, claim: str,
         "\nverdict must be exactly one of: supports, contradicts, unresolved\n"
         if node == "L8.5" else ""
     )
+    evidence_instruction = (
+        "\nverification.evidence_ids must use the exact DOI, PMID, or stable URL from "
+        "the cited paper; it must not use an identifier from another paper. RLR "
+        "binds it only to that paper's located evidence IDs.\n"
+        if node == "L8.5" else ""
+    )
     prompt = f"""Use {invocation}. {_stage_instruction(node)}
 
 RLR stage: {node}
@@ -368,6 +381,7 @@ Scientific question: {question}
 Current hypothesis/claim: {claim}
 {result_block}
 {verdict_instruction}
+{evidence_instruction}
 
 Return JSON only, matching the supplied schema. Each paper must include DOI,
 PMID, or stable URL; source_database; metadata; open_access; and located
@@ -488,6 +502,71 @@ def _run_paths(project_dir: Path) -> tuple[Path, Path, Path]:
     return base / "runs", base / "papers", base / "sources"
 
 
+def _is_source_located_extract(extract: object) -> bool:
+    return (
+        isinstance(extract, dict)
+        and extract.get("verification_status", "located") == "located"
+        and bool(str(extract.get("locator", "")).strip())
+    )
+
+
+def _bind_l85_verification_evidence_ids(
+    verification: object,
+    papers: list[dict],
+    records: list[dict],
+) -> object:
+    """Bind exact provider paper IDs to that paper's located evidence IDs.
+
+    Unresolved provider IDs are deliberately left unchanged so the existing
+    evidence audit remains the sole fail-closed acceptance boundary.
+    """
+    if not isinstance(verification, list):
+        return verification
+
+    identifier_to_papers: dict[str, set[int]] = {}
+    located_ids_by_paper: dict[int, tuple[str, ...]] = {}
+    canonical_ids: set[str] = set()
+    for paper_index, (paper, record) in enumerate(zip(papers, records)):
+        source_extracts = paper.get("extracts", [])
+        persisted_ids = record.get("evidence_ids", [])
+        located_ids = tuple(
+            evidence_id
+            for extract_index, evidence_id in enumerate(persisted_ids)
+            if extract_index < len(source_extracts)
+            and _is_source_located_extract(source_extracts[extract_index])
+            and isinstance(evidence_id, str)
+            and evidence_id
+        )
+        located_ids_by_paper[paper_index] = located_ids
+        canonical_ids.update(located_ids)
+        for field in ("doi", "pmid", "url"):
+            identifier = record.get(field)
+            if isinstance(identifier, str) and identifier:
+                identifier_to_papers.setdefault(identifier, set()).add(paper_index)
+
+    bound_verification = []
+    for item in verification:
+        if not isinstance(item, dict) or not isinstance(item.get("evidence_ids"), list):
+            bound_verification.append(item)
+            continue
+        bound_ids = []
+        for value in item["evidence_ids"]:
+            candidates = [value]
+            if isinstance(value, str) and value not in canonical_ids:
+                matching_papers = identifier_to_papers.get(value, set())
+                if len(matching_papers) == 1:
+                    located_ids = located_ids_by_paper[next(iter(matching_papers))]
+                    if located_ids:
+                        candidates = list(located_ids)
+            for candidate in candidates:
+                if candidate not in bound_ids:
+                    bound_ids.append(candidate)
+        normalized_item = dict(item)
+        normalized_item["evidence_ids"] = bound_ids
+        bound_verification.append(normalized_item)
+    return bound_verification
+
+
 def persist_run(
     project_dir: str | Path,
     candidate_id: str,
@@ -562,6 +641,11 @@ def persist_run(
                         "path": str(paper_file.relative_to(project_dir)).replace("\\", "/"),
                         "doi": record["doi"], "pmid": record["pmid"], "url": record["url"],
                         "evidence_ids": [e["evidence_id"] for e in extracts]})
+    verification = payload.get("verification", [])
+    if node == "L8.5":
+        verification = _bind_l85_verification_evidence_ids(
+            verification, payload["papers"], records
+        )
     artifact = {
         "schema_version": SCHEMA_VERSION, "evidence_receipt_schema": "EvidenceRunReceipt/v1.1",
         "kind": "deep_research_run", "research_phase": "pre_research",
@@ -571,7 +655,7 @@ def persist_run(
         "status": "completed", "candidate_id": candidate_id, "node": node, "created_at": _now(),
         "queries": payload["queries"], "skill_receipt": receipt, "papers": records,
         "rejected_papers": rejected_papers,
-        "review_search": payload.get("review_search", {}), "verification": payload.get("verification", []),
+        "review_search": payload.get("review_search", {}), "verification": verification,
         "result_context_hash": _sha(result_context) if result_context else "",
     }
     run_file = runs_dir / f"{run_id}.json"
@@ -803,7 +887,12 @@ def audit_evidence_pack(project_dir: str | Path, candidate_id: str, node: str,
             return False, "L8.5 evidence pack lacks the audited L7/L8 result context hash"
         if not isinstance(verification, list) or not verification:
             return False, "L8.5 requires a paper-based verification verdict"
-        known_ids = {e.get("evidence_id") for r in records for e in r.get("evidence_extracts", [])}
+        known_ids = {
+            e.get("evidence_id")
+            for r in records
+            for e in r.get("evidence_extracts", [])
+            if e.get("verification_status") == "located" and e.get("locator")
+        }
         for item in verification:
             if not isinstance(item, dict) or not str(item.get("finding", "")).strip():
                 return False, "L8.5 verification entries require a finding"

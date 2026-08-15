@@ -68,8 +68,15 @@ def test_l85_profile_owns_verdict_contract_and_native_regressions():
     profile = get_profile("l8_5_verification_integrity")
 
     assert profile.schema_version == VERIFICATION_PROFILE_SCHEMA
-    assert profile.protected_contracts == ("l8_5_verification_verdict_enum",)
+    assert profile.protected_contracts == (
+        "l8_5_verification_verdict_enum",
+        "l8_5_verification_evidence_id_binding",
+    )
     assert any("tests/test_deep_research.py" in step.command for step in profile.required_validation)
+    assert any(
+        any("l85_evidence_id_binding" in token for token in step.command)
+        for step in profile.required_validation
+    )
     assert any(step.step_id == "full_regression" for step in profile.required_validation)
 
 

@@ -117,6 +117,7 @@ _PROFILES = {
         risk_class="high",
         protected_contracts=(
             "l8_5_verification_verdict_enum",
+            "l8_5_verification_evidence_id_binding",
         ),
         required_validation=(
             _pytest_step(
@@ -130,7 +131,7 @@ _PROFILES = {
                 "tests/test_deep_research.py",
                 "-q",
                 "-k",
-                "l85_provider",
+                "l85_provider or l85_evidence_id_binding",
             ),
             _pytest_step("full_regression", "-q"),
         ),
