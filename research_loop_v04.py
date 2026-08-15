@@ -8,7 +8,17 @@ SRC = Path(__file__).resolve().parent / "src"
 sys.path.insert(0, str(SRC))
 
 from research_loop.cli import main  # noqa: E402,F401
+from research_loop import deep_research_task as _deep_research_task  # noqa: E402
 from research_loop import engine as _engine  # noqa: E402
+from rlr_maintenance.autowake_adapter import (  # noqa: E402
+    install as _install_maintenance_autowake,
+)
+
+# Phase 3 is an outer composition concern. The RLR scientific package remains
+# unaware of Meta-RLR/LoopX; this entry point attaches the optional maintenance
+# reconcile hook only after RLR has installed its own provider observability.
+_install_maintenance_autowake(_deep_research_task)
+del _install_maintenance_autowake, _deep_research_task
 
 
 def __getattr__(name):
