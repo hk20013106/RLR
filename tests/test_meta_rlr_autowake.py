@@ -221,3 +221,18 @@ def test_autowake_retry_guard_prevents_recursive_repair(tmp_path, monkeypatch):
 
     assert result is None
     assert calls == []
+
+
+def test_current_revision_rejects_dirty_checkout(tmp_path):
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append(list(command))
+        if command[1:3] == ["status", "--porcelain"]:
+            return SimpleNamespace(returncode=0, stdout=" M src/research_loop/foo.py\n")
+        raise AssertionError("rev-parse must not run for a dirty checkout")
+
+    with pytest.raises(RuntimeError, match="requires a clean RLR code checkout"):
+        autowake._current_revision(tmp_path, runner)
+
+    assert calls == [["git", "status", "--porcelain"]]
