@@ -34,10 +34,11 @@ def _config(tmp_path: Path) -> Path:
     return path
 
 
-def _status(state: str = "provider_failed") -> dict:
+def _status(state: str = "provider_failed", reason: str = "provider_exit_nonzero") -> dict:
     return {
         "task_id": "dr-test",
         "state": state,
+        "termination_reason": reason,
         "updated_at": "2026-08-16T00:00:00+00:00",
     }
 
@@ -68,10 +69,20 @@ def test_autowake_is_disabled_without_explicit_config(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "state",
-    ["running", "succeeded", "completed", "job_stopped", "validation_failed"],
+    "state,reason",
+    [
+        ("running", ""),
+        ("succeeded", "completed"),
+        ("completed", "completed"),
+        ("job_stopped", "operator_stop"),
+        ("validation_failed", "completed"),
+        ("provider_failed", "completed"),
+        ("provider_failed", ""),
+    ],
 )
-def test_autowake_fails_closed_for_non_runtime_repair_states(tmp_path, monkeypatch, state):
+def test_autowake_fails_closed_for_non_runtime_repair_states(
+    tmp_path, monkeypatch, state, reason
+):
     config = _config(tmp_path)
     monkeypatch.setenv(autowake.AUTOWAKE_CONFIG_ENV, str(config))
     calls = []
@@ -81,12 +92,20 @@ def test_autowake_fails_closed_for_non_runtime_repair_states(tmp_path, monkeypat
         task_id="dr-test",
         handler_args=_handler_args(tmp_path),
         returncode=3,
-        status=_status(state),
+        status=_status(state, reason),
         command_runner=lambda *args, **kwargs: calls.append((args, kwargs)),
     )
 
     assert result is None
     assert calls == []
+
+
+def _patch_verified_worktree(monkeypatch, repair_worktree: Path):
+    monkeypatch.setattr(
+        autowake,
+        "_resolve_verified_worktree",
+        lambda **_kwargs: repair_worktree,
+    )
 
 
 def test_autowake_emits_canonical_event_and_calls_existing_meta_cli(tmp_path, monkeypatch):
@@ -97,6 +116,7 @@ def test_autowake_emits_canonical_event_and_calls_existing_meta_cli(tmp_path, mo
     monkeypatch.setattr(autowake, "_current_revision", lambda _repo, _runner: BASE_SHA)
     repair_worktree = tmp_path / "repairs" / "verified-worktree"
     repair_worktree.mkdir(parents=True)
+    _patch_verified_worktree(monkeypatch, repair_worktree)
     calls = []
 
     def runner(command, **kwargs):
@@ -108,7 +128,6 @@ def test_autowake_emits_canonical_event_and_calls_existing_meta_cli(tmp_path, mo
             "profile_id": "provider_runtime_integrity",
             "commit_sha": "b" * 40,
             "reason": None,
-            "worktree_path": str(repair_worktree),
         }
         return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
 
@@ -136,6 +155,7 @@ def test_autowake_emits_canonical_event_and_calls_existing_meta_cli(tmp_path, mo
     assert event["component"] == "deep_research_provider:L4B"
     assert event["expected_contract"] == "provider_runtime_execution_integrity"
     assert event["observed"]["provider_state"] == "provider_failed"
+    assert event["observed"]["termination_reason"] == "provider_exit_nonzero"
     assert event["candidate_ref"] == "C20260802150025462724"
 
 
@@ -147,6 +167,7 @@ def test_autowake_reuses_existing_event_for_same_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(autowake, "_current_revision", lambda _repo, _runner: BASE_SHA)
     repair_worktree = tmp_path / "repairs" / "verified-worktree"
     repair_worktree.mkdir(parents=True)
+    _patch_verified_worktree(monkeypatch, repair_worktree)
     event_args = []
 
     def runner(command, **kwargs):
@@ -161,7 +182,6 @@ def test_autowake_reuses_existing_event_for_same_failure(tmp_path, monkeypatch):
                     "profile_id": "provider_runtime_integrity",
                     "commit_sha": "c" * 40,
                     "reason": None,
-                    "worktree_path": str(repair_worktree),
                 }
             ),
             stderr="",
