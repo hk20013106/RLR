@@ -77,8 +77,7 @@ _l4_closed_corpus.install(_l4_pipeline_module, deep_research)
 
 # Provider observability is installed after all scientific Deep Research/L4
 # wrappers so it supervises the final runtime boundary without changing their
-# contracts, validators, persistence, or authority. Meta-RLR composition is
-# deliberately outside this scientific package.
+# contracts, validators, persistence, or authority.
 from research_loop import deep_research_task as _deep_research_task_module
 from research_loop.provider_runtime_observability import (
     install as _install_provider_runtime_observability,
