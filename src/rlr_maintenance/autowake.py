@@ -1,9 +1,9 @@
 """Thin Phase 3 bridge from observed RLR runtime failure to Phase 2 Meta-RLR.
 
-This module owns no scheduler and no repair logic. It only converts an already
+This module owns no scheduler and no repair logic. It converts an already
 classified provider-runtime failure into the canonical maintenance event,
-invokes the existing ``meta_rlr.py run-once`` entry point, and returns a
-verified worktree handoff when Phase 2 accepts the repair.
+invokes the existing ``meta_rlr.py run-once`` entry point, and resolves the
+verified repair through the existing GitWorkspace provenance authority.
 """
 from __future__ import annotations
 
@@ -14,15 +14,17 @@ import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, MutableMapping, Sequence
+from typing import Mapping, MutableMapping
 
 from .contracts import build_maintenance_event, validate_maintenance_event
+from .workspace import GitWorkspace, GitWorkspaceError
 
 
 AUTOWAKE_CONFIG_ENV = "RLR_META_RLR_AUTOWAKE_CONFIG"
 AUTOWAKE_RETRY_GUARD_ENV = "RLR_META_RLR_AUTOWAKE_RETRY"
 AUTOWAKE_CONFIG_SCHEMA = "RLRMetaAutoWakeConfig/v1"
 PROVIDER_RUNTIME_CONTRACT = "provider_runtime_execution_integrity"
+PROVIDER_RUNTIME_PROFILE = "provider_runtime_integrity"
 REPAIRABLE_PROVIDER_STATES = frozenset(
     {
         "provider_failed",
@@ -30,6 +32,14 @@ REPAIRABLE_PROVIDER_STATES = frozenset(
         "transport_lost",
         "job_timed_out",
         "inactivity_timed_out",
+    }
+)
+_REPAIRABLE_TERMINATION_REASONS = frozenset(
+    {
+        "provider_exit_nonzero",
+        "provider_exited_without_final_output",
+        "job_timeout",
+        "inactivity_timeout",
     }
 )
 
@@ -158,6 +168,16 @@ def _existing_event(event_dir: Path, dedup_fingerprint: str) -> tuple[dict, Path
     return None
 
 
+def _provider_failure_is_repairable(status: Mapping[str, object]) -> bool:
+    state = str(status.get("state") or "")
+    if state not in REPAIRABLE_PROVIDER_STATES:
+        return False
+    if state != "provider_failed":
+        return True
+    reason = str(status.get("termination_reason") or "")
+    return reason in _REPAIRABLE_TERMINATION_REASONS or reason.startswith("launch_failed:")
+
+
 def _event_for_failure(
     *,
     project_dir: Path,
@@ -169,16 +189,16 @@ def _event_for_failure(
 ) -> dict:
     node = str(handler_args.get("node") or "unknown")
     candidate = handler_args.get("cand_id")
-    observed_at = str(status.get("updated_at") or "")
     event = build_maintenance_event(
         event_type="runtime_failure",
         component=f"deep_research_provider:{node}",
         severity="blocking",
-        observed_at=observed_at,
+        observed_at=str(status.get("updated_at") or ""),
         rlr_revision=revision,
         observed={
             "task_id": task_id,
             "provider_state": str(status.get("state") or "unknown"),
+            "termination_reason": str(status.get("termination_reason") or "unknown"),
             "worker_exit_code": int(returncode),
         },
         expected_contract=PROVIDER_RUNTIME_CONTRACT,
@@ -197,11 +217,11 @@ def _event_for_failure(
         suggested_route="repair",
         candidate_ref=str(candidate) if isinstance(candidate, str) and candidate else None,
     )
-    event_dir = project_dir / "08_Audit" / "meta_rlr" / "events"
-    existing = _existing_event(event_dir, event["dedup_fingerprint"])
-    if existing is not None:
-        return existing[0]
-    return event
+    existing = _existing_event(
+        project_dir / "08_Audit" / "meta_rlr" / "events",
+        event["dedup_fingerprint"],
+    )
+    return existing[0] if existing is not None else event
 
 
 def _meta_command(
@@ -242,6 +262,31 @@ def _meta_command(
     return command
 
 
+def _resolve_verified_worktree(
+    *,
+    repo_root: Path,
+    workspace_parent: Path,
+    revision: str,
+    event: Mapping[str, object],
+    commit_sha: str,
+) -> Path | None:
+    workspace = GitWorkspace(repo_root=repo_root, workspace_parent=workspace_parent)
+    work = workspace.find_existing(
+        base_revision=revision,
+        repair_key=str(event["dedup_fingerprint"])[:12],
+    )
+    if work is None:
+        return None
+    binding = workspace.read_verified_commit(work)
+    if (
+        binding.commit_sha != commit_sha
+        or binding.event_id != event["event_id"]
+        or binding.profile_id != PROVIDER_RUNTIME_PROFILE
+    ):
+        return None
+    return work.path
+
+
 def maybe_wake_meta_rlr(
     *,
     project_dir: str | Path,
@@ -262,10 +307,7 @@ def maybe_wake_meta_rlr(
     if environment.get(AUTOWAKE_RETRY_GUARD_ENV):
         return None
     config_token = environment.get(AUTOWAKE_CONFIG_ENV)
-    if not config_token:
-        return None
-    state = str(status.get("state") or "")
-    if state not in REPAIRABLE_PROVIDER_STATES:
+    if not config_token or not _provider_failure_is_repairable(status):
         return None
 
     try:
@@ -282,7 +324,7 @@ def maybe_wake_meta_rlr(
             revision=revision,
         )
         event_dir = project_root / "08_Audit" / "meta_rlr" / "events"
-        existing = _existing_event(event_dir, event["dedup_fingerprint"])
+        existing = _existing_event(event_dir, str(event["dedup_fingerprint"]))
         if existing is not None:
             event, event_path = existing
         else:
@@ -306,16 +348,16 @@ def maybe_wake_meta_rlr(
         }:
             return None
         commit_sha = payload.get("commit_sha")
-        worktree_token = payload.get("worktree_path")
-        if (
-            not isinstance(commit_sha, str)
-            or len(commit_sha) != 40
-            or not isinstance(worktree_token, str)
-            or not worktree_token
-        ):
+        if not isinstance(commit_sha, str) or len(commit_sha) != 40:
             return None
-        worktree = Path(worktree_token)
-        if not worktree.is_dir():
+        worktree = _resolve_verified_worktree(
+            repo_root=repo_root,
+            workspace_parent=config.workspace_parent,
+            revision=revision,
+            event=event,
+            commit_sha=commit_sha,
+        )
+        if worktree is None:
             return None
         return RepairHandoff(
             outcome=str(payload["outcome"]),
@@ -324,5 +366,12 @@ def maybe_wake_meta_rlr(
             commit_sha=commit_sha,
             worktree_path=worktree,
         )
-    except (AutoWakeConfigError, OSError, RuntimeError, ValueError, json.JSONDecodeError):
+    except (
+        AutoWakeConfigError,
+        GitWorkspaceError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
         return None
