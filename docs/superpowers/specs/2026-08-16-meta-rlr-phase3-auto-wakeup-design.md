@@ -22,7 +22,7 @@ RLR provider/runtime failure
 
 Phase 3 is an ignition/bridge layer. It is not a second scheduler, a replacement for LoopX, a new repair engine, or a new scientific decision layer.
 
-## Architectural ownership
+## Architectural ownership and dependency direction
 
 Unchanged from Phase 2:
 
@@ -33,6 +33,15 @@ Unchanged from Phase 2:
 - Git owns code isolation and repair provenance.
 - GitHub remains remote code/PR/CI; it is not the runtime scheduler.
 
+A hard invariant is preserved:
+
+```text
+research_loop scientific core -X-> rlr_maintenance / LoopX
+repository runtime composition -> research_loop + rlr_maintenance
+```
+
+The scientific `src/research_loop` package must not import Meta-RLR or LoopX. Phase 3 is installed by the repository-root `research_loop_v04.py` composition entry point after RLR has initialized its own provider observability. The outer adapter may observe the final RLR runtime state and delegate to Meta-RLR; the scientific engine remains maintenance-unaware.
+
 Phase 3 adds only:
 
 1. failure classification at an existing RLR runtime boundary;
@@ -42,7 +51,7 @@ Phase 3 adds only:
 
 ## Reuse-first decisions
 
-### Existing RLR surfaces reused directly
+### Existing RLR/Meta-RLR surfaces reused directly
 
 - `provider_runtime_observability.py` is the sensor. It already distinguishes terminal provider conditions such as provider failure, timeout, dead process, transport loss, successful completion, and explicit stop. Phase 3 does not add a second watchdog daemon.
 - `rlr_maintenance.contracts` remains the only maintenance-event schema authority.
@@ -51,6 +60,7 @@ Phase 3 adds only:
 - `LoopXCli` remains the LoopX v0.4.5 integration surface.
 - `GitWorkspace` remains the worktree/provenance authority and is reused to resolve the verified repair worktree after Phase 2 returns a verified commit SHA.
 - verification profiles remain the only route from a failure contract to acceptance tests.
+- `research_loop_v04.py` is reused as the existing outer runtime composition point; Phase 3 does not add a daemon or alternate launcher.
 
 ### External designs used as patterns, not imported subsystems
 
@@ -70,7 +80,7 @@ The detached Deep Research worker is the first concrete integration point becaus
 - the failed node;
 - a clean process boundary for restart.
 
-When the synchronous handler exits non-zero, the adapter inspects the durable provider-runtime state after the existing observability wrapper has finalized it.
+The RLR package first completes its normal worker/status path. The outer Phase 3 adapter then inspects the durable provider-runtime state after the existing observability wrapper has finalized it.
 
 Only these provider/runtime states are repair-eligible:
 
@@ -82,6 +92,8 @@ Only these provider/runtime states are repair-eligible:
 
 Explicit stop, successful provider execution followed by scientific/validation rejection, malformed scientific evidence, or an unclassified failure are not auto-repaired. They fail closed through the existing path.
 
+If `RLR_META_RLR_AUTOWAKE_CONFIG` is absent, the outer adapter returns the original worker result without reading maintenance request/status details. The disabled path is intentionally inert.
+
 ## Runtime verification contract
 
 A provider/runtime software failure must not be falsely labelled as an L4 scientific-contract violation. Add one infrastructure contract owned by one verification profile:
@@ -89,7 +101,7 @@ A provider/runtime software failure must not be falsely labelled as an L4 scient
 - contract: `provider_runtime_execution_integrity`
 - profile: `provider_runtime_integrity`
 
-The profile includes focused runtime/maintenance tests and the full regression suite. It does not weaken existing L0/L4/L10C profiles.
+The profile includes the canonical event/observer tests, the outer-adapter and architecture-boundary tests, focused provider-runtime regression, and the full repository regression. It does not weaken existing L0/L4/L10C profiles.
 
 ## Configuration and enablement
 
@@ -121,9 +133,10 @@ Instead:
 
 1. `meta_rlr.py run-once` returns the existing Phase 2 result, including the verified repair commit SHA.
 2. Phase 3 reuses `GitWorkspace.find_existing` and `read_verified_commit` to resolve the single repair worktree and verify that its commit/event/profile provenance matches the Phase 2 result. No second worktree registry is introduced.
-3. The failed detached worker starts a fresh Python process using `<verified_worktree>/research_loop_v04.py`.
+3. The outer adapter starts a fresh Python process using `<verified_worktree>/research_loop_v04.py`.
 4. The new process executes `_deep-research-worker` against the same project directory and task ID, so it consumes the same durable task request and writes the normal task result/status artifacts.
-5. A transient environment guard marks this as the single post-repair retry. If the fresh worker fails, no recursive auto-repair is attempted by that retry; the task remains failed for later diagnosis/escalation.
+5. A transient environment guard marks both the Meta-RLR child process tree and the post-repair worker as non-reentrant. Verification failures inside a maintenance turn cannot recursively create a second maintenance turn.
+6. If the fresh worker fails, no recursive auto-repair is attempted by that retry; the task remains failed for later diagnosis/escalation.
 
 This activates independently verified code without mutating the original checkout.
 
@@ -132,6 +145,7 @@ This activates independently verified code without mutating the original checkou
 Phase 3 does not:
 
 - add a scheduler or service daemon;
+- make the RLR scientific package depend on maintenance code;
 - poll GitHub for runtime state;
 - change LoopX version or semantics;
 - allow Codex to commit/push/merge;
@@ -145,13 +159,15 @@ Phase 3 does not:
 
 A Phase 3 implementation is acceptable only if tests demonstrate:
 
-1. repairable provider/runtime state emits/reuses a valid `RLRMaintenanceEvent/v1`;
-2. non-repairable states do not wake Meta-RLR;
-3. the bridge invokes the existing `meta_rlr.py run-once` rather than duplicating Host logic;
-4. only `verified`/`recovered` Meta-RLR outcomes with matching Git provenance can produce a resume handoff;
-5. dirty RLR code checkouts fail closed;
-6. resume uses a fresh worker from the verified repair worktree;
-7. the original checkout is not modified by the resume path;
-8. recursive post-repair repair is blocked;
-9. existing Phase 2 recovery and settlement tests remain green;
-10. full repository regression remains green.
+1. `src/research_loop` remains free of `rlr_maintenance` and LoopX dependencies;
+2. the public repository runtime entry point is the Phase 3 composition boundary;
+3. repairable provider/runtime state emits/reuses a valid `RLRMaintenanceEvent/v1`;
+4. non-repairable states do not wake Meta-RLR;
+5. the bridge invokes the existing `meta_rlr.py run-once` rather than duplicating Host logic;
+6. only `verified`/`recovered` Meta-RLR outcomes with matching Git provenance can produce a resume handoff;
+7. dirty RLR code checkouts fail closed;
+8. resume uses a fresh worker from the verified repair worktree;
+9. the original checkout is not modified by the resume path;
+10. recursive maintenance and recursive post-repair repair are blocked;
+11. existing Phase 2 recovery and settlement tests remain green;
+12. full repository regression remains green.
