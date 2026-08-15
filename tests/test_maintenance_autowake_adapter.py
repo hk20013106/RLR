@@ -1,8 +1,9 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from research_loop import maintenance_autowake_adapter as adapter
+from rlr_maintenance import autowake_adapter as adapter
 from rlr_maintenance.autowake import (
+    AUTOWAKE_CONFIG_ENV,
     AUTOWAKE_RETRY_GUARD_ENV,
     RepairHandoff,
 )
@@ -106,6 +107,7 @@ def _fake_detached_module(tmp_path: Path, original_returncode: int):
 def test_adapter_success_path_never_wakes_meta_rlr(tmp_path, monkeypatch):
     module, original_calls = _fake_detached_module(tmp_path, 0)
     wake_calls = []
+    monkeypatch.setenv(AUTOWAKE_CONFIG_ENV, "enabled-for-test")
     monkeypatch.setattr(
         adapter,
         "maybe_wake_meta_rlr",
@@ -120,11 +122,30 @@ def test_adapter_success_path_never_wakes_meta_rlr(tmp_path, monkeypatch):
     assert wake_calls == []
 
 
+def test_adapter_disabled_failure_path_is_inert(tmp_path, monkeypatch):
+    module, original_calls = _fake_detached_module(tmp_path, 3)
+    wake_calls = []
+    monkeypatch.delenv(AUTOWAKE_CONFIG_ENV, raising=False)
+    monkeypatch.setattr(
+        adapter,
+        "maybe_wake_meta_rlr",
+        lambda **kwargs: wake_calls.append(kwargs),
+    )
+    adapter.install(module)
+
+    result = module.run_worker(tmp_path, "dr-test", object())
+
+    assert result == 3
+    assert len(original_calls) == 1
+    assert wake_calls == []
+
+
 def test_adapter_verified_repair_resumes_and_returns_fresh_worker_result(tmp_path, monkeypatch):
     module, _ = _fake_detached_module(tmp_path, 3)
     handoff = _handoff(tmp_path)
     wake_calls = []
     resume_calls = []
+    monkeypatch.setenv(AUTOWAKE_CONFIG_ENV, "enabled-for-test")
 
     def wake(**kwargs):
         wake_calls.append(kwargs)
@@ -152,6 +173,7 @@ def test_adapter_verified_repair_resumes_and_returns_fresh_worker_result(tmp_pat
 def test_adapter_failed_post_repair_worker_does_not_claim_success(tmp_path, monkeypatch):
     module, _ = _fake_detached_module(tmp_path, 3)
     handoff = _handoff(tmp_path)
+    monkeypatch.setenv(AUTOWAKE_CONFIG_ENV, "enabled-for-test")
     monkeypatch.setattr(adapter, "maybe_wake_meta_rlr", lambda **_kwargs: handoff)
     monkeypatch.setattr(adapter, "_resume_verified_worker", lambda **_kwargs: 3)
     adapter.install(module)
