@@ -233,8 +233,15 @@ python meta_rlr.py run-once `
   --goal-id <goal> `
   --agent-id <agent> `
   --workspace-parent <path> `
-  [--registry <path>]
+  [--registry <path>] `
+  --quota-scan-root <public-safe-root>
 ```
+
+The local host passes the pinned LoopX runtime profile `outer_controller` by
+default. The quota scan root is deliberately required from the caller: LoopX
+defines its implicit default as the LoopX installation root, while a real RLR
+checkout or control project may contain private state and must not be guessed
+as a public-safe scan root.
 
 No permanent loop or GitHub wake controller is introduced.
 

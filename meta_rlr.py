@@ -30,6 +30,17 @@ def build_parser() -> argparse.ArgumentParser:
     run_once.add_argument("--workspace-parent", required=True, type=Path)
     run_once.add_argument("--registry", type=Path)
     run_once.add_argument("--loopx-executable", default="loopx")
+    run_once.add_argument(
+        "--quota-runtime-profile",
+        default="outer_controller",
+        help="LoopX quota runtime profile for this stateless outer controller.",
+    )
+    run_once.add_argument(
+        "--quota-scan-root",
+        required=True,
+        type=Path,
+        help="Explicit public-safe root for LoopX quota scans.",
+    )
     run_once.add_argument("--codex-executable", default="codex")
     run_once.add_argument("--capability", action="append", dest="capabilities")
     return parser
@@ -41,6 +52,8 @@ def main(argv: list[str] | None = None) -> int:
     loopx = LoopXCli(
         executable=args.loopx_executable,
         registry=str(args.registry) if args.registry else None,
+        quota_runtime_profile=args.quota_runtime_profile,
+        quota_scan_root=args.quota_scan_root,
     )
     host = MetaRLRHost(
         loopx=loopx,
