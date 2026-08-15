@@ -337,9 +337,16 @@ def maybe_wake_meta_rlr(
             event_path = event_dir / f"{event['event_id']}.json"
             _write_json_atomic(event_path, event)
 
+        # The maintenance process and every verifier/Codex child it launches
+        # inherit the guard. That keeps Phase 3 single-shot: verification of a
+        # repair may observe failures, but it must never recursively wake a
+        # second Meta-RLR turn from inside the first maintenance tree.
+        meta_environment = dict(environment)
+        meta_environment[AUTOWAKE_RETRY_GUARD_ENV] = "1"
         completed = command_runner(
             _meta_command(repo_root=repo_root, event_path=event_path, config=config),
             cwd=repo_root,
+            env=meta_environment,
             text=True,
             encoding="utf-8",
             capture_output=True,
