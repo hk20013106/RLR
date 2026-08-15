@@ -172,9 +172,6 @@ class MetaRLRHost:
             or turn_id != expected_turn
         ):
             return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=todo_id or None, profile_id=profile_id, reason="recovery_binding_mismatch")
-        receipt = self._verifier(profile_id, work.path)
-        if getattr(receipt, "passed", False) is not True:
-            return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=todo_id, profile_id=profile_id, commit_sha=getattr(binding, "commit_sha", None), reason="recovery_verification_failed")
         scoped = self._loopx.quota_should_run(
             goal_id=goal_id,
             agent_id=agent_id,
@@ -191,6 +188,9 @@ class MetaRLRHost:
         )
         if scoped.get("should_run") is not True or (selected != todo_id and not settled_frontier_replay):
             return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=todo_id, profile_id=profile_id, commit_sha=getattr(binding, "commit_sha", None), reason="recovery_frontier_mismatch")
+        receipt = self._verifier(profile_id, work.path)
+        if getattr(receipt, "passed", False) is not True:
+            return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=todo_id, profile_id=profile_id, commit_sha=getattr(binding, "commit_sha", None), reason="recovery_verification_failed")
         return self._settle_verified(
             event=event,
             profile_id=profile_id,
