@@ -85,6 +85,23 @@ def test_l85_invocation_includes_actual_l7_l8_results(tmp_path):
     assert "ACTC1" in prompt
 
 
+def test_l85_provider_schema_uses_closed_verdict_enum():
+    schema = dr._runtime_schema("L8.5")
+    verdict_schema = schema["properties"]["verification"]["items"]["properties"]["verdict"]
+
+    assert set(verdict_schema["enum"]) == {"supports", "contradicts", "unresolved"}
+
+
+def test_l85_provider_prompt_requires_closed_verdict_tokens(tmp_path):
+    _, prompt = dr.build_invocation(
+        dr.RuntimeSpec(backend="codex", executable="codex"),
+        "L8.5", "Q", "H", tmp_path,
+        result_context='{"L7": {}, "L8": {}}',
+    )
+
+    assert "verdict must be exactly one of: supports, contradicts, unresolved" in prompt
+
+
 def test_l4_prompt_requires_full_source_payload_for_method_anchors(tmp_path):
     _, prompt = dr.build_invocation(
         dr.RuntimeSpec(backend="codex", executable="codex"),

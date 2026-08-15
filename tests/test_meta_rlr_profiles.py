@@ -64,6 +64,15 @@ def test_l4_and_l10c_profiles_are_separate_contract_families():
     assert "l4b_frozen_corpus_only" not in l10c.protected_contracts
 
 
+def test_l85_profile_owns_verdict_contract_and_native_regressions():
+    profile = get_profile("l8_5_verification_integrity")
+
+    assert profile.schema_version == VERIFICATION_PROFILE_SCHEMA
+    assert profile.protected_contracts == ("l8_5_verification_verdict_enum",)
+    assert any("tests/test_deep_research.py" in step.command for step in profile.required_validation)
+    assert any(step.step_id == "full_regression" for step in profile.required_validation)
+
+
 def _event(expected_contract="runner_nonzero_propagation"):
     return build_maintenance_event(
         event_type="runtime_failure",

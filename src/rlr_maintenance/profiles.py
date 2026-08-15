@@ -111,6 +111,31 @@ _PROFILES = {
         ),
         forbidden_success_shortcuts=_FORBIDDEN_SHORTCUTS,
     ),
+    "l8_5_verification_integrity": VerificationProfile(
+        schema_version=VERIFICATION_PROFILE_SCHEMA,
+        profile_id="l8_5_verification_integrity",
+        risk_class="high",
+        protected_contracts=(
+            "l8_5_verification_verdict_enum",
+        ),
+        required_validation=(
+            _pytest_step(
+                "meta_contract",
+                "tests/test_meta_rlr_contracts.py",
+                "tests/test_meta_rlr_observer.py",
+                "-q",
+            ),
+            _pytest_step(
+                "deep_research_contract",
+                "tests/test_deep_research.py",
+                "-q",
+                "-k",
+                "l85_provider",
+            ),
+            _pytest_step("full_regression", "-q"),
+        ),
+        forbidden_success_shortcuts=_FORBIDDEN_SHORTCUTS,
+    ),
     "l10c_finalization_integrity": VerificationProfile(
         schema_version=VERIFICATION_PROFILE_SCHEMA,
         profile_id="l10c_finalization_integrity",

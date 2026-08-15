@@ -278,7 +278,10 @@ def _runtime_schema() -> dict:
         "type": "object", "additionalProperties": False,
         "properties": {
             "finding": {"type": "string"},
-            "verdict": {"type": "string"},
+            "verdict": {
+                "type": "string",
+                "enum": ["supports", "contradicts", "unresolved"],
+            },
             "evidence_ids": {"type": "array", "items": {"type": "string"}},
         },
         "required": ["finding", "verdict", "evidence_ids"],
@@ -354,12 +357,17 @@ def build_invocation(spec: RuntimeSpec, node: str, question: str, claim: str,
         if not result_context.strip():
             raise DeepResearchError("L8.5 requires actual L7/L8 findings for verification")
         result_block = f"\nActual L7/L8 findings to verify:\n{result_context}\n"
+    verdict_instruction = (
+        "\nverdict must be exactly one of: supports, contradicts, unresolved\n"
+        if node == "L8.5" else ""
+    )
     prompt = f"""Use {invocation}. {_stage_instruction(node)}
 
 RLR stage: {node}
 Scientific question: {question}
 Current hypothesis/claim: {claim}
 {result_block}
+{verdict_instruction}
 
 Return JSON only, matching the supplied schema. Each paper must include DOI,
 PMID, or stable URL; source_database; metadata; open_access; and located
