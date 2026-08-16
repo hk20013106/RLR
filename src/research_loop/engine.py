@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Research Loop v0.9 preview — canonical gated runtime engine.
+"""Research Loop v0.9.1 — canonical gated runtime engine.
 
-This is the v0.9 candidate runtime. The filename `research_loop_v04.py` is retained only
+This is the v0.9.1 runtime. The filename `research_loop_v04.py` is retained only
 for import/CLI stability (run_loop.py and the main-agent protocol import it);
-it is not a legacy engine. As of v0.9, `assemble-context` enforces the
+it is not a legacy engine. As of v0.9.1, `assemble-context` enforces the
 Deep Research gate (`_audit_pre_research`) on L1, L4, and L8.5: it fails closed
 (rc=3) unless a successful Academic Research Skills receipt and source-located
 evidence pack are persisted. A handwritten prose digest or an environment

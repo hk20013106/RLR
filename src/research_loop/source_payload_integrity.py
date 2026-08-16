@@ -145,6 +145,11 @@ def install(deep_research_module) -> None:
                 "evidence_ids": [item["evidence_id"] for item in extracts],
             })
 
+        verification = payload.get("verification", [])
+        if node == "L8.5":
+            verification = dr._bind_l85_verification_evidence_ids(
+                verification, payload["papers"], records
+            )
         artifact = {
             "schema_version": dr.SCHEMA_VERSION,
             "evidence_receipt_schema": "EvidenceRunReceipt/v1.1",
@@ -164,7 +169,7 @@ def install(deep_research_module) -> None:
             "papers": records,
             "rejected_papers": rejected_papers,
             "review_search": payload.get("review_search", {}),
-            "verification": payload.get("verification", []),
+            "verification": verification,
             "result_context_hash": dr._sha(result_context) if result_context else "",
         }
         run_file = runs_dir / f"{run_id}.json"

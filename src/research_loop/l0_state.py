@@ -143,19 +143,178 @@ def _l7_exec_manifest_path(project_dir: Path, cand_id: str) -> Path:
     return project_dir / "04_Analysis_Outputs" / "_exec_manifest" / f"{cand_id}_L7.json"
 
 
+def _l7_delta_path(project_dir: Path, cand_id: str) -> Path | None:
+    """Resolve the canonical L7 declaration used by round-manifest binding.
+
+    Native projects must use the committed v2 delta.  An unbound project is a
+    historical read/verification surface, where the candidate-owned v2 path is
+    the only compatible declaration available to this evidence builder.
+    """
+    path = _delta_for_candidate(project_dir, "L7_turing", cand_id)
+    if path and path.is_file():
+        return path
+    if binding_path(project_dir).is_file():
+        return None
+    compatibility_path = (
+        project_dir / "02_Agent_Notes" / "Turing"
+        / f"{cand_id}_L7_turing_delta.v2.json"
+    )
+    return compatibility_path if compatibility_path.is_file() else None
+
+
+def _load_l7_declaration(project_dir: Path, cand_id: str):
+    path = _l7_delta_path(project_dir, cand_id)
+    if path is None:
+        return None, None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise L0StateError("L0_ROUND_MANIFEST_AUDIT_INVALID",
+                           f"invalid L7 delta: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise L0StateError("L0_ROUND_MANIFEST_AUDIT_INVALID",
+                           "L7 delta must be an object")
+
+    workspace_value = payload.get("workspace")
+    if workspace_value is None:
+        return payload, None
+    if not isinstance(workspace_value, str) or not workspace_value.strip():
+        raise L0StateError("L0_ROUND_MANIFEST_AUDIT_INVALID",
+                           "L7 workspace must be a non-empty path")
+    workspace = _resolve_registered_path(project_dir, workspace_value).resolve()
+    try:
+        workspace.relative_to(project_dir.resolve())
+    except ValueError as exc:
+        raise L0StateError(
+            "L0_ROUND_MANIFEST_AUDIT_INVALID",
+            f"L7 workspace is outside the project: {workspace_value}",
+        ) from exc
+    if not workspace.is_dir():
+        raise L0StateError("L0_ROUND_MANIFEST_ARTIFACT_MISSING",
+                           f"L7 workspace missing: {workspace}")
+    return payload, workspace
+
+
+def _normalise_l7_path(value) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    normalised = value.replace("\\", "/")
+    while normalised.startswith("./"):
+        normalised = normalised[2:]
+    return normalised
+
+
+def _path_is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_l7_reference(project_dir: Path, workspace: Path | None,
+                          value: str) -> Path:
+    raw = Path(value)
+    if raw.is_absolute():
+        resolved = raw.resolve()
+        if workspace is not None and not _path_is_under(resolved, workspace):
+            raise L0StateError(
+                "L0_ROUND_MANIFEST_AUDIT_INVALID",
+                f"L7 absolute artifact path is outside the workspace: {value}",
+            )
+        return resolved
+    if workspace is None:
+        return project_dir / raw
+
+    normalised = _normalise_l7_path(value)
+    workspace_rel = workspace.relative_to(project_dir.resolve()).as_posix()
+    project_roots = {
+        "00_Preflight", "01_Candidates", "02_Agent_Notes",
+        "04_Analysis_Outputs", "08_Audit", "08_Run_Receipts",
+        "09_Literature_Database",
+    }
+    if (normalised == workspace_rel
+            or normalised.startswith(f"{workspace_rel}/")
+            or (Path(normalised).parts
+                and Path(normalised).parts[0] in project_roots)):
+        resolved = project_dir / raw
+    else:
+        resolved = workspace / raw
+    if not _path_is_under(resolved, project_dir):
+        raise L0StateError(
+            "L0_ROUND_MANIFEST_AUDIT_INVALID",
+            f"L7 artifact path escapes the project: {value}",
+        )
+    if not _path_is_under(resolved, workspace):
+        raise L0StateError(
+            "L0_ROUND_MANIFEST_AUDIT_INVALID",
+            f"L7 artifact path escapes the workspace: {value}",
+        )
+    return resolved
+
+
 def _l7_output_paths(project_dir: Path, cand_id: str) -> Iterable[Path]:
     manifest = _l7_exec_manifest_path(project_dir, cand_id)
     if not manifest.is_file():
         return []
     try:
         payload = json.loads(manifest.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise L0StateError("L0_ROUND_MANIFEST_RECEIPT_INVALID",
                            f"invalid L7 execution manifest: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise L0StateError("L0_ROUND_MANIFEST_RECEIPT_INVALID",
+                           "L7 execution manifest must be an object")
+    scripts = payload.get("scripts", [])
+    if not isinstance(scripts, list):
+        raise L0StateError("L0_ROUND_MANIFEST_RECEIPT_INVALID",
+                           "L7 execution manifest scripts must be a list")
+    l7_payload, workspace = _load_l7_declaration(project_dir, cand_id)
+    result_paths = (_l7_result_paths(project_dir, cand_id)
+                    if l7_payload is not None else [])
     out = []
-    for script in payload.get("scripts", []) or []:
-        for value in script.get("output_files", []) or []:
-            out.append(_resolve_registered_path(project_dir, value))
+    for script in scripts:
+        if not isinstance(script, dict):
+            raise L0StateError("L0_ROUND_MANIFEST_RECEIPT_INVALID",
+                               "L7 execution script declaration must be an object")
+        output_files = script.get("output_files", [])
+        if not isinstance(output_files, list):
+            raise L0StateError("L0_ROUND_MANIFEST_RECEIPT_INVALID",
+                               "L7 output_files must be a list")
+        for value in output_files:
+            if not isinstance(value, str) or not value.strip():
+                raise L0StateError("L0_ROUND_MANIFEST_RECEIPT_INVALID",
+                                   "L7 output_files must contain non-empty paths")
+            if Path(value).is_absolute():
+                matches = [
+                    path for path, _hash in result_paths
+                    if path.resolve() == Path(value).resolve()
+                ]
+            else:
+                normalised = _normalise_l7_path(value)
+                matches = []
+                for path, _hash in result_paths:
+                    candidates = {
+                        _normalise_l7_path(_stored_path(project_dir, path))
+                    }
+                    if workspace is not None:
+                        try:
+                            candidates.add(
+                                _normalise_l7_path(
+                                    path.resolve().relative_to(workspace).as_posix()
+                                )
+                            )
+                        except ValueError:
+                            pass
+                    if normalised in candidates:
+                        matches.append(path)
+            unique_matches = {path.resolve() for path in matches}
+            if len(unique_matches) > 1:
+                raise L0StateError("L0_ROUND_MANIFEST_ARTIFACT_AMBIGUOUS", value)
+            out.append(
+                matches[0] if matches
+                else _resolve_l7_reference(project_dir, workspace, value)
+            )
     return out
 
 
@@ -169,24 +328,46 @@ def _candidate_delta_paths(project_dir: Path, cand_id: str) -> list[tuple[str, P
 
 
 def _l7_result_paths(project_dir: Path, cand_id: str) -> list[tuple[Path, str]]:
-    """Return explicit result artifact refs declared by the committed L7 delta."""
-    path = _delta_for_candidate(project_dir, "L7_turing", cand_id)
-    if not path or not path.is_file():
+    """Return explicit result artifact refs declared by the L7 delta."""
+    payload, workspace = _load_l7_declaration(project_dir, cand_id)
+    if payload is None:
         return []
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+    results = payload.get("results", [])
+    if not isinstance(results, list):
         raise L0StateError("L0_ROUND_MANIFEST_AUDIT_INVALID",
-                           f"invalid L7 delta: {exc}") from exc
+                           "L7 results must be a list")
+    if workspace is not None and not results:
+        raise L0StateError("L0_ROUND_MANIFEST_AUDIT_INVALID",
+                           "workspace-bound L7 delta must declare results")
     out = []
-    for result in payload.get("results", []) or []:
+    for result in results:
         if not isinstance(result, dict):
-            continue
-        for ref in result.get("artifact_refs", []) or []:
+            raise L0StateError("L0_ROUND_MANIFEST_AUDIT_INVALID",
+                               "L7 result declaration must be an object")
+        refs = result.get("artifact_refs", [])
+        if not isinstance(refs, list):
+            raise L0StateError("L0_ROUND_MANIFEST_AUDIT_INVALID",
+                               "L7 artifact_refs must be a list")
+        if workspace is not None and not refs:
+            raise L0StateError(
+                "L0_ROUND_MANIFEST_AUDIT_INVALID",
+                "workspace-bound L7 result must declare artifact_refs",
+            )
+        for ref in refs:
             if not isinstance(ref, dict) or not ref.get("path"):
-                continue
-            artifact_path = _resolve_registered_path(project_dir, ref["path"])
+                raise L0StateError("L0_ROUND_MANIFEST_AUDIT_INVALID",
+                                   "L7 artifact reference must declare a path")
             declared_hash = str(ref.get("sha256") or "")
+            if (workspace is not None and
+                    (len(declared_hash) != 64 or
+                     any(char not in "0123456789abcdef" for char in declared_hash))):
+                raise L0StateError(
+                    "L0_ROUND_MANIFEST_AUDIT_INVALID",
+                    f"workspace-bound L7 artifact has invalid sha256: {ref['path']}",
+                )
+            artifact_path = _resolve_l7_reference(
+                project_dir, workspace, str(ref["path"])
+            )
             if declared_hash and artifact_path.exists():
                 actual = _hash_path(artifact_path)
                 if actual != declared_hash:

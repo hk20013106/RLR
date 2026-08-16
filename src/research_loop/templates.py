@@ -204,7 +204,7 @@ framework: gated-multi-loop-council-v07
 created_at: {_yaml_value(_now())}
 ---
 
-# {name} - Research Loop v0.9 Preview Index
+# {name} - Research Loop v0.9.1 Index
 
 Topic: {topic}
 
@@ -228,7 +228,7 @@ Topic: {topic}
   `CurrentRoundDataBinding`, and an approved plan (status METHOD_APPROVED).
 - `00_Preflight/input_manifest.md` and `input_alias` are human/legacy metadata;
   neither grants scientific-data access to L7.
-- Each persona runs as an isolated subagent under the v0.9 preview topology.
+- Each persona runs as an isolated subagent under the v0.9.1 topology.
 - State flows between subagents via delta JSON files only.
 
 ## DAG Node Flow

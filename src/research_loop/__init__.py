@@ -1,4 +1,4 @@
-"""research_loop: modular v0.9 engine package."""
+"""research_loop: modular v0.9.1 engine package."""
 
 # Install focused extensions on stable module objects before CLI modules import
 # their functions and schemas.

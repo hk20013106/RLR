@@ -85,6 +85,36 @@ def test_l85_invocation_includes_actual_l7_l8_results(tmp_path):
     assert "ACTC1" in prompt
 
 
+def test_l85_provider_schema_uses_closed_verdict_enum():
+    schema = dr._runtime_schema("L8.5")
+    verdict_schema = schema["properties"]["verification"]["items"]["properties"]["verdict"]
+    evidence_schema = schema["properties"]["verification"]["items"]["properties"]["evidence_ids"]
+
+    assert set(verdict_schema["enum"]) == {"supports", "contradicts", "unresolved"}
+    assert "exact DOI, PMID, or stable URL" in evidence_schema["description"]
+
+
+def test_l85_provider_prompt_requires_closed_verdict_tokens(tmp_path):
+    _, prompt = dr.build_invocation(
+        dr.RuntimeSpec(backend="codex", executable="codex"),
+        "L8.5", "Q", "H", tmp_path,
+        result_context='{"L7": {}, "L8": {}}',
+    )
+
+    assert "verdict must be exactly one of: supports, contradicts, unresolved" in prompt
+
+
+def test_l85_provider_prompt_requires_same_paper_identifier_evidence_refs(tmp_path):
+    _, prompt = dr.build_invocation(
+        dr.RuntimeSpec(backend="codex", executable="codex"),
+        "L8.5", "Q", "H", tmp_path,
+        result_context='{"L7": {}, "L8": {}}',
+    )
+
+    assert "exact DOI, PMID, or stable URL from the cited paper" in prompt
+    assert "must not use an identifier from another paper" in prompt
+
+
 def test_l4_prompt_requires_full_source_payload_for_method_anchors(tmp_path):
     _, prompt = dr.build_invocation(
         dr.RuntimeSpec(backend="codex", executable="codex"),
@@ -325,6 +355,98 @@ def test_l85_contract_requires_a_cited_verification_verdict(tmp_path):
     run_path = tmp_path / "09_Literature_Database" / "evidence_packs" / "runs" / f"{artifact['run_id']}.json"
     run_path.write_text(json.dumps(artifact), encoding="utf-8")
     assert dr.audit_evidence_pack(tmp_path, "C1", "L8.5") == (True, "")
+
+
+def test_l85_provider_identifier_binds_to_located_ids_for_same_paper(tmp_path):
+    payload = _payload()
+    payload["verification"] = [{
+        "finding": "ACTC1 is supported by the cited result.",
+        "verdict": "supports",
+        "evidence_ids": [payload["papers"][0]["doi"]],
+    }]
+
+    artifact = dr.persist_run(
+        tmp_path,
+        "C1",
+        "L8.5",
+        payload,
+        dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"),
+        result_context='{"L7_key_results": {"gene": "ACTC1"}}',
+    )
+
+    assert artifact["verification"][0]["evidence_ids"] == artifact["papers"][0]["evidence_ids"]
+    assert dr.audit_evidence_pack(tmp_path, "C1", "L8.5", run_id=artifact["run_id"]) == (True, "")
+
+
+def test_l85_provider_identifier_binds_to_the_matching_paper_only(tmp_path):
+    payload = _payload()
+    second = json.loads(json.dumps(payload["papers"][0]))
+    second["doi"] = "10.1000/second-paper"
+    second["pmid"] = "87654321"
+    second["url"] = "https://example.org/second-paper"
+    second["title"] = "Second example study"
+    second["source_metadata_response"] = {"id": "87654321", "title": second["title"]}
+    payload["papers"].append(second)
+    payload["verification"] = [{
+        "finding": "The second paper supports the result.",
+        "verdict": "supports",
+        "evidence_ids": [second["doi"]],
+    }]
+
+    artifact = dr.persist_run(
+        tmp_path,
+        "C1",
+        "L8.5",
+        payload,
+        dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"),
+        result_context='{"L7_key_results": {"gene": "ACTC1"}}',
+    )
+
+    assert artifact["verification"][0]["evidence_ids"] == artifact["papers"][1]["evidence_ids"]
+    assert artifact["verification"][0]["evidence_ids"] != artifact["papers"][0]["evidence_ids"]
+    assert dr.audit_evidence_pack(tmp_path, "C1", "L8.5", run_id=artifact["run_id"]) == (True, "")
+
+
+def test_l85_unknown_provider_identifier_fails_closed_at_audit(tmp_path):
+    payload = _payload()
+    payload["verification"] = [{
+        "finding": "The result has no matching paper identifier.",
+        "verdict": "unresolved",
+        "evidence_ids": ["10.1000/not-persisted"],
+    }]
+    artifact = dr.persist_run(
+        tmp_path,
+        "C1",
+        "L8.5",
+        payload,
+        dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"),
+        result_context='{"L7_key_results": {"gene": "ACTC1"}}',
+    )
+
+    ok, reason = dr.audit_evidence_pack(tmp_path, "C1", "L8.5", run_id=artifact["run_id"])
+    assert ok is False and "unknown evidence ID" in reason
+
+
+def test_l85_provider_identifier_without_located_extract_fails_closed(tmp_path):
+    payload = _payload()
+    for extract in payload["papers"][0]["extracts"]:
+        extract["verification_status"] = "not-located"
+    payload["verification"] = [{
+        "finding": "The paper has no located extract for this result.",
+        "verdict": "unresolved",
+        "evidence_ids": [payload["papers"][0]["doi"]],
+    }]
+    artifact = dr.persist_run(
+        tmp_path,
+        "C1",
+        "L8.5",
+        payload,
+        dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"),
+        result_context='{"L7_key_results": {"gene": "ACTC1"}}',
+    )
+
+    ok, reason = dr.audit_evidence_pack(tmp_path, "C1", "L8.5", run_id=artifact["run_id"])
+    assert ok is False and "unknown evidence ID" in reason
 
 
 def test_gate_rejects_a_handwritten_legacy_research_note(tmp_path):
