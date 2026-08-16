@@ -182,3 +182,21 @@ def test_structured_l4_keeps_navigation_but_does_not_count_it_as_anchor(tmp_path
     assert dr.audit_evidence_pack(
         project, "C1", "L4", run_id=artifact["run_id"]
     ) == (True, "")
+
+
+def test_structured_l4_accepts_normalized_review_results_and_conclusion_headings(tmp_path):
+    payload = _payload()
+    payload["papers"][2]["extracts"][0]["section"] = "Results—Model classes"
+    payload["papers"][2]["extracts"][1]["section"] = "Conclusion: Review implication"
+    project = tmp_path / "P"
+    artifact = dr.persist_run(
+        project,
+        "C1",
+        "L4",
+        payload,
+        dr.skill_receipt("codex", ["codex", "exec"], "prompt", "test"),
+    )
+
+    assert dr.audit_evidence_pack(
+        project, "C1", "L4", run_id=artifact["run_id"]
+    ) == (True, "")

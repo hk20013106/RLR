@@ -279,6 +279,40 @@ def test_l1_contract_rejects_non_heading_conclusion_text(tmp_path):
     assert ok is False and "Conclusion" in reason
 
 
+@pytest.mark.parametrize(("results_section", "discussion_section"), [
+    ("Results—Differential expression analysis", "Discussion—Functional implications"),
+    ("Results: Gene expression", "Discussion (interpretation)"),
+])
+def test_l1_contract_accepts_normalized_results_and_discussion_headings(
+    tmp_path, results_section, discussion_section
+):
+    payload = _payload()
+    payload["papers"][0]["extracts"][0]["section"] = results_section
+    payload["papers"][0]["extracts"][1]["section"] = discussion_section
+    dr.persist_run(tmp_path, "C1", "L1", payload,
+                   dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"))
+
+    assert dr.audit_evidence_pack(tmp_path, "C1", "L1") == (True, "")
+
+
+@pytest.mark.parametrize(("extract_index", "section"), [
+    (0, "Methods: discussion of results"),
+    (1, "Methods: discussion of results"),
+    (0, "Introduction to results"),
+])
+def test_l1_contract_rejects_keyword_only_results_or_discussion_text(
+    tmp_path, extract_index, section
+):
+    payload = _payload()
+    payload["papers"][0]["extracts"][extract_index]["section"] = section
+    dr.persist_run(tmp_path, "C1", "L1", payload,
+                   dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"))
+
+    ok, reason = dr.audit_evidence_pack(tmp_path, "C1", "L1")
+    assert ok is False
+    assert "Results" in reason or "Discussion" in reason
+
+
 def test_l4_contract_accepts_primary_methods_and_review_search_miss(tmp_path):
     payload = _payload()
     payload["review_search"] = {"query": "systematic review network analysis", "status": "none_found", "receipt": "Europe PMC 0"}

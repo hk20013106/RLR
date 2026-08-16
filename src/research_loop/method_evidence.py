@@ -562,16 +562,19 @@ with a real accepted method anchor, or a truthful source-blocked candidate.
                     continue
                 accepted_anchors.add(str(extract.get("anchor_id") or ""))
         if review.get("status") == "completed":
-            review_sections = {
-                str(extract.get("section", "")).lower()
+            review_extracts = [
+                extract
                 for record in records
                 if str(record.get("paper_type", "")).lower() in {
                     "review", "systematic_review", "meta_analysis"
                 }
                 for extract in record.get("evidence_extracts", [])
                 if extract.get("verification_status") == "located" and extract.get("locator")
-            }
-            if not {"results", "conclusion"}.issubset(review_sections):
+            ]
+            if (not any(dr._is_results_section(extract.get("section"))
+                        for extract in review_extracts)
+                    or not any(dr._is_conclusion_section(extract.get("section"))
+                               for extract in review_extracts)):
                 return False, "L4 completed review search lacks located review Results and Conclusion extracts"
         candidates = artifact.get("method_candidates", [])
         for component in artifact.get("method_components", []):
