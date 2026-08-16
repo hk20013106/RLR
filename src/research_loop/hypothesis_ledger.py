@@ -1063,9 +1063,20 @@ class HypothesisLedger:
                     ids = [item["hypothesis_id"] for item in normalized["triage"]]
                     if len(ids) != len(set(ids)):
                         raise LedgerError("L3 triage contains duplicate hypothesis_id")
-                    if set(ids) != set(existing):
+                    # Native v2.1 finalized-upstream validation above already
+                    # constrains L3 to the finalized L1 hypotheses.  A
+                    # continuation also has an authorized L0 successor
+                    # occurrence in this candidate/round, which is not a
+                    # current L1 triage item.  Keep the historical occurrence
+                    # exhaustiveness check only for legacy v2.0 compatibility.
+                    if (transaction_profile.delta_schema_version != "2.1"
+                            and set(ids) != set(existing)):
                         raise LedgerError("L3 triage must dispose every and only current L1 hypothesis")
                     for item in normalized["triage"]:
+                        self._require_occurrences(
+                            con, project_id, candidate_id, str(round_id),
+                            [item["hypothesis_id"]],
+                        )
                         event = add(item["disposition"], hypothesis_id=item["hypothesis_id"], occurrence_id=existing[item["hypothesis_id"]], outcome=item["reason_code"], reason=item["reason"])
                         self._set_workflow(con, existing[item["hypothesis_id"]], item["disposition"], event)
                 elif node in {"L4", "L6"}:
