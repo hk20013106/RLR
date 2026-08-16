@@ -1,8 +1,10 @@
 import hashlib
 import json
 
+import pytest
+
 from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
-from research_loop.hypothesis_ledger import HypothesisLedger
+from research_loop.hypothesis_ledger import HypothesisLedger, LedgerError
 from research_loop.node_skips import ensure_l2_skip_receipt
 from tests.native_v2_helpers import commit_v2, seed_revise_continuation
 
@@ -116,6 +118,19 @@ def test_l3_continuation_successor_does_not_expand_finalized_l1_set(
                 for field in ("testability", "novelty", "feasibility", "impact")
             },
         })
+
+    with pytest.raises(
+        LedgerError,
+        match="L3 triage must cover every finalized L1 hypothesis exactly once",
+    ):
+        commit_v2(project, "C1", "L3", "Oppenheimer", {
+            "schema_version": "2.1",
+            "triage": triage + [{
+                **triage[0],
+                "hypothesis_id": successor_id,
+            }],
+            "route_to": "Fisher",
+        }, round_id="2")
 
     l3 = commit_v2(project, "C1", "L3", "Oppenheimer", {
         "schema_version": "2.1",
