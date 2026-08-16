@@ -103,6 +103,22 @@ def serialize_contract(contract):
     return yaml.safe_dump(contract, allow_unicode=True, sort_keys=True).encode("utf-8")
 
 
+def promote_to_current_schema(contract, *, inherited_inputs=None):
+    """Mark a newly normalized native contract with the current L0 schema.
+
+    Historical low-level builders intentionally keep their 1.0 defaults so
+    old fixtures and readable artifacts remain compatible.  Native intake
+    boundaries call this helper explicitly when they create a current
+    candidate, keeping the schema promotion and continuation vocabulary in one
+    place.
+    """
+    if not isinstance(contract, dict):
+        raise TypeError("contract must be a mapping")
+    contract["schema_version"] = SUPPORTED_SCHEMA_VERSIONS[-1]
+    contract["inherited_inputs"] = list(inherited_inputs or [])
+    return contract
+
+
 # --- builders (used by new-candidate) ---------------------------------------
 
 def build_source_input(input_type=None, files=None, location=None,

@@ -309,6 +309,36 @@ def write_current_round_data_binding(project_dir, cand_id, evidence_binding=None
     return path, _sha_file(path)
 
 
+def recover_current_round_data_binding(project_dir, cand_id, evidence_binding,
+                                       *, expected_old_contract_sha256: str) -> tuple[Path, str]:
+    """Refresh an empty derived binding during explicit continuation recovery.
+
+    Normal creation remains collision-protected by
+    :func:`write_current_round_data_binding`.  This narrowly scoped operation
+    is callable only by the auditable defective-continuation recovery path: the
+    existing binding must still point at the old contract and must authorize no
+    files.  A binding with authorized inputs is evidence that the candidate has
+    progressed and is therefore immutable here.
+    """
+    project = Path(project_dir)
+    path = current_round_data_binding_path(project, cand_id)
+    existing = load_current_round_data_binding(project, cand_id)
+    if existing.get("l0_contract_sha256") != expected_old_contract_sha256:
+        raise L0DataError(
+            "L0_DATA_RECOVERY_BINDING_MISMATCH",
+            "existing CurrentRoundDataBinding does not point at the defective contract",
+        )
+    if existing.get("authorized_inputs"):
+        raise L0DataError(
+            "L0_DATA_RECOVERY_PROGRESS_FORBIDDEN",
+            "existing CurrentRoundDataBinding already authorizes local inputs",
+        )
+    payload = build_current_round_data_binding(project, cand_id, evidence_binding)
+    text = _canonical_json(payload)
+    path.write_text(text, encoding="utf-8")
+    return path, _sha_file(path)
+
+
 def load_current_round_data_binding(project_dir, cand_id) -> dict:
     path = current_round_data_binding_path(project_dir, cand_id)
     if not path.is_file():

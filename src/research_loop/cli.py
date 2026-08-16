@@ -13,6 +13,7 @@ from research_loop.topology import AGENTS, NODE_MAP
 from research_loop.commands.lifecycle import (
     VALID_STATUSES, cmd_check_deps, cmd_decision, cmd_demo, cmd_new_candidate,
     cmd_new_project, cmd_next_step, cmd_normalize_l0_input, cmd_note,
+    cmd_recover_continuation,
     cmd_preflight, cmd_route, cmd_triage_idea, cmd_triage_method,
 )
 from research_loop.commands.research import (
@@ -74,9 +75,9 @@ def _add_deep_research_run_arguments(parser):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="research_loop_v04.py",
-        description="Research Loop v0.9.1 - canonical gated runtime engine "
+        description="Research Loop v0.9.2 - canonical gated runtime engine "
                     "(DAG-driven subagent architecture; assemble-context "
-                    "enforces the v0.9.1 deep-research and provenance gates).")
+                    "enforces the v0.9.2 deep-research and provenance gates).")
     p.add_argument("--version", action="version", version=f"v{__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -85,7 +86,7 @@ def build_parser():
     sp.set_defaults(func=cmd_demo)
 
     # new-project
-    sp = sub.add_parser("new-project", help="create a new native v0.9.1 project folder")
+    sp = sub.add_parser("new-project", help="create a new native v0.9.2 project folder")
     sp.add_argument("name")
     sp.add_argument("topic", nargs="?", default="")
     sp.add_argument("--knowledge-store", dest="knowledge_store",
@@ -145,7 +146,25 @@ def build_parser():
                     help="source_input.location (path or dataset id)")
     sp.add_argument("--input-format", dest="input_format", default=None,
                     help="source_input.format (e.g. csv, fastq)")
+    sp.add_argument("--inherit-previous-source", action="store_true",
+                    help=("explicitly project the prior candidate's verified "
+                          "source files into inherited_inputs"))
     sp.set_defaults(func=cmd_new_candidate)
+
+    sp = sub.add_parser(
+        "recover-continuation",
+        help="explicitly upgrade one pristine defective continuation seed",
+    )
+    sp.add_argument("project_dir")
+    sp.add_argument("cand_id")
+    sp.add_argument("--from-memory", dest="from_memory", default=None,
+                    help="original next_loop_memory.json (defaults to candidate frontmatter)")
+    sp.add_argument("--loop-type", dest="loop_type", default=None,
+                    choices=["divergent", "correction", "data-acquisition"],
+                    help="continuation loop type (defaults to candidate frontmatter)")
+    sp.add_argument("--knowledge-store", dest="knowledge_store",
+                    help="shared HypothesisLedger SQLite store (or RLR_HYPOTHESIS_STORE)")
+    sp.set_defaults(func=cmd_recover_continuation)
 
     sp = sub.add_parser("normalize-l0-input",
                         help="normalize a labelled request into a strict L0 contract")
@@ -578,7 +597,8 @@ def main(argv=None):
         if getattr(args, "knowledge_store", None):
             os.environ["RLR_HYPOTHESIS_STORE"] = str(args.knowledge_store)
         activated_commands = {
-            "preflight", "new-candidate", "normalize-l0-input", "next-step",
+            "preflight", "new-candidate", "recover-continuation",
+            "normalize-l0-input", "next-step",
             "assemble-context", "emit-delta", "triage-idea", "triage-method",
             "execution-gate", "prepare-turing-workspace", "finalize-candidate",
             "aggregate-report", "ranking-shadow", "emit-loop-memory",

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""RLR v0.9.1 loop runner — the canonical active runtime entry point.
+"""RLR v0.9.2 loop runner — the canonical active runtime entry point.
 
 `python run_loop.py run PROJECT CAND` is the one documented way to drive the
-loop. It drives the v0.9.1 engine (research_loop_v04.py) whose `assemble-context`
+loop. It drives the v0.9.2 engine (research_loop_v04.py) whose `assemble-context`
 enforces the V0.7 Deep Research gate: L1/L4/L8.5 fail closed (rc=3) without a
 successful ARS receipt and a valid evidence pack; `assemble_context()` here
 re-raises that as a hard stop.
@@ -862,7 +862,7 @@ def create_child(project, parent_cand, decision, new_round):
              or parent_fm.get("question", ""),
              "--claim", decision["new_candidate_claim"] or "revised claim",
              "--input", src, "--from-memory", str(memory_path),
-             "--loop-type", loop_type)
+             "--loop-type", loop_type, "--inherit-previous-source")
     child = r.stdout.split()[0] if r.stdout.strip() else None
     if not child:
         raise RuntimeError(f"new-candidate failed: {r.stdout} {r.stderr}")
@@ -1021,7 +1021,7 @@ def cmd_run(args):
     return 0
 
 
-MAIN_AGENT_PROMPT_TEMPLATE = """You are now the RLR v0.9.1 main-agent orchestrator.
+MAIN_AGENT_PROMPT_TEMPLATE = """You are now the RLR v0.9.2 main-agent orchestrator.
 
 Project: {project}
 Candidate: {cand_id}
@@ -1086,7 +1086,7 @@ def cmd_print_main_agent_prompt(args):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="run_loop.py",
-        description="RLR v0.9.1 loop runner — canonical runtime entry point "
+        description="RLR v0.9.2 loop runner — canonical runtime entry point "
                     "(main-agent / headless / manual).")
     sub = p.add_subparsers(dest="cmd", required=True)
 

@@ -206,9 +206,9 @@ def _verify_file_manifest(manifest, *, data=None):
 
 
 def _current_contract(contract, inherited_inputs):
-    contract["schema_version"] = l0_contract.SUPPORTED_SCHEMA_VERSIONS[-1]
-    contract["inherited_inputs"] = list(inherited_inputs or [])
-    return contract
+    return l0_contract.promote_to_current_schema(
+        contract, inherited_inputs=inherited_inputs
+    )
 
 
 def normalize_frontmatter(

@@ -26,6 +26,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from deep_research_fixtures import persist_synthetic_evidence
 from native_v2_helpers import write_catalog_emission_receipts
 from research_loop import deep_research
@@ -259,6 +261,198 @@ def test_create_child_production_path_authorizes_verified_parent_source(tmp_path
     assert selectors[0]["sha256"] == hashlib.sha256(parent_source.read_bytes()).hexdigest()
     assert selectors[0]["role"]
     assert selectors[0]["reuse_reason"]
+
+    contract_path = proj / "01_Candidates" / f"{child}.l0_input.yaml"
+    contract_bytes = contract_path.read_bytes()
+    candidate_bytes = (proj / "01_Candidates" / f"{child}.md").read_bytes()
+    retry = run_loop.create_child(
+        str(proj), parent,
+        {
+            "new_candidate_title": "T2",
+            "new_candidate_question": "Q2",
+            "new_candidate_claim": "C2",
+        },
+        2,
+    )
+    assert retry == child
+    assert contract_path.read_bytes() == contract_bytes
+    assert (proj / "01_Candidates" / f"{child}.md").read_bytes() == candidate_bytes
+
+
+def _source_parent_and_seed(tmp_path):
+    proj = _new_project(tmp_path)
+    source = proj / "round1_source.csv"
+    parent = _seed_terminal_candidate(proj, source_file=source)
+    manifest_path, manifest_hash = write_round_manifest(proj, parent)
+    assert hashlib.sha256(manifest_path.read_bytes()).hexdigest() == manifest_hash
+    result = _run("emit-loop-memory", str(proj), parent)
+    assert result.returncode == 0, result.stderr
+    seed = proj / "08_Audit" / "loop_memory" / f"{parent}_next_loop_memory.json"
+    assert seed.is_file()
+    return proj, parent, source, seed
+
+
+def _make_defective_continuation(proj, child):
+    contract, path, _raw = l0_contract.load_contract(proj, child)
+    defective = dict(contract)
+    defective["schema_version"] = "1.0"
+    defective.pop("inherited_inputs", None)
+    defective["source_input"] = l0_contract.build_source_input(
+        input_type="inline", description="old defective continuation",
+        fmt="unspecified",
+    )
+    raw = l0_contract.serialize_contract(defective)
+    path.write_bytes(raw)
+    candidate_path = proj / "01_Candidates" / f"{child}.md"
+    text = candidate_path.read_text(encoding="utf-8")
+    old_hash = hashlib.sha256(_raw).hexdigest()
+    new_hash = hashlib.sha256(raw).hexdigest()
+    assert f"input_contract_hash: {old_hash}" in text
+    text = text.replace(
+        f"input_contract_hash: {old_hash}",
+        f"input_contract_hash: {new_hash}",
+        1,
+    )
+    text = text.replace(
+        "schema_version: 1.1\nround_type: continuation",
+        "schema_version: 1.0\nround_type: continuation",
+        1,
+    )
+    candidate_path.write_text(text, encoding="utf-8")
+    return raw
+
+
+@pytest.mark.parametrize("inherit", [False, True])
+def test_cli_continuation_new_only_and_inherited_plus_new(tmp_path, inherit):
+    proj, parent, source, seed = _source_parent_and_seed(tmp_path)
+    new_source = proj / "round2_new.csv"
+    new_source.write_text("sample,new_value\nA,7\n", encoding="utf-8")
+    source_spec = proj / "round2_source.json"
+    source_spec.write_text(json.dumps({
+        "input_type": "files",
+        "files": [str(new_source)],
+        "location": str(new_source.parent),
+        "description": "round 2 new data",
+        "format": "csv",
+    }), encoding="utf-8")
+    command = [
+        "new-candidate", str(proj), "--title", "T2", "--question", "Q2",
+        "--claim", "C2", "--input", "round 2 new data",
+        "--source-input-file", str(source_spec), "--from-memory", str(seed),
+        "--loop-type", "divergent",
+    ]
+    if inherit:
+        command.append("--inherit-previous-source")
+    result = _run(*command)
+    assert result.returncode == 0, result.stderr
+    child = result.stdout.strip().splitlines()[0]
+    contract, _path, _raw = l0_contract.load_contract(proj, child)
+    assert contract["schema_version"] == "1.1"
+    assert bool(contract["inherited_inputs"]) is inherit
+
+    evidence = l0_state.restore_previous_round(proj, child)
+    binding = l0_data.build_current_round_data_binding(proj, child, evidence)
+    authorized = {item["path"] for item in binding["authorized_inputs"]}
+    assert new_source.relative_to(proj).as_posix() in authorized
+    if inherit:
+        assert source.relative_to(proj).as_posix() in authorized
+    else:
+        assert source.relative_to(proj).as_posix() not in authorized
+
+
+def test_explicit_recovery_upgrades_only_the_pristine_defective_seed(tmp_path):
+    proj, parent, source, seed = _source_parent_and_seed(tmp_path)
+    child = run_loop.create_child(
+        str(proj), parent,
+        {"new_candidate_title": "T2", "new_candidate_question": "Q2",
+         "new_candidate_claim": "C2"},
+        2,
+    )
+    _make_defective_continuation(proj, child)
+    evidence = l0_state.restore_previous_round(proj, child)
+    binding_path = l0_data.write_current_round_data_binding(
+        proj, child, evidence
+    )[0]
+    before = json.loads(binding_path.read_text(encoding="utf-8"))
+    assert before["authorized_inputs"] == []
+
+    result = _run(
+        "recover-continuation", str(proj), child,
+        "--from-memory", str(seed), "--loop-type", "divergent",
+    )
+    assert result.returncode == 0, result.stderr
+    contract, contract_path, raw = l0_contract.load_contract(proj, child)
+    assert contract["schema_version"] == "1.1"
+    assert len(contract["inherited_inputs"]) == 1
+    fm = _candidate_text(proj, child)
+    assert hashlib.sha256(raw).hexdigest() in fm
+    recovered = l0_data.verify_current_round_data_binding(proj, child)
+    assert [item["path"] for item in recovered["authorized_inputs"]] == [
+        source.relative_to(proj).as_posix()
+    ]
+    audit = proj / "08_Audit" / "continuation_recovery" / (
+        f"{child}_contract_upgrade.json"
+    )
+    assert audit.is_file()
+    assert json.loads(audit.read_text(encoding="utf-8"))["old_schema_version"] == "1.0"
+    assert contract_path.is_file()
+
+
+def test_recovery_rejects_a_progressed_defective_candidate(tmp_path):
+    proj, parent, _source, seed = _source_parent_and_seed(tmp_path)
+    child = run_loop.create_child(
+        str(proj), parent,
+        {"new_candidate_title": "T2", "new_candidate_question": "Q2",
+         "new_candidate_claim": "C2"},
+        2,
+    )
+    old_raw = _make_defective_continuation(proj, child)
+    progressed = _run(
+        "decision", str(proj), child, "--status", "IDEA_PROPOSED",
+        "--reason", "test progress",
+    )
+    assert progressed.returncode == 0, progressed.stderr
+    result = _run(
+        "recover-continuation", str(proj), child,
+        "--from-memory", str(seed), "--loop-type", "divergent",
+    )
+    assert result.returncode == 2
+    assert "progressed" in result.stderr.lower()
+    assert (proj / "01_Candidates" / f"{child}.l0_input.yaml").read_bytes() == old_raw
+
+
+def test_mismatched_existing_contract_is_not_overwritten_on_retry(tmp_path):
+    proj, parent, _source, _seed = _source_parent_and_seed(tmp_path)
+    child = run_loop.create_child(
+        str(proj), parent,
+        {"new_candidate_title": "T2", "new_candidate_question": "Q2",
+         "new_candidate_claim": "C2"},
+        2,
+    )
+    contract, path, _raw = l0_contract.load_contract(proj, child)
+    invalid = dict(contract)
+    invalid["scientific_question"] = "tampered existing contract"
+    invalid_raw = l0_contract.serialize_contract(invalid)
+    path.write_bytes(invalid_raw)
+    candidate_path = proj / "01_Candidates" / f"{child}.md"
+    text = candidate_path.read_text(encoding="utf-8")
+    old_hash = hashlib.sha256(_raw).hexdigest()
+    invalid_hash = hashlib.sha256(invalid_raw).hexdigest()
+    candidate_path.write_text(
+        text.replace(f"input_contract_hash: {old_hash}",
+                     f"input_contract_hash: {invalid_hash}", 1),
+        encoding="utf-8",
+    )
+    # Invoke the same controller boundary used by create_child so the refusal
+    # is observed as a production error without allowing a rewrite.
+    result = _run(
+        "new-candidate", str(proj), "--title", "T2", "--question", "Q2",
+        "--claim", "C2", "--input", "Round 1 source", "--from-memory",
+        str(_seed), "--loop-type", "divergent", "--inherit-previous-source",
+    )
+    assert result.returncode == 2
+    assert "refusing overwrite" in result.stderr.lower()
+    assert path.read_bytes() == invalid_raw
 
 
 # --- 1. seed continuity: round N output IS round N+1 input --------------------
