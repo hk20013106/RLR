@@ -637,3 +637,194 @@ def restore_previous_round(project_dir, cand_id) -> dict:
     }
     write_evidence_binding(project, cand_id, binding)
     return binding
+
+
+def project_verified_source_selectors(project_dir, memory: dict, *,
+                                      expected_candidate: str | None = None) -> list[dict]:
+    """Project the prior candidate's declared source files into selectors.
+
+    This is deliberately a projection, not a data registry.  The caller must
+    provide the loop-memory identity, but the memory is used only to locate and
+    hash-check the prior Round Manifest.  The parent L0 contract supplies the
+    declaration of which source files are eligible for this same-dataset
+    continuation; the verified manifest supplies the authoritative class and
+    SHA-256.  No audit, literature, receipt, report, manifest, intermediate,
+    or result artifact is selected by this rule.
+    """
+    project = Path(project_dir)
+    if not isinstance(memory, dict):
+        raise L0StateError(
+            "L0_CONTINUATION_MEMORY_INVALID",
+            "continuation memory must be a mapping",
+        )
+
+    parent_candidate = str(
+        expected_candidate or memory.get("source_candidate_id") or ""
+    ).strip()
+    if not parent_candidate:
+        raise L0StateError(
+            "L0_CONTINUATION_MEMORY_INVALID",
+            "continuation memory lacks source_candidate_id",
+        )
+    memory_candidate = str(memory.get("source_candidate_id") or "").strip()
+    if memory_candidate and memory_candidate != parent_candidate:
+        raise L0StateError(
+            "L0_CONTINUATION_MEMORY_IDENTITY_MISMATCH",
+            f"memory source_candidate_id={memory_candidate!r} != expected={parent_candidate!r}",
+        )
+
+    manifest_value = str(memory.get("round_manifest_path") or "").strip()
+    expected_manifest_sha = str(memory.get("round_manifest_sha256") or "").strip()
+    if not manifest_value or not expected_manifest_sha:
+        raise L0StateError(
+            "L0_CONTINUATION_MANIFEST_MISSING",
+            "continuation memory must carry round_manifest_path and round_manifest_sha256",
+        )
+    manifest_path = _resolve_registered_path(project, manifest_value)
+    if not manifest_path.is_file():
+        raise L0StateError(
+            "L0_CONTINUATION_MANIFEST_MISSING",
+            f"prior round manifest missing: {manifest_value}",
+        )
+    actual_manifest_sha = _hash_path(manifest_path)
+    if actual_manifest_sha != expected_manifest_sha:
+        raise L0StateError(
+            "L0_CONTINUATION_MANIFEST_HASH_MISMATCH",
+            f"{manifest_value}: expected={expected_manifest_sha} actual={actual_manifest_sha}",
+        )
+
+    manifest = load_round_manifest(manifest_path)
+    expected_round = str(
+        memory.get("parent_round_id") or manifest.get("round_id") or ""
+    ).strip()
+    if not expected_round:
+        raise L0StateError(
+            "L0_CONTINUATION_MANIFEST_INVALID",
+            "continuation memory/manifest lacks the prior round id",
+        )
+    verified = verify_round_manifest(
+        project,
+        manifest,
+        expected_candidate=parent_candidate,
+        expected_round=expected_round,
+    )
+
+    parent_contract, contract_path, _raw = l0_contract.load_contract(
+        project, parent_candidate
+    )
+    if not isinstance(parent_contract, dict):
+        raise L0StateError(
+            "L0_CONTINUATION_PARENT_CONTRACT_INVALID",
+            f"parent L0 contract missing/unreadable: {contract_path}",
+        )
+    source = parent_contract.get("source_input")
+    if not isinstance(source, dict):
+        raise L0StateError(
+            "L0_CONTINUATION_SOURCE_UNAVAILABLE",
+            f"parent L0 contract has no source_input: {contract_path}",
+        )
+    input_type = str(source.get("input_type") or "")
+    if input_type not in {"files", "directory"}:
+        raise L0StateError(
+            "L0_CONTINUATION_SOURCE_UNAVAILABLE",
+            f"same-dataset source projection requires a local files/directory source; got {input_type!r}",
+        )
+
+    def canonical_path(value: str) -> str:
+        return _stored_path(project, _resolve_registered_path(project, value))
+
+    verified_by_path: dict[str, list[dict]] = {}
+    for item in verified:
+        if not isinstance(item, dict):
+            continue
+        path_value = str(item.get("path") or "")
+        if not path_value:
+            continue
+        verified_by_path.setdefault(canonical_path(path_value), []).append(item)
+
+    declarations: list[tuple[str, str, str]] = []
+    file_manifest = source.get("file_manifest")
+    if isinstance(file_manifest, list) and file_manifest:
+        for index, entry in enumerate(file_manifest):
+            if not isinstance(entry, dict):
+                raise L0StateError(
+                    "L0_CONTINUATION_SOURCE_INVALID",
+                    f"source_input.file_manifest[{index}] must be a mapping",
+                )
+            path_value = str(entry.get("path") or "").strip()
+            digest = str(entry.get("sha256") or "").strip()
+            if not path_value or not digest:
+                raise L0StateError(
+                    "L0_CONTINUATION_SOURCE_INVALID",
+                    f"source_input.file_manifest[{index}] requires path and sha256",
+                )
+            declarations.append((path_value, digest, str(entry.get("role") or "")))
+    else:
+        raw_paths = list(source.get("files") or [])
+        if not raw_paths and source.get("location"):
+            raw_paths = [source["location"]]
+        if not raw_paths:
+            raise L0StateError(
+                "L0_CONTINUATION_SOURCE_UNAVAILABLE",
+                "parent local source_input declares no files or location",
+            )
+        for value in raw_paths:
+            path_value = str(value).strip()
+            if path_value:
+                declarations.append((path_value, "", ""))
+
+    selected: dict[str, dict] = {}
+    for path_value, declared_sha, declared_role in declarations:
+        resolved = _resolve_registered_path(project, path_value)
+        if resolved.is_dir():
+            matches = [
+                item for stored, items in verified_by_path.items()
+                if _path_is_under(
+                    _resolve_registered_path(project, stored), resolved
+                )
+                for item in items
+            ]
+        else:
+            matches = list(verified_by_path.get(canonical_path(path_value), []))
+        if not matches:
+            raise L0StateError(
+                "L0_CONTINUATION_SOURCE_NOT_VERIFIED",
+                f"parent source declaration is absent from verified manifest: {path_value}",
+            )
+        for item in matches:
+            klass = str(item.get("class") or "")
+            if klass != "source":
+                raise L0StateError(
+                    "L0_CONTINUATION_SOURCE_CLASS_FORBIDDEN",
+                    f"{item.get('path')}: manifest class={klass!r}; same-dataset projection allows source only",
+                )
+            stored = canonical_path(str(item["path"]))
+            manifest_sha = str(item.get("sha256") or "")
+            if declared_sha and manifest_sha != declared_sha:
+                raise L0StateError(
+                    "L0_CONTINUATION_SOURCE_HASH_MISMATCH",
+                    f"{stored}: parent contract={declared_sha} manifest={manifest_sha}",
+                )
+            prior = selected.get(stored)
+            role = declared_role or "inherited_source"
+            if prior is not None and prior["sha256"] != manifest_sha:
+                raise L0StateError(
+                    "L0_CONTINUATION_SOURCE_HASH_CONFLICT",
+                    f"duplicate source declaration has conflicting hashes: {stored}",
+                )
+            selected[stored] = {
+                "path": stored,
+                "sha256": manifest_sha,
+                "role": role,
+                "reuse_reason": (
+                    f"reuse verified source input declared by prior candidate "
+                    f"{parent_candidate} round {expected_round}"
+                ),
+            }
+
+    if not selected:
+        raise L0StateError(
+            "L0_CONTINUATION_SOURCE_UNAVAILABLE",
+            "parent source declaration produced no verified source selectors",
+        )
+    return [selected[key] for key in sorted(selected)]

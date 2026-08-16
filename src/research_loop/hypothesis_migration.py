@@ -570,8 +570,11 @@ def commit(project_dir: str | Path, ledger: HypothesisLedger,
     }
     manifest_hash = content_hash(manifest)
     manifest["manifest_hash"] = manifest_hash
-    manifest_rel = f"08_Audit/hypothesis_migration/{migration_id.replace(':', '_')}_manifest.json"
-    manifest_path = staging / manifest_rel
+    # Keep the staged manifest at the staging root.  Repeating the final audit
+    # path below the already nested staging directory exceeds Windows path
+    # limits and is not needed for the final publish target.
+    manifest_name = f"{migration_id.replace(':', '_')}_manifest.json"
+    manifest_path = staging / manifest_name
     _write_exclusive(manifest_path, canonical_json(manifest))
     staged_ledger.commit_migration(
         project_id=report["project_id"], migration_id=migration_id,
@@ -583,8 +586,10 @@ def commit(project_dir: str | Path, ledger: HypothesisLedger,
         checkpoint.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
         checkpoint.close()
-    for source in sorted((path for path in staging.rglob("*") if path.is_file()),
+    for source in sorted((path for path in staging.rglob("*")
+                          if path.is_file() and path != manifest_path),
                          key=lambda path: len(path.parts)):
         _publish_exclusive(source, project / source.relative_to(staging))
+    _publish_exclusive(manifest_path, audit / manifest_name)
     os.replace(clone, ledger.path)
     return manifest

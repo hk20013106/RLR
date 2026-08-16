@@ -3,13 +3,15 @@
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import pitfall_ledger as pl
 
-from research_loop import deep_research, l0_contract, l0_intake
+from research_loop import deep_research, l0_contract, l0_data, l0_intake, l0_state
 from research_loop.commands.ledger import _ledger_for
 from research_loop.common import (
     REQUIRED_DEPENDENCIES,
@@ -293,17 +295,201 @@ def cmd_new_project(args):
     except LedgerError as exc:
         print(f"ERROR: hypothesis ledger project binding failed: {exc}", file=sys.stderr)
         return 2
-    print(f"Created v0.9.1 native project: {project_dir.resolve()}")
+    print(f"Created v0.9.2 native project: {project_dir.resolve()}")
     print("Next: run `preflight` (Linnaeus L0) before any candidate work.")
     return 0
 
+
+def _load_continuation_runtime(project_dir, from_memory, loop_type,
+                               knowledge_store=None):
+    """Load verified continuation identity without touching project artifacts."""
+    if not loop_type:
+        raise ValueError("--from-memory requires --loop-type")
+    mem = _load_loop_memory(from_memory)
+    continuation_ledger = None
+    if binding_path(project_dir).exists():
+        snapshot = mem.get("hypothesis_ledger")
+        if not isinstance(snapshot, dict) or not mem.get("next_round_hypothesis_id"):
+            raise ValueError(
+                "bound project continuation requires v2 loop-memory ledger snapshot "
+                "and successor hypothesis ID"
+            )
+        ledger = _ledger_for(project_dir, knowledge_store)
+        if snapshot.get("store_id") != ledger.store_id:
+            raise ValueError(
+                "loop-memory ledger store_id does not match configured store"
+            )
+        binding = ledger.require_activated_project(project_dir)
+        if snapshot.get("project_id") != binding["project_id"]:
+            raise ValueError(
+                "loop-memory project_id does not match activated project"
+            )
+        if mem.get("loop_type") != loop_type:
+            raise ValueError(
+                "--loop-type does not match the L10b continuation proposal"
+            )
+        continuation_ledger = ledger
+
+    mem_fields = {
+        "from_memory": True,
+        "loop_type": loop_type,
+        "prior_candidate": mem["source_candidate_id"],
+        "memory_file": str(from_memory),
+        "memory_hash": _sha256_file(from_memory),
+    }
+    if mem.get("next_round_hypothesis_id"):
+        mem_fields["hypothesis_id"] = mem["next_round_hypothesis_id"]
+    continuation_key = (
+        f"{mem_fields['memory_hash']}:{mem.get('next_round_hypothesis_id', '')}"
+    )
+    cand_id = "C" + hashlib.sha256(
+        continuation_key.encode("utf-8")
+    ).hexdigest()[:16].upper()
+    return mem, mem_fields, continuation_ledger, cand_id
+
+
+def _continuation_contract(cand_id, mem, mem_fields, question, claim,
+                           source_input, inherited_inputs):
+    prev_decision = (mem.get("previous_final_decision")
+                     or mem.get("terminal_decision") or "")
+    prev_conclusion = (mem.get("previous_conclusion")
+                       or mem.get("final_reason") or "")
+    new_hyp = (mem.get("new_hypothesis")
+               or mem.get("next_round_hypothesis") or claim)
+    parent_rid = mem.get("parent_round_id")
+    round_id = str(mem.get("round_id")
+                   or (int(parent_rid) + 1 if str(parent_rid or "").isdigit()
+                       else 2))
+    contract = l0_contract.build_continuation_contract(
+        cand_id, round_id, parent_rid, mem.get("source_candidate_id"),
+        question, source_input,
+        previous_round={
+            "hypothesis": mem.get("previous_hypothesis", ""),
+            "final_decision": prev_decision,
+            "conclusion": prev_conclusion,
+            "memory_hash": mem_fields.get("memory_hash", ""),
+        },
+        new_hypothesis=new_hyp,
+    )
+    return l0_contract.promote_to_current_schema(
+        contract, inherited_inputs=inherited_inputs
+    ), round_id, parent_rid
+
+
+def _source_input_from_args(args):
+    si_override = getattr(args, "source_input_file", None)
+    if si_override:
+        try:
+            text = Path(si_override).read_text(encoding="utf-8")
+            if str(si_override).lower().endswith(".json"):
+                sid = json.loads(text)
+            else:
+                import yaml as _yaml
+                sid = _yaml.safe_load(text)
+        except Exception as exc:
+            raise ValueError(
+                f"cannot read --source-input-file {si_override}: {exc}"
+            ) from exc
+        if not isinstance(sid, dict):
+            raise ValueError("--source-input-file must contain a mapping")
+        return l0_contract.build_source_input(
+            input_type=sid.get("input_type"), files=sid.get("files"),
+            location=sid.get("location"),
+            description=sid.get("description", args.input),
+            fmt=sid.get("format", ""),
+            verification_status=sid.get("verification_status"),
+            reason=sid.get("reason"),
+        ), True
+    if getattr(args, "input_type", None) or getattr(args, "input_files", None):
+        return l0_contract.build_source_input(
+            input_type=getattr(args, "input_type", None),
+            files=[f for f in (getattr(args, "input_files", None) or [])],
+            location=getattr(args, "input_location", None),
+            description=args.input,
+            fmt=getattr(args, "input_format", "") or "",
+        ), False
+    return l0_contract.build_source_input(
+        input_type="inline", description=args.input, fmt="unspecified"
+    ), False
+
+
+def _contract_path(project_dir, cand_id):
+    return _candidate_file(Path(project_dir), cand_id).with_suffix(
+        ".l0_input.yaml"
+    )
+
+
+def _atomic_replace(path: Path, data: bytes):
+    """Replace one artifact through a same-directory temporary file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        temporary.write_bytes(data)
+        os.replace(str(temporary), str(path))
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _replace_frontmatter_scalar(text, key, value):
+    pattern = re.compile(rf"(?m)^{re.escape(key)}:.*$")
+    replacement = f"{key}: {value}"
+    updated, count = pattern.subn(replacement, text, count=1)
+    if count != 1:
+        raise ValueError(f"candidate frontmatter is missing {key}")
+    return updated
+
+
+def _recovery_progress_reasons(project_dir, cand_id, existing_binding=None):
+    project = Path(project_dir)
+    reasons = []
+    for key in sorted(DELTA_SCHEMAS):
+        path = _delta_for_candidate(project, key, cand_id)
+        if path is not None and path.is_file():
+            reasons.append(f"delta:{key}")
+    decision_files = list((project / "05_Decision_Log").glob(f"D*_{cand_id}.md"))
+    if len(decision_files) > 1:
+        reasons.append("candidate has decisions beyond the seed")
+    if (project / "04_Analysis_Outputs" / "_exec_manifest" /
+            f"{cand_id}_L7.json").is_file():
+        reasons.append("L7 execution manifest exists")
+    if any(project.glob(f"_turing_workspace_{cand_id}_*")):
+        reasons.append("Turing workspace exists")
+    if (project / "08_Run_Receipts" / cand_id).is_dir():
+        reasons.append("runtime receipts exist")
+    if any((project / name).is_file() for name in (
+        f"FINAL_REPORT_{cand_id}.md", f"FINAL_REPORT_CN_{cand_id}.md"
+    )):
+        reasons.append("candidate report exists")
+    if existing_binding is not None and existing_binding.get("authorized_inputs"):
+        reasons.append("CurrentRoundDataBinding already authorizes local inputs")
+    return reasons
+
+
+def _is_defective_continuation(contract):
+    if not isinstance(contract, dict):
+        return False
+    source = contract.get("source_input")
+    return (
+        str(contract.get("schema_version") or "") == "1.0"
+        and contract.get("round_type") == "continuation"
+        and not contract.get("inherited_inputs")
+        and isinstance(source, dict)
+        and source.get("input_type") == "inline"
+        and not source.get("files")
+        and not source.get("location")
+    )
+
+
 def cmd_new_candidate(args):
+    """Create a candidate without overwriting deterministic retries."""
     project_dir = Path(args.project_dir)
     idx = project_dir / "00_Project_Index.md"
     if not idx.exists():
         print(f"ERROR: not a project dir (no 00_Project_Index.md): {project_dir}",
               file=sys.stderr)
         return 2
+
     from_memory = getattr(args, "from_memory", None)
     loop_type = getattr(args, "loop_type", None) or ""
     explicit_rt = getattr(args, "round_type", None)
@@ -316,129 +502,64 @@ def cmd_new_candidate(args):
               "(a continuation must link to a prior loop-memory seed)",
               file=sys.stderr)
         return 2
+    if getattr(args, "inherit_previous_source", False) and not from_memory:
+        print("ERROR: --inherit-previous-source requires --from-memory",
+              file=sys.stderr)
+        return 2
     round_type = explicit_rt or ("continuation" if from_memory else "initial")
 
     mem_fields = {}
     mem = {}
     continuation_ledger = None
     if from_memory:
-        if not loop_type:
-            print("ERROR: --from-memory requires --loop-type", file=sys.stderr)
-            return 2
         try:
-            mem = _load_loop_memory(from_memory)
-        except (FileNotFoundError, ValueError) as e:
-            print(f"ERROR: {e}", file=sys.stderr)
+            mem, mem_fields, continuation_ledger, cand_id = (
+                _load_continuation_runtime(
+                    project_dir, from_memory, loop_type,
+                    getattr(args, "knowledge_store", None),
+                )
+            )
+        except (FileNotFoundError, ValueError, LedgerError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
             return 2
-        if binding_path(project_dir).exists():
-            snapshot = mem.get("hypothesis_ledger")
-            if not isinstance(snapshot, dict) or not mem.get("next_round_hypothesis_id"):
-                print("ERROR: bound project continuation requires v2 loop-memory ledger snapshot and successor hypothesis ID", file=sys.stderr)
-                return 2
-            try:
-                ledger = _ledger_for(project_dir, getattr(args, "knowledge_store", None))
-            except LedgerError as exc:
-                print(f"ERROR: {exc}", file=sys.stderr)
-                return 2
-            if snapshot.get("store_id") != ledger.store_id:
-                print("ERROR: loop-memory ledger store_id does not match configured store", file=sys.stderr)
-                return 2
-            binding = ledger.require_activated_project(project_dir)
-            if snapshot.get("project_id") != binding["project_id"]:
-                print("ERROR: loop-memory project_id does not match activated project", file=sys.stderr)
-                return 2
-            if mem.get("loop_type") != loop_type:
-                print("ERROR: --loop-type does not match the L10b continuation proposal", file=sys.stderr)
-                return 2
-            continuation_ledger = ledger
-        mem_fields = {
-            "from_memory": True, "loop_type": loop_type,
-            "prior_candidate": mem["source_candidate_id"],
-            "memory_file": str(from_memory),
-            "memory_hash": _sha256_file(from_memory),
-        }
-        if mem.get("next_round_hypothesis_id"):
-            mem_fields["hypothesis_id"] = mem["next_round_hypothesis_id"]
-
-    if from_memory:
-        continuation_key = (
-            f"{_sha256_file(from_memory)}:{mem.get('next_round_hypothesis_id', '')}"
-        )
-        cand_id = "C" + hashlib.sha256(
-            continuation_key.encode("utf-8")
-        ).hexdigest()[:16].upper()
     else:
         cand_id = "C" + _stamp()
 
-    si_override = getattr(args, "source_input_file", None)
-    if si_override:
-        try:
-            _txt = Path(si_override).read_text(encoding="utf-8")
-            if str(si_override).lower().endswith(".json"):
-                _sid = json.loads(_txt)
-            else:
-                import yaml as _yaml
-                _sid = _yaml.safe_load(_txt)
-        except Exception as e:
-            print(f"ERROR: cannot read --source-input-file {si_override}: {e}",
-                  file=sys.stderr)
-            return 2
-        if not isinstance(_sid, dict):
-            print(f"ERROR: --source-input-file must contain a mapping",
-                  file=sys.stderr)
-            return 2
-        source_input = l0_contract.build_source_input(
-            input_type=_sid.get("input_type"),
-            files=_sid.get("files"), location=_sid.get("location"),
-            description=_sid.get("description", args.input),
-            fmt=_sid.get("format", ""),
-            verification_status=_sid.get("verification_status"),
-            reason=_sid.get("reason"))
-    elif getattr(args, "input_type", None) or getattr(args, "input_files", None):
-        source_input = l0_contract.build_source_input(
-            input_type=getattr(args, "input_type", None),
-            files=[f for f in (getattr(args, "input_files", None) or [])],
-            location=getattr(args, "input_location", None),
-            description=args.input,
-            fmt=getattr(args, "input_format", "") or "")
-    else:
-        source_input = l0_contract.build_source_input(
-            input_type="inline", description=args.input, fmt="unspecified")
+    try:
+        source_input, _source_override = _source_input_from_args(args)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
     if round_type == "continuation":
-        prev_decision = (mem.get("previous_final_decision")
-                         or mem.get("terminal_decision") or "")
-        prev_conclusion = (mem.get("previous_conclusion")
-                           or mem.get("final_reason") or "")
-        new_hyp = (mem.get("new_hypothesis")
-                   or mem.get("next_round_hypothesis") or args.claim)
-        parent_rid = mem.get("parent_round_id")
-        round_id = str(mem.get("round_id")
-                       or (int(parent_rid) + 1 if str(parent_rid or "").isdigit()
-                           else 2))
-        contract = l0_contract.build_continuation_contract(
-            cand_id, round_id, parent_rid, mem.get("source_candidate_id"),
-            args.question, source_input,
-            previous_round={
-                "hypothesis": mem.get("previous_hypothesis", ""),
-                "final_decision": prev_decision,
-                "conclusion": prev_conclusion,
-                "memory_hash": mem_fields.get("memory_hash", ""),
-            },
-            new_hypothesis=new_hyp)
+        inherited_inputs = []
+        if getattr(args, "inherit_previous_source", False):
+            try:
+                inherited_inputs = l0_state.project_verified_source_selectors(
+                    project_dir, mem,
+                )
+            except l0_state.L0StateError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return 2
+        contract, round_id, parent_rid = _continuation_contract(
+            cand_id, mem, mem_fields, args.question, args.claim,
+            source_input, inherited_inputs,
+        )
     else:
         round_id = "1"
         parent_rid = None
         contract = l0_contract.build_initial_contract(
             cand_id, round_id, args.question, source_input,
-            new_hypothesis=args.claim)
+            new_hypothesis=args.claim,
+        )
 
-    ic_path, ic_hash = l0_contract.write_contract(project_dir, cand_id, contract)
+    raw_contract = l0_contract.serialize_contract(contract)
+    ic_hash = hashlib.sha256(raw_contract).hexdigest()
+    ic_path = _contract_path(project_dir, cand_id)
     try:
         ic_rel = ic_path.relative_to(project_dir).as_posix()
     except ValueError:
         ic_rel = ic_path.as_posix()
-
     mem_fields.update({
         "input_contract_path": ic_rel,
         "input_contract_hash": ic_hash,
@@ -446,10 +567,11 @@ def cmd_new_candidate(args):
         "round_type": round_type,
         "round_id": round_id,
         "parent_round_id": (parent_rid if parent_rid is not None else ""),
-        "previous_candidate_id": (mem.get("source_candidate_id", "")
-                                  if round_type == "continuation" else ""),
+        "previous_candidate_id": (
+            mem.get("source_candidate_id", "")
+            if round_type == "continuation" else ""
+        ),
     })
-
     try:
         l8_artifact = _candidate_l8_artifact(
             project_dir, getattr(args, "knowledge_store", None)
@@ -465,10 +587,39 @@ def cmd_new_candidate(args):
         l8_storage_key=l8_artifact.storage_key,
     )
     cf = _candidate_file(project_dir, cand_id)
-    if cf.exists() and from_memory:
+
+    # Deterministic continuation IDs are immutable creation keys.  Check both
+    # identity and the complete canonical contract before any sidecar write.
+    if cf.exists():
+        if not from_memory:
+            print(f"ERROR: candidate already exists; refusing overwrite: {cf}",
+                  file=sys.stderr)
+            return 2
         existing = _load_yaml_front(cf)
-        if (existing.get("memory_hash") == mem_fields.get("memory_hash")
-                and existing.get("hypothesis_id") == mem_fields.get("hypothesis_id")):
+        existing_contract, _existing_path, existing_raw = (
+            l0_contract.load_contract(project_dir, cand_id)
+        )
+        existing_hash = (
+            hashlib.sha256(existing_raw).hexdigest()
+            if existing_raw is not None else ""
+        )
+        identity_matches = (
+            existing.get("memory_hash") == mem_fields.get("memory_hash")
+            and existing.get("hypothesis_id") == mem_fields.get("hypothesis_id")
+        )
+        if not identity_matches:
+            print(f"ERROR: continuation candidate collision: {cf}",
+                  file=sys.stderr)
+            return 2
+        if (existing.get("input_contract_hash") != existing_hash
+                or existing.get("input_contract_path") != ic_rel):
+            print(
+                "ERROR: existing continuation candidate and L0 contract are "
+                "out of sync; refusing overwrite",
+                file=sys.stderr,
+            )
+            return 2
+        if existing_raw == raw_contract:
             if continuation_ledger is not None:
                 continuation_ledger.create_continuation_occurrence(
                     project_dir=project_dir, candidate_id=cand_id,
@@ -478,15 +629,29 @@ def cmd_new_candidate(args):
             print(cand_id)
             print(f"  -> {cf}")
             return 0
-        print(f"ERROR: continuation candidate collision: {cf}", file=sys.stderr)
+        print(
+            "ERROR: existing continuation candidate has a different contract; "
+            "refusing overwrite. Use the explicit recover-continuation command "
+            "only after a pristine-seed audit.",
+            file=sys.stderr,
+        )
         return 2
+    if ic_path.exists():
+        print(
+            f"ERROR: orphaned L0 contract exists without candidate; refusing "
+            f"overwrite: {ic_path}",
+            file=sys.stderr,
+        )
+        return 2
+
+    l0_contract.write_contract(project_dir, cand_id, contract)
     cf.write_text(body, encoding="utf-8")
     if continuation_ledger is not None:
         try:
             continuation_ledger.create_continuation_occurrence(
-                project_dir=project_dir, candidate_id=cand_id, round_id=round_id,
-                hypothesis_id=mem_fields["hypothesis_id"], memory_path=from_memory,
-                memory_hash=mem_fields["memory_hash"],
+                project_dir=project_dir, candidate_id=cand_id,
+                round_id=round_id, hypothesis_id=mem_fields["hypothesis_id"],
+                memory_path=from_memory, memory_hash=mem_fields["memory_hash"],
             )
         except LedgerError as exc:
             print(f"ERROR: continuation occurrence failed: {exc}", file=sys.stderr)
@@ -496,6 +661,215 @@ def cmd_new_candidate(args):
     print(cand_id)
     print(f"  -> {cf}")
     return 0
+
+
+def cmd_recover_continuation(args):
+    """Explicitly upgrade one pristine defective continuation seed."""
+    project_dir = Path(args.project_dir)
+    cand_id = str(args.cand_id)
+    cf = _candidate_file(project_dir, cand_id)
+    if not cf.is_file():
+        print(f"ERROR: no candidate {cand_id}", file=sys.stderr)
+        return 2
+    existing_fm = _load_yaml_front(cf)
+    from_memory = getattr(args, "from_memory", None) or existing_fm.get("memory_file")
+    loop_type = getattr(args, "loop_type", None) or existing_fm.get("loop_type")
+    if not from_memory or not loop_type:
+        print(
+            "ERROR: recovery requires the original --from-memory seed and "
+            "--loop-type (or both must be present in candidate frontmatter)",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        mem, mem_fields, _ledger, deterministic_id = _load_continuation_runtime(
+            project_dir, from_memory, loop_type,
+            getattr(args, "knowledge_store", None),
+        )
+    except (FileNotFoundError, ValueError, LedgerError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    if deterministic_id != cand_id:
+        print(
+            f"ERROR: candidate identity mismatch: memory resolves to "
+            f"{deterministic_id}, not {cand_id}",
+            file=sys.stderr,
+        )
+        return 2
+    if (existing_fm.get("memory_hash") != mem_fields.get("memory_hash")
+            or existing_fm.get("hypothesis_id") != mem_fields.get("hypothesis_id")
+            or existing_fm.get("previous_candidate_id") != mem.get("source_candidate_id")):
+        print(
+            "ERROR: recovery identity does not match candidate memory/hypothesis "
+            "pointers; refusing mutation",
+            file=sys.stderr,
+        )
+        return 2
+    if existing_fm.get("current_status", "NEW") != "NEW":
+        print(
+            "ERROR: recovery is forbidden after candidate status progressed "
+            f"beyond NEW ({existing_fm.get('current_status')})",
+            file=sys.stderr,
+        )
+        return 2
+
+    existing_contract, contract_path, existing_raw = l0_contract.load_contract(
+        project_dir, cand_id
+    )
+    if not isinstance(existing_contract, dict) or existing_raw is None:
+        print(
+            f"ERROR: existing continuation contract is missing/unreadable: "
+            f"{contract_path}",
+            file=sys.stderr,
+        )
+        return 2
+    old_contract_hash = hashlib.sha256(existing_raw).hexdigest()
+    if (existing_fm.get("input_contract_hash") != old_contract_hash
+            or existing_fm.get("input_contract_path") !=
+            str(contract_path.relative_to(project_dir).as_posix())):
+        print(
+            "ERROR: existing candidate and L0 contract are already out of sync; "
+            "recovery cannot safely infer which state is authoritative",
+            file=sys.stderr,
+        )
+        return 2
+    if not _is_defective_continuation(existing_contract):
+        print(
+            "ERROR: existing contract is not the known pristine data-less "
+            "schema-1.0 continuation form; refusing recovery",
+            file=sys.stderr,
+        )
+        return 2
+
+    binding_path_value = l0_data.current_round_data_binding_path(
+        project_dir, cand_id
+    )
+    existing_binding = None
+    if binding_path_value.is_file():
+        try:
+            existing_binding = l0_data.load_current_round_data_binding(
+                project_dir, cand_id
+            )
+        except l0_data.L0DataError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+    reasons = _recovery_progress_reasons(
+        project_dir, cand_id, existing_binding=existing_binding
+    )
+    if reasons:
+        print(
+            "ERROR: recovery is forbidden because the candidate has progressed: "
+            + "; ".join(reasons),
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        inherited_inputs = l0_state.project_verified_source_selectors(
+            project_dir, mem,
+        )
+    except l0_state.L0StateError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    source_input = existing_contract.get("source_input")
+    new_contract, round_id, parent_rid = _continuation_contract(
+        cand_id, mem, mem_fields,
+        existing_contract.get("scientific_question", ""),
+        mem.get("next_round_hypothesis") or mem.get("new_hypothesis") or "",
+        source_input, inherited_inputs,
+    )
+    new_raw = l0_contract.serialize_contract(new_contract)
+    new_hash = hashlib.sha256(new_raw).hexdigest()
+    audit_path = (project_dir / "08_Audit" / "continuation_recovery" /
+                  f"{cand_id}_contract_upgrade.json")
+    audit_payload = {
+        "schema_version": "ContinuationContractRecovery/v1",
+        "operation": "upgrade_defective_continuation",
+        "candidate_id": cand_id,
+        "source_candidate_id": mem.get("source_candidate_id", ""),
+        "round_id": str(round_id),
+        "parent_round_id": str(parent_rid or ""),
+        "memory_hash": mem_fields["memory_hash"],
+        "old_contract_sha256": old_contract_hash,
+        "new_contract_sha256": new_hash,
+        "old_schema_version": str(existing_contract.get("schema_version") or ""),
+        "new_schema_version": str(new_contract.get("schema_version") or ""),
+        "inherited_inputs": inherited_inputs,
+        "reason": "explicit recovery of an unstarted v0.9.1 data-less continuation",
+    }
+    audit_text = json.dumps(
+        audit_payload, ensure_ascii=False, indent=2, sort_keys=True
+    ) + "\n"
+    if audit_path.exists() and audit_path.read_text(encoding="utf-8") != audit_text:
+        print(f"ERROR: recovery audit collision: {audit_path}", file=sys.stderr)
+        return 2
+
+    old_candidate_bytes = cf.read_bytes()
+    new_candidate_text = cf.read_text(encoding="utf-8")
+    try:
+        new_candidate_text = _replace_frontmatter_scalar(
+            new_candidate_text, "input_contract_hash", new_hash
+        )
+        new_candidate_text = _replace_frontmatter_scalar(
+            new_candidate_text, "schema_version", new_contract["schema_version"]
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    old_binding_bytes = (
+        binding_path_value.read_bytes() if binding_path_value.is_file() else None
+    )
+    evidence_binding = None
+    evidence_path_value = (
+        project_dir / "08_Audit" / "l0_restore" /
+        f"{cand_id}_evidence_binding.json"
+    )
+    old_evidence_bytes = (
+        evidence_path_value.read_bytes() if evidence_path_value.is_file() else None
+    )
+    try:
+        _atomic_replace(contract_path, new_raw)
+        _atomic_replace(cf, new_candidate_text.encode("utf-8"))
+        if existing_binding is not None:
+            evidence_binding = l0_state.restore_previous_round(
+                project_dir, cand_id
+            )
+            l0_data.recover_current_round_data_binding(
+                project_dir, cand_id, evidence_binding,
+                expected_old_contract_sha256=old_contract_hash,
+            )
+        if not audit_path.exists():
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
+            with audit_path.open("x", encoding="utf-8") as handle:
+                handle.write(audit_text)
+    except (OSError, ValueError, l0_state.L0StateError, l0_data.L0DataError) as exc:
+        try:
+            _atomic_replace(contract_path, existing_raw)
+            _atomic_replace(cf, old_candidate_bytes)
+            if old_binding_bytes is not None:
+                _atomic_replace(binding_path_value, old_binding_bytes)
+            elif binding_path_value.exists():
+                binding_path_value.unlink()
+            if old_evidence_bytes is not None:
+                _atomic_replace(evidence_path_value, old_evidence_bytes)
+            elif evidence_path_value.exists():
+                evidence_path_value.unlink()
+        except OSError as rollback_exc:
+            print(
+                f"ERROR: recovery failed ({exc}) and rollback failed ({rollback_exc})",
+                file=sys.stderr,
+            )
+            return 2
+        print(f"ERROR: recovery failed and was rolled back: {exc}", file=sys.stderr)
+        return 2
+
+    print(cand_id)
+    print(f"  -> recovered contract {contract_path}")
+    print(f"  -> audit {audit_path}")
+    return 0
+
 
 def _print_intake_failure(result):
     print("Cannot create L0 contract.", file=sys.stderr)
