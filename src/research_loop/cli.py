@@ -74,9 +74,9 @@ def _add_deep_research_run_arguments(parser):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="research_loop_v04.py",
-        description="Research Loop v0.9 preview - canonical gated runtime engine "
+        description="Research Loop v0.9.1 - canonical gated runtime engine "
                     "(DAG-driven subagent architecture; assemble-context "
-                    "enforces the v0.9 deep-research and provenance gates).")
+                    "enforces the v0.9.1 deep-research and provenance gates).")
     p.add_argument("--version", action="version", version=f"v{__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -85,7 +85,7 @@ def build_parser():
     sp.set_defaults(func=cmd_demo)
 
     # new-project
-    sp = sub.add_parser("new-project", help="create a new native v0.9-preview project folder")
+    sp = sub.add_parser("new-project", help="create a new native v0.9.1 project folder")
     sp.add_argument("name")
     sp.add_argument("topic", nargs="?", default="")
     sp.add_argument("--knowledge-store", dest="knowledge_store",
