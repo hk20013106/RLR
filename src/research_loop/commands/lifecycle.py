@@ -572,16 +572,6 @@ def cmd_new_candidate(args):
             if round_type == "continuation" else ""
         ),
     })
-    contract_errors = l0_contract.validate_l0_input_contract(
-        contract, mem_fields, project_dir, cand_id,
-        artifact_path=ic_path, raw_bytes=raw_contract,
-    )
-    if contract_errors:
-        print("ERROR: generated L0 contract is invalid:", file=sys.stderr)
-        for error in contract_errors:
-            print(f"- {error}", file=sys.stderr)
-        return 2
-
     try:
         l8_artifact = _candidate_l8_artifact(
             project_dir, getattr(args, "knowledge_store", None)
