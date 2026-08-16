@@ -30,6 +30,8 @@ from deep_research_fixtures import persist_synthetic_evidence
 from native_v2_helpers import write_catalog_emission_receipts
 from research_loop import deep_research
 from research_loop.l0_state import write_round_manifest
+from research_loop import l0_contract, l0_data, l0_state
+import run_loop
 
 RL = str(Path(__file__).resolve().parent.parent / "research_loop_v04.py")
 
@@ -56,12 +58,21 @@ def _new_project(tmp_path):
     return tmp_path / "P"
 
 
-def _seed_terminal_candidate(proj, loop_type="divergent"):
+def _seed_terminal_candidate(proj, loop_type="divergent", source_file=None):
     """Round N: a candidate carrying the L1 + L10b deltas that _build_loop_memory
     reads, with a NON-EMPTY next_steps so the produced seed satisfies the L0
     gate's `required_new_search_directions` requirement."""
-    r = _run("new-candidate", str(proj), "--title", "T", "--question", "Q0",
-             "--claim", "C", "--input", "in")
+    command = ["new-candidate", str(proj), "--title", "T", "--question", "Q0",
+               "--claim", "C", "--input", "in"]
+    if source_file is not None:
+        source_file = Path(source_file)
+        source_file.parent.mkdir(parents=True, exist_ok=True)
+        source_file.write_text("sample,value\nA,1\n", encoding="utf-8")
+        command.extend([
+            "--input-type", "files", "--input-files", str(source_file),
+            "--input-location", str(source_file.parent), "--input-format", "csv",
+        ])
+    r = _run(*command)
     assert r.returncode == 0, r.stderr
     cand = r.stdout.strip().splitlines()[0]
     source_dir = proj / "08_Audit" / "test_sources"
@@ -208,6 +219,46 @@ def _candidate_text(proj, cand):
     matches = list((proj / "01_Candidates").glob(f"{cand}*.md"))
     assert matches, f"candidate file for {cand} not found"
     return matches[0].read_text(encoding="utf-8")
+
+
+def test_create_child_production_path_authorizes_verified_parent_source(tmp_path):
+    """The StopPolicy child path must carry real Round 1 data into Round 2.
+
+    This intentionally asserts the repaired contract rather than constructing
+    schema 1.1 or inherited selectors in the test.  On v0.9.1 the same path
+    creates an inline/schema-1.0 child, so the binding has zero local files.
+    """
+    proj = _new_project(tmp_path)
+    parent_source = proj / "round1_source.csv"
+    parent = _seed_terminal_candidate(proj, source_file=parent_source)
+    manifest_path, manifest_hash = write_round_manifest(proj, parent)
+    assert manifest_path.exists()
+    assert hashlib.sha256(manifest_path.read_bytes()).hexdigest() == manifest_hash
+
+    child = run_loop.create_child(
+        str(proj), parent,
+        {
+            "new_candidate_title": "T2",
+            "new_candidate_question": "Q2",
+            "new_candidate_claim": "C2",
+        },
+        2,
+    )
+
+    evidence = l0_state.restore_previous_round(proj, child)
+    binding = l0_data.build_current_round_data_binding(proj, child, evidence)
+    assert [item["path"] for item in binding["authorized_inputs"]] == [
+        parent_source.relative_to(proj).as_posix()
+    ]
+
+    contract, _contract_path, _raw = l0_contract.load_contract(proj, child)
+    assert contract["schema_version"] == "1.1"
+    selectors = contract["inherited_inputs"]
+    assert len(selectors) == 1
+    assert selectors[0]["path"] == parent_source.relative_to(proj).as_posix()
+    assert selectors[0]["sha256"] == hashlib.sha256(parent_source.read_bytes()).hexdigest()
+    assert selectors[0]["role"]
+    assert selectors[0]["reuse_reason"]
 
 
 # --- 1. seed continuity: round N output IS round N+1 input --------------------
