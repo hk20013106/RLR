@@ -814,27 +814,55 @@ def evidence_artifact_manifest(
     }
 
 
+_SECTION_HEADING_DASHES = str.maketrans({
+    "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-", "―": "-", "−": "-",
+})
+
+
+def _normalize_section_heading(section: object) -> str:
+    normalized = str(section or "").strip().casefold()
+    normalized = normalized.translate(_SECTION_HEADING_DASHES)
+    return "-".join(part.strip() for part in normalized.split("-"))
+
+
+def _is_section_heading(section: object, heading: str, *,
+                        allow_parenthetical: bool = False,
+                        allow_colon: bool = False) -> bool:
+    normalized = _normalize_section_heading(section)
+    heading = heading.casefold()
+    return (
+        normalized == heading
+        or normalized.startswith(f"{heading}-")
+        or (allow_parenthetical and normalized.startswith(f"{heading} ("))
+        or (allow_colon and normalized.startswith(f"{heading}:"))
+    )
+
+
 def _is_methods_section(section: object) -> bool:
     """Return whether a located section is an accepted Methods heading."""
-    normalized = str(section or "").strip().casefold()
-    normalized = normalized.translate(str.maketrans({
-        "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-", "―": "-", "−": "-",
-    }))
-    normalized = "-".join(part.strip() for part in normalized.split("-"))
-    return normalized in {"methods", "materials and methods"} or normalized.startswith("methods-")
+    return (_is_section_heading(section, "methods")
+            or _normalize_section_heading(section) == "materials and methods")
+
+
+def _is_results_section(section: object) -> bool:
+    """Return whether a located section is a Results heading or subsection."""
+    return _is_section_heading(
+        section, "results", allow_parenthetical=True, allow_colon=True
+    )
+
+
+def _is_discussion_section(section: object) -> bool:
+    """Return whether a located section is a Discussion heading or subsection."""
+    return _is_section_heading(
+        section, "discussion", allow_parenthetical=True, allow_colon=True
+    )
 
 
 def _is_conclusion_section(section: object) -> bool:
     """Return whether a located section is a Conclusion heading or its qualifier."""
-    normalized = str(section or "").strip().casefold()
-    normalized = normalized.translate(str.maketrans({
-        "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-", "―": "-", "−": "-",
-    }))
-    normalized = "-".join(part.strip() for part in normalized.split("-"))
-    return (normalized == "conclusion"
-            or normalized.startswith("conclusion-")
-            or normalized.startswith("conclusion (")
-            or normalized.startswith("conclusion:"))
+    return _is_section_heading(
+        section, "conclusion", allow_parenthetical=True, allow_colon=True
+    )
 
 
 def audit_evidence_pack(project_dir: str | Path, candidate_id: str, node: str,
@@ -858,10 +886,12 @@ def audit_evidence_pack(project_dir: str | Path, candidate_id: str, node: str,
         e for r in records for e in r.get("evidence_extracts", [])
         if e.get("verification_status") == "located" and e.get("locator")
     ]
-    sections = {str(e.get("section", "")).lower() for e in located_extracts}
     if node == "L1":
-        for required in ("results", "discussion"):
-            if required not in sections:
+        for required, matcher in (
+            ("Results", _is_results_section),
+            ("Discussion", _is_discussion_section),
+        ):
+            if not any(matcher(e.get("section")) for e in located_extracts):
                 return False, f"L1 evidence lacks located {required.title()} extract"
         if not any(_is_conclusion_section(e.get("section")) for e in located_extracts):
             return False, "L1 evidence lacks located Conclusion extract"
@@ -872,14 +902,15 @@ def audit_evidence_pack(project_dir: str | Path, candidate_id: str, node: str,
         if review.get("status") not in {"completed", "none_found"} or not review.get("receipt"):
             return False, "L4 requires a review search receipt or a documented zero-result search"
         if review.get("status") == "completed":
-            review_sections = {
-                str(e.get("section", "")).lower()
+            review_extracts = [
+                e
                 for record in records
                 if str(record.get("paper_type", "")).lower() in {"review", "systematic_review", "meta_analysis"}
                 for e in record.get("evidence_extracts", [])
                 if e.get("verification_status") == "located" and e.get("locator")
-            }
-            if not {"results", "conclusion"}.issubset(review_sections):
+            ]
+            if (not any(_is_results_section(e.get("section")) for e in review_extracts)
+                    or not any(_is_conclusion_section(e.get("section")) for e in review_extracts)):
                 return False, "L4 completed review search lacks located review Results and Conclusion extracts"
     elif node == "L8.5":
         verification = artifact.get("verification")
