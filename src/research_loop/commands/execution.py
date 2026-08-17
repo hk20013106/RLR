@@ -77,6 +77,11 @@ def cmd_execution_gate(args):
     if status != "METHOD_APPROVED":
         missing.append(f"approved analysis plan (candidate is {status}, "
                        f"need METHOD_APPROVED)")
+    else:
+        _resolved_scripts, script_missing = _approved_execution_scripts(
+            project_dir, args.cand_id
+        )
+        missing.extend(script_missing)
     if missing:
         print("EXECUTION GATE: REJECT")
         for item in missing:
@@ -86,14 +91,14 @@ def cmd_execution_gate(args):
         return 1
 
     _append_decision(project_dir, args.cand_id, status, "NEEDS_EXECUTION",
-                     "execution gate passed: authorized round data + approved plan present",
+                     "execution gate passed: authorized round data + approved executable plan present",
                      route_to="Turing", agent="Oppenheimer",
                      kind="execution_gate")
     _set_status(project_dir, args.cand_id, "NEEDS_EXECUTION", "Turing")
     print("EXECUTION GATE: PASS")
     print("  skill_use_plan.md ........ OK")
     print(f"  round data binding ....... OK ({len(local_inputs)} local input(s) authorized)")
-    print("  approved analysis plan ... OK (METHOD_APPROVED)")
+    print("  approved analysis plan ... OK (METHOD_APPROVED; scripts resolvable)")
     print(f"  {args.cand_id} -> NEEDS_EXECUTION (route: Turing)")
     return 0
 
