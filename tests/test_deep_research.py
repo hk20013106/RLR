@@ -47,9 +47,20 @@ def test_codex_command_explicitly_invokes_academic_research_suite(tmp_path):
     command, prompt = dr.build_invocation(spec, "L1", "Q", "H", tmp_path)
     assert command[:2] == ["codex", "exec"]
     assert "--ephemeral" in command
-    assert "--ignore-user-config" in command
+    assert "--ignore-user-config" not in command
+    assert "-c" in command
+    assert command[command.index("-c") + 1] == "mcp_servers={}"
     assert "$academic-research-suite" in prompt
     assert "Results" in prompt and "Conclusion" in prompt
+
+
+def test_codex_command_preserves_user_provider_config_while_disabling_mcp(tmp_path):
+    spec = dr.RuntimeSpec(backend="codex", executable="codex", model="deepseek-v4-flash")
+    command, _ = dr.build_invocation(spec, "L1", "Q", "H", tmp_path)
+    assert "--ignore-user-config" not in command
+    assert "-c" in command
+    assert command[command.index("-c") + 1] == "mcp_servers={}"
+    assert command[command.index("--model") + 1] == "deepseek-v4-flash"
 
 
 def test_windows_command_wrapper_receives_multiline_prompt_on_standard_input(monkeypatch):
