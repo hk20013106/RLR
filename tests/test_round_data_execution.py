@@ -91,12 +91,37 @@ def test_execution_gate_does_not_require_legacy_input_manifest(tmp_path, monkeyp
     (project / "00_Preflight" / "skill_use_plan.md").write_text("# skills\n", encoding="utf-8")
     legacy = project / "00_Preflight" / "input_manifest.md"
     assert not legacy.exists()
+    monkeypatch.setattr(execution, "_approved_execution_scripts", lambda *_: ([], []))
     monkeypatch.setattr(execution, "_append_decision", lambda *args, **kwargs: None)
     monkeypatch.setattr(execution, "_set_status", lambda *args, **kwargs: None)
 
     rc = execution.cmd_execution_gate(SimpleNamespace(project_dir=str(project), cand_id="C1"))
 
     assert rc == 0
+
+
+def test_execution_gate_rejects_unresolvable_approved_script(
+    tmp_path, monkeypatch, capsys
+):
+    project, _authorized = _project(tmp_path, status="METHOD_APPROVED")
+    (project / "00_Preflight" / "skill_use_plan.md").write_text("# skills\n", encoding="utf-8")
+    status_changes = []
+    monkeypatch.setattr(
+        execution,
+        "_approved_execution_scripts",
+        lambda *_: ([], ["missing execution script: orthology_and_annotation_coverage_audit"]),
+    )
+    monkeypatch.setattr(execution, "_append_decision", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        execution, "_set_status",
+        lambda _project, _cand, status, _owner: status_changes.append(status),
+    )
+
+    rc = execution.cmd_execution_gate(SimpleNamespace(project_dir=str(project), cand_id="C1"))
+
+    assert rc == 1
+    assert status_changes == []
+    assert "missing execution script: orthology_and_annotation_coverage_audit" in capsys.readouterr().out
 
 
 def test_workspace_revalidates_bound_bytes_before_copy(tmp_path, monkeypatch):
