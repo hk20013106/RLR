@@ -147,6 +147,9 @@ supply a canonical source, otherwise L4B records an explicit evidence gap.
 
 Return metadata only. Do not retrieve full text or emit source payloads or
 verbatim extracts. Keep the ordinary `assets` catalog and selection receipts.
+Your final response MUST contain JSON only and MUST conform exactly to the
+supplied output schema. Do not include prose, Markdown, code fences,
+commentary, or any text before or after the JSON object.
 For `source_metadata_response`, return the complete database metadata object as
 one canonical JSON string: UTF-8, sorted keys, compact separators, finite JSON
 numbers, and no Markdown fences or explanatory text.

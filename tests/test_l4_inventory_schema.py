@@ -27,6 +27,20 @@ def test_inventory_wire_schema_omits_unsupported_unique_items():
     assert list(walk(schema)) == []
 
 
+def test_l4_inventory_prompt_states_json_only_schema_output_contract():
+    prompt = l4_inventory.build_prompt("Q", "H")
+
+    assert "Return metadata only" in prompt
+    lowered = prompt.lower()
+    assert "json only" in lowered
+    assert "must conform" in lowered
+    assert "supplied" in prompt
+    assert "schema" in prompt
+    assert "prose" in lowered
+    assert "markdown" in lowered
+    assert "code fences" in lowered
+
+
 def _payload():
     return {
         "schema_version": l4p.L4A_DISCOVERY_SCHEMA_VERSION,
