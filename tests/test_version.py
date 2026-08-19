@@ -6,8 +6,8 @@ from research_loop.commands.reporting import __version__ as reporting_version
 from research_loop.version import VERSION
 
 
-def test_runtime_version_is_v096():
-    assert VERSION == "0.9.6"
+def test_runtime_version_is_v097():
+    assert VERSION == "0.9.7"
 
 
 def test_public_cli_reports_the_single_runtime_version_source():
