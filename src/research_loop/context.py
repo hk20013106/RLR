@@ -102,14 +102,14 @@ def _condense_delta(delta_key, data):
             for s in d["strategies"]:
                 if isinstance(s, dict) and "steps" in s and isinstance(s["steps"], list) and len(s["steps"]) > 5:
                     s["steps"] = s["steps"][:3] + [f"... ({len(s['steps'])} steps total)"]
-            
+
     # 3. Truncate large output_files or script results in L7 Turing
     elif delta_key == "L7_turing":
         if "scripts_run" in d and isinstance(d["scripts_run"], list):
             for s in d["scripts_run"]:
                 if isinstance(s, dict) and "output_files" in s and isinstance(s["output_files"], list) and len(s["output_files"]) > 5:
                     s["output_files"] = s["output_files"][:3] + [f"... ({len(s['output_files'])} output files total)"]
-            
+
     # 4. Truncate the profile-bound L8 audit evidence list.
     elif delta_key in {"L8_curie", "L8_tukey"}:
         if "evidence_verified" in d and isinstance(d["evidence_verified"], list) and len(d["evidence_verified"]) > 10:
@@ -121,14 +121,14 @@ def _condense_delta(delta_key, data):
             for p in d["papers"]:
                 if isinstance(p, dict) and "abstract" in p and isinstance(p["abstract"], str) and len(p["abstract"]) > 150:
                     p["abstract"] = p["abstract"][:150] + "... (truncated abstract)"
-            
+
     # 6. Truncate huge gene lists in L9b Darwin module interpretations
     elif delta_key == "L9b_darwin":
         if "module_interpretations" in d and isinstance(d["module_interpretations"], list):
             for m in d["module_interpretations"]:
                 if isinstance(m, dict) and "genes" in m and isinstance(m["genes"], list) and len(m["genes"]) > 5:
                     m["genes"] = m["genes"][:5] + [f"... ({len(m['genes'])} genes total)"]
-            
+
     return d
 
 def _generate_contract(node_info, project_dir, schema_version):
