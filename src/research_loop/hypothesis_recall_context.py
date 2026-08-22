@@ -27,13 +27,6 @@ _SECTION = "=== HISTORICAL HYPOTHESIS RECALL ==="
 _AUTO_RECALL_ENV = "RLR_AUTO_HYPOTHESIS_RECALL"
 
 
-def _canonical_seed(project, cand_id) -> dict[str, Any]:
-    try:
-        return research_seed.load_l1_research_seed(project, cand_id)
-    except research_seed.ResearchSeedError as exc:
-        raise LedgerError(f"canonical L1 research seed is invalid: {exc}") from exc
-
-
 def _native_l1_identity(args) -> tuple[HypothesisLedger, dict[str, Any], str] | None:
     if str(getattr(args, "node", "")) != "L1":
         return None
@@ -55,7 +48,10 @@ def _native_l1_identity(args) -> tuple[HypothesisLedger, dict[str, Any], str] | 
     candidate = _load_yaml_front(
         project / "01_Candidates" / f"{args.cand_id}.md"
     )
-    seed = _canonical_seed(project, str(args.cand_id))
+    try:
+        seed = research_seed.load_l1_research_seed(project, str(args.cand_id))
+    except research_seed.ResearchSeedError as exc:
+        raise LedgerError(f"canonical L1 research seed is invalid: {exc}") from exc
     round_id = str(seed["round_id"])
     return ledger, candidate, round_id
 
@@ -72,14 +68,18 @@ def _load_bound_recall(
     except LedgerError:
         if os.environ.get(_AUTO_RECALL_ENV) != "1":
             raise
-        seed = _canonical_seed(project, str(args.cand_id))
-        if str(seed["round_id"]) != str(round_id):
-            raise LedgerError(
-                "hypothesis recall round does not match canonical L1 research seed"
+        try:
+            seed = research_seed.load_l1_research_seed(
+                project, str(args.cand_id)
             )
-        query_text = (
-            f"{seed['scientific_question']} {seed['hypothesis_seed']}"
-        ).strip()
+        except research_seed.ResearchSeedError as exc:
+            raise LedgerError(
+                f"canonical L1 research seed is invalid: {exc}"
+            ) from exc
+        query_text = " ".join((
+            str(seed["scientific_question"]),
+            str(seed["hypothesis_seed"]),
+        )).strip()
         artifact = create_recall(
             ledger,
             project,
@@ -247,6 +247,30 @@ def _install_receipt_gate(ledger_commands_module) -> None:
             manifest = json.loads(Path(manifest_arg).read_text(encoding="utf-8"))
         except (OSError, TypeError, json.JSONDecodeError) as exc:
             raise LedgerError(f"invalid context manifest: {exc}") from exc
+
+        recorded_seed = manifest.get("research_seed")
+        if not isinstance(recorded_seed, dict):
+            raise LedgerError(
+                "native L1 context manifest requires canonical research seed"
+            )
+        try:
+            current_seed = research_seed.load_l1_research_seed(
+                args.project_dir, str(args.cand_id)
+            )
+        except research_seed.ResearchSeedError as exc:
+            raise LedgerError(
+                f"native L1 canonical research seed is invalid: {exc}"
+            ) from exc
+        if str(current_seed["round_id"]) != str(round_id):
+            raise LedgerError(
+                "native L1 canonical research seed round does not match emission"
+            )
+        current_seed_entry = research_seed.manifest_entry(current_seed)
+        if recorded_seed != current_seed_entry:
+            raise LedgerError(
+                "L1 canonical research seed changed since context assembly"
+            )
+
         recorded = manifest.get("hypothesis_recall")
         if not isinstance(recorded, dict):
             raise LedgerError(
@@ -284,7 +308,11 @@ def _install_receipt_gate(ledger_commands_module) -> None:
             raise LedgerError(
                 "hypothesis recall metadata changed since context assembly"
             )
-        return {**provenance, "hypothesis_recall": current}
+        return {
+            **provenance,
+            "research_seed": current_seed_entry,
+            "hypothesis_recall": current,
+        }
 
     ledger_commands_module._validate_native_receipts = _validate_native_receipts
 
