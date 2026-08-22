@@ -37,7 +37,7 @@ def _write_candidate(project: Path, *, cand_id: str = "C1"):
         "question: WRONG frontmatter question\n"
         "claim: WRONG frontmatter claim\n"
         "round_type: initial\n"
-        "round_id: '7'\n"
+        "round_id: 7\n"
         f"input_contract_path: {path.relative_to(project).as_posix()}\n"
         f"input_contract_hash: {digest}\n"
         "---\n",
