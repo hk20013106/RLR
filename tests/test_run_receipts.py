@@ -4,10 +4,12 @@ from pathlib import Path
 
 import pytest
 
+from research_loop import l0_contract
 from research_loop.compatibility import PROFILE_V21_CATALOG_1
 from research_loop.engine import main
 from research_loop.hypothesis_ledger import HypothesisLedger
 from research_loop.providers.base import RunReceipt
+from research_loop.yamlio import _replace_field
 from native_v2_helpers import write_catalog_emission_receipts
 
 
@@ -202,4 +204,22 @@ def test_exact_evidence_artifact_tamper_rejects_before_any_write(tmp_path):
         paper_path.read_text(encoding="utf-8") + "\n", encoding="utf-8"
     )
     assert _emit_l1(project, store, candidate, source, manifest, receipt) == 1
+    _assert_zero_native_writes(project, store, candidate)
+
+
+def test_l1_canonical_seed_drift_rejects_stale_receipt_before_any_write(
+    tmp_path, capsys
+):
+    project, store, candidate, source, manifest, receipt = _native_l1_boundary(
+        tmp_path
+    )
+    contract, _path, _raw = l0_contract.load_contract(project, candidate)
+    contract["scientific_question"] = "a different canonical scientific question"
+    _new_path, new_digest = l0_contract.write_contract(project, candidate, contract)
+    candidate_path = project / "01_Candidates" / f"{candidate}.md"
+    _replace_field(candidate_path, "input_contract_hash", new_digest)
+
+    assert _emit_l1(project, store, candidate, source, manifest, receipt) == 1
+    captured = capsys.readouterr()
+    assert "canonical research seed changed since context assembly" in captured.err
     _assert_zero_native_writes(project, store, candidate)
