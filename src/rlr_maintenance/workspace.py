@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable, Sequence
+
+from .bounded_process import DEFAULT_MAX_OUTPUT_BYTES, run_bounded_process
+
+
+GIT_COMMAND_TIMEOUT = 60.0
 
 
 class GitWorkspaceError(RuntimeError):
@@ -44,13 +48,49 @@ class VerifiedRepairCommit:
 
 
 class GitWorkspace:
-    def __init__(self, *, repo_root: str | Path, workspace_parent: str | Path, runner: Callable[..., object] = subprocess.run) -> None:
+    def __init__(
+        self,
+        *,
+        repo_root: str | Path,
+        workspace_parent: str | Path,
+        runner: Callable[..., object] | None = None,
+        timeout: float = GIT_COMMAND_TIMEOUT,
+        max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
+    ) -> None:
         self.repo_root = Path(repo_root).resolve()
         self.workspace_parent = Path(workspace_parent).resolve()
         self._runner = runner
+        self._timeout = float(timeout)
+        self._max_output_bytes = int(max_output_bytes)
 
     def _run(self, cwd: Path, args: Sequence[str], *, allow_failure: bool = False) -> object:
-        completed = self._runner(["git", *args], cwd=cwd, text=True, encoding="utf-8", capture_output=True, shell=False)
+        if self._runner is None:
+            try:
+                completed = run_bounded_process(
+                    ["git", *args],
+                    timeout=self._timeout,
+                    cwd=cwd,
+                    max_output_bytes=self._max_output_bytes,
+                )
+            except OSError as exc:
+                raise GitWorkspaceError(f"Git command could not be launched: {exc}") from exc
+            if completed.terminal_state == "timed_out":
+                raise GitWorkspaceError(f"Git command timed out after {self._timeout}s")
+            if completed.stdout_truncated:
+                raise GitWorkspaceError("Git stdout exceeded the bounded output cap")
+        else:
+            completed = self._runner(
+                ["git", *args],
+                cwd=cwd,
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                shell=False,
+            )
+        if getattr(completed, "terminal_state", "completed") == "timed_out":
+            raise GitWorkspaceError(f"Git command timed out after {self._timeout}s")
+        if getattr(completed, "stdout_truncated", False):
+            raise GitWorkspaceError("Git stdout exceeded the bounded output cap")
         code = int(getattr(completed, "returncode"))
         if code != 0 and not allow_failure:
             raise GitWorkspaceError(f"Git command failed with exit code {code}")

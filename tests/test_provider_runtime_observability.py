@@ -137,6 +137,40 @@ def test_unfinished_mcp_item_is_reported_as_exact_wait_point(tmp_path, monkeypat
     assert holder["result"].final_status == "job_timed_out"
 
 
+def test_inactivity_timeout_preserves_receipt_and_cleans_process_tree(tmp_path, monkeypatch):
+    monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "silent")
+    monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "1.0")
+    runtime = tmp_path / "runtime"
+
+    result = run_observed_provider(
+        command=[sys.executable, str(FIXTURE), "exec", "--json"],
+        prompt="fixture prompt",
+        runtime_dir=runtime,
+        backend="codex",
+        task_id="dr-inactivity",
+        candidate_id="C1",
+        node="L1",
+        job_timeout=3,
+        inactivity_timeout=0.3,
+        observer_interval=0.05,
+        cwd=tmp_path,
+    )
+
+    assert result.final_status == "inactivity_timed_out"
+    receipt = json.loads((runtime / "runtime_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["termination_reason"] == "inactivity_timeout"
+    assert receipt["timed_out"] is True
+    assert receipt["cwd"] == str(tmp_path.resolve())
+    assert receipt["timeout_config"] == {
+        "job_timeout_seconds": 3,
+        "inactivity_timeout_seconds": 0.3,
+        "observer_interval_seconds": 0.05,
+    }
+    assert receipt["command_metadata"]["backend"] == "codex"
+    assert receipt["process_tree_cleanup"]["attempted"] is True
+    assert receipt["process_tree_cleanup"]["provider_alive_after_cleanup"] is False
+
+
 def test_job_timeout_preserves_partial_logs_and_process_cleanup_receipt(tmp_path, monkeypatch):
     monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "timeout")
     monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.15")

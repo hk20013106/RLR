@@ -8,9 +8,20 @@ def _capture(monkeypatch):
 
     def fake_run(command, **kwargs):
         calls.append(list(command))
-        return SimpleNamespace(returncode=0, stdout='{"ok": true}', stderr="")
+        return SimpleNamespace(
+            returncode=0,
+            terminal_state="completed",
+            stdout='{"ok": true}',
+            stderr="",
+            stdout_truncated=False,
+            stderr_truncated=False,
+            stdout_bytes=0,
+            stderr_bytes=0,
+            timeout_seconds=None,
+            process_tree_cleanup={},
+        )
 
-    monkeypatch.setattr("rlr_maintenance.loopx_cli.subprocess.run", fake_run)
+    monkeypatch.setattr("rlr_maintenance.loopx_cli.run_bounded_process", fake_run)
     return calls
 
 

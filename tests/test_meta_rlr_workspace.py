@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from rlr_maintenance.bounded_process import BoundedProcessResult
 from rlr_maintenance.workspace import GitWorkspace, GitWorkspaceError
 
 
@@ -115,3 +116,27 @@ def test_existing_verified_commit_recovers_public_binding(tmp_path):
     assert binding.todo_id == "todo_event"
     assert binding.turn_instance_id == "meta-rlr:recover123"
     assert binding.profile_id == "l0_state_integrity"
+
+
+def test_git_run_boundary_times_out_fail_closed(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    manager = GitWorkspace(
+        repo_root=repo,
+        workspace_parent=tmp_path / "worktrees",
+        runner=lambda *args, **kwargs: BoundedProcessResult(
+            returncode=0,
+            terminal_state="timed_out",
+            stdout="",
+            stderr="",
+            stdout_truncated=False,
+            stderr_truncated=False,
+            stdout_bytes=0,
+            stderr_bytes=0,
+            timeout_seconds=0.2,
+            process_tree_cleanup={},
+        ),
+    )
+
+    with pytest.raises(GitWorkspaceError, match="timed out"):
+        manager._run(repo, ["status"])
