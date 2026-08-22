@@ -1,5 +1,6 @@
 import ast
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -43,6 +44,36 @@ def test_research_loop_never_depends_on_maintenance_or_loopx():
             offenders.append(path.relative_to(ROOT).as_posix())
 
     assert offenders == []
+
+
+def test_phase3_composes_maintenance_only_at_public_runtime_boundary():
+    imports = _imports(ROOT / "research_loop_v04.py")
+
+    assert "rlr_maintenance.autowake_adapter" in imports
+    assert "research_loop" in imports
+    assert "research_loop.cli" in imports
+
+
+def test_phase3_public_runtime_entrypoint_installs_outer_adapter():
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import research_loop_v04; "
+                "from research_loop import deep_research_task; "
+                "assert getattr(deep_research_task, "
+                "'_maintenance_autowake_installed', False) is True"
+            ),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        shell=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_maintenance_uses_external_loopx_boundary_not_python_modules():

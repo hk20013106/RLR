@@ -266,11 +266,14 @@ def run_observed_provider(
     candidate_id: str,
     node: str,
     job_timeout: float | None,
+    inactivity_timeout: float | None = None,
     observer_interval: float = 1.0,
+    cwd: str | Path | None = None,
     input_text: str | None = None,
 ) -> ProviderExecution:
     """Run one provider while streaming semantic events and process telemetry."""
     runtime_dir = Path(runtime_dir)
+    effective_cwd = Path(cwd).resolve() if cwd is not None else Path.cwd()
     runtime_dir.mkdir(parents=True, exist_ok=True)
     status_path = runtime_dir / "status.json"
     events_path = runtime_dir / "events.jsonl"
@@ -299,6 +302,7 @@ def run_observed_provider(
         "final_output_bytes": 0,
         "event_parse_errors": 0,
         "last_process_activity_at": "",
+        "last_activity_at": started_at,
         "cpu_seconds": None,
         "io_bytes": None,
         "child_pids": [],
@@ -332,6 +336,7 @@ def run_observed_provider(
                 "final_output_bytes": shared["final_output_bytes"],
                 "event_parse_errors": shared["event_parse_errors"],
                 "last_process_activity_at": shared["last_process_activity_at"],
+                "last_activity_at": shared["last_activity_at"],
                 "process_activity": {
                     "cpu_seconds": shared["cpu_seconds"],
                     "io_bytes": shared["io_bytes"],
@@ -356,6 +361,8 @@ def run_observed_provider(
         popen_kwargs["creationflags"] = _subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         popen_kwargs["start_new_session"] = True
+    if cwd is not None:
+        popen_kwargs["cwd"] = str(effective_cwd)
     try:
         process = _subprocess.Popen(prepared, **popen_kwargs)
     except OSError as exc:
@@ -368,7 +375,8 @@ def run_observed_provider(
         receipt = _finalize_receipt(
             runtime_dir, task_id, candidate_id, node, backend, command, prompt,
             "unknown", started_at, "transport_lost", None, None,
-            shared, cleanup, prepared,
+            shared, cleanup, prepared, str(effective_cwd), job_timeout,
+            inactivity_timeout, observer_interval,
         )
         return ProviderExecution(
             prepared, 127, "", str(exc), "transport_lost", runtime_dir,
@@ -385,7 +393,10 @@ def run_observed_provider(
         except (BrokenPipeError, OSError):
             pass
 
+    last_activity_monotonic = started_monotonic
+
     def read_stdout() -> None:
+        nonlocal last_activity_monotonic
         assert process.stdout is not None
         with events_path.open("a", encoding="utf-8", newline="") as stream:
             for line in process.stdout:
@@ -393,6 +404,7 @@ def run_observed_provider(
                 stream.flush()
                 encoded = line.encode("utf-8")
                 at = _now()
+                last_activity_monotonic = time.monotonic()
                 try:
                     event = json.loads(line)
                     if not isinstance(event, dict):
@@ -401,6 +413,7 @@ def run_observed_provider(
                     publish(
                         event_bytes=shared["event_bytes"] + len(encoded),
                         event_parse_errors=shared["event_parse_errors"] + 1,
+                        last_activity_at=at,
                     )
                     continue
                 event_type = str(event.get("type") or "unknown")
@@ -408,6 +421,7 @@ def run_observed_provider(
                     "event_bytes": shared["event_bytes"] + len(encoded),
                     "last_provider_event_at": at,
                     "last_provider_event": _safe_event(event),
+                    "last_activity_at": at,
                 }
                 if event_type not in {"error", "turn.failed"}:
                     changes["last_successful_event"] = _safe_event(event)
@@ -429,12 +443,17 @@ def run_observed_provider(
                 publish(**changes)
 
     def read_stderr() -> None:
+        nonlocal last_activity_monotonic
         assert process.stderr is not None
         with stderr_path.open("a", encoding="utf-8", newline="") as stream:
             for line in process.stderr:
+                last_activity_monotonic = time.monotonic()
                 stream.write(line)
                 stream.flush()
-                publish(stderr_bytes=shared["stderr_bytes"] + len(line.encode("utf-8")))
+                publish(
+                    stderr_bytes=shared["stderr_bytes"] + len(line.encode("utf-8")),
+                    last_activity_at=_now(),
+                )
 
     stdout_thread = threading.Thread(target=read_stdout, name="provider-stdout", daemon=True)
     stderr_thread = threading.Thread(target=read_stderr, name="provider-stderr", daemon=True)
@@ -456,6 +475,8 @@ def run_observed_provider(
     }
     final_status = "succeeded"
     termination_reason = "completed"
+    last_event_bytes = int(shared.get("event_bytes", 0))
+    last_stderr_bytes = int(shared.get("stderr_bytes", 0))
     while process.poll() is None:
         time.sleep(max(0.01, observer_interval))
         snapshot = _process_snapshot(process.pid)
@@ -464,6 +485,10 @@ def run_observed_provider(
         activity_changed = (
             (cpu_seconds is not None and cpu_seconds != shared.get("cpu_seconds"))
             or (io_bytes is not None and io_bytes != shared.get("io_bytes"))
+        )
+        stream_activity = (
+            last_event_bytes != shared.get("event_bytes")
+            or last_stderr_bytes != shared.get("stderr_bytes")
         )
         changes = {
             "observer_heartbeat_at": _now(),
@@ -475,12 +500,29 @@ def run_observed_provider(
         if io_bytes is not None:
             changes["io_bytes"] = io_bytes
         if activity_changed:
-            changes["last_process_activity_at"] = _now()
+            activity_at = _now()
+            changes["last_process_activity_at"] = activity_at
+            changes["last_activity_at"] = activity_at
+        elif stream_activity:
+            last_activity_monotonic = time.monotonic()
+        if activity_changed:
+            last_activity_monotonic = time.monotonic()
         publish(**changes)
+        last_event_bytes = int(shared.get("event_bytes", 0))
+        last_stderr_bytes = int(shared.get("stderr_bytes", 0))
         last_snapshot = snapshot
         if job_timeout is not None and time.monotonic() - started_monotonic >= job_timeout:
             final_status = "job_timed_out"
             termination_reason = "job_timeout"
+            publish(state=final_status, termination_reason=termination_reason)
+            cleanup = _terminate_process_tree(process)
+            break
+        if (
+            inactivity_timeout is not None
+            and time.monotonic() - last_activity_monotonic >= inactivity_timeout
+        ):
+            final_status = "inactivity_timed_out"
+            termination_reason = "inactivity_timeout"
             publish(state=final_status, termination_reason=termination_reason)
             cleanup = _terminate_process_tree(process)
             break
@@ -491,7 +533,7 @@ def run_observed_provider(
         returncode = process.poll() if process.poll() is not None else 124
     stdout_thread.join(timeout=5)
     stderr_thread.join(timeout=5)
-    if final_status != "job_timed_out":
+    if final_status not in {"job_timed_out", "inactivity_timed_out"}:
         if returncode != 0:
             final_status = "provider_failed"
             termination_reason = "provider_exit_nonzero"
@@ -513,7 +555,8 @@ def run_observed_provider(
     receipt_hash = _finalize_receipt(
         runtime_dir, task_id, candidate_id, node, backend, command, prompt,
         version, started_at, final_status, returncode, process.pid, shared,
-        cleanup, prepared,
+        cleanup, prepared, str(effective_cwd), job_timeout, inactivity_timeout,
+        observer_interval,
     )
     return ProviderExecution(
         prepared, int(returncode), final_output, stderr_text, final_status,
@@ -537,6 +580,10 @@ def _finalize_receipt(
     shared: dict,
     cleanup: dict,
     executed_command: list[str],
+    cwd: str,
+    job_timeout: float | None,
+    inactivity_timeout: float | None,
+    observer_interval: float,
 ) -> str:
     receipt_path = runtime_dir / "runtime_receipt.json"
     receipt = {
@@ -548,6 +595,17 @@ def _finalize_receipt(
         "provider_version": provider_version,
         "command_hash": _sha_text(json.dumps(command, ensure_ascii=False)),
         "executed_command_hash": _sha_text(json.dumps(executed_command, ensure_ascii=False)),
+        "command_metadata": {
+            "argv0": str(executed_command[0]) if executed_command else "",
+            "argument_count": len(executed_command),
+            "backend": backend,
+        },
+        "cwd": cwd,
+        "timeout_config": {
+            "job_timeout_seconds": job_timeout,
+            "inactivity_timeout_seconds": inactivity_timeout,
+            "observer_interval_seconds": observer_interval,
+        },
         "prompt_hash": _sha_text(prompt),
         "started_at": started_at,
         "ended_at": _now(),
@@ -567,6 +625,7 @@ def _finalize_receipt(
             "cpu_seconds": shared.get("cpu_seconds"),
             "io_bytes": shared.get("io_bytes"),
             "last_process_activity_at": shared.get("last_process_activity_at") or "",
+            "last_activity_at": shared.get("last_activity_at") or "",
         },
         "process_tree_cleanup": cleanup,
         "artifacts": {
