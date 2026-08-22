@@ -3,7 +3,7 @@ import json
 import os
 from pathlib import Path
 
-from research_loop import deep_research
+from research_loop import deep_research, l0_contract, research_seed
 from research_loop.hypothesis_ledger import (
     HypothesisLedger, canonical_json,
 )
@@ -12,7 +12,7 @@ from research_loop.delta import artifact_for_node
 from research_loop.persona_catalog import resolve_persona_template
 from research_loop.providers.base import RunReceipt
 from research_loop.topology import topology_for_profile
-from research_loop.yamlio import _load_yaml_front
+from research_loop.yamlio import _load_yaml_front, _replace_field
 
 
 def activate_native_project(project_dir):
@@ -20,6 +20,55 @@ def activate_native_project(project_dir):
     store = os.environ["RLR_HYPOTHESIS_STORE"]
     HypothesisLedger(store).bind_project(project)
     return project_dir
+
+
+def ensure_native_l0_contract(project_dir, candidate_id):
+    """Give a native test candidate the same canonical L0 sidecar as production.
+
+    This is test-fixture migration, not a runtime fallback.  Existing valid
+    sidecars are revalidated; missing sidecars are synthesized only for initial
+    test candidates from their fixture question/claim fields.
+    """
+    project = Path(project_dir)
+    candidate_file = project / "01_Candidates" / f"{candidate_id}.md"
+    candidate = _load_yaml_front(candidate_file)
+    contract, path, raw = l0_contract.load_contract(project, candidate_id)
+    if contract is not None:
+        errors = l0_contract.validate_l0_input_contract(
+            contract, candidate, project, candidate_id,
+            artifact_path=path, raw_bytes=raw,
+        )
+        if errors:
+            raise AssertionError("invalid native L0 test fixture: " + "; ".join(errors))
+        return research_seed.load_l1_research_seed(project, candidate_id)
+
+    round_type = str(candidate.get("round_type") or "initial")
+    if round_type != "initial":
+        raise AssertionError(
+            "continuation test fixtures must declare their own canonical L0 sidecar"
+        )
+    round_id = str(candidate.get("round_id") or "1")
+    question = str(candidate.get("question") or "synthetic scientific question")
+    claim = str(candidate.get("claim") or "synthetic hypothesis")
+    source_input = l0_contract.build_source_input(
+        input_type="inline",
+        description="synthetic native test fixture input",
+        fmt="text",
+    )
+    contract = l0_contract.promote_to_current_schema(
+        l0_contract.build_initial_contract(
+            candidate_id, round_id, question, source_input, claim
+        )
+    )
+    path, digest = l0_contract.write_contract(project, candidate_id, contract)
+    _replace_field(candidate_file, "schema_version", contract["schema_version"])
+    _replace_field(candidate_file, "round_type", "initial")
+    _replace_field(candidate_file, "round_id", round_id)
+    _replace_field(
+        candidate_file, "input_contract_path", path.relative_to(project).as_posix()
+    )
+    _replace_field(candidate_file, "input_contract_hash", digest)
+    return research_seed.load_l1_research_seed(project, candidate_id)
 
 
 def commit_v2(project_dir, candidate_id, node, persona, delta, round_id="1"):
@@ -61,9 +110,11 @@ def write_native_emission_receipts(project_dir, candidate_id, node, persona, sou
     source = Path(source_file)
     ledger = HypothesisLedger(store_path or os.environ["RLR_HYPOTHESIS_STORE"])
     profile = get_profile(ledger.project_profile(project))
+    seed = ensure_native_l0_contract(project, candidate_id) if node == "L1" else None
     candidate = _load_yaml_front(project / "01_Candidates" / f"{candidate_id}.md")
     project_id = str(ledger.require_binding(project)["project_id"])
-    round_id = str(candidate.get("round_id") or "1")
+    round_id = str(seed["round_id"] if seed is not None
+                   else candidate.get("round_id") or "1")
     authorization = ledger.materialize_authorized_context(
         project, candidate_id, round_id, node
     )
@@ -159,6 +210,9 @@ def write_native_emission_receipts(project_dir, candidate_id, node, persona, sou
             {"evidence_run_id": evidence_artifacts["run_id"],
              "evidence_artifacts": evidence_artifacts}
             if evidence_artifacts else None
+        ),
+        "research_seed": (
+            research_seed.manifest_entry(seed) if seed is not None else None
         ),
         "hypothesis_authorization": {
             "authorization_id": authorization["authorization_id"],
