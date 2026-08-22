@@ -134,13 +134,8 @@ def _merge_query_family_cache(project_dir, families):
 PRE_RESEARCH_MAP = {
     "L1": {"budget": LIT_RUNTIME_DIGEST_TOKEN_BUDGET,
            "type": "deep_research", "skill": "academic-research-suite",
-           "description": "Search literature for convergent evolution, cardiac co-expression, high heart rate adaptation",
-           "queries": [
-               "convergent evolution cardiac gene expression high heart rate",
-               "co-expression modules WGCNA cross-species heart",
-               "molecular convergence bat shrew cardiac adaptation",
-               "module eigengene species trait correlation heart rate",
-           ]},
+           "description": "Search literature relevant to the canonical L0 scientific question and current-round hypothesis",
+           "queries": []},
     "L4": {"budget": LIT_RUNTIME_DIGEST_TOKEN_BUDGET,
            "type": "literature_review", "skill": "academic-research-suite",
            "description": "Search methodology papers: WGCNA cross-species, module preservation, convergent transcriptomics",

@@ -16,6 +16,9 @@ import tempfile
 from pathlib import Path
 from native_v2_helpers import activate_native_project
 
+from research_loop import l0_contract
+from research_loop.yamlio import _replace_field
+
 HERE = Path(__file__).resolve().parent
 RL = str(HERE.parent / "research_loop_v04.py")
 
@@ -28,15 +31,42 @@ def _run(*args):
 
 def _mkproj():
     d = tempfile.mkdtemp(prefix="rlr_pr3_")
-    (Path(d) / "00_Project_Index.md").write_text(
+    project = Path(d)
+    (project / "00_Project_Index.md").write_text(
         "---\nproject_name: T\nkind: project_index\n"
         "created_at: 2026-01-01T00:00:00\n---\n# T\n", encoding="utf-8")
-    cand = Path(d) / "01_Candidates"
+    cand = project / "01_Candidates"
     cand.mkdir(parents=True)
-    (cand / "C1.md").write_text(
+    candidate = cand / "C1.md"
+    candidate.write_text(
         "---\ncandidate_id: C1\ntitle: T\nquestion: Does X cause Y?\n"
         "claim: X causes Y\ncurrent_status: NEW\ncurrent_owner: Einstein\n"
+        "round_id: 1\nround_type: initial\n"
         "---\n# C1\n", encoding="utf-8")
+
+    # This is a native v2.1 fixture. Native L1 is authorized by the L0 sidecar,
+    # not by duplicate candidate question/claim fields, so this fixture must
+    # satisfy the same canonical contract as a current project.
+    source_input = l0_contract.build_source_input(
+        input_type="inline",
+        description="synthetic pre-research fixture input",
+        fmt="text",
+    )
+    contract = l0_contract.promote_to_current_schema(
+        l0_contract.build_initial_contract(
+            "C1", "1", "Does X cause Y?", source_input, "X causes Y"
+        )
+    )
+    contract_path, contract_hash = l0_contract.write_contract(
+        project, "C1", contract
+    )
+    _replace_field(candidate, "schema_version", contract["schema_version"])
+    _replace_field(
+        candidate,
+        "input_contract_path",
+        contract_path.relative_to(project).as_posix(),
+    )
+    _replace_field(candidate, "input_contract_hash", contract_hash)
     return activate_native_project(d)
 
 
@@ -90,7 +120,7 @@ def test_l4_placeholder_fails_gate():
 #    and passes the gate.
 def test_write_synthetic_passes_gate():
     d = _mkproj()
-    
+
     # Write synthetic L1 pre-research
     r = _run("pre-research", d, "C1", "--node", "L1", "--write-synthetic")
     assert r.returncode == 0, f"expected rc=0 for pre-research, got {r.returncode}: {r.stderr}"
@@ -114,7 +144,7 @@ def test_write_synthetic_passes_gate():
 # 4. L7 pre-research node is not gated by literature provenance checks
 def test_l7_pre_research_not_gated():
     d = _mkproj()
-    
+
     # Running pre-research L7. By default it is "code_search", which is not a literature node.
     r = _run("pre-research", d, "C1", "--node", "L7")
     assert r.returncode == 0
@@ -131,16 +161,16 @@ def test_existing_file_not_overwritten():
     pr = Path(d) / "02_Agent_Notes" / "_pre_research"
     pr.mkdir(parents=True, exist_ok=True)
     target = pr / "L1_research.md"
-    
+
     # Write a custom partial/placeholder text
     custom_text = "## Runtime digest\nNOT YET RUN\n## Custom legacy section\nmy partial work\n"
     target.write_text(custom_text, encoding="utf-8")
-    
+
     # Run pre-research without --write-placeholder. It should NOT overwrite.
     r = _run("pre-research", d, "C1", "--node", "L1")
     assert r.returncode == 0
     assert target.read_text(encoding="utf-8") == custom_text, "file was overwritten silently"
-    
+
     # Run pre-research WITH --write-placeholder. It should overwrite.
     r2 = _run("pre-research", d, "C1", "--node", "L1", "--write-placeholder")
     assert r2.returncode == 0

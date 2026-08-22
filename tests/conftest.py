@@ -4,6 +4,7 @@ import hashlib
 import json
 import sys
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -143,3 +144,31 @@ def complete_legacy_staged_l4_fixtures(request, monkeypatch):
         # synthetic manifest intentionally has no persisted file; linkage and
         # frozen-corpus enforcement are covered by test_l4_provenance_hardening.
         monkeypatch.setattr(module.l4p, "_persist_l4b_linkage", lambda *_a, **_k: None)
+
+
+@pytest.fixture(autouse=True)
+def complete_deep_research_l0_fixture(request, monkeypatch):
+    """Migrate the provider-runtime candidate factory to the strict L0 contract.
+
+    The shared ``test_deep_research`` factory predates strict L0 and invokes
+    ``new-candidate --input data``.  The literal ``data`` is intentionally a
+    production placeholder, so keep the validator strict and rewrite only that
+    exact test-fixture command to a descriptive synthetic input.
+    """
+    if not request.module.__name__.endswith("test_deep_research"):
+        return
+
+    real_run = subprocess.run
+
+    def run_with_current_l0_fixture(command, *args, **kwargs):
+        rewritten = command
+        if isinstance(command, (list, tuple)):
+            parts = list(command)
+            if "new-candidate" in parts and "--input" in parts:
+                index = parts.index("--input")
+                if index + 1 < len(parts) and parts[index + 1] == "data":
+                    parts[index + 1] = "synthetic deep research fixture input"
+                    rewritten = tuple(parts) if isinstance(command, tuple) else parts
+        return real_run(rewritten, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run_with_current_l0_fixture)
