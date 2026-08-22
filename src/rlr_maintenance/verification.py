@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 import hashlib
-import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
+from .bounded_process import DEFAULT_MAX_OUTPUT_BYTES, run_bounded_process
 from .profiles import get_profile
 
 
 VERIFICATION_RECEIPT_SCHEMA = "RLRVerificationReceipt/v1"
+VERIFICATION_COMMAND_TIMEOUT = 3600.0
 
 
 @dataclass(frozen=True)
@@ -42,7 +44,9 @@ def run_profile(
     profile_id: str,
     repo_root: str | Path,
     *,
-    runner: Callable[..., object] = subprocess.run,
+    runner: Callable[..., object] | None = None,
+    timeout: float = VERIFICATION_COMMAND_TIMEOUT,
+    max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
 ) -> VerificationReceipt:
     """Run one immutable verification profile from an explicit repository root.
 
@@ -54,17 +58,55 @@ def run_profile(
     root = Path(repo_root)
     results: list[VerificationStepResult] = []
     passed = True
+    if timeout <= 0:
+        raise ValueError("verification timeout must be positive")
+    started = time.monotonic()
 
     for step in profile.required_validation:
-        completed = runner(
-            list(step.command),
-            cwd=root,
-            text=True,
-            encoding="utf-8",
-            capture_output=True,
-            shell=False,
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
+            results.append(
+                VerificationStepResult(
+                    step_id=step.step_id,
+                    command=step.command,
+                    required=step.required,
+                    returncode=124,
+                    stdout_sha256=_digest_text("")[0],
+                    stdout_bytes=0,
+                    stderr_sha256=_digest_text("")[0],
+                    stderr_bytes=0,
+                )
+            )
+            passed = False
+            break
+        if runner is None:
+            completed = run_bounded_process(
+                list(step.command),
+                timeout=remaining,
+                cwd=root,
+                max_output_bytes=max_output_bytes,
+            )
+        else:
+            completed = runner(
+                list(step.command),
+                cwd=root,
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                shell=False,
+                timeout=remaining,
+            )
+        terminal_state = getattr(completed, "terminal_state", "completed")
+        output_truncated = bool(
+            getattr(completed, "stdout_truncated", False)
+            or getattr(completed, "stderr_truncated", False)
         )
-        returncode = int(getattr(completed, "returncode"))
+        if terminal_state == "timed_out":
+            returncode = 124
+        else:
+            returncode = int(getattr(completed, "returncode"))
+            if output_truncated and returncode == 0:
+                returncode = 1
         stdout_sha, stdout_bytes = _digest_text(getattr(completed, "stdout", ""))
         stderr_sha, stderr_bytes = _digest_text(getattr(completed, "stderr", ""))
         results.append(
