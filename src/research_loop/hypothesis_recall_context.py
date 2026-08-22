@@ -9,6 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
 
+from research_loop import research_seed
 from research_loop.compatibility import get_profile
 from research_loop.hypothesis_ledger import HypothesisLedger, LedgerError, canonical_json
 from research_loop.hypothesis_recall import (
@@ -24,6 +25,13 @@ from research_loop.yamlio import _load_yaml_front
 
 _SECTION = "=== HISTORICAL HYPOTHESIS RECALL ==="
 _AUTO_RECALL_ENV = "RLR_AUTO_HYPOTHESIS_RECALL"
+
+
+def _canonical_seed(project, cand_id) -> dict[str, Any]:
+    try:
+        return research_seed.load_l1_research_seed(project, cand_id)
+    except research_seed.ResearchSeedError as exc:
+        raise LedgerError(f"canonical L1 research seed is invalid: {exc}") from exc
 
 
 def _native_l1_identity(args) -> tuple[HypothesisLedger, dict[str, Any], str] | None:
@@ -47,7 +55,8 @@ def _native_l1_identity(args) -> tuple[HypothesisLedger, dict[str, Any], str] | 
     candidate = _load_yaml_front(
         project / "01_Candidates" / f"{args.cand_id}.md"
     )
-    round_id = str(candidate.get("round_id") or "1")
+    seed = _canonical_seed(project, str(args.cand_id))
+    round_id = str(seed["round_id"])
     return ledger, candidate, round_id
 
 
@@ -63,9 +72,13 @@ def _load_bound_recall(
     except LedgerError:
         if os.environ.get(_AUTO_RECALL_ENV) != "1":
             raise
-        query_text = " ".join(
-            str(candidate.get(field) or "")
-            for field in ("question", "claim")
+        seed = _canonical_seed(project, str(args.cand_id))
+        if str(seed["round_id"]) != str(round_id):
+            raise LedgerError(
+                "hypothesis recall round does not match canonical L1 research seed"
+            )
+        query_text = (
+            f"{seed['scientific_question']} {seed['hypothesis_seed']}"
         ).strip()
         artifact = create_recall(
             ledger,
