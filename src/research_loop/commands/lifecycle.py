@@ -11,7 +11,9 @@ from pathlib import Path
 
 import pitfall_ledger as pl
 
-from research_loop import deep_research, l0_contract, l0_data, l0_intake, l0_state
+from research_loop import (
+    deep_research, l0_contract, l0_data, l0_intake, l0_state, research_seed,
+)
 from research_loop.commands.ledger import _ledger_for
 from research_loop.common import (
     REQUIRED_DEPENDENCIES,
@@ -49,8 +51,8 @@ VALID_STATUSES = [
 ]
 
 KNOWLEDGE_BASE_ACCESS = {
-    "L1": "none", "L4": "read-write", "L8.5": "read-write",
-    "L0": "read",
+    "L0.5": "read-write", "L1": "none",
+    "L4": "read-write", "L8.5": "read-write", "L0": "read",
     "L9a": "read", "L9b": "read",
     "L10a": "read", "L10b": "read", "L10c": "read",
 }
@@ -103,8 +105,15 @@ def _pitfall_warnings_for_node(project_dir, node_id):
         })
     return warnings
 
+
 def cmd_next_step(args):
-    """Output JSON scheduling packet for the next DAG node."""
+    """Output the next canonical DAG scheduling packet.
+
+    Native projects schedule the Curie-owned L0.5 research stage directly.
+    L0.5 has no cognitive delta/status transition: its completion signal is the
+    immutable ResearchSeed -> exact EvidencePack binding. Historical profiles
+    retain their former L1-owned pre-research contract.
+    """
     project_dir = Path(args.project_dir)
     cf = _candidate_file(project_dir, args.cand_id)
     if not cf.exists():
@@ -112,12 +121,12 @@ def cmd_next_step(args):
         return 1
     fm = _load_yaml_front(cf)
     status = fm.get("current_status", "NEW")
-    # Unbound directories are legacy read-only inputs. Bound projects always
-    # select the topology from their immutable ledger profile.
     profile_id = PROFILE_V20
     if binding_path(project_dir).exists():
         try:
-            profile_id = _ledger_for(project_dir, getattr(args, "knowledge_store", None)).project_profile(project_dir)
+            profile_id = _ledger_for(
+                project_dir, getattr(args, "knowledge_store", None)
+            ).project_profile(project_dir)
         except LedgerError as exc:
             print(json.dumps({"error": str(exc)}))
             return 1
@@ -131,9 +140,6 @@ def cmd_next_step(args):
     }
 
     if status in FINAL_STATUSES:
-        # KEEP and REVISE both represent completed L10b decisions whose round
-        # still needs the shared L10c finalization boundary. DROP/DOWNGRADE and
-        # ARCHIVED remain terminal here and do not open a continuation round.
         if status in {"KEEP", "REVISE"}:
             node_info = node_map.get("L10c")
             if node_info:
@@ -144,9 +150,9 @@ def cmd_next_step(args):
                     "is_execution": False,
                     "context_files": ["ALL"],
                     "action_hint": node_info["action_hint"],
-        "must": ["Aggregate all deltas in DAG order", "Generate FINAL_REPORT.md and FINAL_REPORT_CN.md"],
-        "must_not": ["Execute code", "Change status", "Skip any delta"],
-        "stop_conditions": ["Any delta missing"],
+                    "must": ["Aggregate all deltas in DAG order", "Generate FINAL_REPORT.md and FINAL_REPORT_CN.md"],
+                    "must_not": ["Execute code", "Change status", "Skip any delta"],
+                    "stop_conditions": ["Any delta missing"],
                     "advance_command": "aggregate-report",
                     "template_path": _layer_template_path("L10c"),
                     "persona_template_path": _persona_template_path(node_info["persona"]),
@@ -163,9 +169,14 @@ def cmd_next_step(args):
         print(json.dumps({"terminal": True, "status": status}))
         return 0
 
+    idea_nodes = (
+        ["L0.5", "L1", "L2", "L3"]
+        if "L0.5" in node_map
+        else ["L1", "L2", "L3"]
+    )
     status_to_nodes = {
         "NEW": ["L0"],
-        "IDEA_PROPOSED": ["L1", "L2", "L3"],
+        "IDEA_PROPOSED": idea_nodes,
         "IDEA_SELECTED": ["L4"],
         "METHOD_PROPOSED": ["L5", "L6"],
         "METHOD_APPROVED": ["L7"],
@@ -178,8 +189,32 @@ def cmd_next_step(args):
 
     node_candidates = status_to_nodes.get(status, [])
     node_id = None
+    l0_5_evidence_run_id = None
     if node_candidates:
         for cand_node in node_candidates:
+            if cand_node == "L0.5":
+                try:
+                    seed = research_seed.load_l1_research_seed(
+                        project_dir, args.cand_id
+                    )
+                    state, detail = research_seed.research_evidence_binding_state(
+                        project_dir, seed, "L0.5"
+                    )
+                except research_seed.ResearchSeedError as exc:
+                    print(json.dumps({
+                        "error": f"L0.5 cannot resolve canonical ResearchSeed: {exc}"
+                    }))
+                    return 3
+                if state == "invalid":
+                    print(json.dumps({
+                        "error": f"L0.5 frozen evidence binding is invalid: {detail}"
+                    }))
+                    return 3
+                if state == "missing":
+                    node_id = "L0.5"
+                    break
+                l0_5_evidence_run_id = detail
+                continue
             if cand_node == "L9_parallel":
                 if (_delta_belongs_to_candidate(
                         project_dir, "L9a_feynman", args.cand_id)
@@ -190,7 +225,9 @@ def cmd_next_step(args):
                 break
             ni = node_map.get(cand_node)
             if ni:
-                delta_key = artifact_key_for(cand_node, ni["persona"], profile_id=profile_id)
+                delta_key = artifact_key_for(
+                    cand_node, ni["persona"], profile_id=profile_id
+                )
                 if _delta_belongs_to_candidate(
                         project_dir, delta_key, args.cand_id):
                     continue
@@ -219,10 +256,7 @@ def cmd_next_step(args):
                 "everos_read_scopes": _everos_scopes_for(ni, project_dir.name),
                 "knowledge_base": ni.get("knowledge_base"),
             })
-        result = {
-            "is_parallel": True,
-            "nodes": nodes,
-        }
+        result = {"is_parallel": True, "nodes": nodes}
         result.update(profile_metadata)
         result["pitfall_warnings"] = {
             "L9a": _pitfall_warnings_for_node(project_dir, "L9a"),
@@ -232,6 +266,7 @@ def cmd_next_step(args):
         return 0
 
     node_info = node_map[node_id]
+    is_research_node = node_info.get("node_kind") == "research"
     result = {
         "node": node_id,
         "persona": node_info["persona"],
@@ -242,12 +277,24 @@ def cmd_next_step(args):
         "advance_command": node_info.get("advance_command"),
         "advance_status": node_info.get("advance_status"),
         "advance_reason": node_info.get("advance_reason"),
-        "template_path": _layer_template_path(node_id),
-        "persona_template_path": _persona_template_path(node_info["persona"]),
+        "template_path": None if is_research_node else _layer_template_path(node_id),
+        "persona_template_path": (
+            None if is_research_node else _persona_template_path(node_info["persona"])
+        ),
         "tools_policy": node_info.get("tools_policy"),
         "everos_read_scopes": _everos_scopes_for(node_info, project_dir.name),
         "knowledge_base": node_info.get("knowledge_base"),
     }
+    if is_research_node:
+        result.update({
+            "node_kind": "research",
+            "research_required": bool(node_info.get("research_required")),
+            "research_persona": node_info.get("research_persona"),
+            "pre_research": node_info.get("pre_research"),
+        })
+    if node_id == "L1" and l0_5_evidence_run_id:
+        result["l0_5_evidence_run_id"] = l0_5_evidence_run_id
+        result["evidence_run_id"] = l0_5_evidence_run_id
     result.update(profile_metadata)
     if status == "NEEDS_EXECUTION" and node_id == "L7":
         delta_done = _delta_belongs_to_candidate(
@@ -264,6 +311,7 @@ def cmd_next_step(args):
     result["pitfall_warnings"] = _pitfall_warnings_for_node(project_dir, node_id)
     print(json.dumps(result, indent=2))
     return 0
+
 
 def cmd_new_project(args):
     name = args.name
@@ -588,8 +636,6 @@ def cmd_new_candidate(args):
     )
     cf = _candidate_file(project_dir, cand_id)
 
-    # Deterministic continuation IDs are immutable creation keys.  Check both
-    # identity and the complete canonical contract before any sidecar write.
     if cf.exists():
         if not from_memory:
             print(f"ERROR: candidate already exists; refusing overwrite: {cf}",
@@ -882,6 +928,7 @@ def _print_intake_failure(result):
         for error in result["errors"]:
             print(f"- {error}", file=sys.stderr)
 
+
 def cmd_normalize_l0_input(args):
     """Normalize a labelled natural-language request into a strict L0 artifact."""
     project_dir = Path(args.project)
@@ -1031,6 +1078,7 @@ def cmd_normalize_l0_input(args):
                                cand_id, "--stop-after-node", "L0"]).returncode
     return 0
 
+
 def cmd_preflight(args):
     project_dir = Path(args.project_dir)
     idx = project_dir / "00_Project_Index.md"
@@ -1083,9 +1131,6 @@ def cmd_preflight(args):
     for f in skipped:
         print(f"  skipped  00_Preflight/{f} (exists; use --force to overwrite)")
 
-    # Single component-level authority: _check_dependencies delegates framework
-    # probes to l0_preflight and persists preflight_receipt.json. Lifecycle only
-    # formats/enforces those results; it never repeats an ARS/service probe.
     ok, missing, advisory = _check_dependencies(project_dir)
     print("\nL0 dependency gate:")
     for d in ok:
@@ -1125,6 +1170,7 @@ def cmd_preflight(args):
     print("L0 PITFALL GATE: PASS -- no blocking confirmed pitfalls.")
     return 0
 
+
 def cmd_check_deps(args):
     """Standalone L0 component gate; non-zero means a blocking dependency failed."""
     project_dir = Path(args.project_dir) if getattr(args, "project_dir", None) else None
@@ -1157,6 +1203,7 @@ def cmd_check_deps(args):
         print("PITFALL GATE: PASS")
     return 0
 
+
 def cmd_note(args):
     project_dir = Path(args.project_dir)
     if args.agent not in AGENTS:
@@ -1184,6 +1231,7 @@ def cmd_note(args):
     print(nid)
     print(f"  -> {nf}")
     return 0
+
 
 def cmd_demo(args):
     pd = (Path(__file__).resolve().parents[3] / "demos" / "other_examples"
@@ -1242,6 +1290,7 @@ def cmd_demo(args):
     print(f"  delta files: {len(delta_nodes)} empty schemas in 02_Agent_Notes/")
     print("\nDAG walk instructions:")
     print("  L0  Linnaeus   -> next-step, assemble-context --node L0")
+    print("  L0.5 Curie     -> next-step, deep-research-run --node L0.5")
     print("  L1  Einstein   -> next-step, assemble-context --node L1")
     print("  L2  Feynman    -> next-step, assemble-context --node L2")
     print("  L3  Oppenheimer-> triage-idea --decision select --reason ...")
@@ -1259,6 +1308,7 @@ def cmd_demo(args):
     print(f"  python research_loop_v04.py show {pd} {c1}")
     print(f"  python research_loop_v04.py aggregate-report {pd} {c1}")
     return 0
+
 
 def cmd_decision(args):
     project_dir = Path(args.project_dir)
@@ -1309,6 +1359,7 @@ def cmd_decision(args):
     print(f"D{seq:04d}: {frm} -> {args.status}")
     return 0
 
+
 def cmd_route(args):
     project_dir = Path(args.project_dir)
     if args.to not in AGENTS:
@@ -1334,6 +1385,7 @@ def cmd_route(args):
     print(hid)
     print(f"  -> {hf}")
     return 0
+
 
 def cmd_triage_idea(args):
     project_dir = Path(args.project_dir)
@@ -1389,6 +1441,7 @@ def cmd_triage_idea(args):
             print(f"  WARN: archive target exists, left in place: {target}", file=sys.stderr)
     print(f"candidate_triage: {frm} -> {to} (route: {owner})")
     return 0
+
 
 def cmd_triage_method(args):
     project_dir = Path(args.project_dir)
