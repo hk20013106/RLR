@@ -13,7 +13,6 @@ from research_loop.method_navigation_compat import install as _install_navigatio
 from research_loop.review_status_compat import install as _install_review_status_compat
 from research_loop.user_sources import registered_sources as _registered_sources
 from research_loop.l0_5_deep_research import install as _install_l0_5_deep_research
-from research_loop.provider_execution import install as _install_provider_execution
 
 _install_source_payload_integrity(deep_research)
 _install_method_evidence(deep_research)
@@ -78,26 +77,15 @@ _install_l4_lineage(deep_research)
 _install_l45_context_binding(_l4_pipeline_module)
 _l4_closed_corpus.install(_l4_pipeline_module, deep_research)
 
-# All external provider/research CLI processes now pass through one execution
-# boundary. Install this BEFORE observability so observability supervises the
-# executor-backed implementation rather than the historical subprocess owner.
-_install_provider_execution(deep_research)
-
-# Provider observability is installed after all scientific Deep Research/L4
-# wrappers so it supervises the final runtime boundary without changing their
-# contracts, validators, persistence, or authority.
+# Provider observability is installed after the scientific Deep Research/L4
+# decorators. It observes the canonical DEFAULT_EXECUTOR; it does not patch or
+# own subprocess modules.
 from research_loop import deep_research_task as _deep_research_task_module
 from research_loop.provider_runtime_observability import (
     install as _install_provider_runtime_observability,
 )
-from research_loop.provider_runtime_compat import (
-    install as _install_provider_runtime_compat,
-)
 
 _install_provider_runtime_observability(deep_research, _deep_research_task_module)
-_install_provider_runtime_compat(
-    deep_research, _deep_research_task_module, _l4_pipeline_module
-)
 
 from research_loop import hypothesis_contracts as hypothesis_contracts
 from research_loop.method_contracts import install as _install_method_contracts
@@ -181,14 +169,14 @@ del _install_source_payload_integrity
 del _install_method_evidence, _install_method_evidence_compat
 del _review_navigation, _install_navigation_compat
 del _install_review_status_compat, _registered_sources
-del _install_l0_5_deep_research, _install_provider_execution
+del _install_l0_5_deep_research
 del _install_l4_pipeline, _install_l4_pipeline_compat
 del _install_l4_provenance, _install_l4_provenance_compat
 del _install_l4_path_safety, _install_l4_lineage
 del _install_l4_registry_projection_integrity
 del _install_l4_inventory_projection, _install_l4_evidence_bundle
 del _install_l4_runtime_compat, _install_l45_context_binding
-del _install_provider_runtime_observability, _install_provider_runtime_compat
+del _install_provider_runtime_observability
 del _deep_research_task_module
 del _l4_pipeline_module, _l4_lineage_module
 del _l4_provenance_module, _l4_inventory_module
