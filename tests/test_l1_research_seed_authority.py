@@ -77,7 +77,7 @@ def test_l1_candidate_context_hides_duplicate_frontmatter_semantics(tmp_path):
     assert l1_frontmatter["candidate_id"] == "C1"
 
 
-def test_l1_deep_research_uses_canonical_l0_seed_not_frontmatter(
+def test_legacy_l1_deep_research_uses_canonical_l0_seed_not_frontmatter(
     tmp_path, monkeypatch, capsys
 ):
     project = tmp_path / "P"
@@ -176,8 +176,8 @@ def test_l1_auto_recall_uses_the_same_canonical_l0_seed(tmp_path, monkeypatch):
     )
 
 
-def test_l1_pre_research_has_no_project_specific_seed_queries():
-    config = PRE_RESEARCH_MAP["L1"]
+def test_l0_5_research_has_no_project_specific_seed_queries():
+    config = PRE_RESEARCH_MAP["L0.5"]
     serialized = json.dumps(config, ensure_ascii=False).lower()
 
     assert config["queries"] == []
