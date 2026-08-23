@@ -1,8 +1,8 @@
 """Versioned Deep Research runtime, evidence packs, and audit helpers.
 
-The module deliberately has no dependency on the RLR engine.  A successful
-research run is an external CLI invocation plus a validated, persisted source
-record; a prose pre-research note alone is never evidence of execution.
+A successful research run is an external CLI invocation plus a validated,
+persisted source record; a prose pre-research note alone is never evidence of
+execution. Process spawning is delegated to the single ProviderExecutor.
 """
 from __future__ import annotations
 
@@ -12,26 +12,17 @@ import json
 import os as _os
 import re
 import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from research_loop.providers.executor import DEFAULT_EXECUTOR, ProviderExecutionError
+
 
 SCHEMA_VERSION = "1.0"
-_STAGES = {"L1", "L4", "L8.5"}
+_STAGES = {"L0.5", "L1", "L4", "L8.5"}
 
-# Deep Research backends. Deliberately closed: every backend needs a verified
-# invocation shape, a skill/plugin layout, and evidence-gate coverage, so a name
-# is only added once those exist.
 SUPPORTED_BACKENDS = ("codex", "claude")
-
-# Environment markers that identify the agent host. Claude Code sets these and
-# providers/headless.py already depends on them. No Codex marker is listed
-# because none has been verified in this repository -- see detect_host_backend.
 _HOST_MARKERS = {"claude": ("CLAUDECODE", "CLAUDE_CODE")}
-
-# Operator escape hatch for hosts that expose no marker (Codex today). Checked
-# before the markers so a deliberate declaration always wins over sniffing.
 HOST_BACKEND_ENV = "RLR_HOST_BACKEND"
 _MAX_SOURCE_BYTES = 5 * 1024 * 1024
 
@@ -55,15 +46,6 @@ def runtime_config_path(project_dir: str | Path) -> Path:
 
 
 def detect_host_backend(env: dict | None = None) -> str | None:
-    """Name the agent host running this process, or None when it is unknown.
-
-    RLR_HOST_BACKEND is read first: it is the only way to name a host that
-    exposes no marker, and a declaration must not be overridden by sniffing.
-    Otherwise only the Claude Code markers are verified (providers/headless.py
-    relies on the same two variables). Codex exposes no marker this repository
-    has confirmed, so an unmarked host is reported as unknown -- never assumed
-    to be Codex. Guessing here is what let a Claude session spend Codex quota.
-    """
     env = _os.environ if env is None else env
     declared = str(env.get(HOST_BACKEND_ENV) or "").strip()
     if declared:
@@ -80,11 +62,6 @@ def detect_host_backend(env: dict | None = None) -> str | None:
 
 def default_runtime_config(backend: str | None = None,
                            env: dict | None = None) -> dict:
-    """Runtime config for an explicit backend, or for the detected host.
-
-    Fails loud when the host cannot be detected: silently defaulting to one
-    backend is what sent Claude-hosted runs to the Codex CLI.
-    """
     backend = backend or detect_host_backend(env)
     if backend is None:
         raise DeepResearchError(
@@ -109,22 +86,11 @@ def default_runtime_config(backend: str | None = None,
                            "codex-user" / "academic-research-suite")
         config["skill_path"] = str(
             legacy_skill if legacy_skill.exists() else relocated_skill)
-    # The Claude plugin directory is installation-specific and is left empty
-    # rather than guessed; runtime_ready() reports it as missing.
     return config
 
 
 def host_matches(spec: RuntimeSpec, env: dict | None = None, *,
                  explicit: bool = False) -> tuple[bool, str]:
-    """Reject a configured backend that contradicts the detected host.
-
-    An unknown host is fail-closed unless the caller named the backend
-    explicitly. Being permissive there meant a Codex session -- which exposes no
-    marker -- silently inherited whatever backend the project file happened to
-    carry, which is the same quota mistake a positive mismatch causes, only
-    quieter. `explicit` says a human chose the backend for this run, so there is
-    nothing left to guess.
-    """
     host = detect_host_backend(env)
     if host is None:
         if explicit:
@@ -144,13 +110,6 @@ def host_matches(spec: RuntimeSpec, env: dict | None = None, *,
 
 
 def validate_spec_consistency(spec: RuntimeSpec) -> tuple[bool, str]:
-    """Reject a runtime spec whose fields contradict its own declared backend.
-
-    A spec can pass host_matches() (backend matches the detected host) while
-    still pointing at the wrong CLI or carrying the other backend's fields --
-    e.g. backend=claude with executable=codex, or a leftover Codex skill_path
-    on a Claude spec. Each of those would still launch the wrong provider.
-    """
     other = "codex" if spec.backend == "claude" else "claude"
     executable_name = Path(spec.executable or "").name.lower()
     if other in executable_name:
@@ -205,7 +164,6 @@ def _safe_id(value: str) -> str:
 
 
 def resolve_subprocess_executable(executable: str) -> str:
-    """Resolve Windows command wrappers before passing them to CreateProcess."""
     if _os.name != "nt":
         return executable
     resolved = shutil.which(executable)
@@ -221,7 +179,7 @@ def subprocess_invocation(command: list[str], prompt: str) -> tuple[list[str], d
     return command + [prompt], {}
 
 
-def _runtime_schema() -> dict:
+def _runtime_schema(node: str | None = None) -> dict:
     extract = {
         "type": "object",
         "additionalProperties": False,
@@ -308,8 +266,16 @@ def _runtime_schema() -> dict:
 
 
 def _stage_instruction(node: str) -> str:
+    if node == "L0.5":
+        return (
+            "Run literature discovery for downstream hypothesis generation. "
+            "Derive actual search queries from the canonical L0 scientific question "
+            "and current-round hypothesis. For every material claim, retrieve "
+            "source-located Results, Discussion, and Conclusion evidence from "
+            "identifiable primary research papers."
+        )
     if node == "L1":
-        return ("Run deep-research/literature discovery for hypothesis generation. "
+        return ("Run legacy deep-research/literature discovery for hypothesis generation. "
                 "For every claim, extract located Results, Discussion, and Conclusion evidence "
                 "from primary research papers.")
     if node == "L4":
@@ -326,12 +292,6 @@ def _stage_instruction(node: str) -> str:
 
 def build_invocation(spec: RuntimeSpec, node: str, question: str, claim: str,
                      work_dir: str | Path, result_context: str = "") -> tuple[list[str], str]:
-    """Build an explicit ARS command and a JSON-only evidence request.
-
-    Codex uses the single-suite skill name. Claude receives a plugin directory
-    and the installed ARS alias.  There is intentionally no generic command
-    template or environment-variable fallback.
-    """
     if node not in _STAGES:
         raise DeepResearchError(f"unsupported Deep Research stage {node!r}")
     if spec.backend not in SUPPORTED_BACKENDS:
@@ -342,10 +302,6 @@ def build_invocation(spec: RuntimeSpec, node: str, question: str, claim: str,
     work_dir = Path(work_dir)
     schema_path = work_dir / "deep_research_output.schema.json"
     if spec.backend == "codex":
-        # A deep-research run is a disposable child process.  Disable the
-        # interactive user's MCP fleet without discarding model/provider config:
-        # --ignore-user-config would also drop model_providers and fall back to
-        # the default provider.
         command = [spec.executable, "exec", "--ephemeral",
                    "-c", "mcp_servers={}",
                    "--output-schema", str(schema_path)]
@@ -420,7 +376,6 @@ def _parse_cli_output(stdout: str) -> dict:
         value = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise DeepResearchError(f"research CLI did not return JSON: {exc}") from exc
-    # Claude --output-format json may place the model result in this envelope.
     if isinstance(value, dict) and isinstance(value.get("result"), str):
         try:
             value = json.loads(value["result"])
@@ -432,7 +387,6 @@ def _parse_cli_output(stdout: str) -> dict:
 
 
 def _filter_unidentifiable_papers(payload: dict) -> tuple[dict, list[dict]]:
-    """Keep citable records and return an auditable list of rejected records."""
     papers = payload.get("papers") if isinstance(payload, dict) else None
     if not isinstance(papers, list):
         return payload, []
@@ -516,14 +470,8 @@ def _bind_l85_verification_evidence_ids(
     papers: list[dict],
     records: list[dict],
 ) -> object:
-    """Bind exact provider paper IDs to that paper's located evidence IDs.
-
-    Unresolved provider IDs are deliberately left unchanged so the existing
-    evidence audit remains the sole fail-closed acceptance boundary.
-    """
     if not isinstance(verification, list):
         return verification
-
     identifier_to_papers: dict[str, set[int]] = {}
     located_ids_by_paper: dict[int, tuple[str, ...]] = {}
     canonical_ids: set[str] = set()
@@ -544,7 +492,6 @@ def _bind_l85_verification_evidence_ids(
             identifier = record.get(field)
             if isinstance(identifier, str) and identifier:
                 identifier_to_papers.setdefault(identifier, set()).add(paper_index)
-
     bound_verification = []
     for item in verification:
         if not isinstance(item, dict) or not isinstance(item.get("evidence_ids"), list):
@@ -581,7 +528,6 @@ def persist_run(
     profile_id: str = "",
     research_persona: str = "Curie",
 ) -> dict:
-    """Persist immutable paper records and a run artifact from a validated payload."""
     if node not in _STAGES:
         raise DeepResearchError(f"unsupported Deep Research stage {node!r}")
     payload, rejected_papers = _filter_unidentifiable_papers(payload)
@@ -670,7 +616,6 @@ def persist_run(
 
 def _artifact(project_dir: str | Path, candidate_id: str, node: str,
               *, run_id: str | None = None) -> dict | None:
-    """Load an exact evidence run when requested; legacy callers use latest."""
     runs_dir, _, _ = _run_paths(Path(project_dir))
     if run_id:
         path = runs_dir / f"{_safe_id(run_id)}.json"
@@ -691,14 +636,12 @@ def _artifact(project_dir: str | Path, candidate_id: str, node: str,
 
 
 def _latest_artifact(project_dir: str | Path, candidate_id: str, node: str) -> dict | None:
-    """Compatibility helper; new context assembly must supply an exact run ID."""
     return _artifact(project_dir, candidate_id, node)
 
 
 def run_ids_for_stage(
     project_dir: str | Path, candidate_id: str, node: str
 ) -> list[str]:
-    """Return stable evidence run IDs without consulting filesystem mtimes."""
     runs_dir, _, _ = _run_paths(Path(project_dir))
     found = []
     for path in sorted(
@@ -719,12 +662,6 @@ def run_ids_for_stage(
 
 
 def unique_run_id(project_dir: str | Path, candidate_id: str, node: str) -> str | None:
-    """Return an unambiguous run ID without selecting by mtime.
-
-    A native context may infer the ID only while there is exactly one valid run
-    for the candidate/stage; once a retry creates multiple runs, callers must
-    supply --evidence-run-id explicitly.
-    """
     found = run_ids_for_stage(project_dir, candidate_id, node)
     return found[0] if len(found) == 1 else None
 
@@ -735,7 +672,6 @@ def evidence_artifact_manifest(
     node: str,
     run_id: str,
 ) -> dict:
-    """Return the exact immutable evidence files consumed by one context."""
     root = Path(project_dir).resolve()
     artifact = _artifact(root, candidate_id, node, run_id=run_id)
     if artifact is None:
@@ -840,27 +776,23 @@ def _is_section_heading(section: object, heading: str, *,
 
 
 def _is_methods_section(section: object) -> bool:
-    """Return whether a located section is an accepted Methods heading."""
     return (_is_section_heading(section, "methods")
             or _normalize_section_heading(section) == "materials and methods")
 
 
 def _is_results_section(section: object) -> bool:
-    """Return whether a located section is a Results heading or subsection."""
     return _is_section_heading(
         section, "results", allow_parenthetical=True, allow_colon=True
     )
 
 
 def _is_discussion_section(section: object) -> bool:
-    """Return whether a located section is a Discussion heading or subsection."""
     return _is_section_heading(
         section, "discussion", allow_parenthetical=True, allow_colon=True
     )
 
 
 def _is_conclusion_section(section: object) -> bool:
-    """Return whether a located section is a Conclusion heading or its qualifier."""
     return _is_section_heading(
         section, "conclusion", allow_parenthetical=True, allow_colon=True
     )
@@ -887,15 +819,14 @@ def audit_evidence_pack(project_dir: str | Path, candidate_id: str, node: str,
         e for r in records for e in r.get("evidence_extracts", [])
         if e.get("verification_status") == "located" and e.get("locator")
     ]
-    if node == "L1":
+    if node in {"L0.5", "L1"}:
         for required, matcher in (
             ("Results", _is_results_section),
             ("Discussion", _is_discussion_section),
+            ("Conclusion", _is_conclusion_section),
         ):
             if not any(matcher(e.get("section")) for e in located_extracts):
-                return False, f"L1 evidence lacks located {required.title()} extract"
-        if not any(_is_conclusion_section(e.get("section")) for e in located_extracts):
-            return False, "L1 evidence lacks located Conclusion extract"
+                return False, f"{node} evidence lacks located {required} extract"
     elif node == "L4":
         if not any(_is_methods_section(e.get("section")) for e in located_extracts):
             return False, "L4 evidence lacks located Methods extract"
@@ -939,7 +870,6 @@ def audit_evidence_pack(project_dir: str | Path, candidate_id: str, node: str,
 
 def render_evidence_digest(project_dir: str | Path, candidate_id: str, nodes: list[str],
                            *, run_ids: dict[str, str] | None = None) -> str:
-    """Render compact, source-located evidence for a cognitive-node context."""
     root = Path(project_dir)
     lines = ["=== DEEP RESEARCH EVIDENCE ==="]
     for node in nodes:
@@ -962,7 +892,6 @@ def render_evidence_digest(project_dir: str | Path, candidate_id: str, nodes: li
 
 def evidence_ids(project_dir: str | Path, candidate_id: str, nodes: list[str],
                  *, run_ids: dict[str, str] | None = None) -> list[str]:
-    """Return IDs present in persisted, source-located evidence records."""
     root = Path(project_dir)
     found = []
     for node in nodes:
@@ -983,13 +912,12 @@ def evidence_ids(project_dir: str | Path, candidate_id: str, nodes: list[str],
 
 def evidence_pack_details(project_dir: str | Path, candidate_id: str,
                           node: str = "L8.5", *, run_id: str | None = None) -> dict:
-    """Return hash-bound, source-located records for ledger import."""
     ok, reason = audit_evidence_pack(project_dir, candidate_id, node, run_id=run_id)
     if not ok:
         raise DeepResearchError(reason)
     root = Path(project_dir)
     artifact = _artifact(root, candidate_id, node, run_id=run_id)
-    if artifact is None:  # guarded by audit; keeps the return type explicit
+    if artifact is None:
         raise DeepResearchError("evidence pack missing")
     records = {}
     for paper_ref in artifact.get("papers", []):
@@ -1052,16 +980,36 @@ def run_and_persist(
     command[0] = resolve_subprocess_executable(command[0])
     execution_command, invocation_kwargs = subprocess_invocation(command, prompt)
     try:
-        completed = subprocess.run(execution_command, capture_output=True, text=True,
-                                   encoding="utf-8", errors="strict",
-                                   timeout=spec.timeout, check=False, **invocation_kwargs)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise DeepResearchError(f"Academic Research CLI invocation failed: {exc}") from exc
-    receipt = skill_receipt(spec.backend, command, prompt, skill_version,
-                            exit_code=completed.returncode, stdout_hash=_sha(completed.stdout),
-                            model=spec.model)
+        completed = DEFAULT_EXECUTOR.run(
+            execution_command,
+            timeout=spec.timeout,
+            input_text=invocation_kwargs.get("input"),
+            check=False,
+            encoding="utf-8",
+            errors="strict",
+        )
+    except ProviderExecutionError as exc:
+        detail = exc.stderr.strip() or str(exc)
+        if exc.timed_out:
+            raise DeepResearchError(
+                f"Academic Research CLI timed out after {exc.timeout}s: {detail}"
+            ) from exc
+        raise DeepResearchError(
+            f"Academic Research CLI invocation failed: {detail}"
+        ) from exc
+    receipt = skill_receipt(
+        spec.backend,
+        command,
+        prompt,
+        skill_version,
+        exit_code=completed.returncode,
+        stdout_hash=_sha(completed.stdout),
+        model=spec.model,
+    )
     if completed.returncode != 0:
-        raise DeepResearchError(f"Academic Research CLI exited {completed.returncode}: {completed.stderr.strip()}")
+        raise DeepResearchError(
+            f"Academic Research CLI exited {completed.returncode}: {completed.stderr.strip()}"
+        )
     artifact = persist_run(
         project_dir, candidate_id, node, _parse_cli_output(completed.stdout),
         receipt, result_context, project_id=project_id, round_id=round_id,
