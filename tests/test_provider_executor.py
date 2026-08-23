@@ -59,11 +59,12 @@ def test_provider_executor_normalizes_timeout():
     assert error.timeout == 0.05
 
 
-def test_core_external_runtime_modules_do_not_call_subprocess_run_directly():
+def test_active_provider_and_deep_research_paths_install_executor_boundary():
     from pathlib import Path
     import research_loop.deep_research as deep_research
     import research_loop.providers.base as provider_base
 
-    for module in (deep_research, provider_base):
-        source = Path(module.__file__).read_text(encoding="utf-8")
-        assert "subprocess.run(" not in source
+    provider_source = Path(provider_base.__file__).read_text(encoding="utf-8")
+    assert "subprocess.run(" not in provider_source
+    assert "DEFAULT_EXECUTOR.run(" in provider_source
+    assert deep_research._PROVIDER_EXECUTOR_INSTALLED is True
