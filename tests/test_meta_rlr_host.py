@@ -1,13 +1,25 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from rlr_maintenance.host import MetaRLRHost, _todo_text
+from rlr_maintenance.host import MetaRLRHost, _repair_prompt, _todo_text
 from rlr_maintenance.observer import observe_contract_failure
+from rlr_maintenance.profiles import profile_for_event
 from rlr_maintenance.workspace import GitWorkspaceError, RepairWorkspace
 
 
 def event():
     return observe_contract_failure(component="l0_restore", error_code="L0_STATE_HASH_MISMATCH", expected_contract="l0_restore_fail_closed", rlr_revision="a" * 40, observed_at="2026-08-13T22:00:00+08:00")
+
+
+def test_repair_prompt_separates_bounded_repair_from_independent_verification():
+    payload = json.loads(_repair_prompt(event(), profile_for_event(event()), "todo_event"))
+    boundary = "\n".join(payload["worker_boundary"])
+
+    assert "directly relevant focused tests" in boundary
+    assert "full repository test suite" in boundary
+    assert "return immediately" in boundary
+    assert "independent Meta-RLR verifier" in boundary
 
 
 class LoopXFake:

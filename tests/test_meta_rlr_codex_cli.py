@@ -132,6 +132,11 @@ def test_codex_default_runner_is_bounded(tmp_path, monkeypatch):
     assert runner.calls[0]["inactivity_timeout"] == 3
 
 
+def test_repair_default_timeout_is_an_emergency_ceiling_not_the_old_900_second_deadline():
+    assert codex_cli.DEFAULT_REPAIR_EMERGENCY_TIMEOUT > 900
+    assert codex_cli.DEFAULT_REPAIR_JOB_TIMEOUT == codex_cli.DEFAULT_REPAIR_EMERGENCY_TIMEOUT
+
+
 def test_codex_default_observer_runs_real_subprocess_and_persists_receipt(tmp_path):
     worktree = tmp_path / "repair"
     worktree.mkdir()

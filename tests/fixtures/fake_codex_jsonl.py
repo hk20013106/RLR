@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -76,6 +77,26 @@ def main() -> int:
         _emit({"type": "turn.completed", "usage": {}})
         _write_final(final_path)
         return 0
+    if mode == "stderr_noise":
+        for index in range(100):
+            print(f"ordinary diagnostic noise {index}", file=sys.stderr, flush=True)
+            time.sleep(delay)
+        return 9
+    if mode == "child_busy":
+        child_code = (
+            "import time\n"
+            "end = time.monotonic() + 10\n"
+            "value = 0\n"
+            "while time.monotonic() < end:\n"
+            "    value += 1\n"
+        )
+        child = subprocess.Popen([sys.executable, "-c", child_code])
+        try:
+            time.sleep(delay * 100)
+        finally:
+            child.terminate()
+            child.wait(timeout=2)
+        return 9
     if mode == "recoverable_error":
         _emit({"type": "error", "message": "temporary fixture error"})
         time.sleep(delay)

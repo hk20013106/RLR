@@ -171,6 +171,59 @@ def test_inactivity_timeout_preserves_receipt_and_cleans_process_tree(tmp_path, 
     assert receipt["process_tree_cleanup"]["provider_alive_after_cleanup"] is False
 
 
+def test_stderr_noise_cannot_indefinitely_refresh_effective_inactivity(tmp_path, monkeypatch):
+    monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "stderr_noise")
+    monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.03")
+    original_snapshot = runtime_observability._process_snapshot
+
+    def frozen_process_activity(pid):
+        value = original_snapshot(pid)
+        if value.get("alive"):
+            value["cpu_seconds"] = 0.0
+            value["io_bytes"] = 0
+        return value
+
+    monkeypatch.setattr(runtime_observability, "_process_snapshot", frozen_process_activity)
+    result = run_observed_provider(
+        command=[sys.executable, str(FIXTURE), "exec", "--json"],
+        prompt="fixture prompt",
+        runtime_dir=tmp_path / "runtime",
+        backend="codex",
+        task_id="dr-stderr-noise",
+        candidate_id="C1",
+        node="L1",
+        job_timeout=0.8,
+        inactivity_timeout=0.15,
+        observer_interval=0.03,
+        cwd=tmp_path,
+    )
+
+    assert result.final_status == "inactivity_timed_out"
+
+
+def test_process_activity_aggregates_active_child_tree(tmp_path, monkeypatch):
+    monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "child_busy")
+    monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.01")
+    result = run_observed_provider(
+        command=[sys.executable, str(FIXTURE), "exec", "--json"],
+        prompt="fixture prompt",
+        runtime_dir=tmp_path / "runtime",
+        backend="codex",
+        task_id="dr-child-activity",
+        candidate_id="C1",
+        node="L1",
+        job_timeout=0.7,
+        inactivity_timeout=0.20,
+        observer_interval=0.03,
+        cwd=tmp_path,
+    )
+    receipt = json.loads((tmp_path / "runtime" / "runtime_receipt.json").read_text(encoding="utf-8"))
+
+    assert result.final_status == "job_timed_out"
+    assert receipt["process_activity"]["cpu_seconds"] > 0
+    assert receipt["process_activity"]["last_process_activity_at"]
+
+
 def test_job_timeout_preserves_partial_logs_and_process_cleanup_receipt(tmp_path, monkeypatch):
     monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "timeout")
     monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.15")
