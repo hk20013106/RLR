@@ -6,7 +6,7 @@ from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
 def test_topology_is_canonical_knowledge_base_policy_owner():
     assert lifecycle.KNOWLEDGE_BASE_ACCESS is topology.KNOWLEDGE_BASE_ACCESS
 
-    _nodes, node_map, _sequence = topology.topology_for_profile(DEFAULT_NATIVE_PROFILE)
+    nodes, node_map, _sequence = topology.topology_for_profile(DEFAULT_NATIVE_PROFILE)
     expected_access = {
         "L0": "read",
         "L1": "none",
@@ -18,6 +18,9 @@ def test_topology_is_canonical_knowledge_base_policy_owner():
         "L10b": "read",
         "L10c": "read",
     }
+    assert topology.KNOWLEDGE_BASE_ACCESS == expected_access
 
-    for node_id, expected in expected_access.items():
-        assert node_map[node_id].get("knowledge_base") == expected
+    for node in nodes:
+        node_id = node["node"]
+        expected = expected_access.get(node_id, "none")
+        assert node_map[node_id]["knowledge_base"] == expected
