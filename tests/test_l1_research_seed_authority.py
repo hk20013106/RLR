@@ -9,9 +9,10 @@ from research_loop import context
 from research_loop import l0_contract
 from research_loop import hypothesis_recall_context as recall_context
 from research_loop.commands import research
-from research_loop.commands.lifecycle import KNOWLEDGE_BASE_ACCESS
+from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
 from research_loop.hypothesis_ledger import LedgerError
 from research_loop.preresearch import PRE_RESEARCH_MAP
+from research_loop.topology import topology_for_profile
 
 
 def _write_candidate(project: Path, *, cand_id: str = "C1"):
@@ -185,4 +186,8 @@ def test_l1_pre_research_has_no_project_specific_seed_queries():
 
 
 def test_l1_einstein_has_no_direct_knowledge_base_authority():
-    assert KNOWLEDGE_BASE_ACCESS.get("L1", "none") == "none"
+    _nodes, node_map, _sequence = topology_for_profile(DEFAULT_NATIVE_PROFILE)
+    l1 = node_map["L1"]
+
+    assert l1.get("knowledge_base", "none") == "none"
+    assert any("09_Literature_Database" in rule for rule in l1["must_not"])
