@@ -3,7 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from rlr_maintenance.workspace import GitWorkspace, GitWorkspaceError
+from rlr_maintenance.bounded_process import BoundedProcessResult
+from rlr_maintenance.workspace import GitWorkspace, GitWorkspaceError, RepairWorkspace
 
 
 class GitFake:
@@ -12,6 +13,7 @@ class GitFake:
         self.committed = False
         self.branch = "meta-rlr/abc123-9fafe5188c01"
         self.calls = []
+        self.include_receipt = False
 
     def __call__(self, command, **kwargs):
         command = list(command)
@@ -48,7 +50,8 @@ class GitFake:
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
             return SimpleNamespace(returncode=0, stdout="src/a.py\n", stderr="")
         if args[:3] == ["ls-files", "--others", "--exclude-standard"]:
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
+            output = "verification_receipt.json\n" if self.include_receipt else ""
+            return SimpleNamespace(returncode=0, stdout=output, stderr="")
         if args[:3] == ["diff", "--cached", "--name-only"]:
             return SimpleNamespace(returncode=0, stdout="src/a.py\n", stderr="")
         if args and args[0] == "commit":
@@ -115,3 +118,46 @@ def test_existing_verified_commit_recovers_public_binding(tmp_path):
     assert binding.todo_id == "todo_event"
     assert binding.turn_instance_id == "meta-rlr:recover123"
     assert binding.profile_id == "l0_state_integrity"
+
+
+def test_git_run_boundary_times_out_fail_closed(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    manager = GitWorkspace(
+        repo_root=repo,
+        workspace_parent=tmp_path / "worktrees",
+        runner=lambda *args, **kwargs: BoundedProcessResult(
+            returncode=0,
+            terminal_state="timed_out",
+            stdout="",
+            stderr="",
+            stdout_truncated=False,
+            stderr_truncated=False,
+            stdout_bytes=0,
+            stderr_bytes=0,
+            timeout_seconds=0.2,
+            process_tree_cleanup={},
+        ),
+    )
+
+    with pytest.raises(GitWorkspaceError, match="timed out"):
+        manager._run(repo, ["status"])
+
+
+def test_durable_verification_receipt_is_not_repair_code_diff(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    fake = GitFake()
+    fake.include_receipt = True
+    manager = GitWorkspace(repo_root=repo, workspace_parent=tmp_path / "worktrees", runner=fake)
+    work = RepairWorkspace(
+        path=tmp_path / "worktree",
+        branch="meta-rlr/abc123-9fafe5188c01",
+        base_sha="a" * 40,
+        repair_key="abc123",
+    )
+
+    inspection = manager.inspect(work)
+
+    assert inspection.changed_paths == ("src/a.py",)
+    assert "verification_receipt.json" not in inspection.dirty_paths

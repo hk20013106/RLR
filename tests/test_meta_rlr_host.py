@@ -1,22 +1,38 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from rlr_maintenance.host import MetaRLRHost
+from rlr_maintenance.host import MetaRLRHost, _repair_prompt, _todo_text
 from rlr_maintenance.observer import observe_contract_failure
+from rlr_maintenance.profiles import profile_for_event
+from rlr_maintenance.workspace import GitWorkspaceError, RepairWorkspace
 
 
 def event():
     return observe_contract_failure(component="l0_restore", error_code="L0_STATE_HASH_MISMATCH", expected_contract="l0_restore_fail_closed", rlr_revision="a" * 40, observed_at="2026-08-13T22:00:00+08:00")
 
 
+def test_repair_prompt_separates_bounded_repair_from_independent_verification():
+    payload = json.loads(_repair_prompt(event(), profile_for_event(event()), "todo_event"))
+    boundary = "\n".join(payload["worker_boundary"])
+
+    assert "directly relevant focused tests" in boundary
+    assert "full repository test suite" in boundary
+    assert "return immediately" in boundary
+    assert "independent Meta-RLR verifier" in boundary
+
+
 class LoopXFake:
-    def __init__(self, should_run=True, selected="todo_event", refresh_ok=True):
+    def __init__(self, should_run=True, selected="todo_event", refresh_ok=True, todo_items=None):
         self.should_run = should_run
         self.selected = selected
         self.refresh_ok = refresh_ok
+        self.todo_items = todo_items if todo_items is not None else []
         self.calls = []
     def todo_add_agent(self, **kwargs):
         self.calls.append(("add", kwargs)); return {"ok": True, "todo_id": "todo_event"}
+    def todo_list(self, **kwargs):
+        self.calls.append(("list", kwargs)); return {"ok": True, "todos": self.todo_items}
     def quota_should_run(self, **kwargs):
         self.calls.append(("quota", kwargs)); return {"ok": True, "should_run": self.should_run, "agent_lane_next_action": {"todo_id": self.selected}}
     def todo_claim(self, **kwargs):
@@ -44,10 +60,60 @@ class WorkspaceFake:
         return "b" * 40
 
 
+class RecoveredCleanWorkspace:
+    def __init__(self, root, *, dirty=False):
+        self.root = Path(root)
+        self.calls = []
+        self.dirty = dirty
+        self.inspect_count = 0
+
+    def find_existing(self, **kwargs):
+        self.calls.append(("find", kwargs))
+        key = kwargs["repair_key"]
+        return RepairWorkspace(
+            path=self.root,
+            branch=f"meta-rlr/{key}-9fafe5188c01",
+            base_sha=kwargs["base_revision"],
+            repair_key=key,
+        )
+
+    def read_verified_commit(self, work):
+        raise GitWorkspaceError("recoverable verified commit is missing")
+
+    def inspect(self, work):
+        self.calls.append(("inspect", {}))
+        self.inspect_count += 1
+        if not self.dirty and self.inspect_count > 1:
+            return SimpleNamespace(
+                base_sha=work.base_sha,
+                head_sha=work.base_sha,
+                changed_paths=("src/x.py",),
+                dirty_paths=("src/x.py",),
+            )
+        return SimpleNamespace(
+            base_sha=work.base_sha,
+            head_sha=work.base_sha,
+            changed_paths=(),
+            dirty_paths=("src/x.py",) if self.dirty else (),
+        )
+
+    def create(self, **kwargs):
+        raise AssertionError("recovered workspace must be reused")
+
+    def commit_verified(self, work, **kwargs):
+        self.calls.append(("commit", kwargs))
+        return "b" * 40
+
+
 class CodexFake:
     def __init__(self): self.calls = []
     def run_repair(self, **kwargs):
         self.calls.append(kwargs); return SimpleNamespace(status="changed", summary="bounded repair", tests_requested=(), blocker=None)
+
+
+class NoChangeCodexFake:
+    def run_repair(self, **kwargs):
+        return SimpleNamespace(status="no_change", summary="no patch produced", tests_requested=(), blocker=None)
 
 
 def verifier(passed=True):
@@ -123,6 +189,39 @@ def test_failed_verification_blocks_without_commit_complete_or_spend(tmp_path):
     assert loopx.calls[-1][1]["status"] == "blocked"
 
 
+def test_failed_verification_todo_evidence_binds_receipt_details(tmp_path):
+    receipt_path = tmp_path / "verification_receipt.json"
+    receipt_path.write_text('{"passed": false}', encoding="utf-8")
+    receipt_hash = "c" * 64
+
+    def failing_verifier(profile_id, repo_root):
+        return SimpleNamespace(
+            profile_id=profile_id,
+            passed=False,
+            failed_step_id="bounded_repair_execution",
+            receipt_path=receipt_path,
+            receipt_sha256=receipt_hash,
+            steps=(),
+        )
+
+    loopx, workspace = LoopXFake(), WorkspaceFake(tmp_path)
+    result = MetaRLRHost(
+        loopx=loopx,
+        codex=CodexFake(),
+        workspace=workspace,
+        verifier=failing_verifier,
+    ).run_once(event=event(), goal_id="g", agent_id="a")
+
+    assert result.outcome == "blocked"
+    assert result.reason == "verification_failed"
+    update = loopx.calls[-1][1]
+    assert update["status"] == "blocked"
+    assert "reason=verification_failed" in update["evidence"]
+    assert "failed_step_id=bounded_repair_execution" in update["evidence"]
+    assert f"receipt_path={receipt_path}" in update["evidence"]
+    assert f"receipt_sha256={receipt_hash}" in update["evidence"]
+
+
 def test_different_frontier_todo_defers(tmp_path):
     loopx, codex = LoopXFake(selected="todo_other"), CodexFake()
     workspace = WorkspaceFake(tmp_path)
@@ -131,3 +230,96 @@ def test_different_frontier_todo_defers(tmp_path):
     assert [name for name, _ in loopx.calls] == ["add", "quota"]
     assert [name for name, _ in workspace.calls] == ["find"]
     assert codex.calls == []
+
+
+def test_no_change_is_blocked_without_self_certified_success(tmp_path):
+    loopx, workspace = LoopXFake(), WorkspaceFake(tmp_path)
+    result = MetaRLRHost(
+        loopx=loopx,
+        codex=NoChangeCodexFake(),
+        workspace=workspace,
+        verifier=verifier(True),
+    ).run_once(event=event(), goal_id="g", agent_id="a")
+
+    assert result.outcome == "blocked"
+    assert result.reason == "diagnosed_no_change_unverified"
+    assert [name for name, _ in loopx.calls] == ["add", "quota", "quota", "claim", "update"]
+    assert loopx.calls[-1][1]["status"] == "blocked"
+    assert "complete" not in [name for name, _ in loopx.calls]
+    assert "refresh" not in [name for name, _ in loopx.calls]
+    assert "spend" not in [name for name, _ in loopx.calls]
+
+
+def test_interrupted_clean_workspace_recovers_canonical_todo_without_add(tmp_path):
+    e = event()
+    loopx = LoopXFake(
+        todo_items=[
+            {
+                "todo_id": "todo_event",
+                "text": _todo_text(e),
+                "status": "open",
+                "claimed_by": "a",
+            }
+        ]
+    )
+    workspace = RecoveredCleanWorkspace(tmp_path)
+
+    result = MetaRLRHost(
+        loopx=loopx,
+        codex=CodexFake(),
+        workspace=workspace,
+        verifier=verifier(True),
+    ).run_once(event=e, goal_id="g", agent_id="a")
+
+    assert result.outcome == "verified"
+    assert "add" not in [name for name, _ in loopx.calls]
+    assert loopx.calls[0][0] == "list"
+    assert [name for name, _ in loopx.calls][-3:] == ["complete", "refresh", "spend"]
+    assert "create" not in [name for name, _ in workspace.calls]
+
+
+def test_interrupted_clean_workspace_ambiguous_todo_fails_closed(tmp_path):
+    e = event()
+    loopx = LoopXFake(todo_items=[])
+    codex = CodexFake()
+    workspace = RecoveredCleanWorkspace(tmp_path)
+
+    result = MetaRLRHost(
+        loopx=loopx,
+        codex=codex,
+        workspace=workspace,
+        verifier=verifier(True),
+    ).run_once(event=e, goal_id="g", agent_id="a")
+
+    assert result.outcome == "blocked"
+    assert result.reason == "recovery_todo_unresolved"
+    assert codex.calls == []
+    assert "add" not in [name for name, _ in loopx.calls]
+
+
+def test_interrupted_dirty_workspace_fails_closed(tmp_path):
+    e = event()
+    loopx = LoopXFake(
+        todo_items=[
+            {
+                "todo_id": "todo_event",
+                "text": _todo_text(e),
+                "status": "open",
+                "claimed_by": "a",
+            }
+        ]
+    )
+    codex = CodexFake()
+    workspace = RecoveredCleanWorkspace(tmp_path, dirty=True)
+
+    result = MetaRLRHost(
+        loopx=loopx,
+        codex=codex,
+        workspace=workspace,
+        verifier=verifier(True),
+    ).run_once(event=e, goal_id="g", agent_id="a")
+
+    assert result.outcome == "blocked"
+    assert result.reason == "recovery_workspace_dirty"
+    assert codex.calls == []
+    assert "add" not in [name for name, _ in loopx.calls]

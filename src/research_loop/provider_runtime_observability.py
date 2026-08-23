@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 try:  # Optional at import time; requirements install it in supported runtime.
     import psutil  # type: ignore
@@ -149,21 +149,36 @@ def _process_snapshot(pid: int) -> dict:
         return {"alive": alive, "cpu_seconds": None, "io_bytes": None, "children": []}
     try:
         process = psutil.Process(pid)
-        cpu = process.cpu_times()
-        try:
-            io = process.io_counters()
-            io_bytes = int(io.read_bytes + io.write_bytes)
-        except (psutil.AccessDenied, AttributeError, NotImplementedError):
-            io_bytes = None
         children = [child.pid for child in process.children(recursive=True) if child.is_running()]
+        tree = [process, *(psutil.Process(child_pid) for child_pid in children)]
+        cpu_values: list[float] = []
+        io_values: list[int] = []
+        for member in tree:
+            try:
+                cpu = member.cpu_times()
+                cpu_values.append(float(cpu.user + cpu.system))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+            try:
+                io = member.io_counters()
+                io_values.append(int(io.read_bytes + io.write_bytes))
+            except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError, NotImplementedError):
+                pass
         return {
             "alive": process.is_running() and process.status() != psutil.STATUS_ZOMBIE,
-            "cpu_seconds": float(cpu.user + cpu.system),
-            "io_bytes": io_bytes,
+            "cpu_seconds": sum(cpu_values) if cpu_values else None,
+            "io_bytes": sum(io_values) if io_values else None,
             "children": children,
+            "process_tree_pids": [member.pid for member in tree],
         }
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return {"alive": False, "cpu_seconds": None, "io_bytes": None, "children": []}
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return {
+            "alive": False,
+            "cpu_seconds": None,
+            "io_bytes": None,
+            "children": [],
+            "process_tree_pids": [],
+        }
 
 
 def _terminate_process_tree(process: _subprocess.Popen, grace: float = 2.0) -> dict:
@@ -266,11 +281,15 @@ def run_observed_provider(
     candidate_id: str,
     node: str,
     job_timeout: float | None,
+    inactivity_timeout: float | None = None,
     observer_interval: float = 1.0,
+    cwd: str | Path | None = None,
+    env: Mapping[str, str] | None = None,
     input_text: str | None = None,
 ) -> ProviderExecution:
     """Run one provider while streaming semantic events and process telemetry."""
     runtime_dir = Path(runtime_dir)
+    effective_cwd = Path(cwd).resolve() if cwd is not None else Path.cwd()
     runtime_dir.mkdir(parents=True, exist_ok=True)
     status_path = runtime_dir / "status.json"
     events_path = runtime_dir / "events.jsonl"
@@ -299,9 +318,11 @@ def run_observed_provider(
         "final_output_bytes": 0,
         "event_parse_errors": 0,
         "last_process_activity_at": "",
+        "last_activity_at": started_at,
         "cpu_seconds": None,
         "io_bytes": None,
         "child_pids": [],
+        "process_tree_pids": [],
         "termination_reason": "",
     }
 
@@ -313,6 +334,7 @@ def run_observed_provider(
                 "schema_version": STATUS_SCHEMA,
                 "task_schema_version": _TASK_SCHEMA_V2,
                 "task_id": task_id,
+                "attempt_id": os.environ.get("RLR_DEEP_RESEARCH_ATTEMPT_ID", ""),
                 "candidate_id": candidate_id,
                 "node": node,
                 "backend": backend,
@@ -332,10 +354,12 @@ def run_observed_provider(
                 "final_output_bytes": shared["final_output_bytes"],
                 "event_parse_errors": shared["event_parse_errors"],
                 "last_process_activity_at": shared["last_process_activity_at"],
+                "last_activity_at": shared["last_activity_at"],
                 "process_activity": {
                     "cpu_seconds": shared["cpu_seconds"],
                     "io_bytes": shared["io_bytes"],
                     "child_pids": shared["child_pids"],
+                    "process_tree_pids": shared["process_tree_pids"],
                 },
                 "termination_reason": shared["termination_reason"],
                 "elapsed_seconds": round(time.monotonic() - started_monotonic, 3),
@@ -356,6 +380,10 @@ def run_observed_provider(
         popen_kwargs["creationflags"] = _subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         popen_kwargs["start_new_session"] = True
+    if cwd is not None:
+        popen_kwargs["cwd"] = str(effective_cwd)
+    if env is not None:
+        popen_kwargs["env"] = dict(env)
     try:
         process = _subprocess.Popen(prepared, **popen_kwargs)
     except OSError as exc:
@@ -368,7 +396,8 @@ def run_observed_provider(
         receipt = _finalize_receipt(
             runtime_dir, task_id, candidate_id, node, backend, command, prompt,
             "unknown", started_at, "transport_lost", None, None,
-            shared, cleanup, prepared,
+            shared, cleanup, prepared, str(effective_cwd), job_timeout,
+            inactivity_timeout, observer_interval,
         )
         return ProviderExecution(
             prepared, 127, "", str(exc), "transport_lost", runtime_dir,
@@ -384,6 +413,8 @@ def run_observed_provider(
             process.stdin.close()
         except (BrokenPipeError, OSError):
             pass
+
+    last_activity_monotonic = started_monotonic
 
     def read_stdout() -> None:
         assert process.stdout is not None
@@ -401,6 +432,7 @@ def run_observed_provider(
                     publish(
                         event_bytes=shared["event_bytes"] + len(encoded),
                         event_parse_errors=shared["event_parse_errors"] + 1,
+                        last_activity_at=at,
                     )
                     continue
                 event_type = str(event.get("type") or "unknown")
@@ -408,6 +440,7 @@ def run_observed_provider(
                     "event_bytes": shared["event_bytes"] + len(encoded),
                     "last_provider_event_at": at,
                     "last_provider_event": _safe_event(event),
+                    "last_activity_at": at,
                 }
                 if event_type not in {"error", "turn.failed"}:
                     changes["last_successful_event"] = _safe_event(event)
@@ -427,6 +460,8 @@ def run_observed_provider(
                 elif event_type == "turn.failed":
                     changes["state"] = "provider_failed"
                 publish(**changes)
+                # Only a parseable provider event is semantic progress.
+                last_activity_monotonic = time.monotonic()
 
     def read_stderr() -> None:
         assert process.stderr is not None
@@ -434,7 +469,9 @@ def run_observed_provider(
             for line in process.stderr:
                 stream.write(line)
                 stream.flush()
-                publish(stderr_bytes=shared["stderr_bytes"] + len(line.encode("utf-8")))
+                publish(
+                    stderr_bytes=shared["stderr_bytes"] + len(line.encode("utf-8")),
+                )
 
     stdout_thread = threading.Thread(target=read_stdout, name="provider-stdout", daemon=True)
     stderr_thread = threading.Thread(target=read_stderr, name="provider-stderr", daemon=True)
@@ -444,6 +481,7 @@ def run_observed_provider(
     initial_changes: dict[str, Any] = {
         "provider_alive": bool(last_snapshot["alive"]),
         "child_pids": last_snapshot.get("children", []),
+        "process_tree_pids": last_snapshot.get("process_tree_pids", []),
     }
     if last_snapshot.get("cpu_seconds") is not None:
         initial_changes["cpu_seconds"] = last_snapshot.get("cpu_seconds")
@@ -456,28 +494,52 @@ def run_observed_provider(
     }
     final_status = "succeeded"
     termination_reason = "completed"
+    last_event_bytes = int(shared.get("event_bytes", 0))
+    last_stderr_bytes = int(shared.get("stderr_bytes", 0))
     while process.poll() is None:
         time.sleep(max(0.01, observer_interval))
         snapshot = _process_snapshot(process.pid)
         cpu_seconds = snapshot.get("cpu_seconds")
         io_bytes = snapshot.get("io_bytes")
-        activity_changed = (
+        process_tree_changed = snapshot.get("process_tree_pids", []) != last_snapshot.get("process_tree_pids", [])
+        activity_changed = process_tree_changed or (
             (cpu_seconds is not None and cpu_seconds != shared.get("cpu_seconds"))
             or (io_bytes is not None and io_bytes != shared.get("io_bytes"))
         )
+        semantic_stream_activity = last_event_bytes != shared.get("event_bytes")
         changes = {
             "observer_heartbeat_at": _now(),
             "provider_alive": bool(snapshot["alive"]),
             "child_pids": snapshot.get("children", []),
+            "process_tree_pids": snapshot.get("process_tree_pids", []),
         }
         if cpu_seconds is not None:
             changes["cpu_seconds"] = cpu_seconds
         if io_bytes is not None:
             changes["io_bytes"] = io_bytes
         if activity_changed:
-            changes["last_process_activity_at"] = _now()
+            activity_at = _now()
+            changes["last_process_activity_at"] = activity_at
+            changes["last_activity_at"] = activity_at
+        elif semantic_stream_activity:
+            last_activity_monotonic = time.monotonic()
+        if activity_changed:
+            last_activity_monotonic = time.monotonic()
         publish(**changes)
+        last_event_bytes = int(shared.get("event_bytes", 0))
+        last_stderr_bytes = int(shared.get("stderr_bytes", 0))
         last_snapshot = snapshot
+        if (
+            inactivity_timeout is not None
+            and time.monotonic() - last_activity_monotonic >= inactivity_timeout
+        ):
+            final_status = "inactivity_timed_out"
+            termination_reason = "inactivity_timeout"
+            publish(state=final_status, termination_reason=termination_reason)
+            cleanup = _terminate_process_tree(process)
+            break
+        # The hard ceiling is deliberately checked after inactivity: it is an
+        # emergency guard, while inactivity is the ordinary stuck criterion.
         if job_timeout is not None and time.monotonic() - started_monotonic >= job_timeout:
             final_status = "job_timed_out"
             termination_reason = "job_timeout"
@@ -491,7 +553,7 @@ def run_observed_provider(
         returncode = process.poll() if process.poll() is not None else 124
     stdout_thread.join(timeout=5)
     stderr_thread.join(timeout=5)
-    if final_status != "job_timed_out":
+    if final_status not in {"job_timed_out", "inactivity_timed_out"}:
         if returncode != 0:
             final_status = "provider_failed"
             termination_reason = "provider_exit_nonzero"
@@ -513,7 +575,8 @@ def run_observed_provider(
     receipt_hash = _finalize_receipt(
         runtime_dir, task_id, candidate_id, node, backend, command, prompt,
         version, started_at, final_status, returncode, process.pid, shared,
-        cleanup, prepared,
+        cleanup, prepared, str(effective_cwd), job_timeout, inactivity_timeout,
+        observer_interval,
     )
     return ProviderExecution(
         prepared, int(returncode), final_output, stderr_text, final_status,
@@ -537,17 +600,33 @@ def _finalize_receipt(
     shared: dict,
     cleanup: dict,
     executed_command: list[str],
+    cwd: str,
+    job_timeout: float | None,
+    inactivity_timeout: float | None,
+    observer_interval: float,
 ) -> str:
     receipt_path = runtime_dir / "runtime_receipt.json"
     receipt = {
         "schema_version": RECEIPT_SCHEMA,
         "task_id": task_id,
+        "attempt_id": os.environ.get("RLR_DEEP_RESEARCH_ATTEMPT_ID", ""),
         "candidate_id": candidate_id,
         "node": node,
         "backend": backend,
         "provider_version": provider_version,
         "command_hash": _sha_text(json.dumps(command, ensure_ascii=False)),
         "executed_command_hash": _sha_text(json.dumps(executed_command, ensure_ascii=False)),
+        "command_metadata": {
+            "argv0": str(executed_command[0]) if executed_command else "",
+            "argument_count": len(executed_command),
+            "backend": backend,
+        },
+        "cwd": cwd,
+        "timeout_config": {
+            "job_timeout_seconds": job_timeout,
+            "inactivity_timeout_seconds": inactivity_timeout,
+            "observer_interval_seconds": observer_interval,
+        },
         "prompt_hash": _sha_text(prompt),
         "started_at": started_at,
         "ended_at": _now(),
@@ -567,6 +646,8 @@ def _finalize_receipt(
             "cpu_seconds": shared.get("cpu_seconds"),
             "io_bytes": shared.get("io_bytes"),
             "last_process_activity_at": shared.get("last_process_activity_at") or "",
+            "last_activity_at": shared.get("last_activity_at") or "",
+            "process_tree_pids": shared.get("process_tree_pids") or [],
         },
         "process_tree_cleanup": cleanup,
         "artifacts": {
@@ -752,11 +833,21 @@ def install(deep_research_module, detached_task_module) -> None:
     deep_research_module.run_and_persist = run_and_persist
     deep_research_module.skill_receipt = skill_receipt
 
-    def task_status(task_id: str, state: str, *, error: str = "", run_id: str = "") -> dict:
+    def task_status(
+            task_id: str,
+            state: str,
+            *,
+            error: str = "",
+            run_id: str = "",
+            attempt_id: str = "",
+            attempt_path: str = "") -> dict:
         mapped = {
             "running": "running", "succeeded": "succeeded", "failed": "provider_failed",
         }.get(state, state)
-        value = original_task_status(task_id, state, error=error, run_id=run_id)
+        value = original_task_status(
+            task_id, state, error=error, run_id=run_id,
+            attempt_id=attempt_id, attempt_path=attempt_path,
+        )
         value["schema_version"] = _TASK_SCHEMA_V2
         value["status_schema"] = STATUS_SCHEMA
         value["state"] = mapped

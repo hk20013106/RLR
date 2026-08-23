@@ -1,6 +1,7 @@
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -220,6 +221,22 @@ def test_registry_is_explicit_cli_argument_not_loopx_python_import(tmp_path):
     ]
 
 
+def test_todo_list_reads_canonical_agent_todos(tmp_path):
+    script, argv_file = _write_fake_loopx(
+        tmp_path,
+        "print(json.dumps({'ok': True, 'todos': []}))\n",
+    )
+    client = LoopXCli(executable=(sys.executable, script))
+
+    packet = client.todo_list(goal_id="meta-rlr")
+    recorded = json.loads(Path(argv_file).read_text(encoding="utf-8"))
+
+    assert packet["ok"] is True
+    assert recorded == [
+        "--format", "json", "todo", "list", "--goal-id", "meta-rlr"
+    ]
+
+
 @pytest.mark.parametrize(
     "body,match",
     [
@@ -250,13 +267,50 @@ def test_nonzero_loopx_exit_never_synthesizes_success(tmp_path):
 def test_loopx_json_boundary_forces_utf8_for_windows_child_process(monkeypatch):
     captured = {}
 
-    def fake_run(command, **kwargs):
-        captured.update(kwargs)
-        return type("Completed", (), {"returncode": 0, "stdout": '{"ok": true}', "stderr": ""})()
+    def fake_run(command, *, timeout, cwd, env, max_output_bytes):
+        captured.update(
+            {
+                "command": list(command),
+                "timeout": timeout,
+                "cwd": cwd,
+                "env": env,
+                "max_output_bytes": max_output_bytes,
+            }
+        )
+        return SimpleNamespace(
+            returncode=0,
+            terminal_state="completed",
+            stdout='{"ok": true}',
+            stderr="",
+            stdout_truncated=False,
+            stderr_truncated=False,
+        )
 
-    monkeypatch.setattr("rlr_maintenance.loopx_cli.subprocess.run", fake_run)
+    monkeypatch.setattr("rlr_maintenance.loopx_cli.run_bounded_process", fake_run)
 
     LoopXCli().quota_should_run(goal_id="g", agent_id="a")
 
     assert captured["env"]["PYTHONIOENCODING"] == "utf-8"
     assert captured["env"]["PYTHONUTF8"] == "1"
+
+
+def test_loopx_timeout_fails_closed(tmp_path):
+    script, _argv_file = _write_fake_loopx(
+        tmp_path,
+        "import time; time.sleep(60)\n",
+    )
+    client = LoopXCli(executable=(sys.executable, script), timeout=0.2)
+
+    with pytest.raises(LoopXError, match="timed out"):
+        client.quota_should_run(goal_id="g", agent_id="a")
+
+
+def test_loopx_stdout_cap_fails_closed(tmp_path):
+    script, _argv_file = _write_fake_loopx(
+        tmp_path,
+        "print(json.dumps({'ok': True}))\n",
+    )
+    client = LoopXCli(executable=(sys.executable, script), max_output_bytes=8)
+
+    with pytest.raises(LoopXError, match="output cap"):
+        client.quota_should_run(goal_id="g", agent_id="a")

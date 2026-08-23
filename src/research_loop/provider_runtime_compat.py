@@ -73,10 +73,20 @@ def install(deep_research_module, detached_task_module, l4_pipeline_module) -> N
         "inactivity_timed_out", "cancelled", "provider_dead", "transport_lost",
     }
 
-    def status(task_id: str, state: str, *, error: str = "", run_id: str = "") -> dict:
+    def status(
+            task_id: str,
+            state: str,
+            *,
+            error: str = "",
+            run_id: str = "",
+            attempt_id: str = "",
+            attempt_path: str = "") -> dict:
         task_dir_value = os.environ.get("RLR_DEEP_RESEARCH_TASK_DIR")
         before = _read(Path(task_dir_value) / "status.json") if task_dir_value else {}
-        value = previous_status(task_id, state, error=error, run_id=run_id)
+        value = previous_status(
+            task_id, state, error=error, run_id=run_id,
+            attempt_id=attempt_id, attempt_path=attempt_path,
+        )
         if state == "failed":
             before_state = before.get("state")
             if before_state == "succeeded":

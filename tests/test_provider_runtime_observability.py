@@ -137,6 +137,93 @@ def test_unfinished_mcp_item_is_reported_as_exact_wait_point(tmp_path, monkeypat
     assert holder["result"].final_status == "job_timed_out"
 
 
+def test_inactivity_timeout_preserves_receipt_and_cleans_process_tree(tmp_path, monkeypatch):
+    monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "silent")
+    monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "1.0")
+    runtime = tmp_path / "runtime"
+
+    result = run_observed_provider(
+        command=[sys.executable, str(FIXTURE), "exec", "--json"],
+        prompt="fixture prompt",
+        runtime_dir=runtime,
+        backend="codex",
+        task_id="dr-inactivity",
+        candidate_id="C1",
+        node="L1",
+        job_timeout=3,
+        inactivity_timeout=0.3,
+        observer_interval=0.05,
+        cwd=tmp_path,
+    )
+
+    assert result.final_status == "inactivity_timed_out"
+    receipt = json.loads((runtime / "runtime_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["termination_reason"] == "inactivity_timeout"
+    assert receipt["timed_out"] is True
+    assert receipt["cwd"] == str(tmp_path.resolve())
+    assert receipt["timeout_config"] == {
+        "job_timeout_seconds": 3,
+        "inactivity_timeout_seconds": 0.3,
+        "observer_interval_seconds": 0.05,
+    }
+    assert receipt["command_metadata"]["backend"] == "codex"
+    assert receipt["process_tree_cleanup"]["attempted"] is True
+    assert receipt["process_tree_cleanup"]["provider_alive_after_cleanup"] is False
+
+
+def test_stderr_noise_cannot_indefinitely_refresh_effective_inactivity(tmp_path, monkeypatch):
+    monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "stderr_noise")
+    monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.03")
+    original_snapshot = runtime_observability._process_snapshot
+
+    def frozen_process_activity(pid):
+        value = original_snapshot(pid)
+        if value.get("alive"):
+            value["cpu_seconds"] = 0.0
+            value["io_bytes"] = 0
+        return value
+
+    monkeypatch.setattr(runtime_observability, "_process_snapshot", frozen_process_activity)
+    result = run_observed_provider(
+        command=[sys.executable, str(FIXTURE), "exec", "--json"],
+        prompt="fixture prompt",
+        runtime_dir=tmp_path / "runtime",
+        backend="codex",
+        task_id="dr-stderr-noise",
+        candidate_id="C1",
+        node="L1",
+        job_timeout=0.8,
+        inactivity_timeout=0.15,
+        observer_interval=0.03,
+        cwd=tmp_path,
+    )
+
+    assert result.final_status == "inactivity_timed_out"
+
+
+def test_process_activity_aggregates_active_child_tree(tmp_path, monkeypatch):
+    monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "child_busy")
+    monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.01")
+    result = run_observed_provider(
+        command=[sys.executable, str(FIXTURE), "exec", "--json"],
+        prompt="fixture prompt",
+        runtime_dir=tmp_path / "runtime",
+        backend="codex",
+        task_id="dr-child-activity",
+        candidate_id="C1",
+        node="L1",
+        job_timeout=0.7,
+        inactivity_timeout=0.20,
+        observer_interval=0.03,
+        cwd=tmp_path,
+    )
+    receipt = json.loads((tmp_path / "runtime" / "runtime_receipt.json").read_text(encoding="utf-8"))
+
+    assert result.final_status == "job_timed_out"
+    assert receipt["process_activity"]["cpu_seconds"] > 0
+    assert receipt["process_activity"]["last_process_activity_at"]
+
+
 def test_job_timeout_preserves_partial_logs_and_process_cleanup_receipt(tmp_path, monkeypatch):
     monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "timeout")
     monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.15")
@@ -242,10 +329,11 @@ def test_worker_diagnostics_cannot_mutate_provider_stderr_after_receipt(tmp_path
     }), encoding="utf-8")
 
     def handler(_args):
+        runtime_dir = Path(os.environ["RLR_DEEP_RESEARCH_TASK_DIR"])
         result = run_observed_provider(
             command=[sys.executable, str(FIXTURE), "exec", "--json"],
             prompt="fixture prompt",
-            runtime_dir=task_dir,
+            runtime_dir=runtime_dir,
             backend="codex",
             task_id=task_id,
             candidate_id="C1",
@@ -259,11 +347,13 @@ def test_worker_diagnostics_cannot_mutate_provider_stderr_after_receipt(tmp_path
 
     assert deep_research_task.run_worker(tmp_path, task_id, handler) == 3
 
-    receipt = json.loads((task_dir / "runtime_receipt.json").read_text(encoding="utf-8"))
-    provider_stderr = task_dir / "stderr.log"
+    current = json.loads((task_dir / "status.json").read_text(encoding="utf-8"))
+    attempt_dir = task_dir / current["attempt_path"]
+    receipt = json.loads((attempt_dir / "runtime_receipt.json").read_text(encoding="utf-8"))
+    provider_stderr = attempt_dir / "stderr.log"
     actual_hash = hashlib.sha256(provider_stderr.read_bytes()).hexdigest()
     assert receipt["artifacts"]["stderr"]["sha256"] == actual_hash
-    worker_stderr = task_dir / "worker_stderr.log"
+    worker_stderr = attempt_dir / "worker_stderr.log"
     assert worker_stderr.is_file()
     assert "post-provider worker diagnostic" in worker_stderr.read_text(encoding="utf-8")
 

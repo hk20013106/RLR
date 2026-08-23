@@ -84,6 +84,46 @@ def observe_process_failure(
     )
 
 
+def observe_provider_runtime_failure(
+    *,
+    component: str,
+    task_id: str,
+    provider_state: str,
+    termination_reason: str,
+    worker_exit_code: int,
+    expected_contract: str,
+    rlr_revision: str,
+    observed_at: str,
+    candidate_ref: str | None = None,
+    evidence_refs: Iterable[Mapping[str, Any]] = (),
+    source_receipts: Iterable[Mapping[str, Any]] = (),
+    severity: str = "blocking",
+) -> dict[str, Any]:
+    """Normalize the durable provider-runtime facts used by Phase 3.
+
+    Raw logs stay outside the event. Task/candidate identity is retained only as
+    structured provenance needed to resume the same detached scientific task.
+    """
+    return build_maintenance_event(
+        event_type="runtime_failure",
+        component=component,
+        severity=severity,
+        observed_at=observed_at,
+        rlr_revision=rlr_revision,
+        observed={
+            "task_id": str(task_id),
+            "provider_state": str(provider_state),
+            "termination_reason": str(termination_reason),
+            "worker_exit_code": int(worker_exit_code),
+        },
+        expected_contract=expected_contract,
+        evidence_refs=evidence_refs,
+        source_receipts=source_receipts,
+        suggested_route="repair",
+        candidate_ref=candidate_ref,
+    )
+
+
 def observe_verification_failure(
     *,
     component: str,

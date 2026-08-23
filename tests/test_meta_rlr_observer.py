@@ -5,6 +5,7 @@ from rlr_maintenance.observer import (
     observe_ci_failure,
     observe_contract_failure,
     observe_process_failure,
+    observe_provider_runtime_failure,
     observe_verification_failure,
 )
 
@@ -77,6 +78,37 @@ def test_module_process_identity_keeps_python_module_not_following_arguments():
 
     assert event["observed"]["command"] == ["python", "-m", "pytest"]
     assert "PRIVATE_TEST_SELECTOR" not in str(event)
+
+
+def test_provider_runtime_failure_keeps_compact_resume_provenance_not_raw_logs():
+    event = observe_provider_runtime_failure(
+        component="deep_research_provider:L4B",
+        task_id="dr-test",
+        provider_state="provider_failed",
+        termination_reason="provider_exit_nonzero",
+        worker_exit_code=3,
+        expected_contract="provider_runtime_execution_integrity",
+        rlr_revision=REVISION,
+        observed_at=WHEN,
+        candidate_ref="C-test",
+        evidence_refs=[
+            {
+                "kind": "rlr_artifact",
+                "ref": "08_Audit/deep_research_runtime/tasks/dr-test/status.json",
+            }
+        ],
+    )
+
+    assert event["event_type"] == "runtime_failure"
+    assert event["candidate_ref"] == "C-test"
+    assert event["observed"] == {
+        "task_id": "dr-test",
+        "provider_state": "provider_failed",
+        "termination_reason": "provider_exit_nonzero",
+        "worker_exit_code": 3,
+    }
+    assert "stdout" not in event["observed"]
+    assert "stderr" not in event["observed"]
 
 
 def test_verification_failure_records_validator_identity():

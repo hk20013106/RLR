@@ -15,6 +15,7 @@ from typing import Callable
 
 
 TASK_SCHEMA_VERSION = "DeepResearchDetachedTask/v1"
+ATTEMPT_SCHEMA_VERSION = "DeepResearchDetachedAttempt/v1"
 _HANDLER_ARGUMENTS = (
     "project_dir", "cand_id", "node", "backend", "allow_host_mismatch",
     "executable", "plugin_dir", "skill_path", "skill_version", "model",
@@ -85,7 +86,14 @@ def _validate_status(status: dict, task_id: str) -> None:
         raise DetachedTaskError(f"task {task_id} status identity is invalid")
 
 
-def _status(task_id: str, state: str, *, error: str = "", run_id: str = "") -> dict:
+def _status(
+        task_id: str,
+        state: str,
+        *,
+        error: str = "",
+        run_id: str = "",
+        attempt_id: str = "",
+        attempt_path: str = "") -> dict:
     value = {
         "schema_version": TASK_SCHEMA_VERSION,
         "task_id": task_id,
@@ -96,7 +104,45 @@ def _status(task_id: str, state: str, *, error: str = "", run_id: str = "") -> d
         value["run_id"] = run_id
     if error:
         value["error"] = error
+    if attempt_id:
+        value["attempt_id"] = attempt_id
+    if attempt_path:
+        value["attempt_path"] = attempt_path
     return value
+
+
+def _new_attempt(task_dir: Path, task_id: str) -> tuple[str, Path]:
+    attempts_dir = task_dir / "attempts"
+    attempts_dir.mkdir(parents=True, exist_ok=True)
+    number = 1
+    while True:
+        attempt_id = f"attempt-{number:04d}"
+        attempt_dir = attempts_dir / attempt_id
+        try:
+            attempt_dir.mkdir()
+        except FileExistsError:
+            number += 1
+            continue
+        _write_json(attempt_dir / "attempt.json", {
+            "schema_version": ATTEMPT_SCHEMA_VERSION,
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "started_at": _now(),
+        })
+        return attempt_id, attempt_dir
+
+
+def _publish_attempt_status(
+        task_dir: Path,
+        attempt_dir: Path,
+        task_id: str,
+        attempt_id: str,
+        status: dict) -> None:
+    value = dict(status)
+    value["attempt_id"] = attempt_id
+    value["attempt_path"] = attempt_dir.relative_to(task_dir).as_posix()
+    _write_json(attempt_dir / "status.json", value)
+    _write_json(task_dir / "status.json", value)
 
 
 def _public_cli_path() -> Path:
@@ -180,9 +226,20 @@ def run_worker(
         synchronous_handler: Callable[[argparse.Namespace], int]) -> int:
     """Run the existing handler unchanged and record its complete CLI output."""
     task_dir = _task_dir(project_dir, task_id)
-    stdout_path = task_dir / "stdout.log"
-    stderr_path = task_dir / "worker_stderr.log"
+    attempt_id, attempt_dir = _new_attempt(task_dir, task_id)
+    stdout_path = attempt_dir / "stdout.log"
+    stderr_path = attempt_dir / "worker_stderr.log"
     returncode = 3
+    previous_task_dir = os.environ.get("RLR_DEEP_RESEARCH_TASK_DIR")
+    previous_task_id = os.environ.get("RLR_DEEP_RESEARCH_TASK_ID")
+    previous_attempt_id = os.environ.get("RLR_DEEP_RESEARCH_ATTEMPT_ID")
+    os.environ["RLR_DEEP_RESEARCH_TASK_DIR"] = str(attempt_dir)
+    os.environ["RLR_DEEP_RESEARCH_TASK_ID"] = task_id
+    os.environ["RLR_DEEP_RESEARCH_ATTEMPT_ID"] = attempt_id
+    _publish_attempt_status(
+        task_dir, attempt_dir, task_id, attempt_id,
+        _status(task_id, "running", attempt_id=attempt_id),
+    )
     try:
         request = _read_json(task_dir / "request.json", f"task {task_id} request")
         handler_args = _validate_request(request, project_dir, task_id)
@@ -202,30 +259,45 @@ def run_worker(
 
         if returncode != 0:
             error = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
-            _write_json(
-                task_dir / "status.json",
-                _status(task_id, "failed", error=error or f"command exited {returncode}"),
+            failure = _status(
+                task_id, "failed", error=error or f"command exited {returncode}",
+                attempt_id=attempt_id,
             )
+            _publish_attempt_status(task_dir, attempt_dir, task_id, attempt_id, failure)
             return returncode
 
         result = _read_json(stdout_path, f"task {task_id} stdout")
         run_id = result.get("run_id")
         if not isinstance(run_id, str) or not run_id:
             raise DetachedTaskError("successful Deep Research output has no run_id")
+        _write_json(attempt_dir / "result.json", result)
         _write_json(task_dir / "result.json", result)
-        _write_json(
-            task_dir / "status.json",
-            _status(task_id, "succeeded", run_id=run_id),
+        _publish_attempt_status(
+            task_dir, attempt_dir, task_id, attempt_id,
+            _status(task_id, "succeeded", run_id=run_id, attempt_id=attempt_id),
         )
         return 0
     except Exception as exc:
         with stderr_path.open("a", encoding="utf-8") as stderr:
             stderr.write(f"Detached worker failed: {exc}\n")
-        _write_json(
-            task_dir / "status.json",
-            _status(task_id, "failed", error=str(exc)),
+        _publish_attempt_status(
+            task_dir, attempt_dir, task_id, attempt_id,
+            _status(task_id, "failed", error=str(exc), attempt_id=attempt_id),
         )
         return 3
+    finally:
+        if previous_task_dir is None:
+            os.environ.pop("RLR_DEEP_RESEARCH_TASK_DIR", None)
+        else:
+            os.environ["RLR_DEEP_RESEARCH_TASK_DIR"] = previous_task_dir
+        if previous_task_id is None:
+            os.environ.pop("RLR_DEEP_RESEARCH_TASK_ID", None)
+        else:
+            os.environ["RLR_DEEP_RESEARCH_TASK_ID"] = previous_task_id
+        if previous_attempt_id is None:
+            os.environ.pop("RLR_DEEP_RESEARCH_ATTEMPT_ID", None)
+        else:
+            os.environ["RLR_DEEP_RESEARCH_ATTEMPT_ID"] = previous_attempt_id
 
 
 def collect_task(project_dir: str | Path, task_id: str, audit: Callable) -> dict:
