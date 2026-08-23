@@ -9,5 +9,6 @@ from research_loop.providers import (  # noqa: F401  (re-export shim)
     ProviderError, _scalar, _mini_yaml, load_config, ProviderConfig,
     AgentProvider, _schema_repr, _compose_auto_prompt, ManualProvider,
     _run_command_agent, run_text_command, CommandProvider, HeadlessProvider,
-    make_provider, RunReceipt, now,
+    make_provider, ProviderExecutor, ProviderExecutionResult,
+    ProviderExecutionError, DEFAULT_EXECUTOR, RunReceipt, now,
 )
