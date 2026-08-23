@@ -59,29 +59,44 @@ def install(native_helpers) -> None:
                 canonical_summary.parent.mkdir(parents=True, exist_ok=True)
                 canonical_summary.write_bytes(source_summary.read_bytes())
 
-        if node != "L1" or not include_recall:
+        if node != "L1":
             return manifest_path, receipt_path
 
-        ledger = HypothesisLedger(
-            store_path or os.environ["RLR_HYPOTHESIS_STORE"]
-        )
         seed = research_seed.load_l1_research_seed(project, candidate_id)
         round_id = str(seed["round_id"])
-        query_text = " ".join((
-            str(seed["scientific_question"]),
-            str(seed["hypothesis_seed"]),
-        )).strip()
-        create_recall(
-            ledger,
-            project,
-            candidate_id,
-            round_id,
-            query_text=query_text,
+        evidence_run_id = str(
+            (manifest.get("pre_research") or {}).get("evidence_run_id") or ""
+        )
+        if not evidence_run_id:
+            raise AssertionError("synthetic native L1 fixture has no exact evidence run")
+        research_seed.write_l1_evidence_binding(
+            project, seed, evidence_run_id
+        )
+        manifest["research_seed_evidence_binding"] = (
+            research_seed.evidence_binding_manifest_entry(
+                project, seed, evidence_run_id
+            )
         )
 
-        manifest["hypothesis_recall"] = recall_manifest_entry(
-            project, candidate_id, round_id
-        )
+        if include_recall:
+            ledger = HypothesisLedger(
+                store_path or os.environ["RLR_HYPOTHESIS_STORE"]
+            )
+            query_text = " ".join((
+                str(seed["scientific_question"]),
+                str(seed["hypothesis_seed"]),
+            )).strip()
+            create_recall(
+                ledger,
+                project,
+                candidate_id,
+                round_id,
+                query_text=query_text,
+            )
+            manifest["hypothesis_recall"] = recall_manifest_entry(
+                project, candidate_id, round_id
+            )
+
         Path(manifest_path).write_text(
             json.dumps(manifest, sort_keys=True), encoding="utf-8"
         )
