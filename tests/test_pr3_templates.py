@@ -10,13 +10,15 @@ Ensures that:
 4. Existing test gates and digests are preserved.
 """
 import json
+import os
 import sys
 import subprocess
 import tempfile
 from pathlib import Path
-from native_v2_helpers import activate_native_project
 
 from research_loop import l0_contract
+from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
+from research_loop.hypothesis_ledger import HypothesisLedger
 from research_loop.yamlio import _replace_field
 
 HERE = Path(__file__).resolve().parent
@@ -67,7 +69,10 @@ def _mkproj():
         contract_path.relative_to(project).as_posix(),
     )
     _replace_field(candidate, "input_contract_hash", contract_hash)
-    return activate_native_project(d)
+    HypothesisLedger(os.environ["RLR_HYPOTHESIS_STORE"]).bind_project(
+        project, profile_id=DEFAULT_NATIVE_PROFILE
+    )
+    return d
 
 
 # 1. Running pre-research node L1 creates a placeholder that contains sections
