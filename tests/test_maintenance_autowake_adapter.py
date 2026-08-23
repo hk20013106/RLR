@@ -21,7 +21,7 @@ def _handoff(tmp_path: Path) -> RepairHandoff:
     )
 
 
-def test_resume_verified_worker_uses_repaired_cli_same_task_and_retry_guard(tmp_path):
+def test_resume_verified_worker_uses_repaired_cli_same_task_without_retry_guard(tmp_path, monkeypatch):
     handoff = _handoff(tmp_path)
     repaired_cli = handoff.worktree_path / "research_loop_v04.py"
     repaired_cli.write_text("# fixture\n", encoding="utf-8")
@@ -30,6 +30,7 @@ def test_resume_verified_worker_uses_repaired_cli_same_task_and_retry_guard(tmp_
     working_directory = tmp_path / "working"
     working_directory.mkdir()
     calls = []
+    monkeypatch.setenv(AUTOWAKE_RETRY_GUARD_ENV, "1")
 
     def runner(command, **kwargs):
         calls.append((list(command), kwargs))
@@ -51,7 +52,7 @@ def test_resume_verified_worker_uses_repaired_cli_same_task_and_retry_guard(tmp_
     assert Path(command[3]) == project.resolve()
     assert command[4] == "dr-original"
     assert kwargs["cwd"] == working_directory
-    assert kwargs["env"][AUTOWAKE_RETRY_GUARD_ENV] == "1"
+    assert AUTOWAKE_RETRY_GUARD_ENV not in kwargs["env"]
     assert kwargs["shell"] is False
 
 
@@ -80,7 +81,7 @@ def test_resume_verified_worker_launches_detached_without_waiting(tmp_path):
     assert result == 0
     _, kwargs = calls[0]
     assert kwargs["shell"] is False
-    assert kwargs["env"][AUTOWAKE_RETRY_GUARD_ENV] == "1"
+    assert AUTOWAKE_RETRY_GUARD_ENV not in kwargs["env"]
     assert "creationflags" in kwargs or "start_new_session" in kwargs
 
 

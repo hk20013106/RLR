@@ -329,10 +329,11 @@ def test_worker_diagnostics_cannot_mutate_provider_stderr_after_receipt(tmp_path
     }), encoding="utf-8")
 
     def handler(_args):
+        runtime_dir = Path(os.environ["RLR_DEEP_RESEARCH_TASK_DIR"])
         result = run_observed_provider(
             command=[sys.executable, str(FIXTURE), "exec", "--json"],
             prompt="fixture prompt",
-            runtime_dir=task_dir,
+            runtime_dir=runtime_dir,
             backend="codex",
             task_id=task_id,
             candidate_id="C1",
@@ -346,11 +347,13 @@ def test_worker_diagnostics_cannot_mutate_provider_stderr_after_receipt(tmp_path
 
     assert deep_research_task.run_worker(tmp_path, task_id, handler) == 3
 
-    receipt = json.loads((task_dir / "runtime_receipt.json").read_text(encoding="utf-8"))
-    provider_stderr = task_dir / "stderr.log"
+    current = json.loads((task_dir / "status.json").read_text(encoding="utf-8"))
+    attempt_dir = task_dir / current["attempt_path"]
+    receipt = json.loads((attempt_dir / "runtime_receipt.json").read_text(encoding="utf-8"))
+    provider_stderr = attempt_dir / "stderr.log"
     actual_hash = hashlib.sha256(provider_stderr.read_bytes()).hexdigest()
     assert receipt["artifacts"]["stderr"]["sha256"] == actual_hash
-    worker_stderr = task_dir / "worker_stderr.log"
+    worker_stderr = attempt_dir / "worker_stderr.log"
     assert worker_stderr.is_file()
     assert "post-provider worker diagnostic" in worker_stderr.read_text(encoding="utf-8")
 

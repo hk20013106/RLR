@@ -334,6 +334,7 @@ def run_observed_provider(
                 "schema_version": STATUS_SCHEMA,
                 "task_schema_version": _TASK_SCHEMA_V2,
                 "task_id": task_id,
+                "attempt_id": os.environ.get("RLR_DEEP_RESEARCH_ATTEMPT_ID", ""),
                 "candidate_id": candidate_id,
                 "node": node,
                 "backend": backend,
@@ -608,6 +609,7 @@ def _finalize_receipt(
     receipt = {
         "schema_version": RECEIPT_SCHEMA,
         "task_id": task_id,
+        "attempt_id": os.environ.get("RLR_DEEP_RESEARCH_ATTEMPT_ID", ""),
         "candidate_id": candidate_id,
         "node": node,
         "backend": backend,
@@ -831,11 +833,21 @@ def install(deep_research_module, detached_task_module) -> None:
     deep_research_module.run_and_persist = run_and_persist
     deep_research_module.skill_receipt = skill_receipt
 
-    def task_status(task_id: str, state: str, *, error: str = "", run_id: str = "") -> dict:
+    def task_status(
+            task_id: str,
+            state: str,
+            *,
+            error: str = "",
+            run_id: str = "",
+            attempt_id: str = "",
+            attempt_path: str = "") -> dict:
         mapped = {
             "running": "running", "succeeded": "succeeded", "failed": "provider_failed",
         }.get(state, state)
-        value = original_task_status(task_id, state, error=error, run_id=run_id)
+        value = original_task_status(
+            task_id, state, error=error, run_id=run_id,
+            attempt_id=attempt_id, attempt_path=attempt_path,
+        )
         value["schema_version"] = _TASK_SCHEMA_V2
         value["status_schema"] = STATUS_SCHEMA
         value["state"] = mapped

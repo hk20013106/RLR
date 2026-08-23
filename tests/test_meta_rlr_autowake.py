@@ -161,7 +161,7 @@ def test_autowake_emits_canonical_event_and_calls_existing_meta_cli(tmp_path, mo
     assert event["candidate_ref"] == "C20260802150025462724"
 
 
-def test_autowake_reuses_existing_event_for_same_failure(tmp_path, monkeypatch):
+def test_autowake_creates_new_event_occurrence_for_same_failure(tmp_path, monkeypatch):
     project = tmp_path / "project"
     project.mkdir()
     config = _config(tmp_path)
@@ -189,7 +189,7 @@ def test_autowake_reuses_existing_event_for_same_failure(tmp_path, monkeypatch):
             stderr="",
         )
 
-    kwargs = dict(
+    first_kwargs = dict(
         project_dir=project,
         task_id="dr-test",
         handler_args=_handler_args(tmp_path),
@@ -197,13 +197,23 @@ def test_autowake_reuses_existing_event_for_same_failure(tmp_path, monkeypatch):
         status=_status(),
         command_runner=runner,
     )
-    first = autowake.maybe_wake_meta_rlr(**kwargs)
-    second = autowake.maybe_wake_meta_rlr(**kwargs)
+    second_kwargs = dict(first_kwargs)
+    second_kwargs["status"] = _status()
+    second_kwargs["status"]["updated_at"] = "2026-08-16T00:00:01+00:00"
+    first = autowake.maybe_wake_meta_rlr(**first_kwargs)
+    second = autowake.maybe_wake_meta_rlr(**second_kwargs)
 
     assert first is not None and second is not None
-    assert first.event_path == second.event_path
-    assert first.event_id == second.event_id
-    assert event_args == [first.event_path, first.event_path]
+    assert first.event_path != second.event_path
+    assert first.event_id != second.event_id
+    assert event_args == [first.event_path, second.event_path]
+    first_event = validate_maintenance_event(
+        json.loads(first.event_path.read_text(encoding="utf-8"))
+    )
+    second_event = validate_maintenance_event(
+        json.loads(second.event_path.read_text(encoding="utf-8"))
+    )
+    assert first_event["dedup_fingerprint"] == second_event["dedup_fingerprint"]
 
 
 def test_autowake_retry_guard_prevents_recursive_repair(tmp_path, monkeypatch):

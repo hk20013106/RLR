@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import uuid
 from dataclasses import dataclass
@@ -187,20 +188,6 @@ def _write_json_atomic(path: Path, value: Mapping[str, object]) -> None:
     os.replace(temporary, path)
 
 
-def _existing_event(event_dir: Path, dedup_fingerprint: str) -> tuple[dict, Path] | None:
-    if not event_dir.is_dir():
-        return None
-    for path in sorted(event_dir.glob("*.json")):
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-            event = validate_maintenance_event(value)
-        except Exception:
-            continue
-        if event.get("dedup_fingerprint") == dedup_fingerprint:
-            return event, path
-    return None
-
-
 def _provider_failure_is_repairable(status: Mapping[str, object]) -> bool:
     state = str(status.get("state") or "")
     if state not in REPAIRABLE_PROVIDER_STATES:
@@ -209,6 +196,35 @@ def _provider_failure_is_repairable(status: Mapping[str, object]) -> bool:
         return True
     reason = str(status.get("termination_reason") or "")
     return reason in _REPAIRABLE_TERMINATION_REASONS or reason.startswith("launch_failed:")
+
+
+def _failure_evidence_refs(task_id: str, status: Mapping[str, object]) -> tuple[dict[str, str], ...]:
+    """Bind an occurrence to the logical task and its isolated attempt."""
+    refs: list[dict[str, str]] = [{
+        "kind": "rlr_artifact",
+        "ref": (
+            Path("08_Audit")
+            / "deep_research_runtime"
+            / "tasks"
+            / task_id
+            / "status.json"
+        ).as_posix(),
+    }]
+    attempt_id = str(status.get("attempt_id") or "")
+    if re.fullmatch(r"attempt-[0-9]{4,}", attempt_id):
+        attempt_root = (
+            Path("08_Audit")
+            / "deep_research_runtime"
+            / "tasks"
+            / task_id
+            / "attempts"
+            / attempt_id
+        )
+        refs.extend((
+            {"kind": "rlr_artifact", "ref": (attempt_root / "status.json").as_posix()},
+            {"kind": "rlr_artifact", "ref": (attempt_root / "runtime_receipt.json").as_posix()},
+        ))
+    return tuple(refs)
 
 
 def _event_for_failure(
@@ -232,24 +248,9 @@ def _event_for_failure(
         rlr_revision=revision,
         observed_at=str(status.get("updated_at") or ""),
         candidate_ref=str(candidate) if isinstance(candidate, str) and candidate else None,
-        evidence_refs=(
-            {
-                "kind": "rlr_artifact",
-                "ref": (
-                    Path("08_Audit")
-                    / "deep_research_runtime"
-                    / "tasks"
-                    / task_id
-                    / "status.json"
-                ).as_posix(),
-            },
-        ),
+        evidence_refs=_failure_evidence_refs(task_id, status),
     )
-    existing = _existing_event(
-        project_dir / "08_Audit" / "meta_rlr" / "events",
-        event["dedup_fingerprint"],
-    )
-    return existing[0] if existing is not None else event
+    return event
 
 
 def _meta_command(
@@ -354,12 +355,8 @@ def maybe_wake_meta_rlr(
             revision=revision,
         )
         event_dir = project_root / "08_Audit" / "meta_rlr" / "events"
-        existing = _existing_event(event_dir, str(event["dedup_fingerprint"]))
-        if existing is not None:
-            event, event_path = existing
-        else:
-            event_path = event_dir / f"{event['event_id']}.json"
-            _write_json_atomic(event_path, event)
+        event_path = event_dir / f"{event['event_id']}.json"
+        _write_json_atomic(event_path, event)
 
         # The maintenance process and every verifier/Codex child it launches
         # inherit the guard. That keeps Phase 3 single-shot: verification of a

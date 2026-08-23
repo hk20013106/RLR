@@ -41,7 +41,10 @@ def _resume_verified_worker(
     if cwd is not None and not cwd.is_dir():
         return None
     environment = dict(os.environ)
-    environment[AUTOWAKE_RETRY_GUARD_ENV] = "1"
+    # A verified fresh worker is a new RLR execution attempt, not a child of
+    # the maintenance execution tree.  Do not inherit the maintenance-only
+    # recursion guard even when the launcher itself happens to carry it.
+    environment.pop(AUTOWAKE_RETRY_GUARD_ENV, None)
     popen_kwargs = {
         "cwd": cwd,
         "env": environment,
