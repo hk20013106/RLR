@@ -179,6 +179,33 @@ def test_existing_file_not_overwritten():
     assert "## Query log" in new_text
 
 
+def test_l1_evidence_is_rejected_after_canonical_research_seed_drift():
+    d = _mkproj()
+    project = Path(d)
+
+    r = _run("pre-research", d, "C1", "--node", "L1", "--write-synthetic")
+    assert r.returncode == 0, r.stderr
+
+    lit_dir = project / "09_Literature_Database"
+    lit_dir.mkdir(parents=True, exist_ok=True)
+    (lit_dir / "smith2020.md").write_text("Title: Smith 2020", encoding="utf-8")
+
+    contract, _path, _raw = l0_contract.load_contract(project, "C1")
+    contract["scientific_question"] = "A different canonical scientific question"
+    contract_path, contract_hash = l0_contract.write_contract(project, "C1", contract)
+    candidate = project / "01_Candidates" / "C1.md"
+    _replace_field(
+        candidate,
+        "input_contract_path",
+        contract_path.relative_to(project).as_posix(),
+    )
+    _replace_field(candidate, "input_contract_hash", contract_hash)
+
+    r_assem = _run("assemble-context", d, "C1", "--node", "L1")
+    assert r_assem.returncode == 3, r_assem.stderr
+    assert "research seed" in r_assem.stderr.lower() or "evidence binding" in r_assem.stderr.lower()
+
+
 def _run_as_script():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]
