@@ -131,37 +131,48 @@ def _merge_query_family_cache(project_dir, families):
     p.write_text(json.dumps({"families": sorted(existing)}, indent=2), encoding="utf-8")
 
 
+# Active runtime policy only. Search strings are always derived at execution
+# time from authoritative scientific state; this table must never become a
+# project-specific query catalog again.
 PRE_RESEARCH_MAP = {
-    "L1": {"budget": LIT_RUNTIME_DIGEST_TOKEN_BUDGET,
-           "type": "deep_research", "skill": "academic-research-suite",
-           "description": "Search literature relevant to the canonical L0 scientific question and current-round hypothesis",
-           "queries": []},
-    "L4": {"budget": LIT_RUNTIME_DIGEST_TOKEN_BUDGET,
-           "type": "literature_review", "skill": "academic-research-suite",
-           "description": "Search methodology papers: WGCNA cross-species, module preservation, convergent transcriptomics",
-           "queries": [
-               "WGCNA module preservation cross-species Zsummary",
-               "module trait correlation WGCNA cardiac tissue",
-               "gene set enrichment GSEA ranked kME WGCNA",
-               "signed vs unsigned WGCNA network cardiac",
-               "module preservation statistics Zsummary medianRank",
-           ]},
-    "L7": {"budget": 0, "type": "code_search", "skill": "github-search",
-           "description": "Search GitHub/Bioconductor for WGCNA pipelines, GSEA wrappers, ECM score tools",
-           "queries": [
-               "WGCNA pipeline R script cross-species module preservation",
-               "clusterProfiler GSEA kME ranked gene list R",
-               "ECM extracellular matrix score gene set R",
-               "WGCNA signed network soft threshold power R",
-           ]},
-    "L8.5": {"budget": 0, "type": "literature_verification", "skill": "academic-research-suite",
-             "description": "Search PubMed/EuropePMC for papers that CONFIRM or "
-                            "CONTRADICT the actual L7/L8 findings (grounded in the "
-                            "real results, not just the question)",
-             "queries": [
-                 "cardiac gene expression co-expression module cross-species",
-                 "convergent evolution heart rate adaptation molecular mechanisms",
-                 "WGCNA module preservation validation cross-species transcriptomics",
-                 "bat shrew cardiac transcriptome comparative genomics",
-             ]},
+    "L0.5": {
+        "budget": LIT_RUNTIME_DIGEST_TOKEN_BUDGET,
+        "type": "deep_research",
+        "skill": "academic-research-suite",
+        "description": (
+            "Discover literature for the canonical L0 scientific question and "
+            "current-round hypothesis"
+        ),
+        "queries": [],
+    },
+    "L4": {
+        "budget": LIT_RUNTIME_DIGEST_TOKEN_BUDGET,
+        "type": "literature_review",
+        "skill": "academic-research-suite",
+        "description": (
+            "Derive methodology searches from the current scientific question, "
+            "selected hypotheses, data constraints, and method-design objective"
+        ),
+        "queries": [],
+    },
+    "L7": {
+        "budget": 0,
+        "type": "code_search",
+        "skill": "github-search",
+        "description": (
+            "Derive implementation searches from the approved method strategy, "
+            "required scripts, software constraints, and current data"
+        ),
+        "queries": [],
+    },
+    "L8.5": {
+        "budget": 0,
+        "type": "literature_verification",
+        "skill": "academic-research-suite",
+        "description": (
+            "Derive confirmation and contradiction searches from the actual "
+            "L7 execution results and L8 evidence audit"
+        ),
+        "queries": [],
+    },
 }
