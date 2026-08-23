@@ -9,6 +9,7 @@ def test_topology_is_canonical_knowledge_base_policy_owner():
     nodes, node_map, _sequence = topology.topology_for_profile(DEFAULT_NATIVE_PROFILE)
     expected_access = {
         "L0": "read",
+        "L0.5": "read-write",
         "L1": "none",
         "L4": "read-write",
         "L8.5": "read-write",
