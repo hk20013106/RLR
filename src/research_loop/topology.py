@@ -1,13 +1,13 @@
 """DAG topology constants (Phase 1a leaf extraction).
 
-Pure data + no intra-repo imports -> safe leaf. research_loop_v04 imports
-these back (inward shim) so external importers keep working unchanged.
-DAGTopology is a thin namespace over the constants for the future EngineAPI.
+Pure data + compatibility profile selection. ``DAG_NODES`` represents the
+current native topology; ``topology_for_profile`` removes native-only stages
+when reading historical projects.
 """
 
 import copy
 
-from research_loop.compatibility import PROFILE_V20, get_profile
+from research_loop.compatibility import DEFAULT_NATIVE_PROFILE, PROFILE_V20, get_profile
 
 AGENTS = ["Linnaeus", "Einstein", "Feynman", "Oppenheimer", "Fisher",
           "Tukey", "Turing", "Curie", "Darwin", "Jobs"]
@@ -51,11 +51,44 @@ DAG_NODES = [
             "Current input declaration invalid or current file hash mismatch",
             "Continuation restore or inherited selector verification fails",
         ],
-        "advance_status": "IDEA_PROPOSED", "advance_reason": "Preflight complete, route to Einstein",
+        "advance_status": "IDEA_PROPOSED", "advance_reason": "Preflight complete, route to Curie retrieval",
         "context_inputs": ["candidate_frontmatter"],
         "is_parallel": False, "is_execution": False,
         "action_hint": "Verify runtime + l0_input, restore prior evidence when needed, freeze current-round data binding",
         "agent_type": "default",
+    },
+    {
+        "node": "L0.5", "persona": "Curie",
+        "status_before": "IDEA_PROPOSED", "advance_command": None,
+        "advance_status": None, "advance_reason": None,
+        "context_inputs": ["L0"],
+        "is_parallel": False, "is_execution": False,
+        "node_kind": "research",
+        "research_required": True,
+        "research_persona": "Curie",
+        "pre_research": "deep_research",
+        "tools_policy": "research",
+        "knowledge_base": "read-write",
+        "action_hint": (
+            "Derive literature searches from the canonical L0 ResearchSeed, "
+            "persist a source-located EvidencePack, and freeze the exact run"
+        ),
+        "must": [
+            "Use only the validated L0 scientific question and current-round hypothesis as semantic seed",
+            "Persist actual search queries, retrieval receipts, source identifiers, and located extracts",
+            "Freeze exactly one successful evidence run to the current ResearchSeed before L1",
+        ],
+        "must_not": [
+            "Generate an L1 hypothesis delta",
+            "Change candidate status",
+            "Use project-specific hardcoded search queries",
+            "Replace an already frozen evidence run for the same ResearchSeed",
+        ],
+        "stop_conditions": [
+            "Canonical L0 ResearchSeed is missing or invalid",
+            "Evidence cannot be source-located or the research runtime fails",
+        ],
+        "agent_type": "research",
     },
     {
         "node": "L1", "persona": "Einstein",
@@ -63,11 +96,10 @@ DAG_NODES = [
         "advance_status": "IDEA_PROPOSED", "advance_reason": "Einstein hypotheses generated, route to Feynman",
         "context_inputs": ["candidate_frontmatter", "L0"],
         "is_parallel": False, "is_execution": False,
-        "pre_research": "deep_research",
-        "research_persona": "Curie", "research_required": True,
-        "action_hint": "Generate scientific hypotheses about the research question",
-        "must": ["Generate testable scientific hypotheses from candidate question and pre-research results", "Each proposal must include statement, operationalization, and at least one predeclared falsification criterion; IDs are engine-assigned"],
-        "must_not": ["Execute code", "Change candidate status", "Design analysis methods"],
+        "knowledge_base": "none",
+        "action_hint": "Generate scientific hypotheses from the frozen L0.5 EvidencePack",
+        "must": ["Generate testable scientific hypotheses from candidate question and frozen research evidence", "Each proposal must include statement, operationalization, and at least one predeclared falsification criterion; IDs are engine-assigned"],
+        "must_not": ["Execute code", "Change candidate status", "Design analysis methods", "Run independent literature searches"],
         "stop_conditions": ["No testable hypothesis generated"],
         "agent_type": "default",
     },
@@ -246,7 +278,7 @@ DAG_NODES = [
 
 NODE_MAP = {n["node"]: n for n in DAG_NODES}
 
-DAG_SEQUENCE = ["L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L8.5",
+DAG_SEQUENCE = ["L0", "L0.5", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L8.5",
                 "L9_parallel", "L10a", "L10b", "L10c"]
 
 DELTA_DAG_ORDER = [
@@ -261,6 +293,21 @@ def topology_for_profile(profile_id: str) -> tuple[list[dict], dict[str, dict], 
     """Return the DAG view selected by an immutable compatibility profile."""
     profile = get_profile(profile_id)
     nodes = copy.deepcopy(DAG_NODES)
+    sequence = list(DAG_SEQUENCE)
+
+    # L0.5 is a current-native stage. Historical v2.0/v2.1 projects retain the
+    # former L1-owned pre-research contract and artifact names.
+    if profile.profile_id != DEFAULT_NATIVE_PROFILE:
+        nodes = [item for item in nodes if item["node"] != "L0.5"]
+        sequence = [item for item in sequence if item != "L0.5"]
+        legacy_l1 = next(item for item in nodes if item["node"] == "L1")
+        legacy_l1.update({
+            "pre_research": "deep_research",
+            "research_persona": "Curie",
+            "research_required": True,
+        })
+        legacy_l1.pop("knowledge_base", None)
+
     if not profile.l9_parallel:
         by_node = {item["node"]: item for item in nodes}
         by_node["L8"]["persona"] = "Tukey"
@@ -273,12 +320,8 @@ def topology_for_profile(profile_id: str) -> tuple[list[dict], dict[str, dict], 
             "context_inputs": ["L1", "L7", "L8", "L8.5", "L9a"],
             "must_not": ["Execute code", "Change status"],
         })
-        sequence = [item for item in DAG_SEQUENCE if item != "L9_parallel"]
+        sequence = [item for item in sequence if item != "L9_parallel"]
         sequence[sequence.index("L10a"):sequence.index("L10a")] = ["L9a", "L9b"]
-    elif profile.l9_parallel:
-        sequence = list(DAG_SEQUENCE)
-    else:
-        raise ValueError(f"unsupported topology profile: {profile.profile_id}")
     return nodes, {item["node"]: item for item in nodes}, sequence
 
 
