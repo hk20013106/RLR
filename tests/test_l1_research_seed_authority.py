@@ -9,6 +9,7 @@ from research_loop import context
 from research_loop import l0_contract
 from research_loop import hypothesis_recall_context as recall_context
 from research_loop.commands import research
+from research_loop.commands.lifecycle import KNOWLEDGE_BASE_ACCESS
 from research_loop.hypothesis_ledger import LedgerError
 from research_loop.preresearch import PRE_RESEARCH_MAP
 
@@ -97,8 +98,22 @@ def test_l1_deep_research_uses_canonical_l0_seed_not_frontmatter(
         captured["round_id"] = kwargs["round_id"]
         return {"run_id": "R1", "status": "completed"}
 
+    def fake_write_binding(_project, seed, run_id):
+        captured["binding"] = {
+            "candidate_id": seed["candidate_id"],
+            "seed_sha256": research.research_seed.seed_sha256(seed),
+            "run_id": run_id,
+        }
+        return captured["binding"]
+
     monkeypatch.setattr(research.deep_research, "run_and_persist", fake_run_and_persist)
     monkeypatch.setattr(research.deep_research, "audit_evidence_pack", lambda *_a, **_k: (True, ""))
+    monkeypatch.setattr(
+        research.research_seed,
+        "write_l1_evidence_binding",
+        fake_write_binding,
+        raising=False,
+    )
 
     args = SimpleNamespace(
         project_dir=str(project),
@@ -117,10 +132,15 @@ def test_l1_deep_research_uses_canonical_l0_seed_not_frontmatter(
     assert research.cmd_deep_research_run(args) == 0
     capsys.readouterr()
 
-    assert captured == {
-        "question": "CANONICAL scientific question from L0",
-        "hypothesis": "CANONICAL current-round hypothesis from L0",
-        "round_id": "7",
+    assert captured["question"] == "CANONICAL scientific question from L0"
+    assert captured["hypothesis"] == "CANONICAL current-round hypothesis from L0"
+    assert captured["round_id"] == "7"
+    assert captured["binding"] == {
+        "candidate_id": "C1",
+        "seed_sha256": research.research_seed.seed_sha256(
+            research.research_seed.load_l1_research_seed(project, "C1")
+        ),
+        "run_id": "R1",
     }
 
 
@@ -162,3 +182,7 @@ def test_l1_pre_research_has_no_project_specific_seed_queries():
     assert config["queries"] == []
     for leaked_example in ("heart rate", "cardiac", "wgcna", "bat", "shrew"):
         assert leaked_example not in serialized
+
+
+def test_l1_einstein_has_no_direct_knowledge_base_authority():
+    assert KNOWLEDGE_BASE_ACCESS.get("L1", "none") == "none"
