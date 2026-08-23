@@ -1,64 +1,9 @@
-"""Runtime topology annotations for research, conditional routing, and methods."""
+"""Runtime annotations for conditional routing and method-review contracts.
+
+Topology membership/order is owned by :mod:`research_loop.topology`. This
+module may enrich existing nodes but must never create/remove DAG stages.
+"""
 from __future__ import annotations
-
-
-def _install_l0_5(topology) -> None:
-    if any(item.get("node") == "L0.5" for item in topology.DAG_NODES):
-        return
-
-    l05 = {
-        "node": "L0.5",
-        "persona": "Curie",
-        "status_before": "IDEA_PROPOSED",
-        "advance_command": None,
-        "context_inputs": ["L0"],
-        "is_parallel": False,
-        "is_execution": False,
-        "node_kind": "research",
-        "research_required": True,
-        "research_persona": "Curie",
-        "pre_research": "deep_research",
-        "tools_policy": "research",
-        "knowledge_base": "read-write",
-        "action_hint": (
-            "Derive literature searches from the canonical L0 ResearchSeed, "
-            "persist a source-located EvidencePack, and freeze the exact run"
-        ),
-        "must": [
-            "Use only the validated L0 scientific question and current-round hypothesis as semantic seed",
-            "Persist actual search queries, retrieval receipts, source identifiers, and located extracts",
-            "Freeze exactly one successful evidence run to the current ResearchSeed before L1",
-        ],
-        "must_not": [
-            "Generate an L1 hypothesis delta",
-            "Change candidate status",
-            "Use project-specific hardcoded search queries",
-            "Replace an already frozen evidence run for the same ResearchSeed",
-        ],
-        "stop_conditions": [
-            "Canonical L0 ResearchSeed is missing or invalid",
-            "Evidence cannot be source-located or the research runtime fails",
-        ],
-    }
-    l1_index = next(
-        index for index, item in enumerate(topology.DAG_NODES)
-        if item.get("node") == "L1"
-    )
-    topology.DAG_NODES.insert(l1_index, l05)
-    topology.NODE_MAP = {item["node"]: item for item in topology.DAG_NODES}
-
-    if "L0.5" not in topology.DAG_SEQUENCE:
-        topology.DAG_SEQUENCE.insert(topology.DAG_SEQUENCE.index("L1"), "L0.5")
-
-    l1 = topology.NODE_MAP["L1"]
-    for key in ("pre_research", "research_required", "research_persona"):
-        l1.pop(key, None)
-
-    # DAGTopology is a read-only namespace over the live module globals. Refresh
-    # references when the extension replaces NODE_MAP or mutates the sequence.
-    topology.DAGTopology.DAG_NODES = topology.DAG_NODES
-    topology.DAGTopology.NODE_MAP = topology.NODE_MAP
-    topology.DAGTopology.DAG_SEQUENCE = topology.DAG_SEQUENCE
 
 
 def install(topology_module) -> None:
@@ -66,7 +11,6 @@ def install(topology_module) -> None:
     if getattr(topology, "_METHOD_AND_SKIP_TOPOLOGY_INSTALLED", False):
         return
 
-    _install_l0_5(topology)
     nodes = {item["node"]: item for item in topology.DAG_NODES}
 
     nodes["L1"]["conditional_routes"] = [
