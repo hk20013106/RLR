@@ -12,6 +12,8 @@ from research_loop import method_review_navigation as _review_navigation
 from research_loop.method_navigation_compat import install as _install_navigation_compat
 from research_loop.review_status_compat import install as _install_review_status_compat
 from research_loop.user_sources import registered_sources as _registered_sources
+from research_loop.l0_5_deep_research import install as _install_l0_5_deep_research
+from research_loop.provider_execution import install as _install_provider_execution
 
 _install_source_payload_integrity(deep_research)
 _install_method_evidence(deep_research)
@@ -23,6 +25,7 @@ _review_navigation._REVIEW_TYPES.update({
 _install_navigation_compat(_review_navigation)
 _review_navigation.install(deep_research)
 _install_review_status_compat(deep_research)
+_install_l0_5_deep_research(deep_research)
 
 # The historical staged pipeline and provenance validators remain installed for
 # compatibility. Native v2.1 L4 runs are intercepted after those boundaries by
@@ -74,6 +77,11 @@ _install_l4_runtime_compat(deep_research, _l4_evidence_bundle_module)
 _install_l4_lineage(deep_research)
 _install_l45_context_binding(_l4_pipeline_module)
 _l4_closed_corpus.install(_l4_pipeline_module, deep_research)
+
+# All external provider/research CLI processes now pass through one execution
+# boundary. Install this BEFORE observability so observability supervises the
+# executor-backed implementation rather than the historical subprocess owner.
+_install_provider_execution(deep_research)
 
 # Provider observability is installed after all scientific Deep Research/L4
 # wrappers so it supervises the final runtime boundary without changing their
@@ -131,15 +139,32 @@ _install_topology_extensions(topology)
 
 from research_loop.commands import lifecycle as _lifecycle
 from research_loop.commands import ledger as _ledger_commands
+from research_loop.commands import research as _research_commands
 from research_loop import context as _context
 from research_loop.conditional_routing import install as _install_conditional_routing
 from research_loop.hypothesis_recall_context import (
     install as _install_hypothesis_recall_context,
 )
 from research_loop.l45_ledger import install as _install_l45_ledger
+from research_loop.l0_5_runtime import (
+    install_lifecycle as _install_l0_5_lifecycle,
+    install_research_command as _install_l0_5_research_command,
+)
+from research_loop.dynamic_preresearch import install as _install_dynamic_preresearch
+from research_loop.l0_5_context import install as _install_l0_5_context
+from research_loop import research_seed as _research_seed_module
+from research_loop import research_evidence_binding as _research_evidence_binding_module
+from research_loop.l0_5_binding_compat import install as _install_l0_5_binding_compat
 
 _install_l45_ledger(_ledger_commands)
 _install_conditional_routing(_lifecycle, _context)
+_install_l0_5_lifecycle(_lifecycle)
+_install_l0_5_research_command(_research_commands, deep_research)
+_install_dynamic_preresearch(_research_commands)
+_install_l0_5_context(_context)
+_install_l0_5_binding_compat(
+    _research_seed_module, _research_evidence_binding_module
+)
 _install_hypothesis_recall_context(_context, _ledger_commands)
 
 # CLI extensions are installed only after the canonical CLI module has defined
@@ -147,13 +172,16 @@ _install_hypothesis_recall_context(_context, _ledger_commands)
 # the same stable module object with additive commands registered.
 from research_loop import cli as _cli
 from research_loop.hypothesis_pool_cli import install as _install_hypothesis_pool_cli
+from research_loop.l0_5_cli import install as _install_l0_5_cli
 
+_install_l0_5_cli(_cli)
 _install_hypothesis_pool_cli(_cli)
 
 del _install_source_payload_integrity
 del _install_method_evidence, _install_method_evidence_compat
 del _review_navigation, _install_navigation_compat
 del _install_review_status_compat, _registered_sources
+del _install_l0_5_deep_research, _install_provider_execution
 del _install_l4_pipeline, _install_l4_pipeline_compat
 del _install_l4_provenance, _install_l4_provenance_compat
 del _install_l4_path_safety, _install_l4_lineage
@@ -172,5 +200,10 @@ del _install_reactivation_constraints, _install_conditional_skip_constraints
 del _install_reactivation_compat
 del _install_topology_extensions, _install_l45_ledger
 del _install_conditional_routing, _install_hypothesis_recall_context
-del _install_hypothesis_pool_cli
-del _constraint_validation, _lifecycle, _ledger_commands, _context, _cli
+del _install_l0_5_lifecycle, _install_l0_5_research_command
+del _install_dynamic_preresearch, _install_l0_5_context
+del _install_l0_5_binding_compat
+del _research_seed_module, _research_evidence_binding_module
+del _install_l0_5_cli, _install_hypothesis_pool_cli
+del _constraint_validation, _lifecycle, _ledger_commands, _research_commands
+del _context, _cli
