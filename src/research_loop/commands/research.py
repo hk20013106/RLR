@@ -183,7 +183,7 @@ NOT YET RUN
                 "receipt": "synthetic-test 0"}
         profile, binding = _bound_profile(project_dir)
         _, node_map, _ = topology_for_profile(profile.profile_id)
-        deep_research.persist_run(
+        artifact = deep_research.persist_run(
             project_dir, args.cand_id, node, synthetic_payload,
             deep_research.skill_receipt("codex", ["synthetic-test"],
                                          "synthetic-test", "test-only"),
@@ -194,6 +194,14 @@ NOT YET RUN
                 node_map[node].get("research_persona") or "Curie"
             ),
         )
+        if node == "L1":
+            try:
+                research_seed.write_l1_evidence_binding(
+                    project_dir, seed, artifact["run_id"]
+                )
+            except research_seed.ResearchSeedError as exc:
+                print(f"ERROR: L1 evidence binding failed: {exc}", file=sys.stderr)
+                return 3
 
     focus = research_config.get("description", "")
     if node == "L1":
@@ -641,6 +649,14 @@ def cmd_deep_research_run(args):
     if not ok:
         print(f"ERROR: Deep Research evidence gate failed: {reason}", file=sys.stderr)
         return 3
+    if args.node == "L1":
+        try:
+            research_seed.write_l1_evidence_binding(
+                project_dir, l1_seed, artifact["run_id"]
+            )
+        except research_seed.ResearchSeedError as exc:
+            print(f"ERROR: L1 evidence binding failed: {exc}", file=sys.stderr)
+            return 3
     print(json.dumps(artifact, ensure_ascii=False, indent=2))
     return 0
 
