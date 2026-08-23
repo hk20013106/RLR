@@ -8,11 +8,6 @@ def install(topology_module) -> None:
         return
     nodes = {item["node"]: item for item in topology.DAG_NODES}
 
-    # Curie owns literature discovery for L1. Einstein consumes the frozen
-    # evidence handoff and therefore receives no direct knowledge-base channel.
-    # This explicit per-node policy wins over legacy fallback defaults applied
-    # later by the engine via setdefault().
-    nodes["L1"]["knowledge_base"] = "none"
     nodes["L1"]["conditional_routes"] = [
         {
             "condition": "1 <= committed_unique_hypothesis_count <= 4",
