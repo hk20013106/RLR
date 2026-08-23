@@ -49,7 +49,7 @@ VALID_STATUSES = [
 ]
 
 KNOWLEDGE_BASE_ACCESS = {
-    "L1": "read-write", "L4": "read-write", "L8.5": "read-write",
+    "L1": "none", "L4": "read-write", "L8.5": "read-write",
     "L0": "read",
     "L9a": "read", "L9b": "read",
     "L10a": "read", "L10b": "read", "L10c": "read",
