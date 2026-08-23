@@ -35,7 +35,10 @@ from research_loop.templates import (
     _handoff_template, _index_template, _knowledge_base_md, _note_template,
     _preflight_template,
 )
-from research_loop.topology import AGENTS, DECISION_TRANSITIONS, NODE_MAP, topology_for_profile
+from research_loop.topology import (
+    AGENTS, DECISION_TRANSITIONS, KNOWLEDGE_BASE_ACCESS, NODE_MAP,
+    topology_for_profile,
+)
 from research_loop.yamlio import _load_yaml_front, _replace_field
 
 # Preserve repository-relative lookup semantics from the former engine owner.
@@ -47,13 +50,6 @@ VALID_STATUSES = [
     "NEEDS_EXECUTION", "EXECUTED", "AUDITED", "UNDER_REVIEW",
     "KEEP", "REVISE", "DOWNGRADE", "DROP", "ARCHIVED",
 ]
-
-KNOWLEDGE_BASE_ACCESS = {
-    "L1": "none", "L4": "read-write", "L8.5": "read-write",
-    "L0": "read",
-    "L9a": "read", "L9b": "read",
-    "L10a": "read", "L10b": "read", "L10c": "read",
-}
 
 FINAL_STATUSES = {"KEEP", "REVISE", "DOWNGRADE", "DROP", "ARCHIVED"}
 
