@@ -329,3 +329,31 @@ def test_current_revision_rejects_dirty_checkout(tmp_path):
         autowake._current_revision(tmp_path, runner)
 
     assert calls == [["git", "status", "--porcelain"]]
+
+
+def test_current_revision_allows_only_untracked_verification_receipt(tmp_path):
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append(list(command))
+        if command[1:3] == ["status", "--porcelain"]:
+            return SimpleNamespace(returncode=0, stdout="?? verification_receipt.json\n")
+        if command[1:3] == ["rev-parse", "HEAD"]:
+            return SimpleNamespace(returncode=0, stdout=BASE_SHA + "\n")
+        raise AssertionError(f"unexpected git command: {command}")
+
+    assert autowake._current_revision(tmp_path, runner) == BASE_SHA
+    assert calls == [
+        ["git", "status", "--porcelain"],
+        ["git", "rev-parse", "HEAD"],
+    ]
+
+
+def test_current_revision_rejects_untracked_non_receipt(tmp_path):
+    def runner(command, **kwargs):
+        if command[1:3] == ["status", "--porcelain"]:
+            return SimpleNamespace(returncode=0, stdout="?? unrelated.txt\n")
+        raise AssertionError("rev-parse must not run for an untracked code file")
+
+    with pytest.raises(RuntimeError, match="requires a clean RLR code checkout"):
+        autowake._current_revision(tmp_path, runner)

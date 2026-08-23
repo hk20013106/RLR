@@ -20,7 +20,7 @@ from .bounded_process import DEFAULT_MAX_OUTPUT_BYTES, run_bounded_process
 from .codex_cli import DEFAULT_REPAIR_JOB_TIMEOUT
 from .contracts import validate_maintenance_event
 from .observer import observe_provider_runtime_failure
-from .verification import VERIFICATION_COMMAND_TIMEOUT
+from .verification import VERIFICATION_COMMAND_TIMEOUT, VERIFICATION_RECEIPT_FILENAME
 from .workspace import GIT_COMMAND_TIMEOUT, GitWorkspace, GitWorkspaceError
 
 
@@ -166,7 +166,18 @@ def _current_revision(repo_root: Path, runner) -> str:
     status = _run_git(repo_root, runner, "status", "--porcelain")
     if int(getattr(status, "returncode", 1)) != 0:
         raise RuntimeError("cannot inspect failing RLR checkout")
-    if str(getattr(status, "stdout", "") or "").strip():
+    dirty_lines = []
+    for line in str(getattr(status, "stdout", "") or "").splitlines():
+        # Independent verification deliberately leaves its durable receipt in
+        # the repair worktree. It is evidence, not a code change; every other
+        # tracked or untracked path must still fail closed here.
+        if line.startswith("?? "):
+            path = line[3:].strip().strip('"').replace("\\", "/")
+            if path == VERIFICATION_RECEIPT_FILENAME:
+                continue
+        if line.strip():
+            dirty_lines.append(line)
+    if dirty_lines:
         raise RuntimeError("automatic repair requires a clean RLR code checkout")
 
     completed = _run_git(repo_root, runner, "rev-parse", "HEAD")
