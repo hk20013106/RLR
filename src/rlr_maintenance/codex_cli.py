@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 
-DEFAULT_REPAIR_JOB_TIMEOUT = 900.0
+# Repair is bounded by inactivity first. This ceiling is only an emergency
+# escape hatch for a genuinely runaway process, not the normal repair budget.
+DEFAULT_REPAIR_EMERGENCY_TIMEOUT = 1800.0
+# Keep the old keyword/API name for callers while making its semantics explicit.
+DEFAULT_REPAIR_JOB_TIMEOUT = DEFAULT_REPAIR_EMERGENCY_TIMEOUT
 DEFAULT_REPAIR_INACTIVITY_TIMEOUT = 180.0
 DEFAULT_REPAIR_OBSERVER_INTERVAL = 1.0
 

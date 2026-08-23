@@ -66,6 +66,9 @@ def _repair_prompt(event: Mapping[str, Any], profile: object, todo_id: str) -> s
             "Edit only the bounded root-cause repair.",
             "Obey AGENTS.md and existing canonical authorities.",
             "Do not commit, push, merge, modify LoopX state, weaken tests, or change scientific policy.",
+            "You may run directly relevant focused tests for the repair, but do not run the full repository test suite.",
+            "After the repair, return immediately with the structured changed/no_change/blocked result.",
+            "Formal verification is performed by the independent Meta-RLR verifier after you return.",
             "Do not treat your own completion text as verification.",
         ],
     }

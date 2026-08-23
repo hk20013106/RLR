@@ -149,21 +149,36 @@ def _process_snapshot(pid: int) -> dict:
         return {"alive": alive, "cpu_seconds": None, "io_bytes": None, "children": []}
     try:
         process = psutil.Process(pid)
-        cpu = process.cpu_times()
-        try:
-            io = process.io_counters()
-            io_bytes = int(io.read_bytes + io.write_bytes)
-        except (psutil.AccessDenied, AttributeError, NotImplementedError):
-            io_bytes = None
         children = [child.pid for child in process.children(recursive=True) if child.is_running()]
+        tree = [process, *(psutil.Process(child_pid) for child_pid in children)]
+        cpu_values: list[float] = []
+        io_values: list[int] = []
+        for member in tree:
+            try:
+                cpu = member.cpu_times()
+                cpu_values.append(float(cpu.user + cpu.system))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+            try:
+                io = member.io_counters()
+                io_values.append(int(io.read_bytes + io.write_bytes))
+            except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError, NotImplementedError):
+                pass
         return {
             "alive": process.is_running() and process.status() != psutil.STATUS_ZOMBIE,
-            "cpu_seconds": float(cpu.user + cpu.system),
-            "io_bytes": io_bytes,
+            "cpu_seconds": sum(cpu_values) if cpu_values else None,
+            "io_bytes": sum(io_values) if io_values else None,
             "children": children,
+            "process_tree_pids": [member.pid for member in tree],
         }
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return {"alive": False, "cpu_seconds": None, "io_bytes": None, "children": []}
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return {
+            "alive": False,
+            "cpu_seconds": None,
+            "io_bytes": None,
+            "children": [],
+            "process_tree_pids": [],
+        }
 
 
 def _terminate_process_tree(process: _subprocess.Popen, grace: float = 2.0) -> dict:
@@ -306,6 +321,7 @@ def run_observed_provider(
         "cpu_seconds": None,
         "io_bytes": None,
         "child_pids": [],
+        "process_tree_pids": [],
         "termination_reason": "",
     }
 
@@ -341,6 +357,7 @@ def run_observed_provider(
                     "cpu_seconds": shared["cpu_seconds"],
                     "io_bytes": shared["io_bytes"],
                     "child_pids": shared["child_pids"],
+                    "process_tree_pids": shared["process_tree_pids"],
                 },
                 "termination_reason": shared["termination_reason"],
                 "elapsed_seconds": round(time.monotonic() - started_monotonic, 3),
@@ -396,7 +413,6 @@ def run_observed_provider(
     last_activity_monotonic = started_monotonic
 
     def read_stdout() -> None:
-        nonlocal last_activity_monotonic
         assert process.stdout is not None
         with events_path.open("a", encoding="utf-8", newline="") as stream:
             for line in process.stdout:
@@ -404,7 +420,6 @@ def run_observed_provider(
                 stream.flush()
                 encoded = line.encode("utf-8")
                 at = _now()
-                last_activity_monotonic = time.monotonic()
                 try:
                     event = json.loads(line)
                     if not isinstance(event, dict):
@@ -441,18 +456,17 @@ def run_observed_provider(
                 elif event_type == "turn.failed":
                     changes["state"] = "provider_failed"
                 publish(**changes)
+                # Only a parseable provider event is semantic progress.
+                last_activity_monotonic = time.monotonic()
 
     def read_stderr() -> None:
-        nonlocal last_activity_monotonic
         assert process.stderr is not None
         with stderr_path.open("a", encoding="utf-8", newline="") as stream:
             for line in process.stderr:
-                last_activity_monotonic = time.monotonic()
                 stream.write(line)
                 stream.flush()
                 publish(
                     stderr_bytes=shared["stderr_bytes"] + len(line.encode("utf-8")),
-                    last_activity_at=_now(),
                 )
 
     stdout_thread = threading.Thread(target=read_stdout, name="provider-stdout", daemon=True)
@@ -463,6 +477,7 @@ def run_observed_provider(
     initial_changes: dict[str, Any] = {
         "provider_alive": bool(last_snapshot["alive"]),
         "child_pids": last_snapshot.get("children", []),
+        "process_tree_pids": last_snapshot.get("process_tree_pids", []),
     }
     if last_snapshot.get("cpu_seconds") is not None:
         initial_changes["cpu_seconds"] = last_snapshot.get("cpu_seconds")
@@ -482,18 +497,17 @@ def run_observed_provider(
         snapshot = _process_snapshot(process.pid)
         cpu_seconds = snapshot.get("cpu_seconds")
         io_bytes = snapshot.get("io_bytes")
-        activity_changed = (
+        process_tree_changed = snapshot.get("process_tree_pids", []) != last_snapshot.get("process_tree_pids", [])
+        activity_changed = process_tree_changed or (
             (cpu_seconds is not None and cpu_seconds != shared.get("cpu_seconds"))
             or (io_bytes is not None and io_bytes != shared.get("io_bytes"))
         )
-        stream_activity = (
-            last_event_bytes != shared.get("event_bytes")
-            or last_stderr_bytes != shared.get("stderr_bytes")
-        )
+        semantic_stream_activity = last_event_bytes != shared.get("event_bytes")
         changes = {
             "observer_heartbeat_at": _now(),
             "provider_alive": bool(snapshot["alive"]),
             "child_pids": snapshot.get("children", []),
+            "process_tree_pids": snapshot.get("process_tree_pids", []),
         }
         if cpu_seconds is not None:
             changes["cpu_seconds"] = cpu_seconds
@@ -503,7 +517,7 @@ def run_observed_provider(
             activity_at = _now()
             changes["last_process_activity_at"] = activity_at
             changes["last_activity_at"] = activity_at
-        elif stream_activity:
+        elif semantic_stream_activity:
             last_activity_monotonic = time.monotonic()
         if activity_changed:
             last_activity_monotonic = time.monotonic()
@@ -511,18 +525,20 @@ def run_observed_provider(
         last_event_bytes = int(shared.get("event_bytes", 0))
         last_stderr_bytes = int(shared.get("stderr_bytes", 0))
         last_snapshot = snapshot
-        if job_timeout is not None and time.monotonic() - started_monotonic >= job_timeout:
-            final_status = "job_timed_out"
-            termination_reason = "job_timeout"
-            publish(state=final_status, termination_reason=termination_reason)
-            cleanup = _terminate_process_tree(process)
-            break
         if (
             inactivity_timeout is not None
             and time.monotonic() - last_activity_monotonic >= inactivity_timeout
         ):
             final_status = "inactivity_timed_out"
             termination_reason = "inactivity_timeout"
+            publish(state=final_status, termination_reason=termination_reason)
+            cleanup = _terminate_process_tree(process)
+            break
+        # The hard ceiling is deliberately checked after inactivity: it is an
+        # emergency guard, while inactivity is the ordinary stuck criterion.
+        if job_timeout is not None and time.monotonic() - started_monotonic >= job_timeout:
+            final_status = "job_timed_out"
+            termination_reason = "job_timeout"
             publish(state=final_status, termination_reason=termination_reason)
             cleanup = _terminate_process_tree(process)
             break
@@ -626,6 +642,7 @@ def _finalize_receipt(
             "io_bytes": shared.get("io_bytes"),
             "last_process_activity_at": shared.get("last_process_activity_at") or "",
             "last_activity_at": shared.get("last_activity_at") or "",
+            "process_tree_pids": shared.get("process_tree_pids") or [],
         },
         "process_tree_cleanup": cleanup,
         "artifacts": {
