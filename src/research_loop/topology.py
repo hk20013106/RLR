@@ -31,6 +31,16 @@ DECISION_TRANSITIONS = {
     "ARCHIVED": set(),
 }
 
+# Canonical per-node authority for the external literature knowledge base.
+# Topology owns this policy because topology_for_profile() is the canonical
+# construction path consumed by both the modular CLI/context code and engine.
+KNOWLEDGE_BASE_ACCESS = {
+    "L1": "none", "L4": "read-write", "L8.5": "read-write",
+    "L0": "read",
+    "L9a": "read", "L9b": "read",
+    "L10a": "read", "L10b": "read", "L10c": "read",
+}
+
 DAG_NODES = [
     {
         "node": "L0", "persona": "Linnaeus",
@@ -243,6 +253,12 @@ DAG_NODES = [
         "agent_type": "default",
     },
 ]
+
+# Every topology view carries an explicit KB permission from this single policy
+# table. This prevents import-order-dependent authority in modular consumers.
+for _node in DAG_NODES:
+    _node["knowledge_base"] = KNOWLEDGE_BASE_ACCESS.get(_node["node"], "none")
+del _node
 
 NODE_MAP = {n["node"]: n for n in DAG_NODES}
 
