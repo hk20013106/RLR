@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 import time
 
@@ -7,6 +8,7 @@ from rlr_maintenance.verification import (
     VERIFICATION_RECEIPT_SCHEMA,
     run_profile,
 )
+from rlr_maintenance.profiles import get_profile
 
 
 def test_required_failure_makes_receipt_fail(tmp_path):
@@ -82,6 +84,8 @@ def test_required_verification_timeout_marks_receipt_failed(tmp_path):
     assert receipt.passed is False
     assert len(calls) == 1
     assert receipt.steps[-1].returncode == 124
+    assert receipt.failed_step_id == receipt.steps[-1].step_id
+    assert receipt.steps[-1].timed_out is True
 
 
 def test_verification_timeout_is_profile_wide_remaining_budget(tmp_path, monkeypatch):
@@ -129,4 +133,118 @@ def test_verification_stops_when_profile_budget_exhausted(tmp_path, monkeypatch)
 
     assert receipt.passed is False
     assert len(calls) == 1
-    assert receipt.steps[-1].returncode == 124
+    assert receipt.steps[-1].returncode == 0
+    assert receipt.failed_step_id is None
+    assert receipt.unexecuted_step_ids == tuple(
+        step.step_id for step in get_profile("l0_state_integrity").required_validation[1:]
+    )
+
+
+def test_verification_persists_durable_receipt_with_step_observability(tmp_path):
+    def fake_run(command, **kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            terminal_state="completed",
+            stdout="verification ok",
+            stderr="",
+            stdout_truncated=False,
+            stderr_truncated=False,
+        )
+
+    receipt = run_profile("l0_state_integrity", tmp_path, runner=fake_run)
+    receipt_path = tmp_path / "verification_receipt.json"
+    payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+
+    assert receipt.receipt_path == receipt_path
+    assert receipt.receipt_sha256
+    assert payload["profile_id"] == "l0_state_integrity"
+    assert payload["passed"] is True
+    assert payload["failed_step_id"] is None
+    assert payload["started_at"] < payload["ended_at"]
+    assert payload["unexecuted_step_ids"] == []
+    assert len(payload["steps"]) == len(get_profile("l0_state_integrity").required_validation)
+    step = payload["steps"][0]
+    assert set(step) >= {
+        "step_id", "command", "required", "returncode", "terminal_state",
+        "duration_seconds", "timed_out", "stdout_bytes", "stderr_bytes",
+        "stdout_sha256", "stderr_sha256", "output_truncated",
+        "stdout_evidence", "stderr_evidence",
+    }
+    assert step["stdout_evidence"] == "verification ok"
+
+
+def test_failed_verification_persists_failure_step_and_bounded_evidence(tmp_path):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if len(calls) == 2:
+            return SimpleNamespace(
+                returncode=23,
+                terminal_state="completed",
+                stdout="failed stdout",
+                stderr="specific verifier failure",
+                stdout_truncated=False,
+                stderr_truncated=False,
+            )
+        return SimpleNamespace(
+            returncode=0,
+            terminal_state="completed",
+            stdout="ok",
+            stderr="",
+            stdout_truncated=False,
+            stderr_truncated=False,
+        )
+
+    receipt = run_profile("l0_state_integrity", tmp_path, runner=fake_run)
+    payload = json.loads((tmp_path / "verification_receipt.json").read_text(encoding="utf-8"))
+
+    assert receipt.passed is False
+    assert payload["failed_step_id"] == payload["steps"][-1]["step_id"]
+    assert payload["failure_reason"] == "required verification step failed"
+    assert len(payload["steps"]) == 2
+    assert payload["unexecuted_step_ids"]
+    failed = payload["steps"][-1]
+    assert failed["returncode"] == 23
+    assert failed["terminal_state"] == "completed"
+    assert failed["timed_out"] is False
+    assert failed["stdout_evidence"] == "failed stdout"
+    assert failed["stderr_evidence"] == "specific verifier failure"
+
+
+def test_verifier_launch_failure_is_durable_and_fail_closed(tmp_path):
+    def fake_run(command, **kwargs):
+        raise FileNotFoundError("test verifier executable missing")
+
+    receipt = run_profile("l0_state_integrity", tmp_path, runner=fake_run)
+    payload = json.loads((tmp_path / "verification_receipt.json").read_text(encoding="utf-8"))
+
+    assert receipt.passed is False
+    assert payload["failed_step_id"] == payload["steps"][0]["step_id"]
+    assert payload["steps"][0]["terminal_state"] == "launch_failed"
+    assert payload["steps"][0]["returncode"] == 127
+    assert "test verifier executable missing" in payload["steps"][0]["stderr_evidence"]
+
+
+def test_verification_uses_process_reader_tail_when_output_was_bounded(tmp_path):
+    def fake_run(command, **kwargs):
+        return BoundedProcessResult(
+            returncode=9,
+            terminal_state="completed",
+            stdout="captured prefix",
+            stderr="captured error prefix",
+            stdout_truncated=True,
+            stderr_truncated=True,
+            stdout_bytes=1000,
+            stderr_bytes=1000,
+            timeout_seconds=1.0,
+            process_tree_cleanup={},
+            stdout_tail="actual stdout tail",
+            stderr_tail="actual stderr tail",
+        )
+
+    receipt = run_profile("l0_state_integrity", tmp_path, runner=fake_run)
+
+    assert receipt.steps[0].stdout_evidence == "actual stdout tail"
+    assert receipt.steps[0].stderr_evidence == "actual stderr tail"
+    assert receipt.steps[0].output_truncated is True

@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Sequence
 
 from .bounded_process import DEFAULT_MAX_OUTPUT_BYTES, run_bounded_process
+from .verification import VERIFICATION_RECEIPT_FILENAME
 
 
 GIT_COMMAND_TIMEOUT = 60.0
@@ -114,6 +115,11 @@ class GitWorkspace:
         return tuple(sorted(values))
 
     @staticmethod
+    def _without_durable_evidence(paths: Sequence[str]) -> tuple[str, ...]:
+        """Keep the verifier receipt durable without treating it as repair code."""
+        return tuple(path for path in paths if path != VERIFICATION_RECEIPT_FILENAME)
+
+    @staticmethod
     def _event_part(event_token: str) -> str:
         return re.sub(r"[^A-Za-z0-9]", "", str(event_token))[:12] or "event"
 
@@ -175,8 +181,12 @@ class GitWorkspace:
         tracked = self._stdout(self._run(work.path, ["diff", "--name-only", work.base_sha]))
         dirty_tracked = self._stdout(self._run(work.path, ["diff", "--name-only", "HEAD"]))
         untracked = self._stdout(self._run(work.path, ["ls-files", "--others", "--exclude-standard"]))
-        changed = self._safe_paths("\n".join(x for x in (tracked, untracked) if x))
-        dirty = self._safe_paths("\n".join(x for x in (dirty_tracked, untracked) if x))
+        changed = self._without_durable_evidence(
+            self._safe_paths("\n".join(x for x in (tracked, untracked) if x))
+        )
+        dirty = self._without_durable_evidence(
+            self._safe_paths("\n".join(x for x in (dirty_tracked, untracked) if x))
+        )
         return WorkspaceInspection(base_sha=work.base_sha, head_sha=head_sha, changed_paths=changed, dirty_paths=dirty)
 
     @staticmethod

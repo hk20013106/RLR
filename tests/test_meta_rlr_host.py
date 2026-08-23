@@ -189,6 +189,39 @@ def test_failed_verification_blocks_without_commit_complete_or_spend(tmp_path):
     assert loopx.calls[-1][1]["status"] == "blocked"
 
 
+def test_failed_verification_todo_evidence_binds_receipt_details(tmp_path):
+    receipt_path = tmp_path / "verification_receipt.json"
+    receipt_path.write_text('{"passed": false}', encoding="utf-8")
+    receipt_hash = "c" * 64
+
+    def failing_verifier(profile_id, repo_root):
+        return SimpleNamespace(
+            profile_id=profile_id,
+            passed=False,
+            failed_step_id="bounded_repair_execution",
+            receipt_path=receipt_path,
+            receipt_sha256=receipt_hash,
+            steps=(),
+        )
+
+    loopx, workspace = LoopXFake(), WorkspaceFake(tmp_path)
+    result = MetaRLRHost(
+        loopx=loopx,
+        codex=CodexFake(),
+        workspace=workspace,
+        verifier=failing_verifier,
+    ).run_once(event=event(), goal_id="g", agent_id="a")
+
+    assert result.outcome == "blocked"
+    assert result.reason == "verification_failed"
+    update = loopx.calls[-1][1]
+    assert update["status"] == "blocked"
+    assert "reason=verification_failed" in update["evidence"]
+    assert "failed_step_id=bounded_repair_execution" in update["evidence"]
+    assert f"receipt_path={receipt_path}" in update["evidence"]
+    assert f"receipt_sha256={receipt_hash}" in update["evidence"]
+
+
 def test_different_frontier_todo_defers(tmp_path):
     loopx, codex = LoopXFake(selected="todo_other"), CodexFake()
     workspace = WorkspaceFake(tmp_path)

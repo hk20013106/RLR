@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from rlr_maintenance.bounded_process import BoundedProcessResult
-from rlr_maintenance.workspace import GitWorkspace, GitWorkspaceError
+from rlr_maintenance.workspace import GitWorkspace, GitWorkspaceError, RepairWorkspace
 
 
 class GitFake:
@@ -13,6 +13,7 @@ class GitFake:
         self.committed = False
         self.branch = "meta-rlr/abc123-9fafe5188c01"
         self.calls = []
+        self.include_receipt = False
 
     def __call__(self, command, **kwargs):
         command = list(command)
@@ -49,7 +50,8 @@ class GitFake:
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
             return SimpleNamespace(returncode=0, stdout="src/a.py\n", stderr="")
         if args[:3] == ["ls-files", "--others", "--exclude-standard"]:
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
+            output = "verification_receipt.json\n" if self.include_receipt else ""
+            return SimpleNamespace(returncode=0, stdout=output, stderr="")
         if args[:3] == ["diff", "--cached", "--name-only"]:
             return SimpleNamespace(returncode=0, stdout="src/a.py\n", stderr="")
         if args and args[0] == "commit":
@@ -140,3 +142,22 @@ def test_git_run_boundary_times_out_fail_closed(tmp_path):
 
     with pytest.raises(GitWorkspaceError, match="timed out"):
         manager._run(repo, ["status"])
+
+
+def test_durable_verification_receipt_is_not_repair_code_diff(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    fake = GitFake()
+    fake.include_receipt = True
+    manager = GitWorkspace(repo_root=repo, workspace_parent=tmp_path / "worktrees", runner=fake)
+    work = RepairWorkspace(
+        path=tmp_path / "worktree",
+        branch="meta-rlr/abc123-9fafe5188c01",
+        base_sha="a" * 40,
+        repair_key="abc123",
+    )
+
+    inspection = manager.inspect(work)
+
+    assert inspection.changed_paths == ("src/a.py",)
+    assert "verification_receipt.json" not in inspection.dirty_paths

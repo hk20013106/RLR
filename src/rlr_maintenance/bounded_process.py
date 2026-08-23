@@ -30,6 +30,8 @@ class BoundedProcessResult:
     stderr_bytes: int
     timeout_seconds: float | None
     process_tree_cleanup: Mapping[str, Any]
+    stdout_tail: str = ""
+    stderr_tail: str = ""
 
 
 def _terminate_process_tree(process: subprocess.Popen, grace: float = 2.0) -> dict[str, Any]:
@@ -93,6 +95,7 @@ class _BoundedReader:
         self._stream = stream
         self._max_bytes = max_bytes
         self._kept = bytearray()
+        self._tail = bytearray()
         self._total = 0
         self._truncated = False
 
@@ -107,11 +110,15 @@ class _BoundedReader:
                 self._kept.extend(chunk[:remaining])
                 if len(chunk) > remaining:
                     self._truncated = True
+            if self._max_bytes > 0:
+                self._tail.extend(chunk)
+                if len(self._tail) > self._max_bytes:
+                    del self._tail[:-self._max_bytes]
             else:
                 self._truncated = True
 
-    def result(self) -> tuple[bytes, int, bool]:
-        return bytes(self._kept), self._total, self._truncated
+    def result(self) -> tuple[bytes, bytes, int, bool]:
+        return bytes(self._kept), bytes(self._tail), self._total, self._truncated
 
 
 def run_bounded_process(
@@ -182,8 +189,8 @@ def run_bounded_process(
     stdout_thread.join(timeout=5)
     stderr_thread.join(timeout=5)
 
-    stdout, stdout_bytes, stdout_truncated = stdout_reader.result()
-    stderr, stderr_bytes, stderr_truncated = stderr_reader.result()
+    stdout, stdout_tail, stdout_bytes, stdout_truncated = stdout_reader.result()
+    stderr, stderr_tail, stderr_bytes, stderr_truncated = stderr_reader.result()
     return BoundedProcessResult(
         returncode=returncode,
         terminal_state="timed_out" if timed_out else "completed",
@@ -195,4 +202,6 @@ def run_bounded_process(
         stderr_bytes=stderr_bytes,
         timeout_seconds=timeout,
         process_tree_cleanup=cleanup,
+        stdout_tail=stdout_tail.decode(encoding, errors=errors),
+        stderr_tail=stderr_tail.decode(encoding, errors=errors),
     )

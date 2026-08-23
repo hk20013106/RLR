@@ -49,6 +49,24 @@ def _todo_text(event: Mapping[str, Any]) -> str:
     return f"Repair RLR failure {event['dedup_fingerprint'][:12]}: {event['component']} violates {event['expected_contract']}"
 
 
+def _verification_failure_evidence(receipt: object, worktree_path: str | Path) -> str:
+    """Return stable LoopX evidence while pointing to the durable receipt."""
+    failed_step = getattr(receipt, "failed_step_id", None) or "unavailable"
+    receipt_path = getattr(receipt, "receipt_path", None)
+    if receipt_path is None:
+        receipt_path = Path(worktree_path) / "verification_receipt.json"
+    receipt_path = Path(receipt_path)
+    receipt_sha = getattr(receipt, "receipt_sha256", None)
+    if not receipt_sha and receipt_path.is_file():
+        receipt_sha = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+    receipt_sha = receipt_sha or "unavailable"
+    return (
+        f"failed_step_id={failed_step} "
+        f"verification_receipt_path={receipt_path} "
+        f"verification_receipt_sha256={receipt_sha}"
+    )
+
+
 def _repair_prompt(event: Mapping[str, Any], profile: object, todo_id: str) -> str:
     payload = {
         "objective": "Repair exactly one Meta-RLR software maintenance todo.",
@@ -84,13 +102,26 @@ class MetaRLRHost:
         self._loopx_cwd = Path(loopx_cwd) if loopx_cwd is not None else None
         self._capabilities = tuple(str(x) for x in capabilities)
 
-    def _block(self, *, event: Mapping[str, Any], profile_id: str, goal_id: str, agent_id: str, todo_id: str, reason: str) -> MetaRLRTurnResult:
+    def _block(
+        self,
+        *,
+        event: Mapping[str, Any],
+        profile_id: str,
+        goal_id: str,
+        agent_id: str,
+        todo_id: str,
+        reason: str,
+        evidence_suffix: str | None = None,
+    ) -> MetaRLRTurnResult:
+        evidence = f"profile={profile_id} passed=false reason={reason}"
+        if evidence_suffix:
+            evidence = f"{evidence} {evidence_suffix}"
         packet = self._loopx.todo_update(
             goal_id=goal_id,
             todo_id=todo_id,
             agent_id=agent_id,
             status="blocked",
-            evidence=f"profile={profile_id} passed=false reason={reason}",
+            evidence=evidence,
             reason=reason.replace("_", " "),
             cwd=self._loopx_cwd,
         )
@@ -199,7 +230,15 @@ class MetaRLRHost:
             return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=todo_id, profile_id=profile_id, commit_sha=getattr(binding, "commit_sha", None), reason="recovery_frontier_mismatch")
         receipt = self._verifier(profile_id, work.path)
         if getattr(receipt, "passed", False) is not True:
-            return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=todo_id, profile_id=profile_id, commit_sha=getattr(binding, "commit_sha", None), reason="recovery_verification_failed")
+            return self._block(
+                event=event,
+                profile_id=profile_id,
+                goal_id=goal_id,
+                agent_id=agent_id,
+                todo_id=todo_id,
+                reason="verification_failed",
+                evidence_suffix=_verification_failure_evidence(receipt, work.path),
+            )
         return self._settle_verified(
             event=event,
             profile_id=profile_id,
@@ -362,7 +401,15 @@ class MetaRLRHost:
             return self._block(event=normalized, profile_id=profile.profile_id, goal_id=goal_id, agent_id=agent_id, todo_id=todo_id, reason="empty_diff")
         receipt = self._verifier(profile.profile_id, work.path)
         if getattr(receipt, "passed", False) is not True:
-            return self._block(event=normalized, profile_id=profile.profile_id, goal_id=goal_id, agent_id=agent_id, todo_id=todo_id, reason="verification_failed")
+            return self._block(
+                event=normalized,
+                profile_id=profile.profile_id,
+                goal_id=goal_id,
+                agent_id=agent_id,
+                todo_id=todo_id,
+                reason="verification_failed",
+                evidence_suffix=_verification_failure_evidence(receipt, work.path),
+            )
         after = self._workspace.inspect(work)
         if after.head_sha != work.base_sha or after.changed_paths != before.changed_paths:
             return self._block(event=normalized, profile_id=profile.profile_id, goal_id=goal_id, agent_id=agent_id, todo_id=todo_id, reason="post_verification_diff_changed")
