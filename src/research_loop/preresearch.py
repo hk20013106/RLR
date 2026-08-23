@@ -1,10 +1,13 @@
-"""Pre-research artifact text utilities + literature-gate constants (Phase 3a leaf).
+"""Pre-research artifact utilities and research-stage policy.
 
-No intra-repo imports -> pure leaf.
+The active configuration contains no project/domain query catalog. Search
+queries are derived at runtime from authoritative scientific state.
 """
 import re
 import json
 from pathlib import Path
+
+from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
 
 
 LIT_RUNTIME_DIGEST_TOKEN_BUDGET = 1000
@@ -14,6 +17,7 @@ _LIT_PRE_RESEARCH_TYPES = {"deep_research", "literature_review", "literature_ver
 _DOI_PMID_URL_RE = re.compile(
     r"(10\.\d{4,9}/\S+|PMID:?\s*\d+|https?://\S+)", re.IGNORECASE)
 
+
 def _runtime_digest_budget_error(estimated_tokens, budget):
     return (
         f"Runtime digest estimated at {estimated_tokens} tokens exceeds "
@@ -22,22 +26,20 @@ def _runtime_digest_budget_error(estimated_tokens, budget):
         "compression; preserve Query log, Tool receipt, Source count, and all "
         "DOI/PMID/URL identifiers.")
 
+
 def _extract_section(text, heading):
-    # Extract a markdown section by heading. Returns section text or empty str.
-    pattern = f"\n## {heading}"
     idx = text.find(f"## {heading}")
     if idx == -1:
         return ""
     start = idx + len(f"## {heading}")
-    # Find next ## heading after this section
     rest = text[start:]
     next_h2 = rest.find("\n## ")
     if next_h2 == -1:
         return rest.strip()
     return rest[:next_h2].strip()
 
+
 def _estimate_tokens(text):
-    # Rough token estimate: 1 token ~= 4 characters.
     return max(1, len(text) // 4)
 
 
@@ -57,7 +59,6 @@ def _validate_pre_research_content(text, pr_cfg):
         if estimated_tokens > LIT_RUNTIME_DIGEST_TOKEN_BUDGET:
             return False, _runtime_digest_budget_error(
                 estimated_tokens, LIT_RUNTIME_DIGEST_TOKEN_BUDGET)
-        # V0.6 (PR2): reviewable provenance is mandatory for literature nodes.
         prov = _parse_pre_research_provenance(text)
         if not prov["query_log"]:
             return False, ("missing or empty `## Query log` -- record the actual "
@@ -72,8 +73,8 @@ def _validate_pre_research_content(text, pr_cfg):
             return False, "`## Source count` is < 1 (no sources retrieved)"
     return True, ""
 
+
 def _parse_section_bullets(text, heading):
-    """Return the '- '/'* ' bullet items under a `## <heading>` section."""
     bullets = []
     for raw in _extract_section(text, heading).splitlines():
         line = raw.strip()
@@ -83,12 +84,8 @@ def _parse_section_bullets(text, heading):
                 bullets.append(item)
     return bullets
 
-def _parse_pre_research_provenance(text):
-    """Extract V0.6 provenance from a pre-research artifact. Never raises.
 
-    Returns {query_log, tool_receipt, source_count, source_count_declared}.
-    Missing sections yield empty/0; if `## Source count` is absent the count
-    falls back to distinct DOI/PMID/URL identifiers in the Runtime digest."""
+def _parse_pre_research_provenance(text):
     declared = _extract_section(text, "Source count")
     m = re.search(r"-?\d+", declared)
     if m:
@@ -105,14 +102,15 @@ def _parse_pre_research_provenance(text):
         "source_count_declared": source_count_declared,
     }
 
+
 _QF_STOP = {"the", "a", "an", "of", "in", "and", "or", "vs", "for", "to", "on", "is", "do"}
 
+
 def _query_family_key(q):
-    """Normalize a query string to a family key: lowercased, de-punctuated,
-    stop-words removed, sorted unique tokens."""
     toks = [t for t in re.sub(r"[^a-z0-9 ]", " ", q.lower()).split()
             if t and t not in _QF_STOP]
     return " ".join(sorted(set(toks)))
+
 
 def _load_query_family_cache(project_dir):
     p = Path(project_dir) / "09_Literature_Database" / "query_families.json"
@@ -123,6 +121,7 @@ def _load_query_family_cache(project_dir):
             return set()
     return set()
 
+
 def _merge_query_family_cache(project_dir, families):
     p = Path(project_dir) / "09_Literature_Database" / "query_families.json"
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -131,9 +130,6 @@ def _merge_query_family_cache(project_dir, families):
     p.write_text(json.dumps({"families": sorted(existing)}, indent=2), encoding="utf-8")
 
 
-# Active runtime policy only. Search strings are always derived at execution
-# time from authoritative scientific state; this table must never become a
-# project-specific query catalog again.
 PRE_RESEARCH_MAP = {
     "L0.5": {
         "budget": LIT_RUNTIME_DIGEST_TOKEN_BUDGET,
@@ -166,7 +162,7 @@ PRE_RESEARCH_MAP = {
         "queries": [],
     },
     "L8.5": {
-        "budget": 0,
+        "budget": LIT_RUNTIME_DIGEST_TOKEN_BUDGET,
         "type": "literature_verification",
         "skill": "academic-research-suite",
         "description": (
@@ -176,3 +172,21 @@ PRE_RESEARCH_MAP = {
         "queries": [],
     },
 }
+
+# Historical profiles used L1 as the discovery target. Keep that contract
+# explicit and isolated from the active native map rather than reintroducing L1
+# research ownership into current projects.
+LEGACY_L1_PRE_RESEARCH_CONFIG = {
+    "budget": LIT_RUNTIME_DIGEST_TOKEN_BUDGET,
+    "type": "deep_research",
+    "skill": "academic-research-suite",
+    "description": "Discover literature for the canonical research question and hypothesis",
+    "queries": [],
+}
+
+
+def pre_research_config(node: str, profile_id: str):
+    """Resolve research policy for one compatibility profile."""
+    if str(node) == "L1" and str(profile_id) != DEFAULT_NATIVE_PROFILE:
+        return LEGACY_L1_PRE_RESEARCH_CONFIG
+    return PRE_RESEARCH_MAP.get(str(node))
