@@ -2,11 +2,20 @@
 from __future__ import annotations
 
 import json
-import subprocess
+import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
+
+
+# Repair is bounded by inactivity first. This ceiling is only an emergency
+# escape hatch for a genuinely runaway process, not the normal repair budget.
+DEFAULT_REPAIR_EMERGENCY_TIMEOUT = 1800.0
+# Keep the old keyword/API name for callers while making its semantics explicit.
+DEFAULT_REPAIR_JOB_TIMEOUT = DEFAULT_REPAIR_EMERGENCY_TIMEOUT
+DEFAULT_REPAIR_INACTIVITY_TIMEOUT = 180.0
+DEFAULT_REPAIR_OBSERVER_INTERVAL = 1.0
 
 
 class CodexError(RuntimeError):
@@ -41,10 +50,36 @@ _RESULT_SCHEMA = {
 }
 
 
+def _default_observed_runner(**kwargs: object) -> object:
+    """Load the existing bounded provider runner only at the repair boundary."""
+    from research_loop.provider_runtime_observability import run_observed_provider
+
+    return run_observed_provider(**kwargs)
+
+
 class CodexCli:
-    def __init__(self, executable: str | Sequence[str] = "codex", runner: Callable[..., object] = subprocess.run) -> None:
+    def __init__(
+        self,
+        executable: str | Sequence[str] = "codex",
+        runner: Callable[..., object] | None = None,
+        *,
+        observed_runner: Callable[..., object] | None = None,
+        job_timeout: float = DEFAULT_REPAIR_JOB_TIMEOUT,
+        inactivity_timeout: float = DEFAULT_REPAIR_INACTIVITY_TIMEOUT,
+        observer_interval: float = DEFAULT_REPAIR_OBSERVER_INTERVAL,
+    ) -> None:
+        if runner is not None and observed_runner is not None:
+            raise ValueError("Codex runner and observed runner are mutually exclusive")
+        if job_timeout <= 0 or inactivity_timeout <= 0 or observer_interval <= 0:
+            raise ValueError("Codex repair runtime bounds must be positive")
         self._executable = _command_prefix(executable)
         self._runner = runner
+        self._observed_runner = (
+            observed_runner if observed_runner is not None else _default_observed_runner
+        )
+        self._job_timeout = float(job_timeout)
+        self._inactivity_timeout = float(inactivity_timeout)
+        self._observer_interval = float(observer_interval)
 
     @staticmethod
     def _parse_result(payload: object) -> CodexRepairResult:
@@ -70,18 +105,66 @@ class CodexCli:
             raise ValueError("Codex repair prompt must be non-empty")
         with tempfile.TemporaryDirectory(prefix="meta-rlr-codex-") as tmp:
             temp_root = Path(tmp)
+            # Keep repair-time test caches and interpreter scratch outside the
+            # verifier worktree.  Codex may run focused pytest commands, but
+            # its sandbox-created artifacts must remain independently readable.
+            scratch_root = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{root.name}.meta-rlr-codex-scratch-",
+                    dir=root.parent,
+                )
+            )
+            repair_env = dict(os.environ)
+            pytest_options = repair_env.get("PYTEST_ADDOPTS", "").strip()
+            repair_env["PYTEST_ADDOPTS"] = (
+                f"{pytest_options} -p no:cacheprovider".strip()
+            )
+            repair_env["PYTHONDONTWRITEBYTECODE"] = "1"
+            for variable in ("TEMP", "TMP", "TMPDIR"):
+                repair_env[variable] = str(scratch_root)
             schema_path = temp_root / "result.schema.json"
             output_path = temp_root / "last-message.json"
             schema_path.write_text(json.dumps(_RESULT_SCHEMA, sort_keys=True), encoding="utf-8")
             command = [*self._executable, "exec", "--ephemeral", "--sandbox", "workspace-write", "-C", str(root), "--output-schema", str(schema_path), "--output-last-message", str(output_path), "-"]
-            completed = self._runner(command, cwd=root, input=prompt, text=True, encoding="utf-8", capture_output=True, shell=False)
-            returncode = int(getattr(completed, "returncode"))
-            if returncode != 0:
-                raise CodexError(f"Codex command failed with exit code {returncode}")
-            if not output_path.is_file():
-                raise CodexError("Codex final result file is missing")
+            if self._runner is not None:
+                completed = self._runner(command, cwd=root, env=repair_env, input=prompt, text=True, encoding="utf-8", capture_output=True, shell=False)
+                returncode = int(getattr(completed, "returncode"))
+                if returncode != 0:
+                    raise CodexError(f"Codex command failed with exit code {returncode}")
+                if not output_path.is_file():
+                    raise CodexError("Codex final result file is missing")
+                result_text = output_path.read_text(encoding="utf-8")
+            else:
+                try:
+                    runtime_dir = Path(tempfile.mkdtemp(prefix=f".{root.name}.meta-rlr-runtime-", dir=root.parent))
+                except OSError as exc:
+                    raise CodexError("Codex repair runtime directory could not be created") from exc
+                execution = self._observed_runner(
+                    command=command,
+                    prompt=prompt,
+                    runtime_dir=runtime_dir,
+                    backend="codex",
+                    task_id=f"meta-rlr-repair-{runtime_dir.name}",
+                    candidate_id="maintenance",
+                    node="Meta-RLR",
+                    job_timeout=self._job_timeout,
+                    inactivity_timeout=self._inactivity_timeout,
+                    observer_interval=self._observer_interval,
+                    cwd=root,
+                    env=repair_env,
+                    input_text=prompt,
+                )
+                final_status = str(getattr(execution, "final_status", "unknown"))
+                if final_status != "succeeded":
+                    receipt_path = getattr(execution, "runtime_receipt_path", runtime_dir / "runtime_receipt.json")
+                    raise CodexError(
+                        f"Codex repair terminated with status {final_status}; runtime receipt {receipt_path}"
+                    )
+                result_text = str(getattr(execution, "final_output", ""))
+                if not result_text:
+                    raise CodexError("Codex final result file is missing")
             try:
-                payload = json.loads(output_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
+                payload = json.loads(result_text)
+            except json.JSONDecodeError as exc:
                 raise CodexError("Codex final result is not valid JSON") from exc
             return self._parse_result(payload)

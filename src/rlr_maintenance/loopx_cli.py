@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from pathlib import Path
 from typing import Mapping, Sequence
+
+from .bounded_process import DEFAULT_MAX_OUTPUT_BYTES, run_bounded_process
+
+
+LOOPX_COMMAND_TIMEOUT = 30.0
 
 
 class LoopXError(RuntimeError):
@@ -26,11 +30,15 @@ class LoopXCli:
         registry: str | None = None,
         quota_runtime_profile: str | None = None,
         quota_scan_root: str | Path | None = None,
+        timeout: float = LOOPX_COMMAND_TIMEOUT,
+        max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
     ) -> None:
         self._executable = _command_prefix(executable)
         self._registry = str(registry) if registry else None
         self._quota_runtime_profile = str(quota_runtime_profile) if quota_runtime_profile else None
         self._quota_scan_root = str(quota_scan_root) if quota_scan_root else None
+        self._timeout = float(timeout)
+        self._max_output_bytes = int(max_output_bytes)
 
     def _base_command(self) -> list[str]:
         command = [*self._executable, "--format", "json"]
@@ -44,7 +52,20 @@ class LoopXCli:
         environment = dict(os.environ)
         environment["PYTHONIOENCODING"] = "utf-8"
         environment["PYTHONUTF8"] = "1"
-        completed = subprocess.run(command, cwd=Path(cwd) if cwd is not None else None, text=True, encoding="utf-8", capture_output=True, shell=False, env=environment)
+        try:
+            completed = run_bounded_process(
+                command,
+                timeout=self._timeout,
+                cwd=Path(cwd) if cwd is not None else None,
+                env=environment,
+                max_output_bytes=self._max_output_bytes,
+            )
+        except OSError as exc:
+            raise LoopXError(f"LoopX command could not be launched: {exc}") from exc
+        if completed.terminal_state == "timed_out":
+            raise LoopXError(f"LoopX command timed out after {self._timeout}s")
+        if completed.stdout_truncated:
+            raise LoopXError("LoopX stdout exceeded the bounded output cap")
         if completed.returncode != 0:
             raise LoopXError(f"LoopX command failed with exit code {completed.returncode}")
         raw = (completed.stdout or "").strip()
@@ -84,6 +105,9 @@ class LoopXCli:
 
     def todo_add_agent(self, *, goal_id: str, text: str, task_class: str = "advancement_task", action_kind: str = "repair", cwd: str | Path | None = None) -> dict:
         return self.run_json(["todo", "add", "--goal-id", str(goal_id), "--role", "agent", "--text", str(text), "--task-class", str(task_class), "--action-kind", str(action_kind)], cwd=cwd)
+
+    def todo_list(self, *, goal_id: str, cwd: str | Path | None = None) -> dict:
+        return self.run_json(["todo", "list", "--goal-id", str(goal_id)], cwd=cwd)
 
     def todo_claim(self, *, goal_id: str, todo_id: str, agent_id: str, cwd: str | Path | None = None) -> dict:
         return self.run_json(["todo", "claim", "--goal-id", str(goal_id), "--todo-id", str(todo_id), "--claimed-by", str(agent_id), "--agent-id", str(agent_id)], cwd=cwd)

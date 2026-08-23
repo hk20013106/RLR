@@ -26,10 +26,13 @@ def test_l0_profile_protects_durable_architecture_not_historical_incident():
     } <= set(profile.forbidden_success_shortcuts)
 
 
-def test_profiles_use_argv_not_shell_commands_and_include_full_regression():
+def test_profiles_use_argv_and_non_provider_profiles_include_full_regression():
     for profile in all_profiles():
         assert profile.required_validation
-        assert any(step.step_id == "full_regression" for step in profile.required_validation)
+        has_full_regression = any(
+            step.step_id == "full_regression" for step in profile.required_validation
+        )
+        assert has_full_regression is (profile.profile_id != "provider_runtime_integrity")
         for step in profile.required_validation:
             assert isinstance(step.command, tuple)
             assert step.command
@@ -98,6 +101,46 @@ def test_profile_routing_requires_a_valid_maintenance_event():
 
     with pytest.raises(MaintenanceContractError):
         profile_for_event({"expected_contract": "runner_nonzero_propagation"})
+
+
+def test_provider_runtime_profile_owns_only_execution_integrity():
+    profile = get_profile("provider_runtime_integrity")
+
+    assert profile.protected_contracts == ("provider_runtime_execution_integrity",)
+    assert profile_for_event(
+        _event("provider_runtime_execution_integrity")
+    ).profile_id == "provider_runtime_integrity"
+    assert any(step.step_id == "bounded_repair_execution" for step in profile.required_validation)
+
+
+def test_provider_runtime_profile_owns_focused_contract_surface():
+    profile = get_profile("provider_runtime_integrity")
+    step_ids = [step.step_id for step in profile.required_validation]
+
+    for expected in (
+        "bounded_repair_execution",
+        "bounded_maintenance_external_execution",
+        "host_settlement_recovery",
+        "autowake_bridge",
+        "architecture_invariant",
+        "meta_contract",
+    ):
+        assert expected in step_ids
+
+
+def test_provider_runtime_profile_excludes_unrelated_full_regression():
+    profile = get_profile("provider_runtime_integrity")
+    step_ids = [step.step_id for step in profile.required_validation]
+
+    assert "full_regression" not in step_ids
+    assert step_ids == [
+        "bounded_repair_execution",
+        "bounded_maintenance_external_execution",
+        "host_settlement_recovery",
+        "autowake_bridge",
+        "architecture_invariant",
+        "meta_contract",
+    ]
 
 
 def test_unowned_expected_contract_fails_closed_without_second_registry():

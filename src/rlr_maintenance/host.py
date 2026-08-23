@@ -10,7 +10,7 @@ from .codex_cli import CodexError
 from .contracts import validate_maintenance_event
 from .profiles import profile_for_event
 from .verification import run_profile
-from .workspace import GitWorkspaceError
+from .workspace import GitWorkspaceError, RepairWorkspace
 
 
 class MetaRLRHostError(RuntimeError):
@@ -49,6 +49,24 @@ def _todo_text(event: Mapping[str, Any]) -> str:
     return f"Repair RLR failure {event['dedup_fingerprint'][:12]}: {event['component']} violates {event['expected_contract']}"
 
 
+def _verification_failure_evidence(receipt: object, worktree_path: str | Path) -> str:
+    """Return stable LoopX evidence while pointing to the durable receipt."""
+    failed_step = getattr(receipt, "failed_step_id", None) or "unavailable"
+    receipt_path = getattr(receipt, "receipt_path", None)
+    if receipt_path is None:
+        receipt_path = Path(worktree_path) / "verification_receipt.json"
+    receipt_path = Path(receipt_path)
+    receipt_sha = getattr(receipt, "receipt_sha256", None)
+    if not receipt_sha and receipt_path.is_file():
+        receipt_sha = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+    receipt_sha = receipt_sha or "unavailable"
+    return (
+        f"failed_step_id={failed_step} "
+        f"verification_receipt_path={receipt_path} "
+        f"verification_receipt_sha256={receipt_sha}"
+    )
+
+
 def _repair_prompt(event: Mapping[str, Any], profile: object, todo_id: str) -> str:
     payload = {
         "objective": "Repair exactly one Meta-RLR software maintenance todo.",
@@ -66,6 +84,9 @@ def _repair_prompt(event: Mapping[str, Any], profile: object, todo_id: str) -> s
             "Edit only the bounded root-cause repair.",
             "Obey AGENTS.md and existing canonical authorities.",
             "Do not commit, push, merge, modify LoopX state, weaken tests, or change scientific policy.",
+            "You may run directly relevant focused tests for the repair, but do not run the full repository test suite.",
+            "After the repair, return immediately with the structured changed/no_change/blocked result.",
+            "Formal verification is performed by the independent Meta-RLR verifier after you return.",
             "Do not treat your own completion text as verification.",
         ],
     }
@@ -81,13 +102,26 @@ class MetaRLRHost:
         self._loopx_cwd = Path(loopx_cwd) if loopx_cwd is not None else None
         self._capabilities = tuple(str(x) for x in capabilities)
 
-    def _block(self, *, event: Mapping[str, Any], profile_id: str, goal_id: str, agent_id: str, todo_id: str, reason: str) -> MetaRLRTurnResult:
+    def _block(
+        self,
+        *,
+        event: Mapping[str, Any],
+        profile_id: str,
+        goal_id: str,
+        agent_id: str,
+        todo_id: str,
+        reason: str,
+        evidence_suffix: str | None = None,
+    ) -> MetaRLRTurnResult:
+        evidence = f"profile={profile_id} passed=false reason={reason}"
+        if evidence_suffix:
+            evidence = f"{evidence} {evidence_suffix}"
         packet = self._loopx.todo_update(
             goal_id=goal_id,
             todo_id=todo_id,
             agent_id=agent_id,
             status="blocked",
-            evidence=f"profile={profile_id} passed=false reason={reason}",
+            evidence=evidence,
             reason=reason.replace("_", " "),
             cwd=self._loopx_cwd,
         )
@@ -147,7 +181,7 @@ class MetaRLRHost:
         profile: object,
         goal_id: str,
         agent_id: str,
-    ) -> MetaRLRTurnResult | None:
+    ) -> MetaRLRTurnResult | tuple[RepairWorkspace, str] | None:
         repair_key = str(event["dedup_fingerprint"])[:12]
         try:
             work = self._workspace.find_existing(base_revision=event["rlr_revision"], repair_key=repair_key)
@@ -158,7 +192,13 @@ class MetaRLRHost:
         try:
             binding = self._workspace.read_verified_commit(work)
         except GitWorkspaceError:
-            return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=None, profile_id=getattr(profile, "profile_id"), reason="recovery_commit_invalid")
+            return self._recover_interrupted_workspace(
+                event=event,
+                profile=profile,
+                goal_id=goal_id,
+                agent_id=agent_id,
+                work=work,
+            )
         todo_id = str(getattr(binding, "todo_id", ""))
         turn_id = str(getattr(binding, "turn_instance_id", ""))
         profile_id = str(getattr(profile, "profile_id"))
@@ -190,7 +230,15 @@ class MetaRLRHost:
             return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=todo_id, profile_id=profile_id, commit_sha=getattr(binding, "commit_sha", None), reason="recovery_frontier_mismatch")
         receipt = self._verifier(profile_id, work.path)
         if getattr(receipt, "passed", False) is not True:
-            return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=todo_id, profile_id=profile_id, commit_sha=getattr(binding, "commit_sha", None), reason="recovery_verification_failed")
+            return self._block(
+                event=event,
+                profile_id=profile_id,
+                goal_id=goal_id,
+                agent_id=agent_id,
+                todo_id=todo_id,
+                reason="verification_failed",
+                evidence_suffix=_verification_failure_evidence(receipt, work.path),
+            )
         return self._settle_verified(
             event=event,
             profile_id=profile_id,
@@ -203,25 +251,87 @@ class MetaRLRHost:
             outcome="recovered",
         )
 
+    def _recover_interrupted_workspace(
+        self,
+        *,
+        event: Mapping[str, Any],
+        profile: object,
+        goal_id: str,
+        agent_id: str,
+        work: RepairWorkspace,
+    ) -> MetaRLRTurnResult | tuple[RepairWorkspace, str]:
+        profile_id = getattr(profile, "profile_id")
+        try:
+            inspection = self._workspace.inspect(work)
+        except GitWorkspaceError:
+            return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=None, profile_id=profile_id, reason="recovery_workspace_invalid")
+        if (
+            inspection.head_sha != work.base_sha
+            or inspection.changed_paths
+            or inspection.dirty_paths
+        ):
+            reason = "recovery_workspace_dirty" if inspection.dirty_paths else "recovery_workspace_ambiguous"
+            return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=None, profile_id=profile_id, reason=reason)
+
+        branch = str(getattr(work, "branch", ""))
+        if not branch.startswith("meta-rlr/") or "-" not in branch.rsplit("/", 1)[-1]:
+            return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=None, profile_id=profile_id, reason="recovery_todo_unresolved")
+        todo_hash = branch.rsplit("/", 1)[-1].rsplit("-", 1)[-1]
+        packet = self._loopx.todo_list(goal_id=goal_id, cwd=self._loopx_cwd)
+        _require_ok(packet, "todo list")
+        todos = packet.get("todos")
+        if not isinstance(todos, list):
+            return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=None, profile_id=profile_id, reason="recovery_todo_unresolved")
+
+        matches = []
+        expected_text = _todo_text(event)
+        for item in todos:
+            if not isinstance(item, Mapping):
+                continue
+            todo_id = item.get("todo_id")
+            if not isinstance(todo_id, str) or not todo_id:
+                continue
+            if hashlib.sha256(todo_id.encode("utf-8")).hexdigest()[:12] != todo_hash:
+                continue
+            if str(item.get("text") or "") != expected_text:
+                continue
+            if str(item.get("status") or "open") != "open":
+                continue
+            claimed_by = item.get("claimed_by")
+            if claimed_by is not None and str(claimed_by) != agent_id:
+                return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=todo_id, profile_id=profile_id, reason="recovery_claimant_mismatch")
+            matches.append(todo_id)
+
+        if len(matches) != 1:
+            return MetaRLRTurnResult(outcome="blocked", event_id=event["event_id"], todo_id=None, profile_id=profile_id, reason="recovery_todo_unresolved")
+        return work, matches[0]
+
     def run_once(self, *, event: Mapping[str, Any], goal_id: str, agent_id: str) -> MetaRLRTurnResult:
         normalized = validate_maintenance_event(event)
         profile = profile_for_event(normalized)
 
         recovered = self._recover_verified_commit(event=normalized, profile=profile, goal_id=goal_id, agent_id=agent_id)
-        if recovered is not None:
+        reusable_work: RepairWorkspace | None = None
+        recovered_todo_id: str | None = None
+        if isinstance(recovered, MetaRLRTurnResult):
             return recovered
+        if isinstance(recovered, tuple):
+            reusable_work, recovered_todo_id = recovered
 
-        added = self._loopx.todo_add_agent(
-            goal_id=goal_id,
-            text=_todo_text(normalized),
-            task_class="advancement_task",
-            action_kind="repair",
-            cwd=self._loopx_cwd,
-        )
-        _require_ok(added, "todo add")
-        todo_id = added.get("todo_id")
-        if not isinstance(todo_id, str) or not todo_id:
-            raise MetaRLRHostError("LoopX todo add did not return a todo_id")
+        if reusable_work is None:
+            added = self._loopx.todo_add_agent(
+                goal_id=goal_id,
+                text=_todo_text(normalized),
+                task_class="advancement_task",
+                action_kind="repair",
+                cwd=self._loopx_cwd,
+            )
+            _require_ok(added, "todo add")
+            todo_id = added.get("todo_id")
+            if not isinstance(todo_id, str) or not todo_id:
+                raise MetaRLRHostError("LoopX todo add did not return a todo_id")
+        else:
+            todo_id = recovered_todo_id
 
         frontier = self._loopx.quota_should_run(
             goal_id=goal_id,
@@ -252,16 +362,38 @@ class MetaRLRHost:
 
         claimed = self._loopx.todo_claim(goal_id=goal_id, todo_id=todo_id, agent_id=agent_id, cwd=self._loopx_cwd)
         _require_ok(claimed, "todo claim")
-        try:
-            work = self._workspace.create(base_revision=normalized["rlr_revision"], event_token=normalized["dedup_fingerprint"][:12], todo_id=todo_id)
-        except GitWorkspaceError:
-            return self._block(event=normalized, profile_id=profile.profile_id, goal_id=goal_id, agent_id=agent_id, todo_id=todo_id, reason="workspace_failed")
+        if reusable_work is None:
+            try:
+                work = self._workspace.create(base_revision=normalized["rlr_revision"], event_token=normalized["dedup_fingerprint"][:12], todo_id=todo_id)
+            except GitWorkspaceError:
+                return self._block(event=normalized, profile_id=profile.profile_id, goal_id=goal_id, agent_id=agent_id, todo_id=todo_id, reason="workspace_failed")
+        else:
+            work = reusable_work
         try:
             worker = self._codex.run_repair(worktree=work.path, prompt=_repair_prompt(normalized, profile, todo_id))
         except CodexError:
             return self._block(event=normalized, profile_id=profile.profile_id, goal_id=goal_id, agent_id=agent_id, todo_id=todo_id, reason="codex_failed")
-        if getattr(worker, "status", None) != "changed":
-            return self._block(event=normalized, profile_id=profile.profile_id, goal_id=goal_id, agent_id=agent_id, todo_id=todo_id, reason="no_verified_change")
+        worker_status = getattr(worker, "status", None)
+        if worker_status == "no_change":
+            return self._block(
+                event=normalized,
+                profile_id=profile.profile_id,
+                goal_id=goal_id,
+                agent_id=agent_id,
+                todo_id=todo_id,
+                reason="diagnosed_no_change_unverified",
+            )
+        if worker_status != "changed":
+            blocker = getattr(worker, "blocker", None)
+            reason = str(blocker) if isinstance(blocker, str) and blocker else "codex_blocked"
+            return self._block(
+                event=normalized,
+                profile_id=profile.profile_id,
+                goal_id=goal_id,
+                agent_id=agent_id,
+                todo_id=todo_id,
+                reason=reason,
+            )
         before = self._workspace.inspect(work)
         if before.head_sha != work.base_sha:
             return self._block(event=normalized, profile_id=profile.profile_id, goal_id=goal_id, agent_id=agent_id, todo_id=todo_id, reason="worker_changed_head")
@@ -269,7 +401,15 @@ class MetaRLRHost:
             return self._block(event=normalized, profile_id=profile.profile_id, goal_id=goal_id, agent_id=agent_id, todo_id=todo_id, reason="empty_diff")
         receipt = self._verifier(profile.profile_id, work.path)
         if getattr(receipt, "passed", False) is not True:
-            return self._block(event=normalized, profile_id=profile.profile_id, goal_id=goal_id, agent_id=agent_id, todo_id=todo_id, reason="verification_failed")
+            return self._block(
+                event=normalized,
+                profile_id=profile.profile_id,
+                goal_id=goal_id,
+                agent_id=agent_id,
+                todo_id=todo_id,
+                reason="verification_failed",
+                evidence_suffix=_verification_failure_evidence(receipt, work.path),
+            )
         after = self._workspace.inspect(work)
         if after.head_sha != work.base_sha or after.changed_paths != before.changed_paths:
             return self._block(event=normalized, profile_id=profile.profile_id, goal_id=goal_id, agent_id=agent_id, todo_id=todo_id, reason="post_verification_diff_changed")
