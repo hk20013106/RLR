@@ -8,7 +8,7 @@ import pytest
 from research_loop import context
 from research_loop import l0_contract
 from research_loop import hypothesis_recall_context as recall_context
-from research_loop.commands import research
+from research_loop.commands import lifecycle, research
 from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
 from research_loop.hypothesis_ledger import LedgerError
 from research_loop.preresearch import PRE_RESEARCH_MAP
@@ -191,3 +191,7 @@ def test_l1_einstein_has_no_direct_knowledge_base_authority():
 
     assert l1.get("knowledge_base", "none") == "none"
     assert any("09_Literature_Database" in rule for rule in l1["must_not"])
+
+
+def test_l1_has_no_conflicting_legacy_knowledge_base_fallback():
+    assert "L1" not in lifecycle.KNOWLEDGE_BASE_ACCESS
