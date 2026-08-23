@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from research_loop import deep_research, deep_research_task
-from research_loop import l4_evidence_bundle, l4_pipeline
+from research_loop import l4_evidence_bundle, l4_pipeline, research_seed
 from research_loop.common import _now
 from research_loop.compatibility import PROFILE_V20, get_profile
 from research_loop.delta import _delta_for_candidate, artifact_for_node
@@ -56,18 +56,26 @@ def cmd_pre_research(args):
     research_type = research_config["type"]
     queries = research_config["queries"]
 
-    # Ground the research in THIS candidate's question/claim so it generalizes
-    # beyond the seed queries (which are domain examples to adapt, not fixed).
     cf = _candidate_file(project_dir, args.cand_id)
     fm = _load_yaml_front(cf) if cf.exists() else {}
-    question = fm.get("question", "")
-    claim = fm.get("claim", "")
     title = fm.get("title", args.cand_id)
-    round_id = 1
-    try:
-        round_id = int(fm.get("round_id", 1))
-    except Exception:
-        pass
+    if node == "L1":
+        try:
+            seed = research_seed.load_l1_research_seed(project_dir, args.cand_id)
+        except research_seed.ResearchSeedError as exc:
+            print(f"ERROR: L1 canonical research seed is invalid: {exc}", file=sys.stderr)
+            return 3
+        question = seed["scientific_question"]
+        claim = seed["hypothesis_seed"]
+        round_id = seed["round_id"]
+    else:
+        question = fm.get("question", "")
+        claim = fm.get("claim", "")
+        round_id = 1
+        try:
+            round_id = int(fm.get("round_id", 1))
+        except Exception:
+            pass
 
     if getattr(args, "output_dir", None):
         output_file = Path(args.output_dir) / f"{node}_research.md"
@@ -120,8 +128,8 @@ NOT YET RUN
 - [[09_Literature_Database/smith2020|Smith 2020]] doi:10.1000/abc123 — core finding: X associates with Y.
 
 ## Query log
-- convergent evolution heart rate
-- cardiac co-expression bat (0 results)
+- canonical scientific question mechanisms
+- alternative explanations evidence (0 results)
 
 ## Tool receipt
 - tool: pubmed | time: 2026-07-05T10:00:00 | summary: 1 hit
@@ -161,8 +169,9 @@ NOT YET RUN
             {"section": "Conclusion", "text": "Synthetic conclusion.", "locator": "Conclusion"},
             {"section": "Methods", "text": "Synthetic method.", "locator": "Methods"},
         ]
+        synthetic_queries = list(queries) or [q for q in (question, claim) if q]
         synthetic_payload = {
-            "schema_version": deep_research.SCHEMA_VERSION, "queries": list(queries),
+            "schema_version": deep_research.SCHEMA_VERSION, "queries": synthetic_queries,
             "papers": [{"doi": "10.1000/abc123", "title": "Synthetic Smith 2020",
                         "source_database": "synthetic-test", "metadata": {},
                         "source_metadata_response": {"fixture": "write-synthetic"},
@@ -174,7 +183,7 @@ NOT YET RUN
                 "receipt": "synthetic-test 0"}
         profile, binding = _bound_profile(project_dir)
         _, node_map, _ = topology_for_profile(profile.profile_id)
-        deep_research.persist_run(
+        artifact = deep_research.persist_run(
             project_dir, args.cand_id, node, synthetic_payload,
             deep_research.skill_receipt("codex", ["synthetic-test"],
                                          "synthetic-test", "test-only"),
@@ -185,15 +194,33 @@ NOT YET RUN
                 node_map[node].get("research_persona") or "Curie"
             ),
         )
+        if node == "L1":
+            try:
+                research_seed.write_l1_evidence_binding(
+                    project_dir, seed, artifact["run_id"]
+                )
+            except research_seed.ResearchSeedError as exc:
+                print(f"ERROR: L1 evidence binding failed: {exc}", file=sys.stderr)
+                return 3
 
     focus = research_config.get("description", "")
+    if node == "L1":
+        query_directive = (
+            "Derive the actual search queries from this canonical L0 question and "
+            "current-round hypothesis. No project-specific seed queries are "
+            "authorized by the runtime.\n"
+        )
+    else:
+        query_directive = (
+            "Adapt the seed queries below to THIS question/claim and the actual "
+            "data; they are domain examples, not a fixed list.\n"
+        )
     grounding = (f"## This study\n"
                  f"- Title: {title}\n"
                  f"- Question: {question}\n"
                  f"- Claim: {claim}\n"
                  f"- Research focus for this step: {focus}\n\n"
-                 f"Adapt the seed queries below to THIS question/claim and the "
-                 f"actual data; they are domain examples, not a fixed list.\n")
+                 f"{query_directive}")
 
     if research_type == "deep_research":
         prompt = f"""# Pre-Research: Deep Literature Search (before {node})
@@ -224,10 +251,17 @@ This is Round {round_id} of the research loop.
      - "summary": string (relevance, methods, results summary)
      - "url": string (or empty)
 
-Use the academic-research-suite / search tools to query (seed queries):
 """
-        for i, q in enumerate(queries, 1):
-            prompt += f"{i}. {q}\n"
+        if node == "L1":
+            prompt += (
+                "Derive and issue multiple literature-search queries from the "
+                "canonical L0 scientific question and current-round hypothesis "
+                "shown above. Record the actual queries in the Query log.\n"
+            )
+        else:
+            prompt += "Use the academic-research-suite / search tools to query (seed queries):\n"
+            for i, q in enumerate(queries, 1):
+                prompt += f"{i}. {q}\n"
         prompt += f"""
 Write a structured summary to: {output_file.as_posix()}
 
@@ -562,6 +596,21 @@ def cmd_deep_research_run(args):
     except (deep_research.DeepResearchError, KeyError, ValueError) as exc:
         print(f"ERROR: Deep Research identity is invalid: {exc}", file=sys.stderr)
         return 3
+
+    if args.node == "L1":
+        try:
+            l1_seed = research_seed.load_l1_research_seed(project_dir, args.cand_id)
+        except research_seed.ResearchSeedError as exc:
+            print(f"ERROR: L1 canonical research seed is invalid: {exc}", file=sys.stderr)
+            return 3
+        dispatch_question = l1_seed["scientific_question"]
+        dispatch_hypothesis = l1_seed["hypothesis_seed"]
+        dispatch_round_id = l1_seed["round_id"]
+    else:
+        dispatch_question = fm.get("question", "")
+        dispatch_hypothesis = fm.get("claim", "")
+        dispatch_round_id = str(fm.get("round_id") or "1")
+
     run_dir = project_dir / "08_Audit" / "deep_research_runtime" / args.cand_id / args.node.replace(".", "_")
     result_context = ""
     if args.node == "L8.5":
@@ -584,10 +633,10 @@ def cmd_deep_research_run(args):
         }, ensure_ascii=False, sort_keys=True)
     try:
         artifact = deep_research.run_and_persist(
-            project_dir, args.cand_id, args.node, fm.get("question", ""), fm.get("claim", ""),
+            project_dir, args.cand_id, args.node, dispatch_question, dispatch_hypothesis,
             spec, run_dir, skill_version, result_context,
             project_id=str(binding["project_id"]),
-            round_id=str(fm.get("round_id") or "1"),
+            round_id=dispatch_round_id,
             profile_id=profile.profile_id,
             research_persona=research_persona,
         )
@@ -600,6 +649,14 @@ def cmd_deep_research_run(args):
     if not ok:
         print(f"ERROR: Deep Research evidence gate failed: {reason}", file=sys.stderr)
         return 3
+    if args.node == "L1":
+        try:
+            research_seed.write_l1_evidence_binding(
+                project_dir, l1_seed, artifact["run_id"]
+            )
+        except research_seed.ResearchSeedError as exc:
+            print(f"ERROR: L1 evidence binding failed: {exc}", file=sys.stderr)
+            return 3
     print(json.dumps(artifact, ensure_ascii=False, indent=2))
     return 0
 

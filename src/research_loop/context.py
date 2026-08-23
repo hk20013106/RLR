@@ -39,7 +39,7 @@ from research_loop.gates import (
     _audit_l0_contract,
 )
 from research_loop import l0_contract
-from research_loop import deep_research
+from research_loop import deep_research, research_seed
 
 
 def strip_candidate_to_frontmatter(candidate_path, include_source_path=False):
@@ -65,6 +65,25 @@ def strip_candidate_to_frontmatter(candidate_path, include_source_path=False):
         keep["input_alias"] = _input_alias(fm["source_input"])  # back-compat
     return keep
 
+
+def candidate_frontmatter_for_node(candidate_path, node_id,
+                                   include_source_path=False):
+    """Return candidate metadata visible to one node.
+
+    L1 must not receive the duplicated candidate-frontmatter ``question`` or
+    ``claim`` fields.  Native L1 receives those semantics only through the
+    validated L0 research-seed projection.  Other nodes retain the historical
+    frontmatter view until their authority contracts are reviewed separately.
+    """
+    visible = strip_candidate_to_frontmatter(
+        candidate_path, include_source_path=include_source_path
+    )
+    if str(node_id) == "L1":
+        visible.pop("question", None)
+        visible.pop("claim", None)
+    return visible
+
+
 def _condense_delta(delta_key, data):
     """Return a token-efficient, condensed copy of the delta data for aggregation."""
     if not isinstance(data, dict):
@@ -83,14 +102,14 @@ def _condense_delta(delta_key, data):
             for s in d["strategies"]:
                 if isinstance(s, dict) and "steps" in s and isinstance(s["steps"], list) and len(s["steps"]) > 5:
                     s["steps"] = s["steps"][:3] + [f"... ({len(s['steps'])} steps total)"]
-                    
+
     # 3. Truncate large output_files or script results in L7 Turing
     elif delta_key == "L7_turing":
         if "scripts_run" in d and isinstance(d["scripts_run"], list):
             for s in d["scripts_run"]:
                 if isinstance(s, dict) and "output_files" in s and isinstance(s["output_files"], list) and len(s["output_files"]) > 5:
                     s["output_files"] = s["output_files"][:3] + [f"... ({len(s['output_files'])} output files total)"]
-                    
+
     # 4. Truncate the profile-bound L8 audit evidence list.
     elif delta_key in {"L8_curie", "L8_tukey"}:
         if "evidence_verified" in d and isinstance(d["evidence_verified"], list) and len(d["evidence_verified"]) > 10:
@@ -102,14 +121,14 @@ def _condense_delta(delta_key, data):
             for p in d["papers"]:
                 if isinstance(p, dict) and "abstract" in p and isinstance(p["abstract"], str) and len(p["abstract"]) > 150:
                     p["abstract"] = p["abstract"][:150] + "... (truncated abstract)"
-                    
+
     # 6. Truncate huge gene lists in L9b Darwin module interpretations
     elif delta_key == "L9b_darwin":
         if "module_interpretations" in d and isinstance(d["module_interpretations"], list):
             for m in d["module_interpretations"]:
                 if isinstance(m, dict) and "genes" in m and isinstance(m["genes"], list) and len(m["genes"]) > 5:
                     m["genes"] = m["genes"][:5] + [f"... ({len(m['genes'])} genes total)"]
-                    
+
     return d
 
 def _generate_contract(node_info, project_dir, schema_version):
@@ -169,6 +188,7 @@ def cmd_assemble_context(args):
     profile_id = PROFILE_V20
     profile = get_profile(profile_id)
     hypothesis_snapshot = None
+    l1_research_seed = None
     if binding_path(project_dir).exists():
         store = getattr(args, "knowledge_store", None) or os.environ.get(
             "RLR_HYPOTHESIS_STORE"
@@ -181,6 +201,16 @@ def cmd_assemble_context(args):
             ledger = HypothesisLedger(store)
             profile_id = ledger.project_profile(project_dir)
             profile = get_profile(profile_id)
+            if node_id == "L1" and profile.delta_schema_version == "2.1":
+                try:
+                    l1_research_seed = research_seed.load_l1_research_seed(
+                        project_dir, args.cand_id
+                    )
+                except research_seed.ResearchSeedError as exc:
+                    raise LedgerError(
+                        f"native L1 canonical research seed is invalid: {exc}"
+                    ) from exc
+                round_id = str(l1_research_seed["round_id"])
             authorization_id = getattr(args, "authorization_id", None)
             if authorization_id:
                 hypothesis_snapshot = ledger.load_authorized_context(
@@ -272,19 +302,24 @@ def cmd_assemble_context(args):
         if profile_id != PROFILE_V20 and node_id == "L9b" and inp == "L9a":
             continue
         if inp == "candidate_frontmatter":
-            # L0 (input verification) sees the real source_input path; every
-            # other cognitive node sees only the path-free alias.
-            fm = strip_candidate_to_frontmatter(
-                cf, include_source_path=(node_id == "L0"))
+            # Native L1 receives semantic question/hypothesis only from the
+            # canonical L0 research seed.  Legacy v2.0 keeps its historical
+            # candidate-frontmatter view until that compatibility path is retired.
+            if l1_research_seed is not None:
+                fm = candidate_frontmatter_for_node(cf, node_id)
+            else:
+                fm = strip_candidate_to_frontmatter(
+                    cf, include_source_path=(node_id == "L0"))
             lines = ["=== CANDIDATE FRONTMATTER ==="]
             for k, v in fm.items():
                 lines.append(f"  {k}: {v}")
             sections.append("\n".join(lines))
             sections.append("")
+            if l1_research_seed is not None:
+                sections.append(research_seed.render_context_block(l1_research_seed))
+                sections.append("")
             # L0 (and only L0) physically receives the structured input contract
-            # in its rendered context -> it flows into the provider prompt. The
-            # scientific_question / source_input / previous_round fields are
-            # L0-only, exactly like the source_input path exception above.
+            # in its rendered context -> it flows into the provider prompt.
             if node_id == "L0" and l0_contract_obj is not None:
                 sections.append(l0_contract.render_contract_block(l0_contract_obj))
                 sections.append("")
@@ -649,6 +684,10 @@ def cmd_assemble_context(args):
                       if (is_exec and workspaces) else None),
         "pre_research": pre_research_meta,
         "deep_research_evidence": evidence_meta,
+        "research_seed": (
+            research_seed.manifest_entry(l1_research_seed)
+            if l1_research_seed is not None else None
+        ),
         "hypothesis_authorization": ({
             "authorization_id": hypothesis_snapshot["authorization_id"],
             "as_of_commit_seq": hypothesis_snapshot["as_of_commit_seq"],

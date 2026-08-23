@@ -10,11 +10,16 @@ Ensures that:
 4. Existing test gates and digests are preserved.
 """
 import json
+import os
 import sys
 import subprocess
 import tempfile
 from pathlib import Path
-from native_v2_helpers import activate_native_project
+
+from research_loop import l0_contract
+from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
+from research_loop.hypothesis_ledger import HypothesisLedger
+from research_loop.yamlio import _replace_field
 
 HERE = Path(__file__).resolve().parent
 RL = str(HERE.parent / "research_loop_v04.py")
@@ -28,16 +33,46 @@ def _run(*args):
 
 def _mkproj():
     d = tempfile.mkdtemp(prefix="rlr_pr3_")
-    (Path(d) / "00_Project_Index.md").write_text(
+    project = Path(d)
+    (project / "00_Project_Index.md").write_text(
         "---\nproject_name: T\nkind: project_index\n"
         "created_at: 2026-01-01T00:00:00\n---\n# T\n", encoding="utf-8")
-    cand = Path(d) / "01_Candidates"
+    cand = project / "01_Candidates"
     cand.mkdir(parents=True)
-    (cand / "C1.md").write_text(
+    candidate = cand / "C1.md"
+    candidate.write_text(
         "---\ncandidate_id: C1\ntitle: T\nquestion: Does X cause Y?\n"
         "claim: X causes Y\ncurrent_status: NEW\ncurrent_owner: Einstein\n"
+        "round_id: 1\nround_type: initial\n"
         "---\n# C1\n", encoding="utf-8")
-    return activate_native_project(d)
+
+    # This is a native v2.1 fixture. Native L1 is authorized by the L0 sidecar,
+    # not by duplicate candidate question/claim fields, so this fixture must
+    # satisfy the same canonical contract as a current project.
+    source_input = l0_contract.build_source_input(
+        input_type="inline",
+        description="synthetic pre-research fixture input",
+        fmt="text",
+    )
+    contract = l0_contract.promote_to_current_schema(
+        l0_contract.build_initial_contract(
+            "C1", "1", "Does X cause Y?", source_input, "X causes Y"
+        )
+    )
+    contract_path, contract_hash = l0_contract.write_contract(
+        project, "C1", contract
+    )
+    _replace_field(candidate, "schema_version", contract["schema_version"])
+    _replace_field(
+        candidate,
+        "input_contract_path",
+        contract_path.relative_to(project).as_posix(),
+    )
+    _replace_field(candidate, "input_contract_hash", contract_hash)
+    HypothesisLedger(os.environ["RLR_HYPOTHESIS_STORE"]).bind_project(
+        project, profile_id=DEFAULT_NATIVE_PROFILE
+    )
+    return d
 
 
 # 1. Running pre-research node L1 creates a placeholder that contains sections
@@ -57,10 +92,17 @@ def test_l1_placeholder_fails_gate():
     assert "## Source count" in text
     assert "NOT YET RUN" in text
 
-    # Assemble context on L1 must fail closed with rc=3 due to placeholder/NOT YET RUN
+    # Assemble context on L1 must fail closed with rc=3. Depending on exact-run
+    # history, the runtime may reject the placeholder itself or require an
+    # explicit evidence-run identity before it can evaluate the placeholder.
     r_assem = _run("assemble-context", d, "C1", "--node", "L1")
     assert r_assem.returncode == 3, f"expected rc=3, got {r_assem.returncode}: {r_assem.stderr}"
-    assert "gate" in r_assem.stderr.lower() or "not yet run" in r_assem.stderr.lower()
+    error = r_assem.stderr.lower()
+    assert (
+        "gate" in error
+        or "not yet run" in error
+        or "requires --evidence-run-id" in error
+    )
 
 
 # 2. Running pre-research node L4 creates a placeholder that contains sections
@@ -80,17 +122,23 @@ def test_l4_placeholder_fails_gate():
     assert "## Source count" in text
     assert "NOT YET RUN" in text
 
-    # Assemble context on L4 must fail closed with rc=3 due to placeholder/NOT YET RUN
+    # Assemble context on L4 must fail closed with rc=3. Exact-run ambiguity is
+    # also an intentional fail-closed outcome and is not a production failure.
     r_assem = _run("assemble-context", d, "C1", "--node", "L4")
     assert r_assem.returncode == 3, f"expected rc=3, got {r_assem.returncode}: {r_assem.stderr}"
-    assert "gate" in r_assem.stderr.lower() or "not yet run" in r_assem.stderr.lower()
+    error = r_assem.stderr.lower()
+    assert (
+        "gate" in error
+        or "not yet run" in error
+        or "requires --evidence-run-id" in error
+    )
 
 
 # 3. Running pre-research with --write-synthetic creates valid completed artifact
 #    and passes the gate.
 def test_write_synthetic_passes_gate():
     d = _mkproj()
-    
+
     # Write synthetic L1 pre-research
     r = _run("pre-research", d, "C1", "--node", "L1", "--write-synthetic")
     assert r.returncode == 0, f"expected rc=0 for pre-research, got {r.returncode}: {r.stderr}"
@@ -114,7 +162,7 @@ def test_write_synthetic_passes_gate():
 # 4. L7 pre-research node is not gated by literature provenance checks
 def test_l7_pre_research_not_gated():
     d = _mkproj()
-    
+
     # Running pre-research L7. By default it is "code_search", which is not a literature node.
     r = _run("pre-research", d, "C1", "--node", "L7")
     assert r.returncode == 0
@@ -131,22 +179,49 @@ def test_existing_file_not_overwritten():
     pr = Path(d) / "02_Agent_Notes" / "_pre_research"
     pr.mkdir(parents=True, exist_ok=True)
     target = pr / "L1_research.md"
-    
+
     # Write a custom partial/placeholder text
     custom_text = "## Runtime digest\nNOT YET RUN\n## Custom legacy section\nmy partial work\n"
     target.write_text(custom_text, encoding="utf-8")
-    
+
     # Run pre-research without --write-placeholder. It should NOT overwrite.
     r = _run("pre-research", d, "C1", "--node", "L1")
     assert r.returncode == 0
     assert target.read_text(encoding="utf-8") == custom_text, "file was overwritten silently"
-    
+
     # Run pre-research WITH --write-placeholder. It should overwrite.
     r2 = _run("pre-research", d, "C1", "--node", "L1", "--write-placeholder")
     assert r2.returncode == 0
     new_text = target.read_text(encoding="utf-8")
     assert new_text != custom_text, "file was not overwritten when requested"
     assert "## Query log" in new_text
+
+
+def test_l1_evidence_is_rejected_after_canonical_research_seed_drift():
+    d = _mkproj()
+    project = Path(d)
+
+    r = _run("pre-research", d, "C1", "--node", "L1", "--write-synthetic")
+    assert r.returncode == 0, r.stderr
+
+    lit_dir = project / "09_Literature_Database"
+    lit_dir.mkdir(parents=True, exist_ok=True)
+    (lit_dir / "smith2020.md").write_text("Title: Smith 2020", encoding="utf-8")
+
+    contract, _path, _raw = l0_contract.load_contract(project, "C1")
+    contract["scientific_question"] = "A different canonical scientific question"
+    contract_path, contract_hash = l0_contract.write_contract(project, "C1", contract)
+    candidate = project / "01_Candidates" / "C1.md"
+    _replace_field(
+        candidate,
+        "input_contract_path",
+        contract_path.relative_to(project).as_posix(),
+    )
+    _replace_field(candidate, "input_contract_hash", contract_hash)
+
+    r_assem = _run("assemble-context", d, "C1", "--node", "L1")
+    assert r_assem.returncode == 3, r_assem.stderr
+    assert "research seed" in r_assem.stderr.lower() or "evidence binding" in r_assem.stderr.lower()
 
 
 def _run_as_script():

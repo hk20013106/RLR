@@ -8,6 +8,11 @@ def install(topology_module) -> None:
         return
     nodes = {item["node"]: item for item in topology.DAG_NODES}
 
+    # Curie owns literature discovery for L1. Einstein consumes the frozen
+    # evidence handoff and therefore receives no direct knowledge-base channel.
+    # This explicit per-node policy wins over legacy fallback defaults applied
+    # later by the engine via setdefault().
+    nodes["L1"]["knowledge_base"] = "none"
     nodes["L1"]["conditional_routes"] = [
         {
             "condition": "1 <= committed_unique_hypothesis_count <= 4",
@@ -33,10 +38,11 @@ def install(topology_module) -> None:
         "Cite the recalled hypothesis and occurrence IDs, and provide an explicit "
         "reactivation basis whenever historical blockers or rejection exist",
     ])
-    nodes["L1"]["must_not"].append(
+    nodes["L1"]["must_not"].extend([
         "Silently copy a historical hypothesis as NEW or reuse a FALSIFIED "
-        "hypothesis without formal reopening"
-    )
+        "hypothesis without formal reopening",
+        "Access 09_Literature_Database directly; consume only the frozen Curie evidence supplied in context",
+    ])
     nodes["L3"]["must"].extend([
         "When a verified L2 skip receipt is present, independently triage the L1 "
         "hypotheses and explicitly acknowledge that no Feynman attack occurred",

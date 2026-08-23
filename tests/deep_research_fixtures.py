@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from research_loop import deep_research
+from research_loop import deep_research, research_seed
 from research_loop.hypothesis_ledger import binding_path
 from research_loop.paths import _pre_research_file
 from research_loop.topology import topology_for_profile
@@ -58,4 +58,9 @@ def persist_synthetic_evidence(project_dir, candidate_id, node, queries, *, resu
     pre_research.write_text(deep_research.render_pre_research_markdown(artifact), encoding="utf-8")
     ok, reason = deep_research.audit_evidence_pack(project_dir, candidate_id, node)
     assert ok, reason
+    if node == "L1":
+        seed = research_seed.load_l1_research_seed(project_dir, candidate_id)
+        research_seed.write_l1_evidence_binding(
+            project_dir, seed, artifact["run_id"]
+        )
     return artifact

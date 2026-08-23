@@ -9,6 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
 
+from research_loop import research_seed
 from research_loop.compatibility import get_profile
 from research_loop.hypothesis_ledger import HypothesisLedger, LedgerError, canonical_json
 from research_loop.hypothesis_recall import (
@@ -47,7 +48,11 @@ def _native_l1_identity(args) -> tuple[HypothesisLedger, dict[str, Any], str] | 
     candidate = _load_yaml_front(
         project / "01_Candidates" / f"{args.cand_id}.md"
     )
-    round_id = str(candidate.get("round_id") or "1")
+    try:
+        seed = research_seed.load_l1_research_seed(project, str(args.cand_id))
+    except research_seed.ResearchSeedError as exc:
+        raise LedgerError(f"canonical L1 research seed is invalid: {exc}") from exc
+    round_id = str(seed["round_id"])
     return ledger, candidate, round_id
 
 
@@ -63,10 +68,18 @@ def _load_bound_recall(
     except LedgerError:
         if os.environ.get(_AUTO_RECALL_ENV) != "1":
             raise
-        query_text = " ".join(
-            str(candidate.get(field) or "")
-            for field in ("question", "claim")
-        ).strip()
+        try:
+            seed = research_seed.load_l1_research_seed(
+                project, str(args.cand_id)
+            )
+        except research_seed.ResearchSeedError as exc:
+            raise LedgerError(
+                f"canonical L1 research seed is invalid: {exc}"
+            ) from exc
+        query_text = " ".join((
+            str(seed["scientific_question"]),
+            str(seed["hypothesis_seed"]),
+        )).strip()
         artifact = create_recall(
             ledger,
             project,
@@ -134,6 +147,26 @@ def _remove_generated_context(manifest_path: Path | None) -> None:
     manifest_path.unlink(missing_ok=True)
 
 
+def _l1_evidence_binding_entry(args, manifest: dict[str, Any]) -> dict[str, Any]:
+    project = Path(args.project_dir)
+    try:
+        seed = research_seed.load_l1_research_seed(project, str(args.cand_id))
+    except research_seed.ResearchSeedError as exc:
+        raise LedgerError(f"canonical L1 research seed is invalid: {exc}") from exc
+    pre_research = manifest.get("pre_research")
+    if not isinstance(pre_research, dict):
+        raise LedgerError("native L1 context manifest requires exact pre-research evidence")
+    run_id = str(pre_research.get("evidence_run_id") or "")
+    if not run_id:
+        raise LedgerError("native L1 context manifest requires exact evidence_run_id")
+    try:
+        return research_seed.evidence_binding_manifest_entry(
+            project, seed, run_id
+        )
+    except research_seed.ResearchSeedError as exc:
+        raise LedgerError(str(exc)) from exc
+
+
 def _install_context_gate(context_module) -> None:
     original = context_module.cmd_assemble_context
 
@@ -167,10 +200,18 @@ def _install_context_gate(context_module) -> None:
         rendered_path: Path | None = None
         try:
             manifest_path = _manifest_path(original_stderr)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            binding_entry = _l1_evidence_binding_entry(args, manifest)
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError,
+                LedgerError) as exc:
+            _remove_generated_context(manifest_path)
+            print(f"ERROR: L1 evidence binding gate -- {exc}", file=sys.stderr)
+            return 3
+
+        try:
             artifact = _load_bound_recall(
                 args, ledger, candidate, round_id
             )
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             rendered_path = Path(str(manifest["rendered_context_path"]))
             context_text = rendered_path.read_text(encoding="utf-8")
             recall_text = canonical_json(_concise_recall(artifact))
@@ -184,6 +225,7 @@ def _install_context_gate(context_module) -> None:
                 )
             rendered_path.write_text(context_text, encoding="utf-8")
             manifest["rendered_context_sha256"] = _sha256(rendered_path)
+            manifest["research_seed_evidence_binding"] = binding_entry
             manifest["hypothesis_recall"] = recall_manifest_entry(
                 args.project_dir, str(args.cand_id), round_id
             )
@@ -234,6 +276,53 @@ def _install_receipt_gate(ledger_commands_module) -> None:
             manifest = json.loads(Path(manifest_arg).read_text(encoding="utf-8"))
         except (OSError, TypeError, json.JSONDecodeError) as exc:
             raise LedgerError(f"invalid context manifest: {exc}") from exc
+
+        recorded_seed = manifest.get("research_seed")
+        if not isinstance(recorded_seed, dict):
+            raise LedgerError(
+                "native L1 context manifest requires canonical research seed"
+            )
+        try:
+            current_seed = research_seed.load_l1_research_seed(
+                args.project_dir, str(args.cand_id)
+            )
+        except research_seed.ResearchSeedError as exc:
+            raise LedgerError(
+                f"native L1 canonical research seed is invalid: {exc}"
+            ) from exc
+        if str(current_seed["round_id"]) != str(round_id):
+            raise LedgerError(
+                "native L1 canonical research seed round does not match emission"
+            )
+        current_seed_entry = research_seed.manifest_entry(current_seed)
+        if recorded_seed != current_seed_entry:
+            raise LedgerError(
+                "L1 canonical research seed changed since context assembly"
+            )
+
+        recorded_binding = manifest.get("research_seed_evidence_binding")
+        if not isinstance(recorded_binding, dict):
+            raise LedgerError(
+                "native L1 context manifest requires research-seed evidence binding"
+            )
+        evidence_run_id = str(recorded_binding.get("evidence_run_id") or "")
+        if not evidence_run_id:
+            raise LedgerError(
+                "native L1 research-seed evidence binding requires evidence_run_id"
+            )
+        try:
+            current_binding = research_seed.evidence_binding_manifest_entry(
+                args.project_dir, current_seed, evidence_run_id
+            )
+        except research_seed.ResearchSeedError as exc:
+            raise LedgerError(
+                f"native L1 research-seed evidence binding is invalid: {exc}"
+            ) from exc
+        if recorded_binding != current_binding:
+            raise LedgerError(
+                "L1 research-seed evidence binding changed since context assembly"
+            )
+
         recorded = manifest.get("hypothesis_recall")
         if not isinstance(recorded, dict):
             raise LedgerError(
@@ -271,7 +360,12 @@ def _install_receipt_gate(ledger_commands_module) -> None:
             raise LedgerError(
                 "hypothesis recall metadata changed since context assembly"
             )
-        return {**provenance, "hypothesis_recall": current}
+        return {
+            **provenance,
+            "research_seed": current_seed_entry,
+            "research_seed_evidence_binding": current_binding,
+            "hypothesis_recall": current,
+        }
 
     ledger_commands_module._validate_native_receipts = _validate_native_receipts
 
