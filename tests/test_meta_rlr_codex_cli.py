@@ -76,6 +76,25 @@ def test_codex_exec_is_ephemeral_bounded_and_workspace_write(tmp_path):
     assert not hasattr(result, "stderr")
 
 
+def test_codex_repair_isolates_test_cache_and_scratch_environment(tmp_path):
+    worktree = tmp_path / "repair"
+    worktree.mkdir()
+    runner = RecordingRunner(
+        {"status": "changed", "summary": "bounded repair", "tests_requested": [], "blocker": None}
+    )
+
+    CodexCli(runner=runner).run_repair(worktree=worktree, prompt="repair")
+
+    environment = runner.calls[0][1]["env"]
+    assert "-p no:cacheprovider" in environment["PYTEST_ADDOPTS"]
+    assert environment["PYTHONDONTWRITEBYTECODE"] == "1"
+    scratch = Path(environment["TEMP"]).resolve()
+    assert scratch.is_dir()
+    assert scratch == Path(environment["TMP"]).resolve()
+    assert scratch == Path(environment["TMPDIR"]).resolve()
+    assert worktree.resolve() not in scratch.parents
+
+
 def test_codex_nonzero_exit_fails_closed_without_model_text(tmp_path):
     worktree = tmp_path / "repair"
     worktree.mkdir()

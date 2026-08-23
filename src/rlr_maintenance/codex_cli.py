@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,12 +105,29 @@ class CodexCli:
             raise ValueError("Codex repair prompt must be non-empty")
         with tempfile.TemporaryDirectory(prefix="meta-rlr-codex-") as tmp:
             temp_root = Path(tmp)
+            # Keep repair-time test caches and interpreter scratch outside the
+            # verifier worktree.  Codex may run focused pytest commands, but
+            # its sandbox-created artifacts must remain independently readable.
+            scratch_root = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{root.name}.meta-rlr-codex-scratch-",
+                    dir=root.parent,
+                )
+            )
+            repair_env = dict(os.environ)
+            pytest_options = repair_env.get("PYTEST_ADDOPTS", "").strip()
+            repair_env["PYTEST_ADDOPTS"] = (
+                f"{pytest_options} -p no:cacheprovider".strip()
+            )
+            repair_env["PYTHONDONTWRITEBYTECODE"] = "1"
+            for variable in ("TEMP", "TMP", "TMPDIR"):
+                repair_env[variable] = str(scratch_root)
             schema_path = temp_root / "result.schema.json"
             output_path = temp_root / "last-message.json"
             schema_path.write_text(json.dumps(_RESULT_SCHEMA, sort_keys=True), encoding="utf-8")
             command = [*self._executable, "exec", "--ephemeral", "--sandbox", "workspace-write", "-C", str(root), "--output-schema", str(schema_path), "--output-last-message", str(output_path), "-"]
             if self._runner is not None:
-                completed = self._runner(command, cwd=root, input=prompt, text=True, encoding="utf-8", capture_output=True, shell=False)
+                completed = self._runner(command, cwd=root, env=repair_env, input=prompt, text=True, encoding="utf-8", capture_output=True, shell=False)
                 returncode = int(getattr(completed, "returncode"))
                 if returncode != 0:
                     raise CodexError(f"Codex command failed with exit code {returncode}")
@@ -133,6 +151,7 @@ class CodexCli:
                     inactivity_timeout=self._inactivity_timeout,
                     observer_interval=self._observer_interval,
                     cwd=root,
+                    env=repair_env,
                     input_text=prompt,
                 )
                 final_status = str(getattr(execution, "final_status", "unknown"))

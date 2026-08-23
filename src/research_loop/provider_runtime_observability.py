@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 try:  # Optional at import time; requirements install it in supported runtime.
     import psutil  # type: ignore
@@ -284,6 +284,7 @@ def run_observed_provider(
     inactivity_timeout: float | None = None,
     observer_interval: float = 1.0,
     cwd: str | Path | None = None,
+    env: Mapping[str, str] | None = None,
     input_text: str | None = None,
 ) -> ProviderExecution:
     """Run one provider while streaming semantic events and process telemetry."""
@@ -380,6 +381,8 @@ def run_observed_provider(
         popen_kwargs["start_new_session"] = True
     if cwd is not None:
         popen_kwargs["cwd"] = str(effective_cwd)
+    if env is not None:
+        popen_kwargs["env"] = dict(env)
     try:
         process = _subprocess.Popen(prepared, **popen_kwargs)
     except OSError as exc:
