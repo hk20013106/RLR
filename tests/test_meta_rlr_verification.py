@@ -1,4 +1,5 @@
 import json
+import os
 from types import SimpleNamespace
 import time
 
@@ -9,6 +10,9 @@ from rlr_maintenance.verification import (
     run_profile,
 )
 from rlr_maintenance.profiles import get_profile
+
+
+AUTOWAKE_RETRY_GUARD_ENV = "RLR_META_RLR_AUTOWAKE_RETRY"
 
 
 def test_required_failure_makes_receipt_fail(tmp_path):
@@ -91,7 +95,7 @@ def test_required_verification_timeout_marks_receipt_failed(tmp_path):
 def test_verification_timeout_is_profile_wide_remaining_budget(tmp_path, monkeypatch):
     calls = []
 
-    def fake_run(command, *, timeout, cwd, max_output_bytes):
+    def fake_run(command, *, timeout, cwd, env, max_output_bytes):
         calls.append(timeout)
         time.sleep(0.05)
         return SimpleNamespace(
@@ -116,7 +120,7 @@ def test_verification_timeout_is_profile_wide_remaining_budget(tmp_path, monkeyp
 def test_verification_stops_when_profile_budget_exhausted(tmp_path, monkeypatch):
     calls = []
 
-    def fake_run(command, *, timeout, cwd, max_output_bytes):
+    def fake_run(command, *, timeout, cwd, env, max_output_bytes):
         calls.append(timeout)
         time.sleep(0.2)
         return SimpleNamespace(
@@ -248,3 +252,24 @@ def test_verification_uses_process_reader_tail_when_output_was_bounded(tmp_path)
     assert receipt.steps[0].stdout_evidence == "actual stdout tail"
     assert receipt.steps[0].stderr_evidence == "actual stderr tail"
     assert receipt.steps[0].output_truncated is True
+
+
+def test_verification_child_environment_isolates_meta_rlr_retry_guard(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(AUTOWAKE_RETRY_GUARD_ENV, "1")
+    monkeypatch.setenv("RLR_VERIFICATION_KEEP_ME", "preserve")
+    child_environments = []
+
+    def fake_run(command, **kwargs):
+        child_environments.append(kwargs["env"])
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    run_profile("l0_state_integrity", tmp_path, runner=fake_run)
+
+    assert len(child_environments) == len(
+        get_profile("l0_state_integrity").required_validation
+    )
+    assert all(AUTOWAKE_RETRY_GUARD_ENV not in env for env in child_environments)
+    assert all(env["RLR_VERIFICATION_KEEP_ME"] == "preserve" for env in child_environments)
+    assert os.environ[AUTOWAKE_RETRY_GUARD_ENV] == "1"

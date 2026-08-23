@@ -19,6 +19,14 @@ VERIFICATION_RECEIPT_SCHEMA = "RLRVerificationReceipt/v2"
 VERIFICATION_RECEIPT_FILENAME = "verification_receipt.json"
 VERIFICATION_COMMAND_TIMEOUT = 3600.0
 
+# This is the only currently defined Meta-RLR variable whose meaning is
+# explicitly limited to the maintenance/retry execution tree.  Keep config
+# variables and ordinary host environment intact; only this recursion guard
+# must not leak into independent verifier children.
+_MAINTENANCE_TRANSIENT_ENV_VARS = frozenset(
+    {"RLR_META_RLR_AUTOWAKE_RETRY"}
+)
+
 
 @dataclass(frozen=True)
 class VerificationStepResult:
@@ -60,6 +68,14 @@ def _digest_text(value: str | None) -> tuple[str, int]:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _verification_child_environment() -> dict[str, str]:
+    """Return an explicit child environment without maintenance-only guards."""
+    environment = dict(os.environ)
+    for variable in _MAINTENANCE_TRANSIENT_ENV_VARS:
+        environment.pop(variable, None)
+    return environment
 
 
 def _bounded_tail(value: str | None, max_bytes: int) -> str:
@@ -167,6 +183,7 @@ def run_profile(
     started_at = _now()
     steps = tuple(profile.required_validation)
     unexecuted: list[str] = []
+    child_environment = _verification_child_environment()
 
     for index, step in enumerate(steps):
         remaining = timeout - (time.monotonic() - started_monotonic)
@@ -183,12 +200,14 @@ def run_profile(
                     list(step.command),
                     timeout=remaining,
                     cwd=root,
+                    env=dict(child_environment),
                     max_output_bytes=max_output_bytes,
                 )
             else:
                 completed = runner(
                     list(step.command),
                     cwd=root,
+                    env=dict(child_environment),
                     text=True,
                     encoding="utf-8",
                     capture_output=True,
