@@ -1,23 +1,32 @@
-"""Real-time provider supervision installed around the stable Deep Research API.
+"""Real-time provider supervision over the canonical ProviderExecutor boundary.
 
-The extension preserves the existing scientific persistence/gate path. It only
-replaces the long subprocess boundary with streaming observation and installs
-backward-compatible detached-task status handling.
+ProviderExecutor owns process spawning, hard timeouts, and process-tree cleanup.
+This module is deliberately non-owning: it interprets provider JSONL, publishes
+runtime status, applies semantic inactivity policy, and persists replayable
+runtime receipts. Detached-task compatibility is installed here so there is no
+second execution/proxy owner.
 """
 from __future__ import annotations
 
+import codecs
 import contextvars
 import hashlib
 import json
 import os
-import subprocess as _subprocess
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
+
+from research_loop.providers.executor import (
+    ProviderExecutionError,
+    ProviderExecutionResult,
+    ProviderExecutor,
+    run_bounded_process,
+)
 
 try:  # Optional at import time; requirements install it in supported runtime.
     import psutil  # type: ignore
@@ -38,6 +47,7 @@ _TERMINAL_STATES = {
 }
 _ALLOWED_STATES = _TERMINAL_STATES | {
     "starting", "running", "waiting_external", "validating", "persisting",
+    "failed",
 }
 
 
@@ -146,7 +156,13 @@ def _process_snapshot(pid: int) -> dict:
             alive = True
         except OSError:
             alive = False
-        return {"alive": alive, "cpu_seconds": None, "io_bytes": None, "children": []}
+        return {
+            "alive": alive,
+            "cpu_seconds": None,
+            "io_bytes": None,
+            "children": [],
+            "process_tree_pids": [pid] if alive else [],
+        }
     try:
         process = psutil.Process(pid)
         children = [child.pid for child in process.children(recursive=True) if child.is_running()]
@@ -181,71 +197,17 @@ def _process_snapshot(pid: int) -> dict:
         }
 
 
-def _terminate_process_tree(process: _subprocess.Popen, grace: float = 2.0) -> dict:
-    attempted = process.poll() is None
-    targeted: list[int] = []
-    terminated: list[int] = []
-    killed: list[int] = []
-    errors: list[str] = []
-    if attempted and psutil is not None:
-        try:
-            root = psutil.Process(process.pid)
-            children = root.children(recursive=True)
-            targeted = [child.pid for child in children] + [root.pid]
-            for child in reversed(children):
-                try:
-                    child.terminate()
-                    terminated.append(child.pid)
-                except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
-                    errors.append(f"terminate {child.pid}: {exc}")
-            try:
-                root.terminate()
-                terminated.append(root.pid)
-            except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
-                errors.append(f"terminate {root.pid}: {exc}")
-            _, alive = psutil.wait_procs(children + [root], timeout=grace)
-            for remaining in alive:
-                try:
-                    remaining.kill()
-                    killed.append(remaining.pid)
-                except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
-                    errors.append(f"kill {remaining.pid}: {exc}")
-            psutil.wait_procs(alive, timeout=grace)
-        except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
-            errors.append(str(exc))
-    elif attempted:
-        targeted = [process.pid]
-        try:
-            process.terminate()
-            process.wait(timeout=grace)
-            terminated.append(process.pid)
-        except (_subprocess.TimeoutExpired, OSError):
-            try:
-                process.kill()
-                process.wait(timeout=grace)
-                killed.append(process.pid)
-            except (OSError, _subprocess.TimeoutExpired) as exc:
-                errors.append(str(exc))
-    alive_after = process.poll() is None
-    return {
-        "attempted": attempted,
-        "targeted_pids": targeted,
-        "terminated_pids": terminated,
-        "killed_pids": killed,
-        "errors": errors,
-        "provider_alive_after_cleanup": alive_after,
-    }
-
-
-def _version_for(command: list[str]) -> str:
+def _version_for(command: Sequence[str]) -> str:
     if not command:
         return "unknown"
     try:
-        completed = _subprocess.run(
-            [command[0], "--version"], capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=10, check=False,
+        completed = ProviderExecutor().run(
+            [str(command[0]), "--version"],
+            timeout=10,
+            check=False,
+            max_output_bytes=500,
         )
-    except (OSError, _subprocess.SubprocessError):
+    except (OSError, ProviderExecutionError):
         return "unknown"
     text = (completed.stdout or completed.stderr or "").strip()
     return text[:500] or "unknown"
@@ -265,10 +227,264 @@ def _prepare_command(command: list[str], backend: str, final_output: Path) -> li
             prepared[index + 1] = str(final_output)
             break
     else:
-        # The canonical command already carries the flag. This fallback supports
-        # deterministic fixture executables and older callers.
+        # Canonical Codex execution writes the final structured response to a
+        # separate file while stdout remains the observable JSONL event stream.
         prepared.extend(["--output-last-message", str(final_output)])
     return prepared
+
+
+class _RuntimeObserver:
+    """Non-owning observer consumed by providers.executor.run_bounded_process."""
+
+    def __init__(
+        self,
+        *,
+        runtime_dir: Path,
+        backend: str,
+        task_id: str,
+        candidate_id: str,
+        node: str,
+        inactivity_timeout: float | None,
+    ) -> None:
+        self.runtime_dir = runtime_dir
+        self.backend = backend
+        self.task_id = task_id
+        self.candidate_id = candidate_id
+        self.node = node
+        self.inactivity_timeout = inactivity_timeout
+        self.status_path = runtime_dir / "status.json"
+        self.events_path = runtime_dir / "events.jsonl"
+        self.stderr_path = runtime_dir / "stderr.log"
+        self.final_output_path = runtime_dir / "final_output.json"
+        self.started_at = _now()
+        self.started_monotonic = time.monotonic()
+        self.last_activity_monotonic = self.started_monotonic
+        self.lock = threading.RLock()
+        self.decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self.line_buffer = ""
+        self.last_snapshot: dict[str, Any] = {}
+        self.shared: dict[str, Any] = {
+            "revision": 0,
+            "state": "starting",
+            "thread_id": "",
+            "provider_pid": None,
+            "provider_alive": False,
+            "observer_heartbeat_at": self.started_at,
+            "last_provider_event_at": "",
+            "last_provider_event": {},
+            "last_successful_event": {},
+            "current_item": {},
+            "event_bytes": 0,
+            "stderr_bytes": 0,
+            "final_output_bytes": 0,
+            "event_parse_errors": 0,
+            "last_process_activity_at": "",
+            "last_activity_at": self.started_at,
+            "cpu_seconds": None,
+            "io_bytes": None,
+            "child_pids": [],
+            "process_tree_pids": [],
+            "termination_reason": "",
+        }
+        self.events_path.touch(exist_ok=True)
+        self.stderr_path.touch(exist_ok=True)
+        self.publish()
+
+    def publish(self, **changes: Any) -> None:
+        with self.lock:
+            self.shared.update(changes)
+            self.shared["revision"] = int(self.shared.get("revision", 0)) + 1
+            value = {
+                "schema_version": STATUS_SCHEMA,
+                "task_schema_version": _TASK_SCHEMA_V2,
+                "task_id": self.task_id,
+                "attempt_id": os.environ.get("RLR_DEEP_RESEARCH_ATTEMPT_ID", ""),
+                "candidate_id": self.candidate_id,
+                "node": self.node,
+                "backend": self.backend,
+                "state": self.shared["state"],
+                "revision": self.shared["revision"],
+                "started_at": self.started_at,
+                "updated_at": _now(),
+                "provider_pid": self.shared["provider_pid"],
+                "provider_alive": self.shared["provider_alive"],
+                "observer_heartbeat_at": self.shared["observer_heartbeat_at"],
+                "last_provider_event_at": self.shared["last_provider_event_at"],
+                "last_provider_event": self.shared["last_provider_event"],
+                "last_successful_event": self.shared["last_successful_event"],
+                "current_item": self.shared["current_item"],
+                "event_bytes": self.shared["event_bytes"],
+                "stderr_bytes": self.shared["stderr_bytes"],
+                "final_output_bytes": self.shared["final_output_bytes"],
+                "event_parse_errors": self.shared["event_parse_errors"],
+                "last_process_activity_at": self.shared["last_process_activity_at"],
+                "last_activity_at": self.shared["last_activity_at"],
+                "process_activity": {
+                    "cpu_seconds": self.shared["cpu_seconds"],
+                    "io_bytes": self.shared["io_bytes"],
+                    "child_pids": self.shared["child_pids"],
+                    "process_tree_pids": self.shared["process_tree_pids"],
+                },
+                "termination_reason": self.shared["termination_reason"],
+                "elapsed_seconds": round(time.monotonic() - self.started_monotonic, 3),
+            }
+            _write_json_atomic(self.status_path, value)
+
+    def on_start(self, pid: int) -> None:
+        snapshot = _process_snapshot(pid)
+        self.last_snapshot = snapshot
+        now = _now()
+        changes: dict[str, Any] = {
+            "state": "running",
+            "provider_pid": pid,
+            "provider_alive": bool(snapshot.get("alive", True)),
+            "last_process_activity_at": now,
+            "last_activity_at": now,
+            "child_pids": snapshot.get("children", []),
+            "process_tree_pids": snapshot.get("process_tree_pids", [pid]),
+        }
+        if snapshot.get("cpu_seconds") is not None:
+            changes["cpu_seconds"] = snapshot["cpu_seconds"]
+        if snapshot.get("io_bytes") is not None:
+            changes["io_bytes"] = snapshot["io_bytes"]
+        self.publish(**changes)
+
+    def _handle_event_line(self, line: str) -> None:
+        if not line.strip():
+            return
+        at = _now()
+        try:
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise ValueError("event is not an object")
+        except (json.JSONDecodeError, ValueError):
+            self.publish(
+                event_parse_errors=int(self.shared["event_parse_errors"]) + 1,
+                last_activity_at=at,
+            )
+            return
+
+        event_type = str(event.get("type") or "unknown")
+        changes: dict[str, Any] = {
+            "last_provider_event_at": at,
+            "last_provider_event": _safe_event(event),
+            "last_activity_at": at,
+        }
+        if event_type not in {"error", "turn.failed"}:
+            changes["last_successful_event"] = _safe_event(event)
+        if event_type == "thread.started":
+            changes["thread_id"] = str(event.get("thread_id") or "")
+        item = event.get("item")
+        if event_type in {"item.started", "item.updated"} and isinstance(item, dict):
+            safe = _safe_item(item)
+            changes["current_item"] = safe
+            changes["state"] = _state_for_item(safe)
+        elif event_type == "item.completed" and isinstance(item, dict):
+            if self.shared.get("current_item", {}).get("id") == str(item.get("id") or ""):
+                changes["current_item"] = {}
+            changes["state"] = "running"
+        elif event_type == "turn.completed":
+            changes["state"] = "validating"
+        elif event_type == "turn.failed":
+            changes["state"] = "provider_failed"
+        # A recoverable `error` event is evidence, not terminal authority.
+        self.last_activity_monotonic = time.monotonic()
+        self.publish(**changes)
+
+    def on_stdout(self, chunk: bytes) -> None:
+        with self.lock:
+            with self.events_path.open("ab") as stream:
+                stream.write(chunk)
+                stream.flush()
+            self.shared["event_bytes"] = int(self.shared["event_bytes"]) + len(chunk)
+            decoded = self.decoder.decode(chunk)
+            self.line_buffer += decoded
+            lines = self.line_buffer.split("\n")
+            self.line_buffer = lines.pop()
+            for line in lines:
+                self._handle_event_line(line.rstrip("\r"))
+            self.publish(event_bytes=self.shared["event_bytes"])
+
+    def on_stderr(self, chunk: bytes) -> None:
+        with self.lock:
+            with self.stderr_path.open("ab") as stream:
+                stream.write(chunk)
+                stream.flush()
+            # stderr diagnostics are persisted but do not count as semantic
+            # progress for inactivity timeout.
+            self.publish(stderr_bytes=int(self.shared["stderr_bytes"]) + len(chunk))
+
+    def on_poll(self, pid: int, elapsed_seconds: float) -> str | None:
+        del elapsed_seconds
+        snapshot = _process_snapshot(pid)
+        previous = self.last_snapshot
+        cpu_seconds = snapshot.get("cpu_seconds")
+        io_bytes = snapshot.get("io_bytes")
+        process_tree_changed = (
+            snapshot.get("process_tree_pids", [])
+            != previous.get("process_tree_pids", [])
+        )
+        activity_changed = process_tree_changed or (
+            cpu_seconds is not None and cpu_seconds != self.shared.get("cpu_seconds")
+        ) or (
+            io_bytes is not None and io_bytes != self.shared.get("io_bytes")
+        )
+        changes: dict[str, Any] = {
+            "observer_heartbeat_at": _now(),
+            "provider_alive": bool(snapshot.get("alive")),
+            "child_pids": snapshot.get("children", []),
+            "process_tree_pids": snapshot.get("process_tree_pids", []),
+        }
+        if cpu_seconds is not None:
+            changes["cpu_seconds"] = cpu_seconds
+        if io_bytes is not None:
+            changes["io_bytes"] = io_bytes
+        if activity_changed:
+            now = _now()
+            changes["last_process_activity_at"] = now
+            changes["last_activity_at"] = now
+            self.last_activity_monotonic = time.monotonic()
+        self.last_snapshot = snapshot
+        self.publish(**changes)
+        if (
+            self.inactivity_timeout is not None
+            and time.monotonic() - self.last_activity_monotonic >= self.inactivity_timeout
+        ):
+            self.publish(
+                state="inactivity_timed_out",
+                termination_reason="inactivity_timeout",
+            )
+            return "inactivity_timed_out"
+        return None
+
+    def on_finish(self, pid: int, returncode: int | None, terminal_state: str) -> None:
+        del pid, returncode
+        remainder = self.decoder.decode(b"", final=True)
+        if remainder:
+            self.line_buffer += remainder
+        if self.line_buffer.strip():
+            self._handle_event_line(self.line_buffer.rstrip("\r"))
+            self.line_buffer = ""
+        self.publish(
+            provider_alive=False,
+            observer_heartbeat_at=_now(),
+            termination_reason=(
+                "job_timeout" if terminal_state == "timed_out"
+                else "inactivity_timeout" if terminal_state == "inactivity_timed_out"
+                else self.shared.get("termination_reason", "")
+            ),
+        )
+
+
+def _receipt_cleanup(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "attempted": bool(value.get("attempted", False)),
+        "targeted_pids": list(value.get("targeted_pids", [])),
+        "terminated_pids": list(value.get("terminated_pids", [])),
+        "killed_pids": list(value.get("killed_pids", [])),
+        "errors": list(value.get("errors", [])),
+        "provider_alive_after_cleanup": bool(value.get("alive_after_cleanup", False)),
+    }
 
 
 def run_observed_provider(
@@ -287,300 +503,133 @@ def run_observed_provider(
     env: Mapping[str, str] | None = None,
     input_text: str | None = None,
 ) -> ProviderExecution:
-    """Run one provider while streaming semantic events and process telemetry."""
+    """Execute one observed provider via the canonical bounded process engine."""
     runtime_dir = Path(runtime_dir)
     effective_cwd = Path(cwd).resolve() if cwd is not None else Path.cwd()
     runtime_dir.mkdir(parents=True, exist_ok=True)
-    status_path = runtime_dir / "status.json"
-    events_path = runtime_dir / "events.jsonl"
-    stderr_path = runtime_dir / "stderr.log"
     final_output_path = runtime_dir / "final_output.json"
     receipt_path = runtime_dir / "runtime_receipt.json"
-    for path in (events_path, stderr_path):
-        path.touch(exist_ok=True)
     prepared = _prepare_command(command, backend, final_output_path)
-    started_at = _now()
-    started_monotonic = time.monotonic()
-    lock = threading.RLock()
-    shared: dict[str, Any] = {
-        "revision": 0,
-        "state": "starting",
-        "thread_id": "",
-        "provider_pid": None,
-        "provider_alive": False,
-        "observer_heartbeat_at": started_at,
-        "last_provider_event_at": "",
-        "last_provider_event": {},
-        "last_successful_event": {},
-        "current_item": {},
-        "event_bytes": 0,
-        "stderr_bytes": 0,
-        "final_output_bytes": 0,
-        "event_parse_errors": 0,
-        "last_process_activity_at": "",
-        "last_activity_at": started_at,
-        "cpu_seconds": None,
-        "io_bytes": None,
-        "child_pids": [],
-        "process_tree_pids": [],
-        "termination_reason": "",
-    }
+    observer = _RuntimeObserver(
+        runtime_dir=runtime_dir,
+        backend=backend,
+        task_id=task_id,
+        candidate_id=candidate_id,
+        node=node,
+        inactivity_timeout=inactivity_timeout,
+    )
 
-    def publish(**changes: Any) -> None:
-        with lock:
-            shared.update(changes)
-            shared["revision"] = int(shared.get("revision", 0)) + 1
-            value = {
-                "schema_version": STATUS_SCHEMA,
-                "task_schema_version": _TASK_SCHEMA_V2,
-                "task_id": task_id,
-                "attempt_id": os.environ.get("RLR_DEEP_RESEARCH_ATTEMPT_ID", ""),
-                "candidate_id": candidate_id,
-                "node": node,
-                "backend": backend,
-                "state": shared["state"],
-                "revision": shared["revision"],
-                "started_at": started_at,
-                "updated_at": _now(),
-                "provider_pid": shared["provider_pid"],
-                "provider_alive": shared["provider_alive"],
-                "observer_heartbeat_at": shared["observer_heartbeat_at"],
-                "last_provider_event_at": shared["last_provider_event_at"],
-                "last_provider_event": shared["last_provider_event"],
-                "last_successful_event": shared["last_successful_event"],
-                "current_item": shared["current_item"],
-                "event_bytes": shared["event_bytes"],
-                "stderr_bytes": shared["stderr_bytes"],
-                "final_output_bytes": shared["final_output_bytes"],
-                "event_parse_errors": shared["event_parse_errors"],
-                "last_process_activity_at": shared["last_process_activity_at"],
-                "last_activity_at": shared["last_activity_at"],
-                "process_activity": {
-                    "cpu_seconds": shared["cpu_seconds"],
-                    "io_bytes": shared["io_bytes"],
-                    "child_pids": shared["child_pids"],
-                    "process_tree_pids": shared["process_tree_pids"],
-                },
-                "termination_reason": shared["termination_reason"],
-                "elapsed_seconds": round(time.monotonic() - started_monotonic, 3),
-            }
-            _write_json_atomic(status_path, value)
-
-    publish()
-    popen_kwargs: dict[str, Any] = {
-        "stdout": _subprocess.PIPE,
-        "stderr": _subprocess.PIPE,
-        "stdin": _subprocess.PIPE if input_text is not None else _subprocess.DEVNULL,
-        "text": True,
-        "encoding": "utf-8",
-        "errors": "replace",
-        "bufsize": 1,
-    }
-    if os.name == "nt":
-        popen_kwargs["creationflags"] = _subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        popen_kwargs["start_new_session"] = True
-    if cwd is not None:
-        popen_kwargs["cwd"] = str(effective_cwd)
-    if env is not None:
-        popen_kwargs["env"] = dict(env)
     try:
-        process = _subprocess.Popen(prepared, **popen_kwargs)
+        bounded = run_bounded_process(
+            prepared,
+            timeout=job_timeout,
+            cwd=effective_cwd,
+            env=env,
+            input_text=input_text,
+            observer=observer,
+            poll_interval=observer_interval,
+            # Runtime artifacts own complete stream persistence. The bounded
+            # result retains a generous diagnostic copy without becoming the
+            # provenance owner.
+            max_output_bytes=4 * 1024 * 1024,
+        )
     except OSError as exc:
-        publish(state="transport_lost", termination_reason=f"launch_failed: {exc}")
+        observer.publish(state="transport_lost", termination_reason=f"launch_failed: {exc}")
         cleanup = {
-            "attempted": False, "targeted_pids": [], "terminated_pids": [],
-            "killed_pids": [], "errors": [str(exc)],
+            "attempted": False,
+            "targeted_pids": [],
+            "terminated_pids": [],
+            "killed_pids": [],
+            "errors": [str(exc)],
             "provider_alive_after_cleanup": False,
         }
-        receipt = _finalize_receipt(
-            runtime_dir, task_id, candidate_id, node, backend, command, prompt,
-            "unknown", started_at, "transport_lost", None, None,
-            shared, cleanup, prepared, str(effective_cwd), job_timeout,
-            inactivity_timeout, observer_interval,
+        receipt_hash = _finalize_receipt(
+            runtime_dir,
+            task_id,
+            candidate_id,
+            node,
+            backend,
+            command,
+            prompt,
+            "unknown",
+            observer.started_at,
+            "transport_lost",
+            None,
+            None,
+            observer.shared,
+            cleanup,
+            prepared,
+            str(effective_cwd),
+            job_timeout,
+            inactivity_timeout,
+            observer_interval,
         )
         return ProviderExecution(
             prepared, 127, "", str(exc), "transport_lost", runtime_dir,
-            receipt_path, receipt,
+            receipt_path, receipt_hash,
         )
-    publish(
-        state="running", provider_pid=process.pid, provider_alive=True,
-        last_process_activity_at=_now(),
-    )
-    if input_text is not None and process.stdin is not None:
-        try:
-            process.stdin.write(input_text)
-            process.stdin.close()
-        except (BrokenPipeError, OSError):
-            pass
 
-    last_activity_monotonic = started_monotonic
+    if bounded.terminal_state == "timed_out":
+        final_status = "job_timed_out"
+        termination_reason = "job_timeout"
+    elif bounded.terminal_state == "inactivity_timed_out":
+        final_status = "inactivity_timed_out"
+        termination_reason = "inactivity_timeout"
+    elif bounded.returncode not in (0, None):
+        final_status = "provider_failed"
+        termination_reason = "provider_exit_nonzero"
+    elif not final_output_path.is_file():
+        final_status = "provider_dead"
+        termination_reason = "provider_exited_without_final_output"
+    else:
+        final_status = "succeeded"
+        termination_reason = "completed"
 
-    def read_stdout() -> None:
-        assert process.stdout is not None
-        with events_path.open("a", encoding="utf-8", newline="") as stream:
-            for line in process.stdout:
-                stream.write(line)
-                stream.flush()
-                encoded = line.encode("utf-8")
-                at = _now()
-                try:
-                    event = json.loads(line)
-                    if not isinstance(event, dict):
-                        raise ValueError("event is not an object")
-                except (json.JSONDecodeError, ValueError):
-                    publish(
-                        event_bytes=shared["event_bytes"] + len(encoded),
-                        event_parse_errors=shared["event_parse_errors"] + 1,
-                        last_activity_at=at,
-                    )
-                    continue
-                event_type = str(event.get("type") or "unknown")
-                changes: dict[str, Any] = {
-                    "event_bytes": shared["event_bytes"] + len(encoded),
-                    "last_provider_event_at": at,
-                    "last_provider_event": _safe_event(event),
-                    "last_activity_at": at,
-                }
-                if event_type not in {"error", "turn.failed"}:
-                    changes["last_successful_event"] = _safe_event(event)
-                if event_type == "thread.started":
-                    changes["thread_id"] = str(event.get("thread_id") or "")
-                item = event.get("item")
-                if event_type in {"item.started", "item.updated"} and isinstance(item, dict):
-                    safe = _safe_item(item)
-                    changes["current_item"] = safe
-                    changes["state"] = _state_for_item(safe)
-                elif event_type == "item.completed" and isinstance(item, dict):
-                    if shared.get("current_item", {}).get("id") == str(item.get("id") or ""):
-                        changes["current_item"] = {}
-                    changes["state"] = "running"
-                elif event_type == "turn.completed":
-                    changes["state"] = "validating"
-                elif event_type == "turn.failed":
-                    changes["state"] = "provider_failed"
-                publish(**changes)
-                # Only a parseable provider event is semantic progress.
-                last_activity_monotonic = time.monotonic()
-
-    def read_stderr() -> None:
-        assert process.stderr is not None
-        with stderr_path.open("a", encoding="utf-8", newline="") as stream:
-            for line in process.stderr:
-                stream.write(line)
-                stream.flush()
-                publish(
-                    stderr_bytes=shared["stderr_bytes"] + len(line.encode("utf-8")),
-                )
-
-    stdout_thread = threading.Thread(target=read_stdout, name="provider-stdout", daemon=True)
-    stderr_thread = threading.Thread(target=read_stderr, name="provider-stderr", daemon=True)
-    stdout_thread.start()
-    stderr_thread.start()
-    last_snapshot = _process_snapshot(process.pid)
-    initial_changes: dict[str, Any] = {
-        "provider_alive": bool(last_snapshot["alive"]),
-        "child_pids": last_snapshot.get("children", []),
-        "process_tree_pids": last_snapshot.get("process_tree_pids", []),
-    }
-    if last_snapshot.get("cpu_seconds") is not None:
-        initial_changes["cpu_seconds"] = last_snapshot.get("cpu_seconds")
-    if last_snapshot.get("io_bytes") is not None:
-        initial_changes["io_bytes"] = last_snapshot.get("io_bytes")
-    publish(**initial_changes)
-    cleanup = {
-        "attempted": False, "targeted_pids": [], "terminated_pids": [],
-        "killed_pids": [], "errors": [], "provider_alive_after_cleanup": False,
-    }
-    final_status = "succeeded"
-    termination_reason = "completed"
-    last_event_bytes = int(shared.get("event_bytes", 0))
-    last_stderr_bytes = int(shared.get("stderr_bytes", 0))
-    while process.poll() is None:
-        time.sleep(max(0.01, observer_interval))
-        snapshot = _process_snapshot(process.pid)
-        cpu_seconds = snapshot.get("cpu_seconds")
-        io_bytes = snapshot.get("io_bytes")
-        process_tree_changed = snapshot.get("process_tree_pids", []) != last_snapshot.get("process_tree_pids", [])
-        activity_changed = process_tree_changed or (
-            (cpu_seconds is not None and cpu_seconds != shared.get("cpu_seconds"))
-            or (io_bytes is not None and io_bytes != shared.get("io_bytes"))
-        )
-        semantic_stream_activity = last_event_bytes != shared.get("event_bytes")
-        changes = {
-            "observer_heartbeat_at": _now(),
-            "provider_alive": bool(snapshot["alive"]),
-            "child_pids": snapshot.get("children", []),
-            "process_tree_pids": snapshot.get("process_tree_pids", []),
-        }
-        if cpu_seconds is not None:
-            changes["cpu_seconds"] = cpu_seconds
-        if io_bytes is not None:
-            changes["io_bytes"] = io_bytes
-        if activity_changed:
-            activity_at = _now()
-            changes["last_process_activity_at"] = activity_at
-            changes["last_activity_at"] = activity_at
-        elif semantic_stream_activity:
-            last_activity_monotonic = time.monotonic()
-        if activity_changed:
-            last_activity_monotonic = time.monotonic()
-        publish(**changes)
-        last_event_bytes = int(shared.get("event_bytes", 0))
-        last_stderr_bytes = int(shared.get("stderr_bytes", 0))
-        last_snapshot = snapshot
-        if (
-            inactivity_timeout is not None
-            and time.monotonic() - last_activity_monotonic >= inactivity_timeout
-        ):
-            final_status = "inactivity_timed_out"
-            termination_reason = "inactivity_timeout"
-            publish(state=final_status, termination_reason=termination_reason)
-            cleanup = _terminate_process_tree(process)
-            break
-        # The hard ceiling is deliberately checked after inactivity: it is an
-        # emergency guard, while inactivity is the ordinary stuck criterion.
-        if job_timeout is not None and time.monotonic() - started_monotonic >= job_timeout:
-            final_status = "job_timed_out"
-            termination_reason = "job_timeout"
-            publish(state=final_status, termination_reason=termination_reason)
-            cleanup = _terminate_process_tree(process)
-            break
-    try:
-        returncode = process.wait(timeout=5)
-    except _subprocess.TimeoutExpired:
-        cleanup = _terminate_process_tree(process)
-        returncode = process.poll() if process.poll() is not None else 124
-    stdout_thread.join(timeout=5)
-    stderr_thread.join(timeout=5)
-    if final_status not in {"job_timed_out", "inactivity_timed_out"}:
-        if returncode != 0:
-            final_status = "provider_failed"
-            termination_reason = "provider_exit_nonzero"
-        elif not final_output_path.is_file():
-            final_status = "provider_dead"
-            termination_reason = "provider_exited_without_final_output"
     final_output = (
         final_output_path.read_text(encoding="utf-8", errors="replace")
         if final_output_path.is_file() else ""
     )
-    stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
-    publish(
+    stderr_text = (runtime_dir / "stderr.log").read_text(
+        encoding="utf-8", errors="replace"
+    )
+    observer.publish(
         state="validating" if final_status == "succeeded" else final_status,
         provider_alive=False,
         final_output_bytes=len(final_output.encode("utf-8")),
         termination_reason=termination_reason,
     )
+    cleanup = _receipt_cleanup(bounded.process_tree_cleanup)
     version = _version_for(prepared)
     receipt_hash = _finalize_receipt(
-        runtime_dir, task_id, candidate_id, node, backend, command, prompt,
-        version, started_at, final_status, returncode, process.pid, shared,
-        cleanup, prepared, str(effective_cwd), job_timeout, inactivity_timeout,
+        runtime_dir,
+        task_id,
+        candidate_id,
+        node,
+        backend,
+        command,
+        prompt,
+        version,
+        observer.started_at,
+        final_status,
+        bounded.returncode,
+        bounded.pid,
+        observer.shared,
+        cleanup,
+        prepared,
+        str(effective_cwd),
+        job_timeout,
+        inactivity_timeout,
         observer_interval,
     )
     return ProviderExecution(
-        prepared, int(returncode), final_output, stderr_text, final_status,
-        runtime_dir, receipt_path, receipt_hash,
+        prepared,
+        int(bounded.returncode or 0),
+        final_output,
+        stderr_text,
+        final_status,
+        runtime_dir,
+        receipt_path,
+        receipt_hash,
     )
 
 
@@ -660,56 +709,29 @@ def _finalize_receipt(
     return _sha_bytes(receipt_path.read_bytes())
 
 
-class _SubprocessProxy:
-    """Intercept only the provider run while preserving the stdlib surface."""
-
-    def __init__(self, original_module):
-        object.__setattr__(self, "_original", original_module)
-
-    def __getattr__(self, name):
-        return getattr(self._original, name)
-
-    def __setattr__(self, name, value):
-        if name == "_original":
-            object.__setattr__(self, name, value)
-        else:
-            object.__setattr__(self, name, value)
-
-    def run(self, args, *positional, **kwargs):
-        context = _CONTEXT.get()
-        if context is None:
-            return self._original.run(args, *positional, **kwargs)
-        execution = run_observed_provider(
-            command=list(args),
-            prompt=context["prompt"],
-            runtime_dir=context["runtime_dir"],
-            backend=context["backend"],
-            task_id=context["task_id"],
-            candidate_id=context["candidate_id"],
-            node=context["node"],
-            job_timeout=kwargs.get("timeout"),
-            observer_interval=float(os.environ.get("RLR_PROVIDER_OBSERVER_INTERVAL", "1.0")),
-            input_text=kwargs.get("input"),
-        )
-        context["execution"] = execution
-        return self._original.CompletedProcess(
-            execution.args, execution.returncode,
-            stdout=execution.final_output, stderr=execution.stderr,
-        )
-
-
 def _runtime_dir(project_dir: str | Path) -> tuple[str, Path]:
     env_dir = os.environ.get("RLR_DEEP_RESEARCH_TASK_DIR")
     env_id = os.environ.get("RLR_DEEP_RESEARCH_TASK_ID")
     if env_dir and env_id:
         return env_id, Path(env_dir)
     task_id = f"dr-direct-{uuid.uuid4().hex}"
-    path = (Path(project_dir).resolve() / "08_Audit" / "deep_research_runtime" /
-            "tasks" / task_id)
+    path = (
+        Path(project_dir).resolve()
+        / "08_Audit"
+        / "deep_research_runtime"
+        / "tasks"
+        / task_id
+    )
     return task_id, path
 
 
-def _update_terminal_status(runtime_dir: Path, state: str, *, error: str = "", run_id: str = "") -> None:
+def _update_terminal_status(
+    runtime_dir: Path,
+    state: str,
+    *,
+    error: str = "",
+    run_id: str = "",
+) -> None:
     status_path = runtime_dir / "status.json"
     value = _read_json(status_path)
     value.update({
@@ -727,8 +749,84 @@ def _update_terminal_status(runtime_dir: Path, state: str, *, error: str = "", r
     _write_json_atomic(status_path, value)
 
 
-def install(deep_research_module, detached_task_module) -> None:
-    """Install streaming behavior on stable module objects exactly once."""
+def _is_legacy_python_provider(command: str | Sequence[str]) -> bool:
+    if isinstance(command, str) or len(command) < 2:
+        return False
+    executable = Path(str(command[0])).name.lower()
+    return executable in {
+        "python", "python.exe", "python3", "python3.exe",
+    } and str(command[1]) == "exec"
+
+
+class _ObservedExecutor:
+    """ProviderExecutor-compatible view that adds observation, not process ownership."""
+
+    def __init__(self, original: Any) -> None:
+        self._original = original
+
+    def run(self, command: str | Sequence[str], **kwargs: Any) -> ProviderExecutionResult:
+        context = _CONTEXT.get()
+        if (
+            context is None
+            or context.get("backend") != "codex"
+            or _is_legacy_python_provider(command)
+        ):
+            return self._original.run(command, **kwargs)
+        if isinstance(command, str):
+            return self._original.run(command, **kwargs)
+
+        execution = run_observed_provider(
+            command=[str(part) for part in command],
+            prompt=str(context["prompt"]),
+            runtime_dir=context["runtime_dir"],
+            backend=str(context["backend"]),
+            task_id=str(context["task_id"]),
+            candidate_id=str(context["candidate_id"]),
+            node=str(context["node"]),
+            job_timeout=kwargs.get("timeout"),
+            observer_interval=float(
+                os.environ.get("RLR_PROVIDER_OBSERVER_INTERVAL", "1.0")
+            ),
+            cwd=kwargs.get("cwd"),
+            env=kwargs.get("env"),
+            input_text=kwargs.get("input_text"),
+        )
+        context["execution"] = execution
+        command_value = tuple(execution.args)
+        if execution.final_status in {"job_timed_out", "inactivity_timed_out"}:
+            raise ProviderExecutionError(
+                f"external provider/tool timed out after {kwargs.get('timeout')}s",
+                command=command_value,
+                returncode=execution.returncode,
+                stdout=execution.final_output,
+                stderr=execution.stderr,
+                timed_out=True,
+                timeout=kwargs.get("timeout"),
+                terminal_state=execution.final_status,
+            )
+        result = ProviderExecutionResult(
+            command=command_value,
+            returncode=execution.returncode,
+            stdout=execution.final_output,
+            stderr=execution.stderr,
+            stdout_bytes=len(execution.final_output.encode("utf-8")),
+            stderr_bytes=len(execution.stderr.encode("utf-8")),
+        )
+        if kwargs.get("check", True) and result.returncode != 0:
+            raise ProviderExecutionError(
+                f"external provider/tool exited {result.returncode}",
+                command=command_value,
+                returncode=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                timeout=kwargs.get("timeout"),
+                terminal_state=execution.final_status,
+            )
+        return result
+
+
+def install(deep_research_module: Any, detached_task_module: Any) -> None:
+    """Install observation over stable Deep Research and detached-task APIs."""
     if getattr(deep_research_module, "_provider_observability_installed", False):
         return
     original_build = deep_research_module.build_invocation
@@ -738,7 +836,7 @@ def install(deep_research_module, detached_task_module) -> None:
     original_validate_status = detached_task_module._validate_status
     original_run_worker = detached_task_module.run_worker
 
-    def build_invocation(*args, **kwargs):
+    def build_invocation(*args: Any, **kwargs: Any):
         command, prompt = original_build(*args, **kwargs)
         spec = args[0] if args else kwargs.get("spec")
         work_dir = args[4] if len(args) > 4 else kwargs.get("work_dir")
@@ -753,8 +851,16 @@ def install(deep_research_module, detached_task_module) -> None:
         return command, prompt
 
     def run_and_persist(
-        project_dir, candidate_id, node, question, claim, spec, work_dir,
-        skill_version="unknown", result_context="", **kwargs,
+        project_dir: Any,
+        candidate_id: Any,
+        node: Any,
+        question: Any,
+        claim: Any,
+        spec: Any,
+        work_dir: Any,
+        skill_version: str = "unknown",
+        result_context: str = "",
+        **kwargs: Any,
     ):
         task_id, runtime_dir = _runtime_dir(project_dir)
         runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -772,11 +878,9 @@ def install(deep_research_module, detached_task_module) -> None:
                     "timeout": getattr(spec, "timeout", None),
                 },
             })
-        command, prompt = build_invocation(
+        _command, prompt = build_invocation(
             spec, node, question, claim, work_dir, result_context
         )
-        # The stable implementation builds the same command again. The context
-        # carries the exact prompt needed by the subprocess proxy.
         context = {
             "runtime_dir": runtime_dir,
             "task_id": task_id,
@@ -789,26 +893,40 @@ def install(deep_research_module, detached_task_module) -> None:
         token = _CONTEXT.set(context)
         try:
             artifact = original_run_and_persist(
-                project_dir, candidate_id, node, question, claim, spec, work_dir,
-                skill_version, result_context, **kwargs,
+                project_dir,
+                candidate_id,
+                node,
+                question,
+                claim,
+                spec,
+                work_dir,
+                skill_version,
+                result_context,
+                **kwargs,
             )
             _update_terminal_status(
-                runtime_dir, "succeeded", run_id=str(artifact.get("run_id") or "")
+                runtime_dir,
+                "succeeded",
+                run_id=str(artifact.get("run_id") or ""),
             )
             return artifact
         except Exception as exc:
             execution = context.get("execution")
             existing = _read_json(runtime_dir / "status.json")
             if existing.get("state") not in _TERMINAL_STATES:
-                state = "validation_failed" if execution and execution.final_status == "succeeded" else (
-                    execution.final_status if execution else "transport_lost"
+                state = (
+                    "validation_failed"
+                    if execution and execution.final_status == "succeeded"
+                    else execution.final_status
+                    if execution
+                    else "transport_lost"
                 )
                 _update_terminal_status(runtime_dir, state, error=str(exc))
             raise
         finally:
             _CONTEXT.reset(token)
 
-    def skill_receipt(*args, **kwargs):
+    def skill_receipt(*args: Any, **kwargs: Any):
         value = original_skill_receipt(*args, **kwargs)
         context = _CONTEXT.get()
         execution = context.get("execution") if context else None
@@ -827,39 +945,64 @@ def install(deep_research_module, detached_task_module) -> None:
             }
         return value
 
-    proxy = _SubprocessProxy(deep_research_module.subprocess)
-    deep_research_module.subprocess = proxy
+    # Deep Research already executes through DEFAULT_EXECUTOR. Replace only the
+    # executor object with a ProviderExecutor-compatible observational view.
+    deep_research_module.DEFAULT_EXECUTOR = _ObservedExecutor(
+        deep_research_module.DEFAULT_EXECUTOR
+    )
     deep_research_module.build_invocation = build_invocation
     deep_research_module.run_and_persist = run_and_persist
     deep_research_module.skill_receipt = skill_receipt
 
+    detailed_failure_terminal = {
+        "provider_failed", "validation_failed", "job_timed_out",
+        "inactivity_timed_out", "cancelled", "provider_dead", "transport_lost",
+    }
+
     def task_status(
-            task_id: str,
-            state: str,
-            *,
-            error: str = "",
-            run_id: str = "",
-            attempt_id: str = "",
-            attempt_path: str = "") -> dict:
-        mapped = {
-            "running": "running", "succeeded": "succeeded", "failed": "provider_failed",
-        }.get(state, state)
+        task_id: str,
+        state: str,
+        *,
+        error: str = "",
+        run_id: str = "",
+        attempt_id: str = "",
+        attempt_path: str = "",
+    ) -> dict:
+        task_dir = os.environ.get("RLR_DEEP_RESEARCH_TASK_DIR")
+        existing = _read_json(Path(task_dir) / "status.json") if task_dir else {}
         value = original_task_status(
-            task_id, state, error=error, run_id=run_id,
-            attempt_id=attempt_id, attempt_path=attempt_path,
+            task_id,
+            state,
+            error=error,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            attempt_path=attempt_path,
         )
         value["schema_version"] = _TASK_SCHEMA_V2
         value["status_schema"] = STATUS_SCHEMA
-        value["state"] = mapped
-        value["revision"] = 1
-        task_dir = os.environ.get("RLR_DEEP_RESEARCH_TASK_DIR")
-        if task_dir:
-            existing = _read_json(Path(task_dir) / "status.json")
-            if existing:
-                previous_revision = int(existing.get("revision", 0))
-                existing.update(value)
-                existing["revision"] = previous_revision + 1
-                value = existing
+        if state == "failed":
+            before_state = existing.get("state")
+            if before_state == "succeeded":
+                value["state"] = "validation_failed"
+                value["legacy_state"] = "failed"
+            elif before_state in detailed_failure_terminal:
+                value["state"] = before_state
+                value["legacy_state"] = "failed"
+            else:
+                value["state"] = "failed"
+                value["diagnostic_state"] = "provider_failed"
+        else:
+            value["state"] = {
+                "running": "running",
+                "succeeded": "succeeded",
+            }.get(state, state)
+        if existing:
+            previous_revision = int(existing.get("revision", 0))
+            existing.update(value)
+            existing["revision"] = previous_revision + 1
+            value = existing
+        else:
+            value["revision"] = 1
         return value
 
     def validate_status(status: dict, task_id: str) -> None:
@@ -875,7 +1018,7 @@ def install(deep_research_module, detached_task_module) -> None:
                 f"task {task_id} status identity is invalid"
             )
 
-    def run_worker(project_dir, task_id, synchronous_handler):
+    def run_worker(project_dir: Any, task_id: str, synchronous_handler: Any):
         task_dir = detached_task_module._task_dir(project_dir, task_id)
         previous_dir = os.environ.get("RLR_DEEP_RESEARCH_TASK_DIR")
         previous_id = os.environ.get("RLR_DEEP_RESEARCH_TASK_ID")
