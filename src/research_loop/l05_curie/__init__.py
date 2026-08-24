@@ -28,8 +28,18 @@ from .store import (
     render_evidence_context,
 )
 from .bridge import freeze_l1_deep_research_run
+from .gap_loop import (
+    AUTH_SCHEMA_VERSION,
+    CONSUMPTION_SCHEMA_VERSION,
+    authorize_gap_retry,
+    consume_gap_retry_authorization,
+    load_open_gap_request,
+    open_gap_request,
+)
 
 __all__ = [
+    "AUTH_SCHEMA_VERSION",
+    "CONSUMPTION_SCHEMA_VERSION",
     "COVERAGE_DECISION_SCHEMA_VERSION",
     "DISCOVERY_BATCH_SCHEMA_VERSION",
     "DISCOVERY_TRANSPORT_SCHEMA_VERSION",
@@ -42,13 +52,17 @@ __all__ = [
     "CurieContractError",
     "DiscoveryTransport",
     "EvidenceRetriever",
+    "authorize_gap_retry",
     "build_evidence_pack",
     "build_gap_request",
+    "consume_gap_retry_authorization",
     "freeze_evidence_pack",
     "freeze_l1_deep_research_run",
     "judge_coverage",
     "load_frozen_evidence_pack",
+    "load_open_gap_request",
     "next_pack_version",
+    "open_gap_request",
     "render_evidence_context",
     "validate_coverage_decision",
     "validate_discovery_batch",
