@@ -150,6 +150,45 @@ def test_semantic_assessor_cannot_change_evidence_identity_or_source_fidelity():
         verifier.verify(_extract(), claim="claim")
 
 
+def test_semantic_result_binds_policy_assessor_and_content_identity():
+    result = _semantic()
+    assert result["assessor_id"] == "semantic-assessor/v1"
+    assert len(result["contract_sha256"]) == 64
+    assert result["verification_id"].startswith("SV_")
+    assert len(result["claim_sha256"]) == 64
+    validate_semantic_verification(result)
+
+
+def test_semantic_assessor_cannot_claim_provenance_authority():
+    verifier = SemanticEvidenceVerifier(
+        assessor=lambda **_kwargs: {
+            **_assessment(),
+            "assessor_id": "forged-assessor",
+            "contract_sha256": "0" * 64,
+        }
+    )
+    with pytest.raises(curie.CurieContractError, match="authority|assessor|contract"):
+        verifier.verify(_extract(), claim="claim")
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("assessor_id", "forged-assessor"),
+        ("contract_sha256", "0" * 64),
+        ("claim_sha256", "not-a-sha256"),
+        ("verification_id", "SV_FORGED"),
+    ],
+)
+def test_semantic_verification_rejects_tampered_provenance_identity(
+    field, replacement
+):
+    result = _semantic()
+    result[field] = replacement
+    with pytest.raises(curie.CurieContractError, match="semantic|verification|contract|assessor|sha|identity"):
+        validate_semantic_verification(result)
+
+
 def test_evidence_pack_freezes_exact_semantic_admission_provenance(tmp_path):
     semantic = _semantic()
     pack = curie.build_evidence_pack(**_pack_kwargs([semantic]))
