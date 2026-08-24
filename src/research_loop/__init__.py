@@ -152,8 +152,10 @@ _install_hypothesis_recall_context(_context, _ledger_commands)
 # the same stable module object with additive commands registered.
 from research_loop import cli as _cli
 from research_loop.hypothesis_pool_cli import install as _install_hypothesis_pool_cli
+from research_loop.l05_curie_cli import install as _install_l05_europepmc_cli
 
 _install_hypothesis_pool_cli(_cli)
+_install_l05_europepmc_cli(_cli)
 
 del _install_source_payload_integrity
 del _install_method_evidence, _install_method_evidence_compat
@@ -178,5 +180,5 @@ del _install_reactivation_compat
 del _install_topology_extensions, _install_l45_ledger
 del _install_conditional_routing, _install_l05_context
 del _install_hypothesis_recall_context
-del _install_hypothesis_pool_cli
+del _install_hypothesis_pool_cli, _install_l05_europepmc_cli
 del _constraint_validation, _lifecycle, _ledger_commands, _context, _cli
