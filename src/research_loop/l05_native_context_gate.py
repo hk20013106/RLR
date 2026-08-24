@@ -15,8 +15,18 @@ from pathlib import Path
 
 from research_loop import research_seed
 from research_loop.compatibility import CompatibilityError, get_profile
+from research_loop.gates import (
+    DIVERGENCE_MIN_NEW_QUERY_FAMILIES,
+    _audit_branch_coverage,
+)
 from research_loop.hypothesis_ledger import binding_path
-from research_loop.preresearch import PRE_RESEARCH_MAP
+from research_loop.paths import _candidate_file
+from research_loop.preresearch import (
+    PRE_RESEARCH_MAP,
+    _load_query_family_cache,
+    _query_family_key,
+)
+from research_loop.yamlio import _load_yaml_front
 
 
 class NativeL1EvidenceGateError(ValueError):
@@ -53,6 +63,58 @@ def _selected_run_id(project: Path, seed: dict, args) -> str:
     )
 
 
+def _audit_native_divergence(project: Path, seed: dict, binding: dict,
+                             cand_id: str) -> tuple[bool, str]:
+    """Apply the cross-round divergence gate to native Curie QueryPlans.
+
+    Native v2.1 must not depend on ``L1_research.md`` merely to preserve the
+    historical divergence policy.  The authoritative search queries are the
+    QueryPlans frozen inside the active EvidencePack, so compare those query
+    families against the existing cross-round cache instead.
+    """
+    cf = _candidate_file(project, cand_id)
+    fm = _load_yaml_front(cf) if cf and cf.exists() else {}
+    if not fm.get("from_memory"):
+        return True, ""
+    if fm.get("loop_type") != "divergent":
+        return True, ""
+
+    from research_loop import l05_curie
+
+    try:
+        pack = l05_curie.load_frozen_evidence_pack(
+            project,
+            binding["evidence_pack"],
+            candidate_id=str(seed["candidate_id"]),
+            round_id=str(seed["round_id"]),
+            seed_sha256=research_seed.seed_sha256(seed),
+        )
+    except (KeyError, l05_curie.CurieContractError) as exc:
+        return False, f"divergence gate: active frozen EvidencePack is invalid: {exc}"
+
+    queries: list[str] = []
+    for plan in pack.get("query_plans", []):
+        if not isinstance(plan, dict):
+            continue
+        for item in plan.get("queries", []):
+            if not isinstance(item, dict):
+                continue
+            query = str(item.get("query") or "").strip()
+            if query:
+                queries.append(query)
+
+    fams = {_query_family_key(query) for query in queries if query.strip()}
+    cache = {_query_family_key(query) for query in _load_query_family_cache(project)}
+    new = {family for family in fams if family and family not in cache}
+    need = DIVERGENCE_MIN_NEW_QUERY_FAMILIES
+    if len(new) < need:
+        return False, (
+            f"divergence gate: only {len(new)} new query families "
+            f"(need >= {need}); reused={sorted(fams & cache)}"
+        )
+    return True, ""
+
+
 def install(context_module) -> None:
     """Install the native evidence authority gate once."""
     if getattr(context_module, "_l05_native_context_gate_installed", False):
@@ -75,6 +137,21 @@ def install(context_module) -> None:
             )
         except (research_seed.ResearchSeedError, NativeL1EvidenceGateError) as exc:
             print(f"ERROR: native L1 evidence binding gate -- {exc}", file=sys.stderr)
+            return 3
+
+        # The historical L1 pre-research block also enforced cross-round
+        # divergence and branch-coverage constraints.  Preserve those policies
+        # before suppressing only the legacy acquisition gate.  Divergence now
+        # reads the authoritative native QueryPlans, not legacy summary text.
+        dok, dreason = _audit_native_divergence(
+            project, seed, binding, str(args.cand_id)
+        )
+        if not dok:
+            print(f"ERROR: {dreason}", file=sys.stderr)
+            return 3
+        bok, breason = _audit_branch_coverage(project, str(args.cand_id))
+        if not bok:
+            print(f"ERROR: {breason}", file=sys.stderr)
             return 3
 
         legacy_l1_config = PRE_RESEARCH_MAP.pop("L1", None)
