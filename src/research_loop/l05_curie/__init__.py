@@ -43,7 +43,21 @@ from .gap_loop import (
     open_gap_request,
 )
 
-del _install_semantic_pack, _store
+# Multi-source query lineage is owned by the orchestrator, not by provider
+# payloads or Selector guesses. Install fail-closed provenance enforcement on
+# the canonical modules before callers import their public functions.
+from . import multisource as _multisource
+from . import selector as _selector
+from .provenance_hardening import install as _install_provenance_hardening
+_install_provenance_hardening(_multisource, _selector)
+
+del (
+    _install_provenance_hardening,
+    _install_semantic_pack,
+    _multisource,
+    _selector,
+    _store,
+)
 
 __all__ = [
     "AUTH_SCHEMA_VERSION",
