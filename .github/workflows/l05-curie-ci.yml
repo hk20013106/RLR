@@ -10,6 +10,7 @@ on:
       - "src/research_loop/context.py"
       - "src/research_loop/__init__.py"
       - "tests/test_l05_curie_*.py"
+      - "tests/test_l05_native_*.py"
       - ".github/workflows/l05-curie-ci.yml"
   pull_request:
     paths:
@@ -20,6 +21,7 @@ on:
       - "src/research_loop/context.py"
       - "src/research_loop/__init__.py"
       - "tests/test_l05_curie_*.py"
+      - "tests/test_l05_native_*.py"
       - ".github/workflows/l05-curie-ci.yml"
 
 concurrency:
@@ -51,4 +53,5 @@ jobs:
           tests/test_l05_curie_europepmc_discovery.py
           tests/test_l05_curie_europepmc_evidence.py
           tests/test_l05_curie_europepmc_runtime.py
+          tests/test_l05_native_evidence_binding.py
           -q
