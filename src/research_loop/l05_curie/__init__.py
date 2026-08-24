@@ -25,7 +25,9 @@ from .store import (
     freeze_evidence_pack,
     load_frozen_evidence_pack,
     next_pack_version,
+    render_evidence_context,
 )
+from .bridge import freeze_l1_deep_research_run
 
 __all__ = [
     "COVERAGE_DECISION_SCHEMA_VERSION",
@@ -43,9 +45,11 @@ __all__ = [
     "build_evidence_pack",
     "build_gap_request",
     "freeze_evidence_pack",
+    "freeze_l1_deep_research_run",
     "judge_coverage",
     "load_frozen_evidence_pack",
     "next_pack_version",
+    "render_evidence_context",
     "validate_coverage_decision",
     "validate_discovery_batch",
     "validate_evidence_extract",
