@@ -129,6 +129,13 @@ from research_loop.topology_extensions import install as _install_topology_exten
 
 _install_topology_extensions(topology)
 
+# Native v2.1 L1 evidence binding is installed on the canonical research_seed
+# module. It is independent of the historical Deep Research run bridge.
+from research_loop import research_seed as _research_seed_module
+from research_loop.l05_native_binding import install as _install_l05_native_binding
+
+_install_l05_native_binding(_research_seed_module)
+
 from research_loop.commands import lifecycle as _lifecycle
 from research_loop.commands import ledger as _ledger_commands
 from research_loop import context as _context
@@ -178,6 +185,7 @@ del _install_receipt_idempotency, _install_hypothesis_reactivation
 del _install_reactivation_constraints, _install_conditional_skip_constraints
 del _install_reactivation_compat
 del _install_topology_extensions, _install_l45_ledger
+del _install_l05_native_binding, _research_seed_module
 del _install_conditional_routing, _install_l05_context
 del _install_hypothesis_recall_context
 del _install_hypothesis_pool_cli, _install_l05_europepmc_cli
