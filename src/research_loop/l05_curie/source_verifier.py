@@ -1,14 +1,16 @@
 """Generic deterministic source-fidelity verifier for Curie candidates.
 
 Retrieval engines may propose text and locators. This verifier independently
-checks the proposed text against supplied source bytes and is the only component
-in this generic path allowed to promote an UNVERIFIED candidate to a LOCATED
-EvidenceExtract.
+locates the proposed text in supplied source bytes and is the only component in
+this generic path allowed to promote an UNVERIFIED candidate to a LOCATED
+EvidenceExtract. Upstream locators remain provenance only; the authoritative
+locator is derived from the independently supplied source.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 
 from .contracts import (
     EVIDENCE_EXTRACT_SCHEMA_VERSION,
@@ -26,12 +28,29 @@ def _text(value: object, name: str) -> str:
     return text
 
 
-def _normalize(value: str) -> str:
-    return " ".join(value.split())
+def _location_pattern(value: str) -> re.Pattern[str]:
+    tokens = value.split()
+    if not tokens:
+        raise CurieContractError("source candidate text must contain non-whitespace text")
+    return re.compile(r"\s+".join(re.escape(token) for token in tokens))
+
+
+def _unique_source_span(source_text: str, candidate_text: str) -> tuple[int, int]:
+    matches = list(_location_pattern(candidate_text).finditer(source_text))
+    if not matches:
+        raise CurieContractError(
+            "candidate text was not located in the independently supplied source"
+        )
+    if len(matches) != 1:
+        raise CurieContractError(
+            "candidate text has multiple source locations; independent locator is ambiguous"
+        )
+    match = matches[0]
+    return match.start(), match.end()
 
 
 class ExactTextSourceVerifier:
-    """Verify that an unverified candidate is literally present in source bytes."""
+    """Verify one unique source span for an unverified retrieval candidate."""
 
     def verify(self, candidate: dict, *, source_bytes: bytes,
                role: str = "CONTEXT") -> dict:
@@ -50,11 +69,10 @@ class ExactTextSourceVerifier:
             raise CurieContractError(
                 f"source verifier source is not valid UTF-8 text: {exc}"
             ) from exc
+
         candidate_text = _text(candidate.get("text"), "source candidate text")
-        if _normalize(candidate_text) not in _normalize(source_text):
-            raise CurieContractError(
-                "candidate text was not located in the independently supplied source"
-            )
+        start, end = _unique_source_span(source_text, candidate_text)
+
         normalized_role = str(role or "").strip().upper()
         if normalized_role not in _ROLES:
             raise CurieContractError(
@@ -71,19 +89,24 @@ class ExactTextSourceVerifier:
             raise CurieContractError(
                 "source candidate must carry a non-empty source_identity"
             )
+        upstream_locator = _text(
+            candidate.get("locator"), "source candidate upstream locator"
+        )
+
         extract = {
             "schema_version": EVIDENCE_EXTRACT_SCHEMA_VERSION,
             "evidence_id": _text(candidate.get("evidence_id"), "source candidate evidence_id"),
             "paper_id": _text(candidate.get("paper_id"), "source candidate paper_id"),
             "section": _text(candidate.get("section"), "source candidate section"),
             "text": candidate_text,
-            "locator": _text(candidate.get("locator"), "source candidate locator"),
+            "locator": f"char:{start}:{end}",
             "role": normalized_role,
             "verification_status": "LOCATED",
             "retrieval": {
                 "engine": "independent-source-verifier",
                 "source_sha256": hashlib.sha256(raw).hexdigest(),
                 "upstream_engine": upstream_engine,
+                "upstream_locator": upstream_locator,
                 "source_identity": json.loads(json.dumps(source_identity)),
             },
         }
