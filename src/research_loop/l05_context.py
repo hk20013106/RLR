@@ -1,10 +1,10 @@
-"""Native L1 context handoff from legacy acquisition to frozen L0.5 evidence.
+"""L1 frozen-evidence context injection for L0.5 Curie.
 
-This wrapper is deliberately installed *inside* the historical-hypothesis-recall
-wrapper.  The canonical ContextAssembler therefore performs all existing Deep
-Research, identity, divergence, and branch-coverage gates first.  Only after
-those gates pass do we replace the human-facing legacy pre-research summary in
-Einstein's context with the exact frozen L0.5 EvidencePack bound to that run.
+Historical v2.0 keeps its legacy path. Native v2.1 arrives here only after the
+native evidence gate has validated one exact Curie binding and removed the
+legacy Deep Research acquisition stage from the canonical context assembly.
+This wrapper injects the exact bound frozen EvidencePack into Einstein's
+rendered context and records the injection receipt.
 """
 from __future__ import annotations
 
@@ -20,10 +20,11 @@ from research_loop.paths import _sha256
 
 _L05_HEADER = "=== L0.5 CURIE FROZEN EVIDENCEPACK ==="
 _PRE_RESEARCH_PREFIX = "=== PRE-RESEARCH"
+_CONTRACT_PREFIX = "=== CONTRACT: L1"
 
 
 class L05ContextError(ValueError):
-    """Raised when native L1 cannot consume its frozen L0.5 evidence state."""
+    """Raised when L1 cannot consume its frozen L0.5 evidence state."""
 
 
 def _manifest_path(stderr_text: str) -> Path:
@@ -35,13 +36,13 @@ def _manifest_path(stderr_text: str) -> Path:
     ]
     if len(matches) != 1:
         raise L05ContextError(
-            "assembled native L1 context did not report exactly one manifest"
+            "assembled L1 context did not report exactly one manifest"
         )
     return Path(matches[0])
 
 
 def _replace_legacy_pre_research(context_text: str, evidence_text: str) -> str:
-    """Replace exactly one generated PRE-RESEARCH block with frozen evidence."""
+    """Compatibility helper for historical native bridge fixtures."""
     lines = context_text.splitlines()
     starts = [
         index for index, line in enumerate(lines)
@@ -49,7 +50,7 @@ def _replace_legacy_pre_research(context_text: str, evidence_text: str) -> str:
     ]
     if len(starts) != 1:
         raise L05ContextError(
-            "native L1 rendered context must contain exactly one pre-research block"
+            "rendered context must contain exactly one legacy pre-research block"
         )
     start = starts[0]
     end = None
@@ -60,10 +61,31 @@ def _replace_legacy_pre_research(context_text: str, evidence_text: str) -> str:
             break
     if end is None:
         raise L05ContextError(
-            "native L1 pre-research block has no following context boundary"
+            "legacy pre-research block has no following context boundary"
         )
     replacement = evidence_text.rstrip().splitlines() + [""]
     rendered = "\n".join(lines[:start] + replacement + lines[end:])
+    if context_text.endswith("\n"):
+        rendered += "\n"
+    return rendered
+
+
+def _insert_native_evidence(context_text: str, evidence_text: str) -> str:
+    """Insert frozen Curie evidence before the L1 contract boundary exactly once."""
+    lines = context_text.splitlines()
+    contract_indexes = [
+        index for index, line in enumerate(lines)
+        if line.startswith(_CONTRACT_PREFIX)
+    ]
+    if len(contract_indexes) != 1:
+        raise L05ContextError(
+            "native L1 rendered context must contain exactly one L1 contract boundary"
+        )
+    if any(line.startswith(_L05_HEADER) for line in lines):
+        raise L05ContextError("native L1 rendered context already contains L0.5 evidence")
+    index = contract_indexes[0]
+    insertion = evidence_text.rstrip().splitlines() + [""]
+    rendered = "\n".join(lines[:index] + insertion + lines[index:])
     if context_text.endswith("\n"):
         rendered += "\n"
     return rendered
@@ -77,7 +99,7 @@ def _remove_generated_context(manifest_path: Path | None, rendered_path: Path | 
 
 
 def install(context_module) -> None:
-    """Install the native L1 frozen-evidence handoff once."""
+    """Install frozen-evidence injection once."""
     if getattr(context_module, "_l05_context_installed", False):
         return
     original = context_module.cmd_assemble_context
@@ -99,17 +121,14 @@ def install(context_module) -> None:
         try:
             manifest_path = _manifest_path(original_stderr)
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            # Historical v2.0 remains untouched.  L0.5 is the native v2.1
-            # evidence boundary and does not silently change legacy behavior.
+            # Historical v2.0 remains untouched.
             if str(manifest.get("delta_schema_version") or "") != "2.1":
                 sys.stdout.write(original_stdout)
                 sys.stderr.write(original_stderr)
                 return 0
 
             project = Path(args.project_dir)
-            seed = research_seed.load_l1_research_seed(
-                project, str(args.cand_id)
-            )
+            seed = research_seed.load_l1_research_seed(project, str(args.cand_id))
             pre_research = manifest.get("pre_research")
             if not isinstance(pre_research, dict):
                 raise L05ContextError(
@@ -121,13 +140,27 @@ def install(context_module) -> None:
                     "native L1 context manifest has no exact evidence_run_id"
                 )
 
-            binding = research_seed.load_l1_evidence_binding(
-                project, seed, run_id
-            )
+            native_entry = pre_research.get("native_evidence_binding")
+            if isinstance(native_entry, dict):
+                binding = research_seed.load_l1_native_evidence_binding(
+                    project, seed, run_id
+                )
+                injection_mode = "l05_native_frozen_pack"
+                native_mode = True
+            else:
+                # Temporary compatibility for historical native bridge fixtures.
+                # New native v2.1 runtime is gated earlier and cannot reach this
+                # branch without an explicit native binding.
+                binding = research_seed.load_l1_evidence_binding(
+                    project, seed, run_id
+                )
+                injection_mode = "l05_frozen_pack"
+                native_mode = False
+
             pack_manifest = binding.get("evidence_pack")
             if not isinstance(pack_manifest, dict):
                 raise L05ContextError(
-                    "native L1 evidence binding has no frozen EvidencePack"
+                    "L1 evidence binding has no frozen EvidencePack"
                 )
             frozen = l05_curie.load_frozen_evidence_pack(
                 project,
@@ -144,8 +177,10 @@ def install(context_module) -> None:
 
             rendered_path = Path(str(manifest["rendered_context_path"]))
             current_context = rendered_path.read_text(encoding="utf-8")
-            context_text = _replace_legacy_pre_research(
-                current_context, evidence_text
+            context_text = (
+                _insert_native_evidence(current_context, evidence_text)
+                if native_mode else
+                _replace_legacy_pre_research(current_context, evidence_text)
             )
             budget = int(getattr(args, "context_token_budget", 8000) or 0)
             estimated = context_module._estimate_tokens(context_text)
@@ -159,7 +194,7 @@ def install(context_module) -> None:
             manifest["rendered_context_sha256"] = _sha256(rendered_path)
             manifest["pre_research"] = {
                 **pre_research,
-                "injected_mode": "l05_frozen_pack",
+                "injected_mode": injection_mode,
                 "injected_tokens_est": context_module._estimate_tokens(evidence_text),
                 "full_text_injected": False,
                 "legacy_summary_injected": False,
