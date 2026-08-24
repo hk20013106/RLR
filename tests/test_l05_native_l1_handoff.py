@@ -157,7 +157,7 @@ def test_native_l1_consumes_curie_pack_without_legacy_pre_research(
     assert "legacy_summary_injected" not in captured.out
 
 
-def test_native_l1_fails_closed_when_native_binding_is_missing(
+def test_native_v21_without_curie_state_keeps_legacy_gate_until_migrated(
     tmp_path, monkeypatch, capsys
 ):
     project, store, _seed, _manifest = _native_project(tmp_path, bind_pack=False)
@@ -166,7 +166,26 @@ def test_native_l1_fails_closed_when_native_binding_is_missing(
     assert context.cmd_assemble_context(_args(project, store)) == 3
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "native L1 evidence binding" in captured.err
+    assert "deep-research gate" in captured.err
+    assert "native L1 evidence binding gate" not in captured.err
+
+
+def test_started_native_curie_state_never_falls_back_to_legacy(
+    tmp_path, monkeypatch, capsys
+):
+    project, store, _seed, _manifest = _native_project(tmp_path, bind_pack=False)
+    monkeypatch.setenv("RLR_HYPOTHESIS_STORE", str(store))
+    native_root = (
+        project / "08_Audit" / "research_seed_bindings" / "native" / "C001" / "1"
+    )
+    native_root.mkdir(parents=True, exist_ok=True)
+    (native_root / "L1_native_broken.json").write_text("{", encoding="utf-8")
+
+    assert context.cmd_assemble_context(_args(project, store)) == 3
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "native L1 evidence binding gate" in captured.err
+    assert "deep-research gate" not in captured.err
 
 
 def test_native_l1_revalidates_binding_at_actual_context_use(
