@@ -1,12 +1,9 @@
 """Native v2.1 L1 acquisition gate replacement.
 
 The historical ContextAssembler owns the legacy Deep Research pre-research gate.
-For v2.1 projects that have entered the Curie-native evidence path, this wrapper
-validates the active frozen Curie binding first, then suppresses only the legacy
-L1 pre-research stage for that call. Existing v2.1 projects that have not yet
-created any native Curie binding/activation state remain on the historical path
-until explicitly migrated. Once native Curie state exists, failures are
-fail-closed and never fall back to legacy acquisition.
+For native v2.1 L1, this wrapper validates the active frozen Curie binding first,
+then suppresses only the legacy L1 pre-research stage for that call. Historical
+v2.0 and all non-L1 nodes retain their original behavior.
 """
 from __future__ import annotations
 
@@ -23,7 +20,7 @@ from research_loop.preresearch import PRE_RESEARCH_MAP
 
 
 class NativeL1EvidenceGateError(ValueError):
-    """Raised when a Curie-managed native L1 lacks an exact validated binding."""
+    """Raised when native L1 lacks one exact validated Curie binding."""
 
 
 def _is_native_l1(args) -> bool:
@@ -39,28 +36,6 @@ def _is_native_l1(args) -> bool:
     except (OSError, json.JSONDecodeError, CompatibilityError):
         return False
     return profile.delta_schema_version == "2.1"
-
-
-def _has_native_curie_state(project: Path, seed: dict) -> bool:
-    """Return True once this candidate/round has entered native Curie authority."""
-    candidate_id = str(seed.get("candidate_id") or "").strip()
-    round_id = str(seed.get("round_id") or "").strip()
-    if not candidate_id or not round_id:
-        return False
-    root = (
-        project
-        / "08_Audit"
-        / "research_seed_bindings"
-        / "native"
-        / candidate_id
-        / round_id
-    )
-    if not root.is_dir():
-        return False
-    if any(root.glob("L1_native_*.json")):
-        return True
-    activation_root = root / "activations"
-    return activation_root.is_dir() and any(activation_root.glob("v*.json"))
 
 
 def _selected_run_id(project: Path, seed: dict, args) -> str:
@@ -91,20 +66,6 @@ def install(context_module) -> None:
         project = Path(args.project_dir)
         try:
             seed = research_seed.load_l1_research_seed(project, str(args.cand_id))
-        except research_seed.ResearchSeedError:
-            # A project cannot be identified as Curie-managed without its
-            # canonical ResearchSeed. Preserve historical error handling until
-            # a native evidence state has actually been created.
-            return original(args)
-
-        # Migration boundary: pre-existing v2.1 projects keep their historical
-        # acquisition path until a native binding/activation artifact exists.
-        # Once any native state exists, all subsequent validation is fail-closed
-        # and this function never delegates back to legacy acquisition.
-        if not _has_native_curie_state(project, seed):
-            return original(args)
-
-        try:
             run_id = _selected_run_id(project, seed, args)
             binding = research_seed.load_l1_native_evidence_binding(
                 project, seed, run_id
