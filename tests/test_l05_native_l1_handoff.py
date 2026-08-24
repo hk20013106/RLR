@@ -181,3 +181,6 @@ def test_native_l1_revalidates_binding_at_actual_context_use(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "frozen L0.5 EvidencePack" in captured.err
+
+
+# Final CI revalidation marker: no runtime or assertion behavior changes.
