@@ -3,9 +3,10 @@
 
 Ensures that:
 1. Running `pre-research` creates placeholder files with the required sections
-   and they fail the PR2 gate with rc=3.
+   and they fail the gate with rc=3.
 2. Generating synthetic artifacts with `--write-synthetic` includes real-looking
-   provenance and passes the gate.
+   provenance; native v2.1 tests explicitly bridge that acquisition through a
+   frozen Curie EvidencePack before L1 context is authorized.
 3. L7 nodes are not gated by literature provenance.
 4. Existing test gates and digests are preserved.
 """
@@ -16,7 +17,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from research_loop import l0_contract
+from research_loop import deep_research, l0_contract, research_seed
+import research_loop.l05_curie as curie
 from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
 from research_loop.hypothesis_ledger import HypothesisLedger
 from research_loop.yamlio import _replace_field
@@ -75,6 +77,25 @@ def _mkproj():
     return d
 
 
+def _bind_synthetic_native_l1(project_dir):
+    """Promote the test-only legacy synthetic run through the native authority."""
+    project = Path(project_dir)
+    seed = research_seed.load_l1_research_seed(project, "C1")
+    run_id = deep_research.unique_run_id(project, "C1", "L1")
+    assert run_id, "synthetic L1 fixture must create exactly one acquisition run"
+    manifest = curie.freeze_l1_deep_research_run(
+        project,
+        candidate_id="C1",
+        round_id=str(seed["round_id"]),
+        seed_sha256=research_seed.seed_sha256(seed),
+        run_id=run_id,
+    )
+    research_seed.write_l1_native_evidence_binding(
+        project, seed, manifest, run_id
+    )
+    return run_id
+
+
 # 1. Running pre-research node L1 creates a placeholder that contains sections
 #    and fails closed with rc=3.
 def test_l1_placeholder_fails_gate():
@@ -92,17 +113,10 @@ def test_l1_placeholder_fails_gate():
     assert "## Source count" in text
     assert "NOT YET RUN" in text
 
-    # Assemble context on L1 must fail closed with rc=3. Depending on exact-run
-    # history, the runtime may reject the placeholder itself or require an
-    # explicit evidence-run identity before it can evaluate the placeholder.
+    # Native L1 has no Curie binding, so context must fail closed with rc=3.
     r_assem = _run("assemble-context", d, "C1", "--node", "L1")
     assert r_assem.returncode == 3, f"expected rc=3, got {r_assem.returncode}: {r_assem.stderr}"
-    error = r_assem.stderr.lower()
-    assert (
-        "gate" in error
-        or "not yet run" in error
-        or "requires --evidence-run-id" in error
-    )
+    assert "native l1 evidence binding" in r_assem.stderr.lower()
 
 
 # 2. Running pre-research node L4 creates a placeholder that contains sections
@@ -134,12 +148,11 @@ def test_l4_placeholder_fails_gate():
     )
 
 
-# 3. Running pre-research with --write-synthetic creates valid completed artifact
-#    and passes the gate.
-def test_write_synthetic_passes_gate():
+# 3. A synthetic legacy acquisition is usable by native L1 only after explicit
+#    Curie freeze + native binding.
+def test_write_synthetic_passes_gate_after_native_curie_binding():
     d = _mkproj()
 
-    # Write synthetic L1 pre-research
     r = _run("pre-research", d, "C1", "--node", "L1", "--write-synthetic")
     assert r.returncode == 0, f"expected rc=0 for pre-research, got {r.returncode}: {r.stderr}"
 
@@ -149,12 +162,16 @@ def test_write_synthetic_passes_gate():
     assert "NOT YET RUN" not in text
     assert "## Source count\n1" in text
 
-    # Register the smith2020 paper in the literature database so Obsidian Wikilink resolves
     lit_dir = Path(d) / "09_Literature_Database"
     lit_dir.mkdir(parents=True, exist_ok=True)
     (lit_dir / "smith2020.md").write_text("Title: Smith 2020", encoding="utf-8")
 
-    # Assemble context must succeed (rc=0)
+    # Legacy acquisition alone is not L1 authority in native v2.1.
+    rejected = _run("assemble-context", d, "C1", "--node", "L1")
+    assert rejected.returncode == 3
+    assert "native l1 evidence binding" in rejected.stderr.lower()
+
+    _bind_synthetic_native_l1(d)
     r_assem = _run("assemble-context", d, "C1", "--node", "L1")
     assert r_assem.returncode == 0, f"expected rc=0, got {r_assem.returncode}: {r_assem.stderr}"
 
@@ -180,16 +197,13 @@ def test_existing_file_not_overwritten():
     pr.mkdir(parents=True, exist_ok=True)
     target = pr / "L1_research.md"
 
-    # Write a custom partial/placeholder text
     custom_text = "## Runtime digest\nNOT YET RUN\n## Custom legacy section\nmy partial work\n"
     target.write_text(custom_text, encoding="utf-8")
 
-    # Run pre-research without --write-placeholder. It should NOT overwrite.
     r = _run("pre-research", d, "C1", "--node", "L1")
     assert r.returncode == 0
     assert target.read_text(encoding="utf-8") == custom_text, "file was overwritten silently"
 
-    # Run pre-research WITH --write-placeholder. It should overwrite.
     r2 = _run("pre-research", d, "C1", "--node", "L1", "--write-placeholder")
     assert r2.returncode == 0
     new_text = target.read_text(encoding="utf-8")
@@ -207,6 +221,12 @@ def test_l1_evidence_is_rejected_after_canonical_research_seed_drift():
     lit_dir = project / "09_Literature_Database"
     lit_dir.mkdir(parents=True, exist_ok=True)
     (lit_dir / "smith2020.md").write_text("Title: Smith 2020", encoding="utf-8")
+
+    # Establish a valid native binding first; otherwise this test would pass for
+    # the wrong reason (missing binding rather than ResearchSeed drift).
+    _bind_synthetic_native_l1(project)
+    before = _run("assemble-context", d, "C1", "--node", "L1")
+    assert before.returncode == 0, before.stderr
 
     contract, _path, _raw = l0_contract.load_contract(project, "C1")
     contract["scientific_question"] = "A different canonical scientific question"
