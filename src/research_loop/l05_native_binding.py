@@ -1,10 +1,8 @@
 """Native v2.1 ResearchSeed -> frozen Curie EvidencePack binding.
 
-This module is the native evidence-binding implementation. It deliberately does
-not inspect or require legacy Deep Research run artifacts. The public functions
-are installed on ``research_loop.research_seed`` so callers retain one semantic
-owner for the L0 -> L0.5 -> L1 boundary while historical v2 compatibility APIs
-remain untouched.
+Bindings are immutable per acquisition run.  The currently authoritative native
+binding is derived from append-only activation receipts rather than a mutable
+pointer, preserving the complete EvidencePack lineage across Curie retries.
 """
 from __future__ import annotations
 
@@ -14,6 +12,7 @@ from pathlib import Path
 
 
 NATIVE_EVIDENCE_BINDING_SCHEMA_VERSION = "L1NativeEvidenceBinding/v1"
+NATIVE_EVIDENCE_ACTIVATION_SCHEMA_VERSION = "L1NativeEvidenceActivation/v1"
 _ROOT = Path("08_Audit") / "research_seed_bindings" / "native"
 
 
@@ -43,6 +42,17 @@ def _binding_path(project_dir: str | Path, seed: dict, acquisition_run_id: str) 
     identity = f"{seed['candidate_id']}:{seed['round_id']}:{run_id}"
     suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
     return _binding_dir(project_dir, seed) / f"L1_native_{suffix}.json"
+
+
+def _activation_dir(project_dir: str | Path, seed: dict) -> Path:
+    return _binding_dir(project_dir, seed) / "activations"
+
+
+def _activation_path(project_dir: str | Path, seed: dict, version: int,
+                     acquisition_run_id: str) -> Path:
+    run_id = _text(acquisition_run_id, "native activation acquisition_run_id")
+    suffix = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:16]
+    return _activation_dir(project_dir, seed) / f"v{int(version):03d}_{suffix}.json"
 
 
 def _load_pack(project_dir: Path, seed: dict, pack_manifest: dict, research_seed_module):
@@ -145,20 +155,17 @@ def _validate_payload(project_dir: Path, seed: dict, acquisition_run_id: str,
 
 
 def install(research_seed_module) -> None:
-    """Install native binding APIs on the canonical research_seed module."""
+    """Install native binding and activation APIs on canonical ``research_seed``."""
     if getattr(research_seed_module, "_l05_native_binding_installed", False):
         return
-    legacy_evidence_binding_manifest_entry = (
-        research_seed_module.evidence_binding_manifest_entry
-    )
+    legacy_evidence_binding_manifest_entry = research_seed_module.evidence_binding_manifest_entry
 
     def write_l1_native_evidence_binding(project_dir, seed, pack_manifest,
                                          acquisition_run_id) -> dict:
         project = Path(project_dir)
         try:
-            payload = _payload(
-                project, seed, pack_manifest, acquisition_run_id, research_seed_module
-            )
+            payload = _payload(project, seed, pack_manifest, acquisition_run_id,
+                               research_seed_module)
         except ValueError as exc:
             raise research_seed_module.ResearchSeedError(str(exc)) from exc
         path = _binding_path(project, seed, acquisition_run_id)
@@ -177,9 +184,8 @@ def install(research_seed_module) -> None:
                 )
         else:
             path.write_bytes(raw)
-        validated = _validate_payload(
-            project, seed, acquisition_run_id, payload, research_seed_module
-        )
+        validated = _validate_payload(project, seed, acquisition_run_id, payload,
+                                      research_seed_module)
         return _entry(project, seed, acquisition_run_id, validated)
 
     def load_l1_native_evidence_binding(project_dir, seed, acquisition_run_id) -> dict:
@@ -194,9 +200,8 @@ def install(research_seed_module) -> None:
             raise research_seed_module.ResearchSeedError(
                 f"native L1 evidence binding is missing or invalid: {exc}"
             ) from exc
-        return _validate_payload(
-            project, seed, acquisition_run_id, payload, research_seed_module
-        )
+        return _validate_payload(project, seed, acquisition_run_id, payload,
+                                 research_seed_module)
 
     def native_evidence_binding_manifest_entry(project_dir, seed,
                                                acquisition_run_id) -> dict:
@@ -205,16 +210,12 @@ def install(research_seed_module) -> None:
         return _entry(project, seed, acquisition_run_id, payload)
 
     def evidence_binding_manifest_entry(project_dir, seed, evidence_run_id) -> dict:
-        """Return the authoritative receipt for this run, native when present."""
+        """Return authoritative receipt for this run, native when present."""
         project = Path(project_dir)
         native_path = _binding_path(project, seed, evidence_run_id)
         if native_path.is_file():
-            return native_evidence_binding_manifest_entry(
-                project, seed, evidence_run_id
-            )
-        return legacy_evidence_binding_manifest_entry(
-            project_dir, seed, evidence_run_id
-        )
+            return native_evidence_binding_manifest_entry(project, seed, evidence_run_id)
+        return legacy_evidence_binding_manifest_entry(project_dir, seed, evidence_run_id)
 
     def unique_l1_native_evidence_run_id(project_dir, seed):
         project = Path(project_dir)
@@ -234,8 +235,7 @@ def install(research_seed_module) -> None:
                 raise research_seed_module.ResearchSeedError(
                     "native L1 evidence binding has no acquisition_run_id"
                 )
-            expected_path = _binding_path(project, seed, run_id).resolve()
-            if path.resolve() != expected_path:
+            if path.resolve() != _binding_path(project, seed, run_id).resolve():
                 raise research_seed_module.ResearchSeedError(
                     "native L1 evidence binding path does not match its acquisition_run_id"
                 )
@@ -244,22 +244,132 @@ def install(research_seed_module) -> None:
                 run_ids.append(run_id)
         return run_ids[0] if len(run_ids) == 1 else None
 
-    research_seed_module.NATIVE_EVIDENCE_BINDING_SCHEMA_VERSION = (
-        NATIVE_EVIDENCE_BINDING_SCHEMA_VERSION
-    )
-    research_seed_module.write_l1_native_evidence_binding = (
-        write_l1_native_evidence_binding
-    )
-    research_seed_module.load_l1_native_evidence_binding = (
-        load_l1_native_evidence_binding
-    )
-    research_seed_module.native_evidence_binding_manifest_entry = (
-        native_evidence_binding_manifest_entry
-    )
-    research_seed_module.evidence_binding_manifest_entry = (
-        evidence_binding_manifest_entry
-    )
-    research_seed_module.unique_l1_native_evidence_run_id = (
-        unique_l1_native_evidence_run_id
-    )
+    def _activation_payload(project: Path, seed: dict, acquisition_run_id: str) -> dict:
+        binding = load_l1_native_evidence_binding(project, seed, acquisition_run_id)
+        entry = native_evidence_binding_manifest_entry(project, seed, acquisition_run_id)
+        lineage = binding["pack_lineage"]
+        return {
+            "schema_version": NATIVE_EVIDENCE_ACTIVATION_SCHEMA_VERSION,
+            "candidate_id": str(seed["candidate_id"]),
+            "round_id": str(seed["round_id"]),
+            "research_seed": research_seed_module.manifest_entry(seed),
+            "acquisition_run_id": str(acquisition_run_id),
+            "evidence_pack_version": int(lineage["version"]),
+            "evidence_pack_content_sha256": str(lineage["content_sha256"]),
+            "parent_pack_sha256": lineage.get("parent_pack_sha256"),
+            "source_gap_request_id": lineage.get("source_gap_request_id"),
+            "binding": entry,
+        }
+
+    def _load_activations(project: Path, seed: dict) -> list[dict]:
+        root = _activation_dir(project, seed)
+        if not root.is_dir():
+            return []
+        activations = []
+        for path in sorted(root.glob("v*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise research_seed_module.ResearchSeedError(
+                    f"native L1 activation receipt is unreadable: {exc}"
+                ) from exc
+            if payload.get("schema_version") != NATIVE_EVIDENCE_ACTIVATION_SCHEMA_VERSION:
+                raise research_seed_module.ResearchSeedError("native L1 activation schema is invalid")
+            if str(payload.get("candidate_id") or "") != str(seed["candidate_id"]):
+                raise research_seed_module.ResearchSeedError("native L1 activation candidate mismatch")
+            if str(payload.get("round_id") or "") != str(seed["round_id"]):
+                raise research_seed_module.ResearchSeedError("native L1 activation round mismatch")
+            if payload.get("research_seed") != research_seed_module.manifest_entry(seed):
+                raise research_seed_module.ResearchSeedError("native L1 activation ResearchSeed changed")
+            run_id = str(payload.get("acquisition_run_id") or "")
+            expected = _activation_payload(project, seed, run_id)
+            if payload != expected:
+                raise research_seed_module.ResearchSeedError(
+                    "native L1 activation no longer matches its immutable binding"
+                )
+            expected_path = _activation_path(
+                project, seed, int(payload["evidence_pack_version"]), run_id
+            ).resolve()
+            if path.resolve() != expected_path:
+                raise research_seed_module.ResearchSeedError(
+                    "native L1 activation path does not match its pack version/run"
+                )
+            activations.append(payload)
+        activations.sort(key=lambda item: int(item["evidence_pack_version"]))
+        for index, item in enumerate(activations, start=1):
+            if int(item["evidence_pack_version"]) != index:
+                raise research_seed_module.ResearchSeedError(
+                    "native L1 activation versions are not contiguous from v1"
+                )
+            if index == 1:
+                if item.get("parent_pack_sha256") not in (None, ""):
+                    raise research_seed_module.ResearchSeedError(
+                        "native L1 v1 activation must not have a parent pack"
+                    )
+            else:
+                previous = activations[index - 2]
+                if item.get("parent_pack_sha256") != previous.get(
+                    "evidence_pack_content_sha256"
+                ):
+                    raise research_seed_module.ResearchSeedError(
+                        "native L1 activation parent lineage is discontinuous"
+                    )
+                if not str(item.get("source_gap_request_id") or ""):
+                    raise research_seed_module.ResearchSeedError(
+                        "native L1 retry activation requires source_gap_request_id"
+                    )
+        return activations
+
+    def activate_l1_native_evidence_binding(project_dir, seed,
+                                            acquisition_run_id) -> dict:
+        project = Path(project_dir)
+        payload = _activation_payload(project, seed, acquisition_run_id)
+        version = int(payload["evidence_pack_version"])
+        existing = _load_activations(project, seed)
+        if existing:
+            latest = existing[-1]
+            if (version == int(latest["evidence_pack_version"]) and
+                    str(acquisition_run_id) == str(latest["acquisition_run_id"])):
+                return latest
+            if version != int(latest["evidence_pack_version"]) + 1:
+                raise research_seed_module.ResearchSeedError(
+                    "native L1 activation must advance exactly one EvidencePack version"
+                )
+            if payload.get("parent_pack_sha256") != latest.get(
+                "evidence_pack_content_sha256"
+            ):
+                raise research_seed_module.ResearchSeedError(
+                    "native L1 activation parent pack does not match current active pack"
+                )
+        elif version != 1:
+            raise research_seed_module.ResearchSeedError(
+                "first native L1 activation must bind EvidencePack v1"
+            )
+        path = _activation_path(project, seed, version, acquisition_run_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        raw = _canonical_bytes(payload)
+        if path.exists() and path.read_bytes() != raw:
+            raise research_seed_module.ResearchSeedError(
+                "native L1 activation receipt already exists with different provenance"
+            )
+        if not path.exists():
+            path.write_bytes(raw)
+        _load_activations(project, seed)
+        return payload
+
+    def active_l1_native_evidence_run_id(project_dir, seed):
+        activations = _load_activations(Path(project_dir), seed)
+        if not activations:
+            return None
+        return str(activations[-1]["acquisition_run_id"])
+
+    research_seed_module.NATIVE_EVIDENCE_BINDING_SCHEMA_VERSION = NATIVE_EVIDENCE_BINDING_SCHEMA_VERSION
+    research_seed_module.NATIVE_EVIDENCE_ACTIVATION_SCHEMA_VERSION = NATIVE_EVIDENCE_ACTIVATION_SCHEMA_VERSION
+    research_seed_module.write_l1_native_evidence_binding = write_l1_native_evidence_binding
+    research_seed_module.load_l1_native_evidence_binding = load_l1_native_evidence_binding
+    research_seed_module.native_evidence_binding_manifest_entry = native_evidence_binding_manifest_entry
+    research_seed_module.evidence_binding_manifest_entry = evidence_binding_manifest_entry
+    research_seed_module.unique_l1_native_evidence_run_id = unique_l1_native_evidence_run_id
+    research_seed_module.activate_l1_native_evidence_binding = activate_l1_native_evidence_binding
+    research_seed_module.active_l1_native_evidence_run_id = active_l1_native_evidence_run_id
     research_seed_module._l05_native_binding_installed = True
