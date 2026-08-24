@@ -8,12 +8,9 @@ which stream carries the message). Full-report byte-hashing is brittle
 (timestamps/receipt paths vary), so we snapshot per-command rc + a stable stderr
 substring instead.
 
-Grounded via CLI probe on v0.7-migration baseline (DemoProject_v03 /
-C20260625112755162852):
-  assemble-context --node L1 (pre-research artifact absent)
-    -> rc=3, stderr contains "V0.7 deep-research gate", stdout empty
-  assemble-context --node L5  -> rc=0, non-empty stdout
-These are the fail-closed and pass baselines the registry must not change.
+Native v2.1 L1 now fails closed at the Curie frozen-evidence binding gate rather
+than the historical V0.7 Deep Research gate. Historical L4 keeps the legacy
+pre-research gate. These are the current command-boundary baselines.
 """
 import subprocess
 import sys
@@ -65,17 +62,19 @@ def _cli(*args):
     return proc.returncode, proc.stdout, proc.stderr
 
 
-def test_l1_pre_research_gate_fails_closed_rc3(gate_project):
-    """L1 literature pre-research missing -> hard fail-closed rc=3, no context on stdout."""
+def test_l1_native_evidence_gate_fails_closed_rc3(gate_project):
+    """Native L1 missing Curie binding -> hard fail-closed rc=3, empty stdout."""
     project, cand = gate_project
     rc, out, err = _cli("assemble-context", str(project), cand, "--node", "L1")
-    assert rc == 3, f"L1 pre-research gate must fail closed with rc=3, got {rc}"
-    assert "V0.7 deep-research gate" in err, f"expected gate message in stderr, got: {err[:200]}"
+    assert rc == 3, f"native L1 evidence gate must fail closed with rc=3, got {rc}"
+    assert "native L1 evidence binding gate" in err, (
+        f"expected native evidence gate message in stderr, got: {err[:200]}"
+    )
     assert out.strip() == "", "fail-closed gate must not emit usable context on stdout"
 
 
 def test_l4_pre_research_gate_fails_closed_rc3(gate_project):
-    """L4 method literature gate shares the L1 fail-closed contract."""
+    """L4 method literature gate shares the fail-closed rc=3 contract."""
     project, cand = gate_project
     rc, out, err = _cli("assemble-context", str(project), cand, "--node", "L4")
     assert rc == 3, f"L4 pre-research gate must fail closed with rc=3, got {rc}"
