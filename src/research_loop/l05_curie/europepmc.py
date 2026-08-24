@@ -180,22 +180,114 @@ def canonicalize_europepmc_record(raw: dict) -> dict:
     }
 
 
+def _copy_record(record: dict) -> dict:
+    return {
+        **record,
+        "identifiers": dict(record.get("identifiers") or {}),
+        "metadata": {
+            **(record.get("metadata") or {}),
+            "publication_types": list(
+                (record.get("metadata") or {}).get("publication_types") or []
+            ),
+        },
+        "provenance": dict(record.get("provenance") or {}),
+    }
+
+
+def _stable_identifiers(record: dict) -> set[tuple[str, str]]:
+    identifiers = record.get("identifiers")
+    if not isinstance(identifiers, dict):
+        return set()
+    return {
+        (key, str(identifiers[key]))
+        for key in ("doi", "pmid", "pmcid")
+        if str(identifiers.get(key) or "").strip()
+    }
+
+
+def _merge_discovery_record(primary: dict, duplicate: dict) -> None:
+    primary_ids = primary["identifiers"]
+    duplicate_ids = duplicate.get("identifiers") or {}
+    for key in ("doi", "pmid", "pmcid"):
+        left = str(primary_ids.get(key) or "")
+        right = str(duplicate_ids.get(key) or "")
+        if left and right and left != right:
+            raise CurieContractError(
+                f"Europe PMC duplicate records conflict on canonical {key}: {left} != {right}"
+            )
+    for key, value in duplicate_ids.items():
+        if value and not primary_ids.get(key):
+            primary_ids[key] = value
+
+    primary_meta = primary["metadata"]
+    duplicate_meta = duplicate.get("metadata") or {}
+    for key in ("authors", "year", "journal", "abstract"):
+        if not primary_meta.get(key) and duplicate_meta.get(key):
+            primary_meta[key] = duplicate_meta[key]
+    for key in ("is_open_access", "in_europe_pmc"):
+        primary_meta[key] = bool(primary_meta.get(key) or duplicate_meta.get(key))
+    publication_types = list(primary_meta.get("publication_types") or [])
+    for value in duplicate_meta.get("publication_types") or []:
+        if value not in publication_types:
+            publication_types.append(value)
+    primary_meta["publication_types"] = publication_types
+
+    provenance = primary["provenance"]
+    source_records = provenance.get("source_records")
+    if not isinstance(source_records, list):
+        source_records = [{
+            key: provenance.get(key)
+            for key in ("provider", "source", "ext_id", "raw_record_sha256")
+            if provenance.get(key) is not None
+        }]
+    duplicate_provenance = duplicate.get("provenance") or {}
+    source_records.append({
+        key: duplicate_provenance.get(key)
+        for key in ("provider", "source", "ext_id", "raw_record_sha256")
+        if duplicate_provenance.get(key) is not None
+    })
+    provenance["source_records"] = source_records
+
+
 def deduplicate_discovery_records(records: list[dict]) -> tuple[list[dict], list[str]]:
-    """Preserve first-seen canonical records and report duplicate paper IDs."""
+    """Deduplicate by stable identifier overlap and merge richer source metadata."""
     if not isinstance(records, list):
         raise CurieContractError("discovery records must be a list")
     unique: list[dict] = []
     duplicates: list[str] = []
-    seen: set[str] = set()
+    paper_owner: dict[str, int] = {}
+    identifier_owner: dict[tuple[str, str], int] = {}
+
     for record in records:
         if not isinstance(record, dict):
             raise CurieContractError("discovery record must be an object")
         paper_id = _require_text(record.get("paper_id"), "discovery record paper_id")
-        if paper_id in seen:
+        stable_ids = _stable_identifiers(record)
+        owners = {
+            owner for identity in stable_ids
+            if (owner := identifier_owner.get(identity)) is not None
+        }
+        if paper_id in paper_owner:
+            owners.add(paper_owner[paper_id])
+        if len(owners) > 1:
+            raise CurieContractError(
+                "Europe PMC record bridges multiple canonical papers with conflicting identity clusters"
+            )
+        if owners:
+            owner = next(iter(owners))
+            _merge_discovery_record(unique[owner], record)
             duplicates.append(paper_id)
+            paper_owner[paper_id] = owner
+            for identity in _stable_identifiers(unique[owner]):
+                identifier_owner[identity] = owner
             continue
-        seen.add(paper_id)
-        unique.append(record)
+
+        owner = len(unique)
+        canonical = _copy_record(record)
+        unique.append(canonical)
+        paper_owner[paper_id] = owner
+        for identity in stable_ids:
+            identifier_owner[identity] = owner
     return unique, duplicates
 
 
@@ -556,7 +648,6 @@ class EuropePmcEvidenceRetriever:
         pmcid = normalize_pmcid(identifiers.get("pmcid"))
         if not pmcid:
             raise CurieContractError("Europe PMC full-text retrieval requires a PMCID")
-        # Validate semantic seed presence without using it to certify evidence.
         _require_text(seed.get("scientific_question") if isinstance(seed, dict) else None,
                       "seed scientific_question")
         _require_text(seed.get("hypothesis_seed") if isinstance(seed, dict) else None,
@@ -668,7 +759,6 @@ class EuropePmcEvidenceVerifier:
             raise CurieContractError(
                 "Europe PMC source snapshot SHA-256 does not match the frozen source bytes"
             )
-        # paper_id is deliberately touched before returning to make identity checks explicit.
         _require_text(paper_id, "source snapshot paper_id")
         return raw
 
