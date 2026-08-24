@@ -100,6 +100,37 @@ def test_canonical_identity_normalizes_doi_and_deduplicates():
     assert duplicate_ids == [duplicate["paper_id"]]
 
 
+def test_dedup_merges_cross_identifier_records_and_preserves_fulltext_identity():
+    primary = canonicalize_europepmc_record(
+        _core_result(pmcid="", isOpenAccess="N", inEPMC="N")
+    )
+    by_pmid_with_fulltext = canonicalize_europepmc_record(
+        _core_result(
+            doi="",
+            id="22253597",
+            source="MED",
+            pmid="22253597",
+            pmcid="PMC3257301",
+            isOpenAccess="Y",
+            inEPMC="Y",
+        )
+    )
+    assert primary["paper_id"] != by_pmid_with_fulltext["paper_id"]
+
+    unique, duplicate_ids = deduplicate_discovery_records(
+        [primary, by_pmid_with_fulltext]
+    )
+
+    assert len(unique) == 1
+    merged = unique[0]
+    assert merged["paper_id"] == primary["paper_id"]
+    assert merged["identifiers"]["pmid"] == "22253597"
+    assert merged["identifiers"]["pmcid"] == "PMC3257301"
+    assert merged["metadata"]["is_open_access"] is True
+    assert merged["metadata"]["in_europe_pmc"] is True
+    assert duplicate_ids == [by_pmid_with_fulltext["paper_id"]]
+
+
 def test_europepmc_transport_persists_raw_response_and_binds_receipt(tmp_path):
     payload = {
         "hitCount": 1,
