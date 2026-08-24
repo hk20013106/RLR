@@ -6,6 +6,7 @@ on:
       - "src/research_loop/l05_curie/**"
       - "src/research_loop/l05_context.py"
       - "src/research_loop/l05_curie_cli.py"
+      - "src/research_loop/l05_native_binding.py"
       - "src/research_loop/research_seed.py"
       - "src/research_loop/context.py"
       - "src/research_loop/__init__.py"
@@ -17,6 +18,7 @@ on:
       - "src/research_loop/l05_curie/**"
       - "src/research_loop/l05_context.py"
       - "src/research_loop/l05_curie_cli.py"
+      - "src/research_loop/l05_native_binding.py"
       - "src/research_loop/research_seed.py"
       - "src/research_loop/context.py"
       - "src/research_loop/__init__.py"
@@ -54,4 +56,5 @@ jobs:
           tests/test_l05_curie_europepmc_evidence.py
           tests/test_l05_curie_europepmc_runtime.py
           tests/test_l05_native_evidence_binding.py
+          tests/test_l05_native_l1_handoff.py
           -q
