@@ -1,9 +1,11 @@
 import pytest
 
 import research_loop.l05_curie as curie
+import research_loop.l05_curie.semantic_verifier as semantic_module
 from research_loop.l05_curie.semantic_verifier import (
     SEMANTIC_VERIFICATION_SCHEMA_VERSION,
     SemanticEvidenceVerifier,
+    admit_reasoning_evidence,
     reasoning_authorized,
     validate_semantic_verification,
 )
@@ -156,6 +158,7 @@ def test_semantic_result_binds_policy_assessor_and_content_identity():
     assert len(result["contract_sha256"]) == 64
     assert result["verification_id"].startswith("SV_")
     assert len(result["claim_sha256"]) == 64
+    assert len(result["extract_sha256"]) == 64
     validate_semantic_verification(result)
 
 
@@ -186,6 +189,33 @@ def test_semantic_verification_rejects_tampered_provenance_identity(
     result = _semantic()
     result[field] = replacement
     with pytest.raises(curie.CurieContractError, match="semantic|verification|contract|assessor|sha|identity"):
+        validate_semantic_verification(result)
+
+
+def test_semantic_admission_rejects_replayed_judgment_on_changed_extract():
+    semantic = _semantic()
+    changed = _extract()
+    changed["text"] = "A different statement was substituted after semantic review."
+    with pytest.raises(curie.CurieContractError, match="extract|semantic|sha|changed"):
+        admit_reasoning_evidence([changed], [semantic])
+
+
+def test_semantic_pack_rejects_replayed_judgment_on_changed_extract():
+    semantic = _semantic()
+    kwargs = _pack_kwargs([semantic])
+    changed = _extract()
+    changed["locator"] = "FORGED LOCATOR"
+    kwargs["evidence"] = [changed]
+    with pytest.raises(curie.CurieContractError, match="extract|semantic|sha|changed"):
+        curie.build_evidence_pack(**kwargs)
+
+
+def test_semantic_validator_recomputes_non_delegable_policy_verdict():
+    result = _semantic()
+    result["scope_match"] = False
+    result["verdict"] = "PASS"
+    result["verification_id"] = semantic_module._verification_id(result)
+    with pytest.raises(curie.CurieContractError, match="policy|verdict|scope"):
         validate_semantic_verification(result)
 
 
