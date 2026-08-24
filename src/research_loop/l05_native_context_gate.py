@@ -1,11 +1,9 @@
 """Native v2.1 L1 acquisition gate replacement.
 
 The historical ContextAssembler owns the legacy Deep Research pre-research gate.
-For native v2.1 L1, that gate would preserve a second acquisition authority even
-when a frozen Curie EvidencePack is already bound. This wrapper validates the
-native binding first, then suppresses only the legacy L1 pre-research stage for
-the duration of the canonical context assembly call. The shared map is restored
-in ``finally`` so historical v2.0 and all other nodes retain their behavior.
+For native v2.1 L1, this wrapper validates the active frozen Curie binding first,
+then suppresses only the legacy L1 pre-research stage for that call. Historical
+v2.0 and all non-L1 nodes retain their original behavior.
 """
 from __future__ import annotations
 
@@ -44,9 +42,12 @@ def _selected_run_id(project: Path, seed: dict, args) -> str:
     explicit = str(getattr(args, "evidence_run_id", "") or "").strip()
     if explicit:
         return explicit
-    run_id = research_seed.unique_l1_native_evidence_run_id(project, seed)
-    if run_id:
-        return str(run_id)
+    active = research_seed.active_l1_native_evidence_run_id(project, seed)
+    if active:
+        return str(active)
+    unique = research_seed.unique_l1_native_evidence_run_id(project, seed)
+    if unique:
+        return str(unique)
     raise NativeL1EvidenceGateError(
         "native L1 evidence binding is missing or ambiguous; select one exact Curie acquisition run"
     )
@@ -76,9 +77,6 @@ def install(context_module) -> None:
             print(f"ERROR: native L1 evidence binding gate -- {exc}", file=sys.stderr)
             return 3
 
-        # The canonical assembler still owns all non-acquisition gates and
-        # context construction. For this native L1 call only, remove its legacy
-        # Deep Research stage after the native binding has been validated.
         legacy_l1_config = PRE_RESEARCH_MAP.pop("L1", None)
         stdout = io.StringIO()
         stderr = io.StringIO()
