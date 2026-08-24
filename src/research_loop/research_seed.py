@@ -1,9 +1,9 @@
-"""Canonical L0 -> L1 research-seed projection.
+"""Canonical L0 -> L0.5 -> L1 research-seed and evidence binding.
 
-The L0 sidecar remains the sole semantic authority.  This module does not
-persist a second copy of the scientific question or hypothesis; it validates
-the existing L0 contract at the boundary of use and projects the exact fields
-needed by Curie (research) and Einstein (L1 reasoning).
+The L0 sidecar remains the sole semantic authority.  L0.5 Curie owns literature
+acquisition and freezes an immutable EvidencePack.  Einstein receives the
+canonical ResearchSeed plus that exact frozen evidence state; it does not gain
+independent retrieval authority.
 """
 from __future__ import annotations
 
@@ -17,11 +17,11 @@ from research_loop.yamlio import _load_yaml_front
 
 
 SCHEMA_VERSION = "L1ResearchSeed/v1"
-EVIDENCE_BINDING_SCHEMA_VERSION = "L1ResearchEvidenceBinding/v1"
+EVIDENCE_BINDING_SCHEMA_VERSION = "L1ResearchEvidenceBinding/v2"
 
 
 class ResearchSeedError(ValueError):
-    """Raised when the canonical L0 contract cannot authorize an L1 seed."""
+    """Raised when the canonical L0/L0.5 boundary cannot authorize L1."""
 
 
 def _canonical_json(value) -> str:
@@ -103,7 +103,7 @@ def _evidence_binding_path(project_dir, seed, run_id) -> Path:
         Path(project_dir)
         / "08_Audit"
         / "research_seed_bindings"
-        / f"L1_{suffix}.json"
+        / f"L1_v2_{suffix}.json"
     )
 
 
@@ -143,8 +143,36 @@ def _current_evidence_run_entry(project_dir, seed, run_id) -> dict:
     }
 
 
+def _current_evidence_pack_entry(project_dir, seed, run_id) -> dict:
+    from research_loop import l05_curie
+
+    seed_hash = seed_sha256(seed)
+    try:
+        manifest = l05_curie.freeze_l1_deep_research_run(
+            project_dir,
+            candidate_id=str(seed["candidate_id"]),
+            round_id=str(seed["round_id"]),
+            seed_sha256=seed_hash,
+            run_id=str(run_id),
+        )
+        frozen = l05_curie.load_frozen_evidence_pack(
+            project_dir,
+            manifest,
+            candidate_id=str(seed["candidate_id"]),
+            round_id=str(seed["round_id"]),
+            seed_sha256=seed_hash,
+        )
+    except l05_curie.CurieContractError as exc:
+        raise ResearchSeedError(f"frozen L0.5 EvidencePack is invalid: {exc}") from exc
+    if str(frozen.get("source_run_id") or "") != str(run_id):
+        raise ResearchSeedError(
+            "frozen L0.5 EvidencePack source_run_id does not match the selected L1 acquisition run"
+        )
+    return manifest
+
+
 def write_l1_evidence_binding(project_dir, seed, run_id) -> dict:
-    """Persist the immutable provenance edge ResearchSeed -> exact L1 evidence run."""
+    """Persist ResearchSeed -> acquisition run -> frozen L0.5 EvidencePack."""
     project_dir = Path(project_dir)
     run_id = str(run_id)
     payload = {
@@ -153,6 +181,7 @@ def write_l1_evidence_binding(project_dir, seed, run_id) -> dict:
         "round_id": str(seed["round_id"]),
         "research_seed": manifest_entry(seed),
         "evidence_run": _current_evidence_run_entry(project_dir, seed, run_id),
+        "evidence_pack": _current_evidence_pack_entry(project_dir, seed, run_id),
     }
     path = _evidence_binding_path(project_dir, seed, run_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -174,14 +203,18 @@ def write_l1_evidence_binding(project_dir, seed, run_id) -> dict:
 
 
 def load_l1_evidence_binding(project_dir, seed, run_id) -> dict:
-    """Load and revalidate the exact ResearchSeed -> evidence-run provenance edge."""
+    """Load and revalidate ResearchSeed, exact run, and frozen EvidencePack."""
+    from research_loop import l05_curie
+
     project_dir = Path(project_dir)
     run_id = str(run_id)
     path = _evidence_binding_path(project_dir, seed, run_id)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise ResearchSeedError(f"L1 research-seed evidence binding is missing or invalid: {exc}") from exc
+        raise ResearchSeedError(
+            f"L1 research-seed evidence binding is missing or invalid: {exc}"
+        ) from exc
     expected_seed = manifest_entry(seed)
     if payload.get("schema_version") != EVIDENCE_BINDING_SCHEMA_VERSION:
         raise ResearchSeedError("L1 evidence binding schema is invalid")
@@ -191,14 +224,34 @@ def load_l1_evidence_binding(project_dir, seed, run_id) -> dict:
         raise ResearchSeedError("L1 evidence binding round does not match research seed")
     if payload.get("research_seed") != expected_seed:
         raise ResearchSeedError("L1 evidence binding research seed has changed")
+
     current_run = _current_evidence_run_entry(project_dir, seed, run_id)
     if payload.get("evidence_run") != current_run:
-        raise ResearchSeedError("L1 evidence run has changed since it was bound to the research seed")
+        raise ResearchSeedError(
+            "L1 evidence run has changed since it was bound to the research seed"
+        )
+    evidence_pack = payload.get("evidence_pack")
+    if not isinstance(evidence_pack, dict):
+        raise ResearchSeedError("L1 evidence binding has no frozen L0.5 EvidencePack")
+    try:
+        frozen = l05_curie.load_frozen_evidence_pack(
+            project_dir,
+            evidence_pack,
+            candidate_id=str(seed["candidate_id"]),
+            round_id=str(seed["round_id"]),
+            seed_sha256=expected_seed["seed_sha256"],
+        )
+    except l05_curie.CurieContractError as exc:
+        raise ResearchSeedError(f"frozen L0.5 EvidencePack is invalid: {exc}") from exc
+    if str(frozen.get("source_run_id") or "") != run_id:
+        raise ResearchSeedError(
+            "frozen L0.5 EvidencePack source_run_id changed since binding"
+        )
     return payload
 
 
 def evidence_binding_manifest_entry(project_dir, seed, run_id) -> dict:
-    """Compact receipt for the validated ResearchSeed -> evidence-run edge."""
+    """Compact receipt for the validated L0 -> L0.5 -> L1 provenance edge."""
     project_dir = Path(project_dir)
     run_id = str(run_id)
     payload = load_l1_evidence_binding(project_dir, seed, run_id)
@@ -207,6 +260,7 @@ def evidence_binding_manifest_entry(project_dir, seed, run_id) -> dict:
         relative_path = path.relative_to(project_dir).as_posix()
     except ValueError:
         relative_path = path.as_posix()
+    pack = payload["evidence_pack"]
     return {
         "schema_version": EVIDENCE_BINDING_SCHEMA_VERSION,
         "artifact_path": relative_path,
@@ -216,6 +270,11 @@ def evidence_binding_manifest_entry(project_dir, seed, run_id) -> dict:
         "seed_sha256": str(payload["research_seed"]["seed_sha256"]),
         "evidence_run_id": run_id,
         "evidence_run_sha256": str(payload["evidence_run"]["sha256"]),
+        "evidence_pack_id": str(pack["pack_id"]),
+        "evidence_pack_version": int(pack["version"]),
+        "evidence_pack_path": str(pack["artifact_path"]),
+        "evidence_pack_sha256": str(pack["artifact_sha256"]),
+        "evidence_pack_content_sha256": str(pack["content_sha256"]),
     }
 
 

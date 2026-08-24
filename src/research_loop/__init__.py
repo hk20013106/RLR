@@ -133,6 +133,7 @@ from research_loop.commands import lifecycle as _lifecycle
 from research_loop.commands import ledger as _ledger_commands
 from research_loop import context as _context
 from research_loop.conditional_routing import install as _install_conditional_routing
+from research_loop.l05_context import install as _install_l05_context
 from research_loop.hypothesis_recall_context import (
     install as _install_hypothesis_recall_context,
 )
@@ -140,6 +141,10 @@ from research_loop.l45_ledger import install as _install_l45_ledger
 
 _install_l45_ledger(_ledger_commands)
 _install_conditional_routing(_lifecycle, _context)
+# L0.5 must sit inside recall: the canonical context and all legacy evidence
+# gates run first; Curie's frozen pack replaces the acquisition summary; only
+# then may the historical-recall extension add its separate frozen artifact.
+_install_l05_context(_context)
 _install_hypothesis_recall_context(_context, _ledger_commands)
 
 # CLI extensions are installed only after the canonical CLI module has defined
@@ -171,6 +176,7 @@ del _install_receipt_idempotency, _install_hypothesis_reactivation
 del _install_reactivation_constraints, _install_conditional_skip_constraints
 del _install_reactivation_compat
 del _install_topology_extensions, _install_l45_ledger
-del _install_conditional_routing, _install_hypothesis_recall_context
+del _install_conditional_routing, _install_l05_context
+del _install_hypothesis_recall_context
 del _install_hypothesis_pool_cli
 del _constraint_validation, _lifecycle, _ledger_commands, _context, _cli
