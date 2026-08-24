@@ -150,17 +150,51 @@ def complete_legacy_staged_l4_fixtures(request, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def complete_deep_research_l0_fixture(request, monkeypatch):
-    """Migrate the provider-runtime candidate factory to the strict L0 contract.
+    """Migrate old provider-runtime fixtures to current L0/L0.5 preconditions.
 
     The shared ``test_deep_research`` factory predates strict L0 and invokes
-    ``new-candidate --input data``.  The literal ``data`` is intentionally a
+    ``new-candidate --input data``. The literal ``data`` is intentionally a
     production placeholder, so keep the validator strict and rewrite only that
     exact test-fixture command to a descriptive synthetic input.
+
+    Two historical positive provider-lifecycle tests also predate native Curie
+    authority and finish by assembling native L1 context. Their scope is the
+    provider/detached runtime, not acquisition authority. Immediately before
+    that final context call, convert the already-audited legacy test run into a
+    frozen Curie pack and native binding. Production never performs this test
+    adapter; dedicated native handoff tests prove legacy-only binding fails.
     """
     if not request.module.__name__.endswith("test_deep_research"):
         return
 
+    native_context_fixture_tests = {
+        "test_detached_deep_research_survives_start_process_exit_and_collects",
+        "test_deep_research_cli_executes_a_local_fake_codex",
+    }
     real_run = subprocess.run
+
+    def ensure_native_test_binding(project, candidate_id):
+        from research_loop import deep_research, l05_curie, research_seed
+        from research_loop.l05_curie.native_runtime import bind_initial_curie_pack
+
+        project = Path(project)
+        seed = research_seed.load_l1_research_seed(project, candidate_id)
+        active = research_seed.active_l1_native_evidence_run_id(project, seed)
+        if active:
+            return
+        run_id = deep_research.unique_run_id(project, candidate_id, "L1")
+        if not run_id:
+            raise AssertionError(
+                "provider-runtime fixture has no unique audited L1 evidence run"
+            )
+        manifest = l05_curie.freeze_l1_deep_research_run(
+            project,
+            candidate_id=str(seed["candidate_id"]),
+            round_id=str(seed["round_id"]),
+            seed_sha256=research_seed.seed_sha256(seed),
+            run_id=str(run_id),
+        )
+        bind_initial_curie_pack(project, seed, manifest, str(run_id))
 
     def run_with_current_l0_fixture(command, *args, **kwargs):
         rewritten = command
@@ -171,6 +205,18 @@ def complete_deep_research_l0_fixture(request, monkeypatch):
                 if index + 1 < len(parts) and parts[index + 1] == "data":
                     parts[index + 1] = "synthetic deep research fixture input"
                     rewritten = tuple(parts) if isinstance(command, tuple) else parts
+            if (
+                request.node.name in native_context_fixture_tests
+                and "assemble-context" in parts
+                and "--node" in parts
+                and parts[parts.index("--node") + 1] == "L1"
+            ):
+                command_index = parts.index("assemble-context")
+                if len(parts) <= command_index + 2:
+                    raise AssertionError("malformed assemble-context test command")
+                ensure_native_test_binding(
+                    parts[command_index + 1], parts[command_index + 2]
+                )
         return real_run(rewritten, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", run_with_current_l0_fixture)
