@@ -1,7 +1,10 @@
 import pytest
 
 import research_loop.l05_curie as curie
-from research_loop.l05_curie.multisource import run_multisource_discovery
+from research_loop.l05_curie.multisource import (
+    build_multisource_query_plan,
+    run_multisource_discovery,
+)
 from research_loop.l05_curie.selector import select_candidates
 
 
@@ -42,7 +45,7 @@ def _plan():
         "scientific_question": "question",
         "hypothesis_seed": "hypothesis",
     }
-    return curie.build_multisource_query_plan(
+    return build_multisource_query_plan(
         seed,
         seed_sha256="a" * 64,
         explicit_queries=["first query", "second query"],
