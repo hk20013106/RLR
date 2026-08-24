@@ -1,0 +1,36 @@
+name: L0.5 Curie contract CI
+
+on:
+  push:
+    paths:
+      - "src/research_loop/l05_curie/**"
+      - "tests/test_l05_curie_*.py"
+      - ".github/workflows/l05-curie-ci.yml"
+  pull_request:
+    paths:
+      - "src/research_loop/l05_curie/**"
+      - "tests/test_l05_curie_*.py"
+      - ".github/workflows/l05-curie-ci.yml"
+
+concurrency:
+  group: l05-curie-${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: Contracts / Ubuntu / Python 3.13
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: L0.5 contract suite
+        env:
+          PYTHONPATH: src
+        run: python -m pytest tests/test_l05_curie_contracts.py tests/test_l05_curie_store.py -q
