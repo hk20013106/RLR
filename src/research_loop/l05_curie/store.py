@@ -87,6 +87,9 @@ def _validate_pack_structure(pack: dict, *, expected_status: str | None = None) 
     round_id = _require_text(pack.get("round_id"), "EvidencePack round_id")
     seed_sha256 = _require_sha256(pack.get("seed_sha256"), "EvidencePack seed_sha256")
     _require_text(pack.get("pack_id"), "EvidencePack pack_id")
+    source_run_id = pack.get("source_run_id")
+    if source_run_id is not None:
+        _require_text(source_run_id, "EvidencePack source_run_id")
     version = pack.get("version")
     if not isinstance(version, int) or isinstance(version, bool) or version < 1:
         raise CurieContractError("EvidencePack version must be a positive integer")
@@ -105,7 +108,6 @@ def _validate_pack_structure(pack: dict, *, expected_status: str | None = None) 
     query_plans = pack.get("query_plans")
     if not isinstance(query_plans, list) or not query_plans:
         raise CurieContractError("EvidencePack query_plans must be a non-empty list")
-    validated_plans: list[dict] = []
     query_ids: set[str] = set()
     plan_ids: set[str] = set()
     for plan in query_plans:
@@ -119,15 +121,12 @@ def _validate_pack_structure(pack: dict, *, expected_status: str | None = None) 
             if query["query_id"] in query_ids:
                 raise CurieContractError(f"duplicate EvidencePack query_id: {query['query_id']}")
             query_ids.add(query["query_id"])
-        validated_plans.append(plan)
 
     discovery_receipts = pack.get("discovery_receipts")
     if not isinstance(discovery_receipts, list):
         raise CurieContractError("EvidencePack discovery_receipts must be a list")
-    validated_discovery = [
+    for batch in discovery_receipts:
         validate_discovery_batch(batch, query_ids=query_ids)
-        for batch in discovery_receipts
-    ]
 
     selected_papers = _validate_selected_papers(pack.get("selected_papers"))
     selected_ids = {paper["paper_id"] for paper in selected_papers}
@@ -135,7 +134,6 @@ def _validate_pack_structure(pack: dict, *, expected_status: str | None = None) 
     evidence = pack.get("evidence")
     if not isinstance(evidence, list) or not evidence:
         raise CurieContractError("EvidencePack evidence must be a non-empty list")
-    validated_evidence: list[dict] = []
     evidence_ids: set[str] = set()
     for extract in evidence:
         extract = validate_evidence_extract(extract)
@@ -146,7 +144,6 @@ def _validate_pack_structure(pack: dict, *, expected_status: str | None = None) 
         if extract["evidence_id"] in evidence_ids:
             raise CurieContractError(f"duplicate evidence_id: {extract['evidence_id']}")
         evidence_ids.add(extract["evidence_id"])
-        validated_evidence.append(extract)
 
     coverage = validate_coverage_decision(pack.get("coverage"))
     gaps = pack.get("gaps")
@@ -166,7 +163,8 @@ def build_evidence_pack(*, candidate_id: str, round_id: str, seed_sha256: str,
                         discovery_receipts: list[dict], selected_papers: list[dict],
                         evidence: list[dict], coverage: dict, gaps: list[dict],
                         parent_pack_sha256: str | None = None,
-                        source_gap_request_id: str | None = None) -> dict:
+                        source_gap_request_id: str | None = None,
+                        source_run_id: str | None = None) -> dict:
     """Build a deterministic, validated pack that is not yet authorized for L1."""
     candidate_id = _require_text(candidate_id, "candidate_id")
     round_id = _require_text(round_id, "round_id")
@@ -178,13 +176,11 @@ def build_evidence_pack(*, candidate_id: str, round_id: str, seed_sha256: str,
             raise CurieContractError("version 1 cannot declare parent_pack_sha256")
         parent_pack_sha256 = None
     else:
-        parent_pack_sha256 = _require_sha256(
-            parent_pack_sha256, "parent_pack_sha256"
-        )
+        parent_pack_sha256 = _require_sha256(parent_pack_sha256, "parent_pack_sha256")
     if source_gap_request_id is not None:
-        source_gap_request_id = _require_text(
-            source_gap_request_id, "source_gap_request_id"
-        )
+        source_gap_request_id = _require_text(source_gap_request_id, "source_gap_request_id")
+    if source_run_id is not None:
+        source_run_id = _require_text(source_run_id, "source_run_id")
 
     pack = {
         "schema_version": EVIDENCE_PACK_SCHEMA_VERSION,
@@ -195,6 +191,7 @@ def build_evidence_pack(*, candidate_id: str, round_id: str, seed_sha256: str,
         "version": version,
         "parent_pack_sha256": parent_pack_sha256,
         "source_gap_request_id": source_gap_request_id,
+        "source_run_id": source_run_id,
         "query_plans": copy.deepcopy(query_plans),
         "discovery_receipts": copy.deepcopy(discovery_receipts),
         "selected_papers": copy.deepcopy(selected_papers),
@@ -212,7 +209,6 @@ def freeze_evidence_pack(project_dir: str | Path, pack: dict) -> dict:
     ready = _validate_pack_structure(pack, expected_status="READY_TO_FREEZE")
     if ready["coverage"]["verdict"] != "PASS":
         raise CurieContractError("EvidencePack coverage verdict must be PASS before freeze")
-
     frozen = copy.deepcopy(ready)
     frozen["status"] = "FROZEN"
     frozen["content_sha256"] = _content_sha256(frozen)
@@ -257,9 +253,7 @@ def _validated_manifest_identity(manifest: dict, *, candidate_id: str,
         raise CurieContractError("EvidencePack manifest candidate_id does not match active candidate")
     if manifest.get("round_id") != round_id:
         raise CurieContractError("EvidencePack manifest round_id does not match active round")
-    manifest_seed = _require_sha256(
-        manifest.get("seed_sha256"), "EvidencePack manifest seed_sha256"
-    )
+    manifest_seed = _require_sha256(manifest.get("seed_sha256"), "EvidencePack manifest seed_sha256")
     if manifest_seed != seed_sha256:
         raise CurieContractError("EvidencePack manifest seed_sha256 does not match active ResearchSeed")
     _require_text(manifest.get("pack_id"), "EvidencePack manifest pack_id")
@@ -279,17 +273,10 @@ def load_frozen_evidence_pack(project_dir: str | Path, manifest: dict, *,
                               seed_sha256: str) -> dict:
     """Revalidate file path, artifact hash, content hash and identity at L1 use."""
     manifest = _validated_manifest_identity(
-        manifest,
-        candidate_id=candidate_id,
-        round_id=round_id,
-        seed_sha256=seed_sha256,
+        manifest, candidate_id=candidate_id, round_id=round_id, seed_sha256=seed_sha256
     )
     project_dir = Path(project_dir).resolve()
-    expected_root = (
-        project_dir
-        / _L05_ROOT
-        / _safe_token(candidate_id, "candidate_id")
-    ).resolve()
+    expected_root = (project_dir / _L05_ROOT / _safe_token(candidate_id, "candidate_id")).resolve()
     relative = Path(manifest["artifact_path"])
     if relative.is_absolute():
         raise CurieContractError("EvidencePack manifest artifact_path must be relative")
@@ -297,9 +284,7 @@ def load_frozen_evidence_pack(project_dir: str | Path, manifest: dict, *,
     try:
         path.relative_to(expected_root)
     except ValueError as exc:
-        raise CurieContractError(
-            "EvidencePack manifest artifact_path escapes the L0.5 evidence root"
-        ) from exc
+        raise CurieContractError("EvidencePack manifest artifact_path escapes the L0.5 evidence root") from exc
     if not path.is_file():
         raise CurieContractError(f"frozen EvidencePack artifact missing: {relative.as_posix()}")
     raw = path.read_bytes()
@@ -335,9 +320,7 @@ def next_pack_version(previous_pack: dict, *, gap_request: dict,
     request = validate_gap_request(gap_request)
     for field in ("candidate_id", "round_id", "seed_sha256"):
         if request[field] != previous[field]:
-            raise CurieContractError(
-                f"gap request {field} does not match the frozen EvidencePack"
-            )
+            raise CurieContractError(f"gap request {field} does not match the frozen EvidencePack")
     if request["pack_sha256"] != previous["content_sha256"]:
         raise CurieContractError(
             "gap request pack_sha256 does not match the frozen EvidencePack content_sha256"
@@ -349,6 +332,7 @@ def next_pack_version(previous_pack: dict, *, gap_request: dict,
         version=previous["version"] + 1,
         parent_pack_sha256=previous["content_sha256"],
         source_gap_request_id=request["request_id"],
+        source_run_id=None,
         query_plans=query_plans,
         discovery_receipts=discovery_receipts,
         selected_papers=selected_papers,
@@ -356,3 +340,30 @@ def next_pack_version(previous_pack: dict, *, gap_request: dict,
         coverage=coverage,
         gaps=gaps,
     )
+
+
+def render_evidence_context(pack: dict) -> str:
+    """Render only verified frozen evidence for Einstein's isolated L1 context."""
+    frozen = _validate_pack_structure(pack, expected_status="FROZEN")
+    if frozen["coverage"]["verdict"] != "PASS":
+        raise CurieContractError("L1 evidence context requires coverage PASS")
+    papers = {paper["paper_id"]: paper for paper in frozen["selected_papers"]}
+    lines = [
+        "=== L0.5 CURIE FROZEN EVIDENCEPACK ===",
+        "AUTHORITY: immutable, verified evidence state; Einstein may reason over these extracts but may not search or retrieve new literature.",
+        f"pack_id: {frozen['pack_id']}",
+        f"content_sha256: {frozen['content_sha256']}",
+        f"version: {frozen['version']}",
+        "## Verified EvidenceExtracts",
+    ]
+    for extract in frozen["evidence"]:
+        paper = papers[extract["paper_id"]]
+        identifier = next(
+            (str(value) for value in paper.get("identifiers", {}).values() if str(value).strip()),
+            extract["paper_id"],
+        )
+        lines.append(
+            f"- [{extract['evidence_id']}] role={extract['role']} | {paper['title']} | {identifier} | "
+            f"{extract['section']} @ {extract['locator']}: {extract['text']}"
+        )
+    return "\n".join(lines)
