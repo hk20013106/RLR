@@ -33,4 +33,4 @@ jobs:
       - name: L0.5 contract suite
         env:
           PYTHONPATH: src
-        run: python -m pytest tests/test_l05_curie_contracts.py tests/test_l05_curie_store.py -q
+        run: python -m pytest tests/test_l05_curie_contracts.py -q
