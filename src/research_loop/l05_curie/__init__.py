@@ -20,6 +20,12 @@ from .contracts import (
     validate_transport_handshake,
 )
 from .interfaces import DiscoveryTransport, EvidenceRetriever
+
+# Install optional semantic-admission validation on the canonical store before
+# any public or downstream module captures its build/freeze/load functions.
+from . import store as _store
+from .semantic_pack import install as _install_semantic_pack
+_install_semantic_pack(_store)
 from .store import (
     build_evidence_pack,
     freeze_evidence_pack,
@@ -36,6 +42,8 @@ from .gap_loop import (
     load_open_gap_request,
     open_gap_request,
 )
+
+del _install_semantic_pack, _store
 
 __all__ = [
     "AUTH_SCHEMA_VERSION",
