@@ -1,9 +1,12 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from research_loop import deep_research, research_seed
+from research_loop import context, deep_research, l0_contract, research_seed
+from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
+from research_loop.hypothesis_ledger import HypothesisLedger
 import research_loop.l05_curie as curie
 
 
@@ -59,7 +62,10 @@ def _payload(*, include_conclusion=True):
                 "title": "Bat cardiac physiology",
                 "source_database": "pubmed",
                 "metadata": {"year": 2025, "journal": "Example"},
-                "source_metadata_response": {"id": "10.1000/curie.1", "title": "Bat cardiac physiology"},
+                "source_metadata_response": {
+                    "id": "10.1000/curie.1",
+                    "title": "Bat cardiac physiology",
+                },
                 "open_access": False,
                 "content_type": "text/plain",
                 "source_payload": "",
@@ -67,12 +73,17 @@ def _payload(*, include_conclusion=True):
                 "extracts": extracts,
             }
         ],
-        "review_search": {"query": "", "status": "none_found", "receipt": "not required for L1"},
+        "review_search": {
+            "query": "",
+            "status": "none_found",
+            "receipt": "not required for L1",
+        },
         "verification": [],
     }
 
 
-def _persist_l1(project: Path, *, include_conclusion=True):
+def _persist_l1(project: Path, *, include_conclusion=True, project_id="PROJECT:1",
+                profile_id="native-v2.1"):
     return deep_research.persist_run(
         project,
         "C001",
@@ -81,11 +92,67 @@ def _persist_l1(project: Path, *, include_conclusion=True):
         deep_research.skill_receipt(
             "codex", ["fixture"], "fixture", "test", stdout_hash="f" * 64
         ),
-        project_id="PROJECT:1",
+        project_id=project_id,
         round_id="1",
-        profile_id="native-v2.1",
+        profile_id=profile_id,
         research_persona="Curie",
     )
+
+
+def _native_l1_project(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    store = tmp_path / "hypotheses.sqlite"
+    ledger = HypothesisLedger(store)
+    ledger.bind_project(project, profile_id=DEFAULT_NATIVE_PROFILE)
+    binding = ledger.require_binding(project)
+
+    candidate_dir = project / "01_Candidates"
+    candidate_dir.mkdir(parents=True)
+    source_input = l0_contract.build_source_input(
+        input_type="inline",
+        description="synthetic L0.5 bridge fixture",
+        fmt="text",
+    )
+    contract = l0_contract.promote_to_current_schema(
+        l0_contract.build_initial_contract(
+            "C001",
+            "1",
+            "Why can bats sustain high heart rates?",
+            source_input,
+            "Cardiac physiology includes adaptive mechanisms.",
+        )
+    )
+    contract_path, contract_hash = l0_contract.write_contract(
+        project, "C001", contract
+    )
+    (candidate_dir / "C001.md").write_text(
+        "---\n"
+        "candidate_id: C001\n"
+        "title: Frozen evidence context fixture\n"
+        "question: duplicated frontmatter question must not be authoritative\n"
+        "claim: duplicated frontmatter claim must not be authoritative\n"
+        "round_type: initial\n"
+        "round_id: 1\n"
+        f"schema_version: {contract['schema_version']}\n"
+        f"input_contract_path: {contract_path.relative_to(project).as_posix()}\n"
+        f"input_contract_hash: {contract_hash}\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    seed = research_seed.load_l1_research_seed(project, "C001")
+    artifact = _persist_l1(
+        project,
+        project_id=str(binding["project_id"]),
+        profile_id=DEFAULT_NATIVE_PROFILE,
+    )
+    source_summary = project / artifact["summary_path"]
+    canonical_summary = (
+        project / "02_Agent_Notes" / "_pre_research" / "L1_research.md"
+    )
+    canonical_summary.write_bytes(source_summary.read_bytes())
+    research_seed.write_l1_evidence_binding(project, seed, artifact["run_id"])
+    return project, store, artifact
 
 
 def test_legacy_l1_run_is_snapshotted_into_frozen_l05_pack(tmp_path):
@@ -157,8 +224,39 @@ def test_research_seed_binding_v2_binds_and_revalidates_frozen_pack(tmp_path):
     assert frozen["source_run_id"] == artifact["run_id"]
 
     pack_path = tmp_path / manifest["artifact_path"]
-    pack_path.write_text(pack_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
-    with pytest.raises(research_seed.ResearchSeedError, match="frozen L0.5 EvidencePack"):
+    pack_path.write_text(
+        pack_path.read_text(encoding="utf-8") + "\n", encoding="utf-8"
+    )
+    with pytest.raises(
+        research_seed.ResearchSeedError, match="frozen L0.5 EvidencePack"
+    ):
         research_seed.load_l1_evidence_binding(
             tmp_path, seed, artifact["run_id"]
         )
+
+
+def test_native_l1_context_consumes_frozen_l05_evidence_not_legacy_summary(
+    tmp_path, monkeypatch, capsys
+):
+    project, store, artifact = _native_l1_project(tmp_path)
+    monkeypatch.setenv("RLR_HYPOTHESIS_STORE", str(store))
+    args = SimpleNamespace(
+        project_dir=str(project),
+        cand_id="C001",
+        node="L1",
+        authorization_id=None,
+        knowledge_store=str(store),
+        template_mode="contract",
+        pre_research_mode="full",
+        pre_research_token_budget=4000,
+        context_token_budget=12000,
+        evidence_run_id=artifact["run_id"],
+    )
+
+    assert context.cmd_assemble_context(args) == 0
+    rendered = capsys.readouterr().out
+    assert "=== L0.5 CURIE FROZEN EVIDENCEPACK ===" in rendered
+    assert "A located result." in rendered
+    assert "A located discussion statement." in rendered
+    assert "A located conclusion." in rendered
+    assert "=== PRE-RESEARCH (deep_research) [FULL] ===" not in rendered
