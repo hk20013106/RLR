@@ -1,8 +1,9 @@
 """Semantic verification after deterministic source fidelity.
 
 The assessor may judge entailment, scope, context, and qualification preservation.
-It cannot rewrite evidence identity, source fidelity, or the policy verdict.
-Ambiguous evidence remains representable but is not reasoning-authorized.
+It cannot rewrite evidence identity, source fidelity, policy provenance, or the
+policy verdict. Ambiguous evidence remains representable but is not
+reasoning-authorized.
 """
 from __future__ import annotations
 
@@ -16,9 +17,36 @@ SEMANTIC_VERIFICATION_SCHEMA_VERSION = "L05SemanticVerification/v1"
 _ENTAILMENT = {"SUPPORTED", "CONTRADICTED", "AMBIGUOUS", "UNRELATED"}
 _VERDICTS = {"PASS", "AMBIGUOUS", "FAIL"}
 _FORBIDDEN_ASSESSOR_KEYS = {
-    "evidence_id", "paper_id", "source_fidelity", "verdict",
-    "verification_status", "role", "text", "locator",
+    "schema_version", "evidence_id", "paper_id", "source_fidelity", "verdict",
+    "verification_status", "role", "text", "locator", "claim_sha256",
+    "assessor_id", "contract_sha256", "verification_id",
 }
+
+
+def _canonical_bytes(value: object) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+
+
+_SEMANTIC_CONTRACT = {
+    "schema_version": SEMANTIC_VERIFICATION_SCHEMA_VERSION,
+    "source_fidelity_precondition": "LOCATED",
+    "assessor_inputs": ["extract", "claim"],
+    "assessor_outputs": [
+        "entailment", "scope_match", "context_preserved",
+        "qualification_preserved", "reason",
+    ],
+    "entailment_values": sorted(_ENTAILMENT),
+    "policy": {
+        "PASS": ["SUPPORTED", "CONTRADICTED"],
+        "AMBIGUOUS": ["AMBIGUOUS"],
+        "FAIL": ["UNRELATED", "scope_or_context_or_qualification_mismatch"],
+    },
+}
+SEMANTIC_CONTRACT_SHA256 = hashlib.sha256(
+    _canonical_bytes(_SEMANTIC_CONTRACT)
+).hexdigest()
 
 
 def _text(value: object, name: str) -> str:
@@ -32,6 +60,40 @@ def _bool(value: object, name: str) -> bool:
     if not isinstance(value, bool):
         raise CurieContractError(f"{name} must be boolean")
     return value
+
+
+def _sha256_text(value: object, name: str) -> str:
+    text = _text(value, name)
+    if len(text) != 64 or any(ch not in "0123456789abcdef" for ch in text):
+        raise CurieContractError(f"{name} must be a lowercase SHA-256 hex digest")
+    return text
+
+
+def _verification_identity(result: dict) -> dict:
+    return {
+        key: result[key]
+        for key in (
+            "schema_version",
+            "evidence_id",
+            "paper_id",
+            "source_fidelity",
+            "entailment",
+            "scope_match",
+            "context_preserved",
+            "qualification_preserved",
+            "verdict",
+            "reason",
+            "claim_sha256",
+            "assessor_id",
+            "contract_sha256",
+        )
+    }
+
+
+def _verification_id(result: dict) -> str:
+    return "SV_" + hashlib.sha256(
+        _canonical_bytes(_verification_identity(result))
+    ).hexdigest()[:20]
 
 
 def validate_semantic_verification(result: dict) -> dict:
@@ -58,7 +120,20 @@ def validate_semantic_verification(result: dict) -> dict:
             f"semantic verification verdict must be one of {sorted(_VERDICTS)}"
         )
     _text(result.get("reason"), "semantic verification reason")
-    _text(result.get("claim_sha256"), "semantic verification claim_sha256")
+    _sha256_text(result.get("claim_sha256"), "semantic verification claim_sha256")
+    _text(result.get("assessor_id"), "semantic verification assessor_id")
+    contract_sha = _sha256_text(
+        result.get("contract_sha256"), "semantic verification contract_sha256"
+    )
+    if contract_sha != SEMANTIC_CONTRACT_SHA256:
+        raise CurieContractError(
+            "semantic verification contract_sha256 does not match the active semantic contract"
+        )
+    expected_id = _verification_id(result)
+    if str(result.get("verification_id") or "") != expected_id:
+        raise CurieContractError(
+            "semantic verification identity does not match its provenance content"
+        )
     return json.loads(json.dumps(result))
 
 
@@ -130,7 +205,9 @@ class SemanticEvidenceVerifier:
             "reason": assessment["reason"],
             "claim_sha256": hashlib.sha256(claim.encode("utf-8")).hexdigest(),
             "assessor_id": self.assessor_id,
+            "contract_sha256": SEMANTIC_CONTRACT_SHA256,
         }
+        result["verification_id"] = _verification_id(result)
         return validate_semantic_verification(result)
 
 
