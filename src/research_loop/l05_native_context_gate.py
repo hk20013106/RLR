@@ -16,6 +16,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from research_loop import research_seed
+from research_loop.compatibility import CompatibilityError, get_profile
 from research_loop.hypothesis_ledger import binding_path
 from research_loop.preresearch import PRE_RESEARCH_MAP
 
@@ -33,9 +34,10 @@ def _is_native_l1(args) -> bool:
         return False
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        profile = get_profile(str(payload.get("profile_id") or ""))
+    except (OSError, json.JSONDecodeError, CompatibilityError):
         return False
-    return str(payload.get("profile_id") or "") == "native-v2.1"
+    return profile.delta_schema_version == "2.1"
 
 
 def _selected_run_id(project: Path, seed: dict, args) -> str:
