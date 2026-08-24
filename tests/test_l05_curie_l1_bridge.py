@@ -150,6 +150,7 @@ def _native_l1_project(tmp_path: Path):
     canonical_summary = (
         project / "02_Agent_Notes" / "_pre_research" / "L1_research.md"
     )
+    canonical_summary.parent.mkdir(parents=True, exist_ok=True)
     canonical_summary.write_bytes(source_summary.read_bytes())
     research_seed.write_l1_evidence_binding(project, seed, artifact["run_id"])
     return project, store, artifact
