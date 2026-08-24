@@ -148,6 +148,9 @@ def install(research_seed_module) -> None:
     """Install native binding APIs on the canonical research_seed module."""
     if getattr(research_seed_module, "_l05_native_binding_installed", False):
         return
+    legacy_evidence_binding_manifest_entry = (
+        research_seed_module.evidence_binding_manifest_entry
+    )
 
     def write_l1_native_evidence_binding(project_dir, seed, pack_manifest,
                                          acquisition_run_id) -> dict:
@@ -201,6 +204,18 @@ def install(research_seed_module) -> None:
         payload = load_l1_native_evidence_binding(project, seed, acquisition_run_id)
         return _entry(project, seed, acquisition_run_id, payload)
 
+    def evidence_binding_manifest_entry(project_dir, seed, evidence_run_id) -> dict:
+        """Return the authoritative receipt for this run, native when present."""
+        project = Path(project_dir)
+        native_path = _binding_path(project, seed, evidence_run_id)
+        if native_path.is_file():
+            return native_evidence_binding_manifest_entry(
+                project, seed, evidence_run_id
+            )
+        return legacy_evidence_binding_manifest_entry(
+            project_dir, seed, evidence_run_id
+        )
+
     def unique_l1_native_evidence_run_id(project_dir, seed):
         project = Path(project_dir)
         root = _binding_dir(project, seed)
@@ -240,6 +255,9 @@ def install(research_seed_module) -> None:
     )
     research_seed_module.native_evidence_binding_manifest_entry = (
         native_evidence_binding_manifest_entry
+    )
+    research_seed_module.evidence_binding_manifest_entry = (
+        evidence_binding_manifest_entry
     )
     research_seed_module.unique_l1_native_evidence_run_id = (
         unique_l1_native_evidence_run_id
