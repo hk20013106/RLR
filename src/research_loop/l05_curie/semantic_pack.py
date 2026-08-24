@@ -3,7 +3,7 @@
 Legacy packs remain byte-compatible when ``semantic_verifications`` is omitted.
 New Phase 7 packs may freeze semantic admission records; whenever present, the
 records are revalidated at build, freeze, and load boundaries and must map
-one-to-one to every reasoning-authorized EvidenceExtract in the pack.
+one-to-one to every reasoning-authorized exact EvidenceExtract in the pack.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ def _validate_semantic_pack(pack: dict) -> dict:
             "EvidencePack semantic_verifications must be a non-empty list when present"
         )
     from .semantic_verifier import (
+        evidence_extract_sha256,
         reasoning_authorized,
         validate_semantic_verification,
     )
@@ -53,6 +54,10 @@ def _validate_semantic_pack(pack: dict) -> dict:
         if str(result["paper_id"]) != str(extract.get("paper_id") or ""):
             raise CurieContractError(
                 f"semantic verification paper identity mismatch for evidence {evidence_id}"
+            )
+        if str(result["extract_sha256"]) != evidence_extract_sha256(extract):
+            raise CurieContractError(
+                f"semantic verification exact extract SHA mismatch for evidence {evidence_id}; evidence changed"
             )
         if not reasoning_authorized(result):
             raise CurieContractError(
