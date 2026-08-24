@@ -68,6 +68,62 @@ def _active_pack(project_dir: str | Path, seed: dict, manifest: dict) -> dict:
         raise CurieContractError(f"active parent EvidencePack is invalid: {exc}") from exc
 
 
+def _authorization_identity(request_id: str, parent_pack_sha256: str,
+                            next_version: int) -> dict:
+    return {
+        "request_id": request_id,
+        "parent_pack_sha256": parent_pack_sha256,
+        "next_version": next_version,
+    }
+
+
+def _authorization_id(identity: dict) -> str:
+    return "EGRA_" + hashlib.sha256(_canonical_bytes(identity)).hexdigest()[:16]
+
+
+def _validate_retry_authorization(seed: dict, authorization: dict) -> dict:
+    if not isinstance(authorization, dict) or authorization.get("schema_version") != AUTH_SCHEMA_VERSION:
+        raise CurieContractError("gap retry authorization schema is invalid")
+    if str(authorization.get("candidate_id") or "") != str(seed["candidate_id"]):
+        raise CurieContractError("gap retry authorization candidate mismatch")
+    if str(authorization.get("round_id") or "") != str(seed["round_id"]):
+        raise CurieContractError("gap retry authorization round mismatch")
+    if str(authorization.get("seed_sha256") or "") != research_seed.seed_sha256(seed):
+        raise CurieContractError("gap retry authorization ResearchSeed mismatch")
+
+    raw_request_id = str(authorization.get("request_id") or "")
+    request_id = _safe(raw_request_id, "gap request_id")
+    if request_id != raw_request_id:
+        raise CurieContractError("gap retry authorization request lineage is not canonical")
+    if str(authorization.get("source_gap_request_id") or "") != request_id:
+        raise CurieContractError("gap retry authorization request lineage mismatch")
+
+    parent_version = authorization.get("parent_pack_version")
+    next_version = authorization.get("next_version")
+    if (
+        isinstance(parent_version, bool)
+        or not isinstance(parent_version, int)
+        or isinstance(next_version, bool)
+        or not isinstance(next_version, int)
+    ):
+        raise CurieContractError("gap retry authorization version lineage is invalid")
+    if parent_version < 1 or next_version != parent_version + 1:
+        raise CurieContractError("gap retry authorization version lineage is invalid")
+    if next_version > MAX_ACQUISITION_ROUNDS:
+        raise CurieContractError(
+            f"gap retry authorization exceeds maximum of {MAX_ACQUISITION_ROUNDS} rounds"
+        )
+
+    parent_sha = str(authorization.get("parent_pack_sha256") or "")
+    if len(parent_sha) != 64 or any(ch not in "0123456789abcdef" for ch in parent_sha):
+        raise CurieContractError("gap retry authorization parent pack SHA is invalid")
+    identity = _authorization_identity(request_id, parent_sha, next_version)
+    expected_id = _authorization_id(identity)
+    if str(authorization.get("authorization_id") or "") != expected_id:
+        raise CurieContractError("gap retry authorization id does not match its lineage")
+    return dict(authorization)
+
+
 def open_gap_request(
     project_dir: str | Path,
     seed: dict,
@@ -146,14 +202,12 @@ def authorize_gap_retry(
     consumed = _consumption_path(project_dir, seed, request_id)
     if consumed.exists():
         raise CurieContractError("EvidenceGapRequest retry authorization was already consumed")
-    identity = {
-        "request_id": request_id,
-        "parent_pack_sha256": pack["content_sha256"],
-        "next_version": current_version + 1,
-    }
-    return {
+    identity = _authorization_identity(
+        str(request_id), str(pack["content_sha256"]), current_version + 1
+    )
+    authorization = {
         "schema_version": AUTH_SCHEMA_VERSION,
-        "authorization_id": "EGRA_" + hashlib.sha256(_canonical_bytes(identity)).hexdigest()[:16],
+        "authorization_id": _authorization_id(identity),
         "candidate_id": str(seed["candidate_id"]),
         "round_id": str(seed["round_id"]),
         "seed_sha256": research_seed.seed_sha256(seed),
@@ -163,6 +217,7 @@ def authorize_gap_retry(
         "parent_pack_version": current_version,
         "next_version": current_version + 1,
     }
+    return _validate_retry_authorization(seed, authorization)
 
 
 def consume_gap_retry_authorization(
@@ -172,23 +227,16 @@ def consume_gap_retry_authorization(
     acquisition_run_id: str,
 ) -> dict:
     """Persist append-only consumption after a successful authorized retry."""
-    if not isinstance(authorization, dict) or authorization.get("schema_version") != AUTH_SCHEMA_VERSION:
-        raise CurieContractError("gap retry authorization schema is invalid")
-    if str(authorization.get("candidate_id") or "") != str(seed["candidate_id"]):
-        raise CurieContractError("gap retry authorization candidate mismatch")
-    if str(authorization.get("round_id") or "") != str(seed["round_id"]):
-        raise CurieContractError("gap retry authorization round mismatch")
-    if str(authorization.get("seed_sha256") or "") != research_seed.seed_sha256(seed):
-        raise CurieContractError("gap retry authorization ResearchSeed mismatch")
-    request_id = _safe(authorization.get("request_id"), "gap request_id")
+    validated = _validate_retry_authorization(seed, authorization)
+    request_id = str(validated["request_id"])
     run_id = _safe(acquisition_run_id, "acquisition_run_id")
     receipt = {
         "schema_version": CONSUMPTION_SCHEMA_VERSION,
-        "authorization_id": str(authorization["authorization_id"]),
+        "authorization_id": str(validated["authorization_id"]),
         "request_id": request_id,
         "acquisition_run_id": run_id,
-        "next_version": int(authorization["next_version"]),
-        "parent_pack_sha256": str(authorization["parent_pack_sha256"]),
+        "next_version": int(validated["next_version"]),
+        "parent_pack_sha256": str(validated["parent_pack_sha256"]),
     }
     path = _consumption_path(project_dir, seed, request_id)
     path.parent.mkdir(parents=True, exist_ok=True)
