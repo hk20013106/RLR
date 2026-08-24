@@ -5,6 +5,7 @@ on:
     paths:
       - "src/research_loop/l05_curie/**"
       - "src/research_loop/l05_context.py"
+      - "src/research_loop/l05_curie_cli.py"
       - "src/research_loop/research_seed.py"
       - "src/research_loop/context.py"
       - "src/research_loop/__init__.py"
@@ -14,6 +15,7 @@ on:
     paths:
       - "src/research_loop/l05_curie/**"
       - "src/research_loop/l05_context.py"
+      - "src/research_loop/l05_curie_cli.py"
       - "src/research_loop/research_seed.py"
       - "src/research_loop/context.py"
       - "src/research_loop/__init__.py"
@@ -46,4 +48,7 @@ jobs:
           tests/test_l05_curie_contracts.py
           tests/test_l05_curie_store.py
           tests/test_l05_curie_l1_bridge.py
+          tests/test_l05_curie_europepmc_discovery.py
+          tests/test_l05_curie_europepmc_evidence.py
+          tests/test_l05_curie_europepmc_runtime.py
           -q

@@ -1,0 +1,35 @@
+name: L0.5 Europe PMC live smoke
+
+on:
+  pull_request:
+    paths:
+      - "src/research_loop/l05_curie/europepmc.py"
+      - "src/research_loop/l05_curie/europepmc_runtime.py"
+      - "src/research_loop/l05_curie_cli.py"
+      - "scripts/l05_europepmc_live_smoke.py"
+      - ".github/workflows/l05-europepmc-live-smoke.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: l05-europepmc-live-${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  live-smoke:
+    name: Europe PMC search + fullTextXML / Ubuntu / Python 3.13
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install runtime dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run bounded live Europe PMC smoke
+        env:
+          PYTHONPATH: src
+        run: python scripts/l05_europepmc_live_smoke.py
