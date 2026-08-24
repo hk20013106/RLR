@@ -29,6 +29,8 @@ def test_independent_source_verifier_promotes_only_exact_located_candidate():
     assert extract["schema_version"] == curie.EVIDENCE_EXTRACT_SCHEMA_VERSION
     assert extract["verification_status"] == "LOCATED"
     assert extract["role"] == "CONTEXT"
+    assert extract["locator"].startswith("char:")
+    assert extract["retrieval"]["upstream_locator"] == "Results p2"
     assert len(extract["retrieval"]["source_sha256"]) == 64
     assert extract["retrieval"]["upstream_engine"] == "paperqa2"
     curie.validate_evidence_extract(extract)
@@ -55,3 +57,11 @@ def test_independent_source_verifier_preserves_contradictory_role():
         role="CONTRADICTORY",
     )
     assert extract["role"] == "CONTRADICTORY"
+
+
+def test_independent_source_verifier_fails_when_exact_text_has_ambiguous_locations():
+    text = b"Calcium handling differed under exercise."
+    with pytest.raises(curie.CurieContractError, match="ambiguous|multiple|location"):
+        ExactTextSourceVerifier().verify(
+            _candidate(), source_bytes=text + b" spacer " + text, role="CONTEXT"
+        )
