@@ -39,8 +39,8 @@ def install(native_helpers) -> None:
         project = Path(project_dir)
         manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
 
-        # The synthetic helper creates the immutable evidence pack directly.
-        # Context assembly also requires its canonical pre-research alias.
+        # Preserve the historical summary alias only for tests that inspect its
+        # file layout. Native L1 context consumes the frozen Curie pack instead.
         evidence = (manifest.get("pre_research") or {}).get("evidence_artifacts")
         if evidence:
             summary = next(
@@ -69,11 +69,11 @@ def install(native_helpers) -> None:
         )
         if not evidence_run_id:
             raise AssertionError("synthetic native L1 fixture has no exact evidence run")
-        research_seed.write_l1_evidence_binding(
-            project, seed, evidence_run_id
-        )
+
+        # native_curie_test_support has already created the authoritative native
+        # binding. Recall may cite it but must not create a legacy L1 binding.
         manifest["research_seed_evidence_binding"] = (
-            research_seed.evidence_binding_manifest_entry(
+            research_seed.native_evidence_binding_manifest_entry(
                 project, seed, evidence_run_id
             )
         )
