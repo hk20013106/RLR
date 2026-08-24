@@ -65,6 +65,20 @@ def _freeze(tmp_path, *, version=1, run_id=None, parent=None, gap_id=None):
     return curie.freeze_evidence_pack(tmp_path, pack)
 
 
+def _authorized_retry(tmp_path):
+    seed = _seed()
+    first = _freeze(tmp_path)
+    request = curie.open_gap_request(
+        tmp_path, seed, first,
+        gaps=[{"gap_id": "G1", "topic": "gap", "reason": "missing",
+               "search_directions": ["search more"]}],
+    )
+    auth = curie.authorize_gap_retry(
+        tmp_path, seed, first, request["request_id"]
+    )
+    return seed, first, request, auth
+
+
 def test_open_gap_request_is_append_only_and_bound_to_exact_pack(tmp_path):
     seed = _seed()
     manifest = _freeze(tmp_path)
@@ -102,16 +116,7 @@ def test_gap_request_rejects_forged_parent_pack(tmp_path):
 
 
 def test_authorize_retry_returns_exact_v2_lineage_and_cannot_be_reused(tmp_path):
-    seed = _seed()
-    first = _freeze(tmp_path)
-    request = curie.open_gap_request(
-        tmp_path, seed, first,
-        gaps=[{"gap_id": "G1", "topic": "gap", "reason": "missing",
-               "search_directions": ["search more"]}],
-    )
-    auth = curie.authorize_gap_retry(
-        tmp_path, seed, first, request["request_id"]
-    )
+    seed, first, request, auth = _authorized_retry(tmp_path)
     assert auth["next_version"] == 2
     assert auth["parent_pack_sha256"] == first["content_sha256"]
     assert auth["source_gap_request_id"] == request["request_id"]
@@ -119,6 +124,27 @@ def test_authorize_retry_returns_exact_v2_lineage_and_cannot_be_reused(tmp_path)
     curie.consume_gap_retry_authorization(tmp_path, seed, auth, "CURIE002")
     with pytest.raises(curie.CurieContractError, match="consumed"):
         curie.authorize_gap_retry(tmp_path, seed, first, request["request_id"])
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("authorization_id", "EGRA_FORGED"),
+        ("source_gap_request_id", "EGR_FORGED"),
+        ("next_version", 3),
+        ("parent_pack_version", 2),
+        ("parent_pack_sha256", "f" * 64),
+    ],
+)
+def test_consume_gap_retry_rejects_tampered_authorization_identity(
+    tmp_path, field, replacement
+):
+    project = tmp_path / field
+    seed, _first, _request, auth = _authorized_retry(project)
+    forged = dict(auth)
+    forged[field] = replacement
+    with pytest.raises(curie.CurieContractError, match="authorization|lineage|version|parent|request"):
+        curie.consume_gap_retry_authorization(project, seed, forged, "CURIE002")
 
 
 def test_no_fourth_acquisition_round_is_authorized(tmp_path):
