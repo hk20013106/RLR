@@ -62,6 +62,9 @@ jobs:
           tests/test_l05_curie_multisource_discovery.py
           tests/test_l05_curie_selector.py
           tests/test_l05_curie_paperqa2.py
+          tests/test_l05_curie_source_verifier.py
+          tests/test_l05_curie_semantic_verifier.py
+          tests/test_l05_curie_fullcycle.py
           tests/test_l05_native_evidence_binding.py
           tests/test_l05_native_l1_handoff.py
           -q
