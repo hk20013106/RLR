@@ -19,7 +19,7 @@ _VERDICTS = {"PASS", "AMBIGUOUS", "FAIL"}
 _FORBIDDEN_ASSESSOR_KEYS = {
     "schema_version", "evidence_id", "paper_id", "source_fidelity", "verdict",
     "verification_status", "role", "text", "locator", "claim_sha256",
-    "assessor_id", "contract_sha256", "verification_id",
+    "extract_sha256", "assessor_id", "contract_sha256", "verification_id",
 }
 
 
@@ -36,6 +36,9 @@ _SEMANTIC_CONTRACT = {
     "assessor_outputs": [
         "entailment", "scope_match", "context_preserved",
         "qualification_preserved", "reason",
+    ],
+    "bound_provenance": [
+        "extract_sha256", "claim_sha256", "assessor_id", "contract_sha256"
     ],
     "entailment_values": sorted(_ENTAILMENT),
     "policy": {
@@ -69,6 +72,12 @@ def _sha256_text(value: object, name: str) -> str:
     return text
 
 
+def evidence_extract_sha256(extract: dict) -> str:
+    """Content address the exact validated EvidenceExtract seen by the assessor."""
+    validated = validate_evidence_extract(extract)
+    return hashlib.sha256(_canonical_bytes(validated)).hexdigest()
+
+
 def _verification_identity(result: dict) -> dict:
     return {
         key: result[key]
@@ -83,6 +92,7 @@ def _verification_identity(result: dict) -> dict:
             "qualification_preserved",
             "verdict",
             "reason",
+            "extract_sha256",
             "claim_sha256",
             "assessor_id",
             "contract_sha256",
@@ -94,6 +104,20 @@ def _verification_id(result: dict) -> str:
     return "SV_" + hashlib.sha256(
         _canonical_bytes(_verification_identity(result))
     ).hexdigest()[:20]
+
+
+def _policy_verdict(assessment: dict) -> str:
+    if not all(
+        assessment[field]
+        for field in ("scope_match", "context_preserved", "qualification_preserved")
+    ):
+        return "FAIL"
+    entailment = assessment["entailment"]
+    if entailment in {"SUPPORTED", "CONTRADICTED"}:
+        return "PASS"
+    if entailment == "AMBIGUOUS":
+        return "AMBIGUOUS"
+    return "FAIL"
 
 
 def validate_semantic_verification(result: dict) -> dict:
@@ -112,14 +136,33 @@ def validate_semantic_verification(result: dict) -> dict:
         raise CurieContractError(
             f"semantic verification entailment must be one of {sorted(_ENTAILMENT)}"
         )
-    for field in ("scope_match", "context_preserved", "qualification_preserved"):
-        _bool(result.get(field), f"semantic verification {field}")
+    scope_match = _bool(
+        result.get("scope_match"), "semantic verification scope_match"
+    )
+    context_preserved = _bool(
+        result.get("context_preserved"), "semantic verification context_preserved"
+    )
+    qualification_preserved = _bool(
+        result.get("qualification_preserved"),
+        "semantic verification qualification_preserved",
+    )
     verdict = _text(result.get("verdict"), "semantic verification verdict").upper()
     if verdict not in _VERDICTS:
         raise CurieContractError(
             f"semantic verification verdict must be one of {sorted(_VERDICTS)}"
         )
+    expected_verdict = _policy_verdict({
+        "entailment": entailment,
+        "scope_match": scope_match,
+        "context_preserved": context_preserved,
+        "qualification_preserved": qualification_preserved,
+    })
+    if verdict != expected_verdict:
+        raise CurieContractError(
+            "semantic verification verdict violates the non-delegable policy"
+        )
     _text(result.get("reason"), "semantic verification reason")
+    _sha256_text(result.get("extract_sha256"), "semantic verification extract_sha256")
     _sha256_text(result.get("claim_sha256"), "semantic verification claim_sha256")
     _text(result.get("assessor_id"), "semantic verification assessor_id")
     contract_sha = _sha256_text(
@@ -137,20 +180,6 @@ def validate_semantic_verification(result: dict) -> dict:
     return json.loads(json.dumps(result))
 
 
-def _policy_verdict(assessment: dict) -> str:
-    if not all(
-        assessment[field]
-        for field in ("scope_match", "context_preserved", "qualification_preserved")
-    ):
-        return "FAIL"
-    entailment = assessment["entailment"]
-    if entailment in {"SUPPORTED", "CONTRADICTED"}:
-        return "PASS"
-    if entailment == "AMBIGUOUS":
-        return "AMBIGUOUS"
-    return "FAIL"
-
-
 class SemanticEvidenceVerifier:
     """Apply a semantic assessor under a fixed, non-delegable admission policy."""
 
@@ -165,10 +194,12 @@ class SemanticEvidenceVerifier:
             raise CurieContractError(
                 "semantic verification requires LOCATED deterministic source fidelity"
             )
-        validate_evidence_extract(extract)
+        validated_extract = validate_evidence_extract(extract)
         claim = _text(claim, "semantic verification claim")
         try:
-            raw = self.assessor(extract=json.loads(json.dumps(extract)), claim=claim)
+            raw = self.assessor(
+                extract=json.loads(json.dumps(validated_extract)), claim=claim
+            )
         except Exception as exc:
             raise CurieContractError(f"semantic assessor failed: {exc}") from exc
         if not isinstance(raw, dict):
@@ -197,12 +228,13 @@ class SemanticEvidenceVerifier:
         }
         result = {
             "schema_version": SEMANTIC_VERIFICATION_SCHEMA_VERSION,
-            "evidence_id": str(extract["evidence_id"]),
-            "paper_id": str(extract["paper_id"]),
+            "evidence_id": str(validated_extract["evidence_id"]),
+            "paper_id": str(validated_extract["paper_id"]),
             "source_fidelity": "PASS",
             **assessment,
             "verdict": _policy_verdict(assessment),
             "reason": assessment["reason"],
+            "extract_sha256": evidence_extract_sha256(validated_extract),
             "claim_sha256": hashlib.sha256(claim.encode("utf-8")).hexdigest(),
             "assessor_id": self.assessor_id,
             "contract_sha256": SEMANTIC_CONTRACT_SHA256,
@@ -221,11 +253,7 @@ def reasoning_authorized(result: dict) -> bool:
 
 
 def admit_reasoning_evidence(extracts: list[dict], semantic_results: list[dict]) -> list[dict]:
-    """Return only extracts explicitly authorized by one matching semantic result.
-
-    Semantic results themselves remain separate audit artifacts; this function
-    controls which source-located extracts may enter a reasoning-authorized pack.
-    """
+    """Return only exact extracts explicitly authorized by semantic verification."""
     if not isinstance(extracts, list) or not isinstance(semantic_results, list):
         raise CurieContractError("reasoning admission requires evidence and semantic lists")
     semantic_by_id = {}
@@ -249,6 +277,10 @@ def admit_reasoning_evidence(extracts: list[dict], semantic_results: list[dict])
         if semantic["paper_id"] != validated_extract["paper_id"]:
             raise CurieContractError(
                 f"semantic verification paper identity mismatch for {evidence_id}"
+            )
+        if semantic["extract_sha256"] != evidence_extract_sha256(validated_extract):
+            raise CurieContractError(
+                f"semantic verification exact extract SHA mismatch for {evidence_id}; evidence changed"
             )
         if reasoning_authorized(semantic):
             admitted.append(validated_extract)
