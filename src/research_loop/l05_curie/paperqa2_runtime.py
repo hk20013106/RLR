@@ -25,6 +25,21 @@ _REQUIRED_RUNTIME = (
     "package", "version", "upstream_repo", "upstream_tag", "upstream_commit",
     "fork_repo", "pdf_sha256",
 )
+PAPERQA2_PACKAGE = "paper-qa"
+PAPERQA2_VERSION = "2026.8.12"
+PAPERQA2_UPSTREAM_REPO = "https://github.com/Future-House/paper-qa"
+PAPERQA2_UPSTREAM_TAG = "v2026.08.12"
+PAPERQA2_UPSTREAM_COMMIT = "57e89f7223b0960d5ee5ea048c69e3c47e088572"
+PAPERQA2_FORK_REPO = "https://github.com/hk20013106/paper-qa"
+PAPERQA2_BACKEND_ID = "paperqa2-fork-v2026.08.12/sparse-docs-v1"
+_PINNED_RUNTIME = {
+    "package": PAPERQA2_PACKAGE,
+    "version": PAPERQA2_VERSION,
+    "upstream_repo": PAPERQA2_UPSTREAM_REPO,
+    "upstream_tag": PAPERQA2_UPSTREAM_TAG,
+    "upstream_commit": PAPERQA2_UPSTREAM_COMMIT,
+    "fork_repo": PAPERQA2_FORK_REPO,
+}
 
 
 def _text(value: object, name: str) -> str:
@@ -49,28 +64,23 @@ def _tokens(value: object) -> list[str]:
     return re.findall(r"[\w]+", normalized, flags=re.UNICODE)
 
 
-def _validate_runtime(
-    runtime: object,
-    *,
-    expected_commit: str,
-    expected_tag: str,
-    pdf_sha256: str,
-) -> dict:
+def validate_pinned_paperqa2_runtime(runtime: object, *, pdf_sha256: str) -> dict:
+    """Validate immutable PaperQA2 integration provenance at every use boundary."""
     if not isinstance(runtime, dict):
         raise CurieContractError("PaperQA2 bridge runtime provenance must be an object")
     if runtime.get("schema_version") != PAPERQA2_RUNTIME_SCHEMA_VERSION:
         raise CurieContractError("PaperQA2 bridge runtime schema_version is invalid")
     for field in _REQUIRED_RUNTIME:
         _text(runtime.get(field), f"PaperQA2 bridge runtime {field}")
-    commit = runtime["upstream_commit"].lower()
+    commit = str(runtime["upstream_commit"]).lower()
     if not _GIT_COMMIT.fullmatch(commit):
         raise CurieContractError("PaperQA2 bridge upstream_commit must be a 40-character git SHA")
-    if commit != expected_commit:
-        raise CurieContractError(
-            "PaperQA2 runtime commit does not match the pinned integration commit"
-        )
-    if runtime["upstream_tag"] != expected_tag:
-        raise CurieContractError("PaperQA2 runtime tag does not match the pinned integration tag")
+    for field, expected in _PINNED_RUNTIME.items():
+        observed = commit if field == "upstream_commit" else str(runtime[field])
+        if observed != expected:
+            raise CurieContractError(
+                f"PaperQA2 runtime {field} does not match the pinned integration"
+            )
     if runtime["pdf_sha256"].lower() != pdf_sha256:
         raise CurieContractError("PaperQA2 runtime PDF hash does not match the requested PDF")
     return copy.deepcopy(runtime)
@@ -86,18 +96,13 @@ class PaperQA2SubprocessBackend:
         bridge_script: str | Path,
         paperqa_repo: str | Path,
         pqa_home: str | Path,
-        expected_commit: str,
-        expected_tag: str = "v2026.08.12",
-        backend_id: str = "paperqa2-fork-v2026.08.12/sparse-docs-v1",
         timeout_seconds: int = 300,
     ) -> None:
         self.python_executable = Path(python_executable).resolve()
         self.bridge_script = Path(bridge_script).resolve()
         self.paperqa_repo = Path(paperqa_repo).resolve()
         self.pqa_home = Path(pqa_home).resolve()
-        self.expected_commit = _text(expected_commit, "PaperQA2 expected_commit").lower()
-        self.expected_tag = _text(expected_tag, "PaperQA2 expected_tag")
-        self.backend_id = _text(backend_id, "PaperQA2 backend_id")
+        self.backend_id = PAPERQA2_BACKEND_ID
         if not self.python_executable.is_file():
             raise CurieContractError(f"PaperQA2 Python executable is missing: {self.python_executable}")
         if not self.bridge_script.is_file():
@@ -153,10 +158,8 @@ class PaperQA2SubprocessBackend:
             raise CurieContractError("PaperQA2 bridge did not return JSON") from exc
         if not isinstance(payload, dict) or payload.get("engine") != "paperqa2":
             raise CurieContractError("PaperQA2 bridge engine identity is invalid")
-        runtime = _validate_runtime(
+        runtime = validate_pinned_paperqa2_runtime(
             payload.get("runtime"),
-            expected_commit=self.expected_commit,
-            expected_tag=self.expected_tag,
             pdf_sha256=pdf_sha256,
         )
         runtime.update({

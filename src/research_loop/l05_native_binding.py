@@ -11,7 +11,8 @@ import json
 from pathlib import Path
 
 
-NATIVE_EVIDENCE_BINDING_SCHEMA_VERSION = "L1NativeEvidenceBinding/v1"
+NATIVE_EVIDENCE_BINDING_SCHEMA_VERSION = "L1NativeEvidenceBinding/v2"
+LEGACY_NATIVE_EVIDENCE_BINDING_SCHEMA_VERSION = "L1NativeEvidenceBinding/v1"
 NATIVE_EVIDENCE_ACTIVATION_SCHEMA_VERSION = "L1NativeEvidenceActivation/v1"
 _ROOT = Path("08_Audit") / "research_seed_bindings" / "native"
 
@@ -72,15 +73,105 @@ def _load_pack(project_dir: Path, seed: dict, pack_manifest: dict, research_seed
         ) from exc
 
 
+def _parent_manifest(project_dir: Path, seed: dict, parent_pack_sha256: str,
+                     research_seed_module) -> dict:
+    """Find a validated bound parent pack without treating a mutable pointer as authority."""
+    for path in sorted(_binding_dir(project_dir, seed).glob("L1_native_*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise research_seed_module.ResearchSeedError(
+                f"native L1 evidence binding is unreadable: {exc}"
+            ) from exc
+        manifest = payload.get("evidence_pack") if isinstance(payload, dict) else None
+        if not isinstance(manifest, dict):
+            continue
+        frozen = _load_pack(project_dir, seed, manifest, research_seed_module)
+        if str(frozen.get("content_sha256") or "") == parent_pack_sha256:
+            return manifest
+    raise research_seed_module.ResearchSeedError(
+        "native L1 retry binding parent pack is not an existing native binding"
+    )
+
+
+def _validated_retry_authorization(project_dir: Path, seed: dict, frozen: dict,
+                                   retry_authorization: object,
+                                   research_seed_module) -> dict | None:
+    """Prove a retry pack is tied to an existing request and bounded authority."""
+    from research_loop import l05_curie
+
+    version = int(frozen["version"])
+    parent_sha = frozen.get("parent_pack_sha256")
+    gap_id = frozen.get("source_gap_request_id")
+    if version == 1:
+        if parent_sha not in (None, "") or gap_id not in (None, ""):
+            raise research_seed_module.ResearchSeedError(
+                "native L1 v1 binding must not have retry lineage"
+            )
+        if retry_authorization not in (None, {}):
+            raise research_seed_module.ResearchSeedError(
+                "native L1 v1 binding must not carry retry authorization"
+            )
+        return None
+    if version > l05_curie.MAX_ACQUISITION_ROUNDS:
+        raise research_seed_module.ResearchSeedError(
+            f"native L1 retry binding exceeds {l05_curie.MAX_ACQUISITION_ROUNDS} rounds"
+        )
+    if not isinstance(retry_authorization, dict):
+        raise research_seed_module.ResearchSeedError(
+            "native L1 retry binding requires persisted retry authorization"
+        )
+    try:
+        authorization = l05_curie.validate_gap_retry_authorization(
+            seed, retry_authorization
+        )
+    except l05_curie.CurieContractError as exc:
+        raise research_seed_module.ResearchSeedError(
+            f"native L1 retry authorization is invalid: {exc}"
+        ) from exc
+    expected = {
+        "next_version": version,
+        "parent_pack_sha256": str(parent_sha or ""),
+        "source_gap_request_id": str(gap_id or ""),
+    }
+    for field, value in expected.items():
+        observed = authorization.get(field)
+        matches = (
+            int(observed or 0) == value
+            if field == "next_version"
+            else str(observed or "") == value
+        )
+        if not matches:
+            raise research_seed_module.ResearchSeedError(
+                f"native L1 retry authorization {field} does not match EvidencePack lineage"
+            )
+    parent_manifest = _parent_manifest(
+        project_dir, seed, str(parent_sha), research_seed_module
+    )
+    try:
+        l05_curie.load_open_gap_request(
+            project_dir, seed, parent_manifest, str(gap_id)
+        )
+    except l05_curie.CurieContractError as exc:
+        raise research_seed_module.ResearchSeedError(
+            f"native L1 retry gap lineage is invalid: {exc}"
+        ) from exc
+    return authorization
+
+
 def _payload(project_dir: Path, seed: dict, pack_manifest: dict,
-             acquisition_run_id: str, research_seed_module) -> dict:
+             acquisition_run_id: str, research_seed_module,
+             retry_authorization: object = None) -> dict:
     run_id = _text(acquisition_run_id, "native binding acquisition_run_id")
     frozen = _load_pack(project_dir, seed, pack_manifest, research_seed_module)
     if str(frozen.get("source_run_id") or "") != run_id:
         raise research_seed_module.ResearchSeedError(
             "frozen L0.5 EvidencePack source_run_id does not match native acquisition_run_id"
         )
-    return {
+    authorization = _validated_retry_authorization(
+        project_dir, seed, frozen, retry_authorization, research_seed_module
+    )
+    payload = {
         "schema_version": NATIVE_EVIDENCE_BINDING_SCHEMA_VERSION,
         "candidate_id": str(seed["candidate_id"]),
         "round_id": str(seed["round_id"]),
@@ -94,6 +185,9 @@ def _payload(project_dir: Path, seed: dict, pack_manifest: dict,
             "content_sha256": str(frozen["content_sha256"]),
         },
     }
+    if authorization is not None:
+        payload["retry_authorization"] = authorization
+    return payload
 
 
 def _entry(project_dir: Path, seed: dict, acquisition_run_id: str,
@@ -105,7 +199,7 @@ def _entry(project_dir: Path, seed: dict, acquisition_run_id: str,
         relative = path.as_posix()
     manifest = payload["evidence_pack"]
     return {
-        "schema_version": NATIVE_EVIDENCE_BINDING_SCHEMA_VERSION,
+        "schema_version": str(payload["schema_version"]),
         "artifact_path": relative,
         "artifact_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "candidate_id": str(seed["candidate_id"]),
@@ -125,7 +219,11 @@ def _validate_payload(project_dir: Path, seed: dict, acquisition_run_id: str,
     run_id = _text(acquisition_run_id, "native binding acquisition_run_id")
     if not isinstance(payload, dict):
         raise research_seed_module.ResearchSeedError("native L1 evidence binding must be an object")
-    if payload.get("schema_version") != NATIVE_EVIDENCE_BINDING_SCHEMA_VERSION:
+    schema_version = payload.get("schema_version")
+    if schema_version not in {
+        LEGACY_NATIVE_EVIDENCE_BINDING_SCHEMA_VERSION,
+        NATIVE_EVIDENCE_BINDING_SCHEMA_VERSION,
+    }:
         raise research_seed_module.ResearchSeedError("native L1 evidence binding schema is invalid")
     if str(payload.get("candidate_id") or "") != str(seed["candidate_id"]):
         raise research_seed_module.ResearchSeedError("native L1 evidence binding candidate mismatch")
@@ -151,6 +249,20 @@ def _validate_payload(project_dir: Path, seed: dict, acquisition_run_id: str,
     }
     if payload.get("pack_lineage") != expected_lineage:
         raise research_seed_module.ResearchSeedError("native L1 evidence binding pack lineage has changed")
+    retry_authorization = payload.get("retry_authorization")
+    if schema_version == LEGACY_NATIVE_EVIDENCE_BINDING_SCHEMA_VERSION:
+        if int(frozen["version"]) != 1:
+            raise research_seed_module.ResearchSeedError(
+                "legacy native L1 retry binding has no authenticated retry lineage"
+            )
+        if retry_authorization not in (None, {}):
+            raise research_seed_module.ResearchSeedError(
+                "legacy native L1 binding must not carry retry authorization"
+            )
+    else:
+        _validated_retry_authorization(
+            project_dir, seed, frozen, retry_authorization, research_seed_module
+        )
     return payload
 
 
@@ -161,11 +273,12 @@ def install(research_seed_module) -> None:
     legacy_evidence_binding_manifest_entry = research_seed_module.evidence_binding_manifest_entry
 
     def write_l1_native_evidence_binding(project_dir, seed, pack_manifest,
-                                         acquisition_run_id) -> dict:
+                                         acquisition_run_id, *,
+                                         retry_authorization=None) -> dict:
         project = Path(project_dir)
         try:
             payload = _payload(project, seed, pack_manifest, acquisition_run_id,
-                               research_seed_module)
+                               research_seed_module, retry_authorization)
         except ValueError as exc:
             raise research_seed_module.ResearchSeedError(str(exc)) from exc
         path = _binding_path(project, seed, acquisition_run_id)
@@ -179,10 +292,37 @@ def install(research_seed_module) -> None:
                     f"native L1 evidence binding is unreadable: {exc}"
                 ) from exc
             if existing != payload:
+                if (
+                    existing.get("schema_version")
+                    == LEGACY_NATIVE_EVIDENCE_BINDING_SCHEMA_VERSION
+                    and retry_authorization in (None, {})
+                    and existing.get("evidence_pack") == pack_manifest
+                ):
+                    validated = _validate_payload(
+                        project, seed, acquisition_run_id, existing,
+                        research_seed_module
+                    )
+                    return _entry(project, seed, acquisition_run_id, validated)
                 raise research_seed_module.ResearchSeedError(
                     "native L1 evidence binding already exists with different provenance"
                 )
         else:
+            if int(payload["pack_lineage"]["version"]) > 1:
+                active_run_id = active_l1_native_evidence_run_id(project, seed)
+                if not active_run_id:
+                    raise research_seed_module.ResearchSeedError(
+                        "native L1 retry binding requires an active parent binding"
+                    )
+                active_binding = load_l1_native_evidence_binding(
+                    project, seed, active_run_id
+                )
+                if (
+                    str(active_binding["pack_lineage"]["content_sha256"])
+                    != str(payload["pack_lineage"]["parent_pack_sha256"])
+                ):
+                    raise research_seed_module.ResearchSeedError(
+                        "native L1 retry binding parent is not the active native pack"
+                    )
             path.write_bytes(raw)
         validated = _validate_payload(project, seed, acquisition_run_id, payload,
                                       research_seed_module)
@@ -246,6 +386,20 @@ def install(research_seed_module) -> None:
 
     def _activation_payload(project: Path, seed: dict, acquisition_run_id: str) -> dict:
         binding = load_l1_native_evidence_binding(project, seed, acquisition_run_id)
+        if int(binding["pack_lineage"]["version"]) > 1:
+            from research_loop import l05_curie
+
+            try:
+                l05_curie.load_gap_retry_consumption(
+                    project,
+                    seed,
+                    binding["retry_authorization"],
+                    acquisition_run_id,
+                )
+            except l05_curie.CurieContractError as exc:
+                raise research_seed_module.ResearchSeedError(
+                    f"native L1 retry activation lacks a valid consumption receipt: {exc}"
+                ) from exc
         entry = native_evidence_binding_manifest_entry(project, seed, acquisition_run_id)
         lineage = binding["pack_lineage"]
         return {

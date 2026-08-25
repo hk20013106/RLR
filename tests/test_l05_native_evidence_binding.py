@@ -1,4 +1,5 @@
 import json
+import hashlib
 
 import pytest
 
@@ -106,7 +107,7 @@ def test_native_binding_does_not_require_legacy_deep_research_run(tmp_path):
         tmp_path, seed, manifest, "CURIE001"
     )
 
-    assert entry["schema_version"] == "L1NativeEvidenceBinding/v1"
+    assert entry["schema_version"] == "L1NativeEvidenceBinding/v2"
     assert entry["evidence_run_id"] == "CURIE001"
     assert entry["evidence_pack_version"] == 1
     assert not (tmp_path / "08_Audit" / "deep_research").exists()
@@ -165,24 +166,36 @@ def test_unique_native_binding_run_id_requires_unambiguous_binding(tmp_path):
     research_seed.write_l1_native_evidence_binding(
         tmp_path, seed, first, "CURIE001"
     )
+    research_seed.activate_l1_native_evidence_binding(tmp_path, seed, "CURIE001")
     assert research_seed.unique_l1_native_evidence_run_id(tmp_path, seed) == "CURIE001"
 
-    first_pack = curie.load_frozen_evidence_pack(
+    request = curie.open_gap_request(
         tmp_path,
+        seed,
         first,
-        candidate_id="C001",
-        round_id="1",
-        seed_sha256=research_seed.seed_sha256(seed),
+        gaps=[{
+            "gap_id": "G1",
+            "topic": "mechanism",
+            "reason": "missing direct evidence",
+            "search_directions": ["find an independently verified source"],
+        }],
+    )
+    authorization = curie.authorize_gap_retry(
+        tmp_path, seed, first, request["request_id"]
     )
     second = _pack_manifest(
         tmp_path,
         run_id="CURIE002",
-        version=2,
-        parent_pack_sha256=first_pack["content_sha256"],
-        source_gap_request_id="EGR_TEST",
+        version=authorization["next_version"],
+        parent_pack_sha256=authorization["parent_pack_sha256"],
+        source_gap_request_id=authorization["source_gap_request_id"],
     )
     research_seed.write_l1_native_evidence_binding(
-        tmp_path, seed, second, "CURIE002"
+        tmp_path,
+        seed,
+        second,
+        "CURIE002",
+        retry_authorization=authorization,
     )
     assert research_seed.unique_l1_native_evidence_run_id(tmp_path, seed) is None
 
@@ -197,3 +210,140 @@ def test_native_binding_payload_is_self_consistent(tmp_path):
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["research_seed"] == research_seed.manifest_entry(seed)
     assert payload["evidence_pack"]["content_sha256"] == entry["evidence_pack_content_sha256"]
+
+
+def test_native_binding_rejects_retry_pack_without_authorized_gap_request(tmp_path):
+    """A direct binding write cannot bypass the persisted gap-retry authority."""
+    seed = _seed()
+    first = _pack_manifest(tmp_path, run_id="CURIE001")
+    research_seed.write_l1_native_evidence_binding(
+        tmp_path, seed, first, "CURIE001"
+    )
+    parent = curie.load_frozen_evidence_pack(
+        tmp_path,
+        first,
+        candidate_id="C001",
+        round_id="1",
+        seed_sha256=research_seed.seed_sha256(seed),
+    )
+    forged_retry = _pack_manifest(
+        tmp_path,
+        run_id="CURIE002",
+        version=2,
+        parent_pack_sha256=parent["content_sha256"],
+        source_gap_request_id="EGR_FORGED",
+    )
+
+    with pytest.raises(research_seed.ResearchSeedError, match="gap|retry|authorization"):
+        research_seed.write_l1_native_evidence_binding(
+            tmp_path, seed, forged_retry, "CURIE002"
+        )
+
+
+def test_native_activation_requires_consumed_retry_authorization(tmp_path):
+    """A valid request alone cannot activate a retry before its receipt exists."""
+    seed = _seed()
+    first = _pack_manifest(tmp_path, run_id="CURIE001")
+    research_seed.write_l1_native_evidence_binding(
+        tmp_path, seed, first, "CURIE001"
+    )
+    research_seed.activate_l1_native_evidence_binding(tmp_path, seed, "CURIE001")
+    parent = curie.load_frozen_evidence_pack(
+        tmp_path,
+        first,
+        candidate_id="C001",
+        round_id="1",
+        seed_sha256=research_seed.seed_sha256(seed),
+    )
+    request = curie.open_gap_request(
+        tmp_path,
+        seed,
+        first,
+        gaps=[{
+            "gap_id": "G1",
+            "topic": "mechanism",
+            "reason": "missing direct evidence",
+            "search_directions": ["find an independently verified source"],
+        }],
+    )
+    authorization = curie.authorize_gap_retry(
+        tmp_path, seed, first, request["request_id"]
+    )
+    retry = _pack_manifest(
+        tmp_path,
+        run_id="CURIE002",
+        version=2,
+        parent_pack_sha256=parent["content_sha256"],
+        source_gap_request_id=request["request_id"],
+    )
+    research_seed.write_l1_native_evidence_binding(
+        tmp_path,
+        seed,
+        retry,
+        "CURIE002",
+        retry_authorization=authorization,
+    )
+
+    with pytest.raises(research_seed.ResearchSeedError, match="consum"):
+        research_seed.activate_l1_native_evidence_binding(tmp_path, seed, "CURIE002")
+
+
+def test_native_activation_rejects_forged_retry_binding_without_gap_lineage(tmp_path):
+    """Activation revalidates persisted retry lineage instead of trusting a nonempty ID."""
+    seed = _seed()
+    first = _pack_manifest(tmp_path, run_id="CURIE001")
+    research_seed.write_l1_native_evidence_binding(
+        tmp_path, seed, first, "CURIE001"
+    )
+    research_seed.activate_l1_native_evidence_binding(tmp_path, seed, "CURIE001")
+    parent = curie.load_frozen_evidence_pack(
+        tmp_path,
+        first,
+        candidate_id="C001",
+        round_id="1",
+        seed_sha256=research_seed.seed_sha256(seed),
+    )
+    forged_retry = _pack_manifest(
+        tmp_path,
+        run_id="CURIE002",
+        version=2,
+        parent_pack_sha256=parent["content_sha256"],
+        source_gap_request_id="EGR_FORGED",
+    )
+    run_id = "CURIE002"
+    identity = f"{seed['candidate_id']}:{seed['round_id']}:{run_id}"
+    binding_path = (
+        tmp_path
+        / "08_Audit"
+        / "research_seed_bindings"
+        / "native"
+        / seed["candidate_id"]
+        / seed["round_id"]
+        / f"L1_native_{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:24]}.json"
+    )
+    binding_path.parent.mkdir(parents=True, exist_ok=True)
+    binding_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "L1NativeEvidenceBinding/v1",
+                "candidate_id": seed["candidate_id"],
+                "round_id": seed["round_id"],
+                "research_seed": research_seed.manifest_entry(seed),
+                "acquisition_run_id": run_id,
+                "evidence_pack": forged_retry,
+                "pack_lineage": {
+                    "version": 2,
+                    "parent_pack_sha256": parent["content_sha256"],
+                    "source_gap_request_id": "EGR_FORGED",
+                    "content_sha256": forged_retry["content_sha256"],
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(research_seed.ResearchSeedError, match="gap|retry|authorization"):
+        research_seed.activate_l1_native_evidence_binding(tmp_path, seed, run_id)

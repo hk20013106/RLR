@@ -27,11 +27,10 @@ def test_external_backend_requires_real_runtime_paths(tmp_path):
     with pytest.raises(CurieContractError, match="python|bridge|runtime"):
         PaperQA2SubprocessBackend(
             python_executable=tmp_path / "missing-python.exe",
-            bridge_script=tmp_path / "missing-bridge.py",
-            paperqa_repo=tmp_path,
-            pqa_home=tmp_path / "pqa-home",
-            expected_commit="57e89f7223b0960d5ee5ea048c69e3c47e088572",
-        )
+        bridge_script=tmp_path / "missing-bridge.py",
+        paperqa_repo=tmp_path,
+        pqa_home=tmp_path / "pqa-home",
+    )
 
 
 def test_external_backend_preserves_exact_runtime_provenance(tmp_path):
@@ -70,7 +69,6 @@ print(json.dumps({
         bridge_script=bridge,
         paperqa_repo=tmp_path,
         pqa_home=tmp_path / "pqa-home",
-        expected_commit="57e89f7223b0960d5ee5ea048c69e3c47e088572",
     )
 
     item = PaperQA2Retriever(
@@ -84,6 +82,19 @@ print(json.dumps({
     )
     assert item["retrieval"]["backend_id"].startswith("paperqa2-fork")
     assert "role" not in item
+
+    bridge.write_text(
+        bridge.read_text(encoding="utf-8").replace(
+            "https://github.com/hk20013106/paper-qa",
+            "https://github.com/untrusted/paper-qa",
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(CurieContractError, match="fork"):
+        PaperQA2Retriever(
+            backend=backend,
+            backend_id="paperqa2-fork-v2026.08.12/sparse-docs-v1",
+        ).retrieve(paper=paper, question="What is the bat TRIM family?")
 
 
 def test_source_alignment_emits_unverified_exact_source_candidates_without_role():

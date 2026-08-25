@@ -39,8 +39,10 @@ from .gap_loop import (
     CONSUMPTION_SCHEMA_VERSION,
     authorize_gap_retry,
     consume_gap_retry_authorization,
+    load_gap_retry_consumption,
     load_open_gap_request,
     open_gap_request,
+    validate_gap_retry_authorization,
 )
 
 # Multi-source query lineage is owned by the orchestrator, not by provider
@@ -82,6 +84,7 @@ __all__ = [
     "freeze_l1_deep_research_run",
     "judge_coverage",
     "load_frozen_evidence_pack",
+    "load_gap_retry_consumption",
     "load_open_gap_request",
     "next_pack_version",
     "open_gap_request",
@@ -90,6 +93,7 @@ __all__ = [
     "validate_discovery_batch",
     "validate_evidence_extract",
     "validate_gap_request",
+    "validate_gap_retry_authorization",
     "validate_query_plan",
     "validate_transport_handshake",
 ]

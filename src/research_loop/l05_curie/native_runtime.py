@@ -129,7 +129,11 @@ def run_authorized_retry(
     )
     try:
         binding = research_seed.write_l1_native_evidence_binding(
-            project_dir, seed, new_manifest, acquisition_run_id
+            project_dir,
+            seed,
+            new_manifest,
+            acquisition_run_id,
+            retry_authorization=authorization,
         )
     except research_seed.ResearchSeedError as exc:
         raise CurieContractError(f"native Curie retry binding failed: {exc}") from exc

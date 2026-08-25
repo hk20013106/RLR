@@ -4,7 +4,9 @@ from pathlib import Path
 
 from research_loop import l0_contract, research_seed
 from research_loop.l05_curie import load_frozen_evidence_pack
+from research_loop.l05_curie import europepmc_runtime
 from research_loop.l05_curie.europepmc_runtime import run_europepmc_acquisition
+from research_loop.l05_curie.paperqa2_runtime import PaperQA2CurieRuntime
 from research_loop import cli
 
 
@@ -149,6 +151,72 @@ def test_runtime_does_not_freeze_when_no_oa_full_text_is_available(tmp_path):
     assert not list((project / "09_Literature_Database" / "evidence_packs" / "l05").rglob("*.json"))
 
 
+def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(tmp_path):
+    """The public production runtime—not a test-only assembly—owns the full path."""
+    project, seed = _project(tmp_path)
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-real-paper")
+
+    def http_get(url, _timeout):
+        if "/search?" in url:
+            return _search_payload()
+        if url.endswith("/PMC3257301/fullTextXML"):
+            return XML
+        raise AssertionError(url)
+
+    runtime = PaperQA2CurieRuntime(
+        backend=lambda **kwargs: [{
+            "text": "Rca1p was required for the transcriptional response to carbon dioxide.",
+            "section": "PaperQA2",
+            "locator": "PDF page 1",
+            "score": 0.91,
+            "runtime": {
+                "schema_version": "PaperQA2Runtime/v1",
+                "package": "paper-qa",
+                "version": "2026.8.12",
+                "upstream_repo": "https://github.com/Future-House/paper-qa",
+                "upstream_tag": "v2026.08.12",
+                "upstream_commit": "57e89f7223b0960d5ee5ea048c69e3c47e088572",
+                "fork_repo": "https://github.com/hk20013106/paper-qa",
+                "python_executable": "test-python",
+                "paperqa_repo": "test-paperqa-repo",
+                "pqa_home": "test-pqa-home",
+                "pdf_path": str(pdf),
+                "pdf_sha256": hashlib.sha256(pdf.read_bytes()).hexdigest(),
+            },
+        }],
+        backend_id="paperqa2-fork-v2026.08.12/sparse-docs-v1",
+    )
+
+    result = europepmc_runtime.run_paperqa2_europepmc_acquisition(
+        project,
+        "C001",
+        paperqa_runtime=runtime,
+        pdf_paths={"P_3cab82183e94295123ee": str(pdf)},
+        explicit_queries=["EXT_ID:22253597 AND SRC:MED"],
+        max_papers=1,
+        page_size=5,
+        run_id="PQA001",
+        http_get=http_get,
+    )
+
+    assert result["status"] == "FROZEN"
+    assert result["native_binding"]["evidence_pack_version"] == 1
+    assert research_seed.active_l1_native_evidence_run_id(project, seed) == "PQA001"
+    frozen = load_frozen_evidence_pack(
+        project,
+        result["evidence_pack"],
+        candidate_id="C001",
+        round_id="1",
+        seed_sha256=research_seed.seed_sha256(seed),
+    )
+    assert frozen["semantic_verifications"]
+    assert all(
+        item["retrieval"]["upstream_engine"] == "paperqa2"
+        for item in frozen["evidence"]
+    )
+
+
 def test_cli_registers_thin_europepmc_acquisition_command(tmp_path, monkeypatch, capsys):
     project, _seed = _project(tmp_path)
     parser = cli.build_parser()
@@ -177,3 +245,48 @@ def test_cli_registers_thin_europepmc_acquisition_command(tmp_path, monkeypatch,
     assert seen["cand_id"] == "C001"
     assert seen["explicit_queries"] == ["EXT_ID:22253597 AND SRC:MED"]
     assert seen["run_id"] == "CLI001"
+
+
+def test_cli_registers_pinned_paperqa2_production_command(tmp_path, monkeypatch, capsys):
+    project, _seed = _project(tmp_path)
+    pdf_map = tmp_path / "pdf-map.json"
+    pdf_map.write_text(json.dumps({"P1": "paper.pdf"}), encoding="utf-8")
+    parser = cli.build_parser()
+    args = parser.parse_args([
+        "l05-acquire-paperqa2-europepmc",
+        str(project),
+        "C001",
+        "--paperqa-python", "paperqa-python",
+        "--paperqa-bridge", "bridge.py",
+        "--paperqa-repo", "paperqa-repo",
+        "--pqa-home", "pqa-home",
+        "--pdf-map", str(pdf_map),
+        "--query", "EXT_ID:22253597 AND SRC:MED",
+        "--run-id", "PQA_CLI001",
+    ])
+
+    seen = {}
+
+    class FakeBackend:
+        backend_id = "paperqa2-fork-v2026.08.12/sparse-docs-v1"
+
+        def __init__(self, **kwargs):
+            seen["backend"] = kwargs
+
+        def __call__(self, **_kwargs):
+            raise AssertionError("CLI test must not invoke the backend")
+
+    def fake_run(project_dir, cand_id, **kwargs):
+        seen.update({"project_dir": project_dir, "cand_id": cand_id, **kwargs})
+        return {"schema_version": "L05PaperQA2EuropePmcAcquisitionResult/v1", "status": "FROZEN"}
+
+    import research_loop.l05_curie_cli as extension
+    monkeypatch.setattr(extension, "PaperQA2SubprocessBackend", FakeBackend)
+    monkeypatch.setattr(extension, "run_paperqa2_europepmc_acquisition", fake_run)
+    assert args.func(args) == 0
+    rendered = json.loads(capsys.readouterr().out)
+    assert rendered["status"] == "FROZEN"
+    assert seen["cand_id"] == "C001"
+    assert seen["backend"]["bridge_script"] == "bridge.py"
+    assert seen["pdf_paths"] == {"P1": "paper.pdf"}
+    assert seen["run_id"] == "PQA_CLI001"

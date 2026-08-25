@@ -124,6 +124,11 @@ def _validate_retry_authorization(seed: dict, authorization: dict) -> dict:
     return dict(authorization)
 
 
+def validate_gap_retry_authorization(seed: dict, authorization: dict) -> dict:
+    """Validate the immutable retry authority before another boundary consumes it."""
+    return _validate_retry_authorization(seed, authorization)
+
+
 def open_gap_request(
     project_dir: str | Path,
     seed: dict,
@@ -248,4 +253,36 @@ def consume_gap_retry_authorization(
             )
     else:
         path.write_bytes(raw)
+    return receipt
+
+
+def load_gap_retry_consumption(
+    project_dir: str | Path,
+    seed: dict,
+    authorization: dict,
+    acquisition_run_id: str,
+) -> dict:
+    """Reload the exact append-only receipt required before retry activation."""
+    validated = _validate_retry_authorization(seed, authorization)
+    request_id = str(validated["request_id"])
+    run_id = _safe(acquisition_run_id, "acquisition_run_id")
+    expected = {
+        "schema_version": CONSUMPTION_SCHEMA_VERSION,
+        "authorization_id": str(validated["authorization_id"]),
+        "request_id": request_id,
+        "acquisition_run_id": run_id,
+        "next_version": int(validated["next_version"]),
+        "parent_pack_sha256": str(validated["parent_pack_sha256"]),
+    }
+    path = _consumption_path(project_dir, seed, request_id)
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CurieContractError(
+            f"EvidenceGapRequest consumption receipt is missing or invalid: {exc}"
+        ) from exc
+    if receipt != expected:
+        raise CurieContractError(
+            "EvidenceGapRequest consumption receipt does not match retry authorization"
+        )
     return receipt
