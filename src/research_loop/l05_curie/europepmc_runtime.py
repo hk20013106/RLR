@@ -466,9 +466,15 @@ def run_paperqa2_europepmc_acquisition(
             source = retriever.retrieve(selected, seed=seed)
             source_snapshots.append(source["snapshot"])
             paper = {**selected, "pdf_path": str(pdf_path)}
+            # PaperQA2 receives a paper-local retrieval anchor.  The canonical
+            # ResearchSeed remains in the pack and governs Curie coverage, but
+            # sending its long-form (possibly non-ASCII) question directly to
+            # the pinned document summarizer can make source-PDF parser errors
+            # look like an RLR evidence failure.
+            paperqa_question = str(selected.get("title") or seed["scientific_question"])
             result = paperqa_runtime.retrieve_and_verify(
                 paper=paper,
-                question=str(seed["scientific_question"]),
+                question=paperqa_question,
                 source_candidates=source["candidates"],
                 verify=lambda candidates, snapshot=source["snapshot"]: verifier.verify(
                     snapshot, candidates

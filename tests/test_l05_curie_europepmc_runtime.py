@@ -166,8 +166,11 @@ def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(
             return XML
         raise AssertionError(url)
 
-    runtime = PaperQA2CurieRuntime(
-        backend=lambda **kwargs: [{
+    seen_question = {}
+
+    def paperqa_backend(**kwargs):
+        seen_question["value"] = kwargs["question"]
+        return [{
             "text": "Rca1p was required for the transcriptional response to carbon dioxide.",
             "section": "PaperQA2",
             "locator": "PDF page 1",
@@ -186,7 +189,10 @@ def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(
                 "pdf_path": str(pdf),
                 "pdf_sha256": hashlib.sha256(pdf.read_bytes()).hexdigest(),
             },
-        }],
+        }]
+
+    runtime = PaperQA2CurieRuntime(
+        backend=paperqa_backend,
         backend_id="paperqa2-fork-v2026.08.12/sparse-docs-v1",
     )
 
@@ -239,6 +245,10 @@ def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(
     assert all(
         item["retrieval"]["upstream_engine"] == "paperqa2"
         for item in frozen["evidence"]
+    )
+    assert seen_question["value"] == (
+        "The bZIP Transcription Factor Rca1p Is a Central Regulator of a Novel "
+        "CO2 Sensing Pathway in Yeast"
     )
     assert observed == {"planner": 1, "discovery": 1, "selector": 1}
 
