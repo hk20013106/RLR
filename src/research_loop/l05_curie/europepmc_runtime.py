@@ -14,14 +14,9 @@ from typing import Callable
 
 from research_loop import research_seed
 
-from .contracts import CurieContractError, judge_coverage, validate_discovery_batch, validate_query_plan
-from .europepmc import (
-    EuropePmcEvidenceRetriever,
-    EuropePmcEvidenceVerifier,
-    EuropePmcTransport,
-    build_europepmc_query_plan,
-    select_europepmc_candidates,
-)
+from .contracts import CurieContractError, judge_coverage, validate_query_plan
+from .europepmc import EuropePmcEvidenceRetriever, EuropePmcEvidenceVerifier, EuropePmcTransport
+from .multisource import build_multisource_query_plan, run_multisource_discovery
 from .native_runtime import bind_initial_curie_pack
 from .paperqa2_runtime import (
     PAPERQA2_BACKEND_ID,
@@ -29,6 +24,7 @@ from .paperqa2_runtime import (
     validate_pinned_paperqa2_runtime,
 )
 from .semantic_verifier import SemanticEvidenceVerifier, admit_reasoning_evidence
+from .selector import select_candidates
 from .store import build_evidence_pack, freeze_evidence_pack
 
 RESULT_SCHEMA_VERSION = "L05EuropePmcAcquisitionResult/v1"
@@ -135,6 +131,73 @@ def _write_audit_manifest(
     return relative.as_posix(), hashlib.sha256(raw).hexdigest()
 
 
+def _europepmc_full_text_eligibility(record: dict) -> tuple[bool, str]:
+    """Require a source-qualified Europe PMC OA full text before retrieval."""
+    identifiers = record.get("identifiers") if isinstance(record.get("identifiers"), dict) else {}
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    if not identifiers.get("pmcid"):
+        return False, "NO_EUROPEPMC_PMCID"
+    if metadata.get("is_open_access") is not True:
+        return False, "NO_OPEN_FULL_TEXT"
+    if metadata.get("in_europe_pmc") is not True:
+        return False, "NOT_IN_EUROPEPMC"
+    return True, "SOURCE_QUALIFIED"
+
+
+def _europepmc_selector_score(record: dict, seed: dict) -> dict:
+    """Provide deterministic ranking only; eligibility remains authoritative."""
+    source = " ".join((
+        str(record.get("title") or ""),
+        str((record.get("metadata") or {}).get("abstract") or ""),
+    )).casefold()
+    seed_terms = {
+        term for term in (
+            str(seed.get("scientific_question") or "") + " "
+            + str(seed.get("hypothesis_seed") or "")
+        ).casefold().replace("?", " ").replace(",", " ").split()
+        if len(term) > 2
+    }
+    matched = sum(term in source for term in seed_terms)
+    relevance = matched / max(1, len(seed_terms))
+    source_count = len(
+        ((record.get("provenance") or {}).get("source_records") or [])
+    )
+    return {
+        "relevance": relevance,
+        "directness": 1.0 if relevance else 0.5,
+        "methodological_value": 0.5,
+        "contradiction_value": 0.0,
+        "evidence_diversity": min(1.0, source_count / 2),
+        "reason": "Deterministic source-qualified Europe PMC ranking from the canonical ResearchSeed.",
+    }
+
+
+def _selected_europepmc_papers(discovery: dict, selection: dict) -> list[dict]:
+    decisions = {
+        str(item["paper_id"]): item
+        for item in selection["decisions"]
+        if item["decision"] == "INCLUDE"
+    }
+    selected = []
+    for record in discovery["records"]:
+        decision = decisions.get(str(record.get("paper_id") or ""))
+        if decision is None:
+            continue
+        selected.append({
+            "paper_id": record["paper_id"],
+            "title": record["title"],
+            "identifiers": dict(record.get("identifiers") or {}),
+            "metadata": dict(record.get("metadata") or {}),
+            "provenance": dict(record.get("provenance") or {}),
+            "selection": {
+                "decision": "INCLUDE",
+                "reason": decision["reason"],
+                "reason_code": decision.get("reason_code"),
+            },
+        })
+    return selected
+
+
 def _prepare_europepmc_acquisition(
     project: Path,
     candidate_id: str,
@@ -154,11 +217,16 @@ def _prepare_europepmc_acquisition(
         raise CurieContractError(f"canonical ResearchSeed is invalid: {exc}") from exc
     seed_digest = research_seed.seed_sha256(seed)
     normalized_run_id = _safe_token(run_id or _new_run_id(candidate_id), "run_id")
-    query_plan = build_europepmc_query_plan(
+    # PaperQA2 retrieval is Europe-PMC source-qualified, but discovery and
+    # selection remain in Curie's provider-neutral planner/orchestrator path.
+    # The declared one-provider plan is deliberate: every selected record must
+    # be retrievable from the exact Europe PMC OA full-text source below.
+    query_plan = build_multisource_query_plan(
         seed,
         seed_sha256=seed_digest,
         round_index=round_index,
         explicit_queries=explicit_queries,
+        providers=["europe-pmc"],
     )
     validate_query_plan(query_plan, seed_sha256=seed_digest)
     transport = EuropePmcTransport(
@@ -168,31 +236,37 @@ def _prepare_europepmc_acquisition(
         http_get=http_get,
         timeout=timeout,
     )
-    handshake = transport.handshake()
-    discovery_batches: list[dict] = []
-    discovered: list[dict] = []
-    query_ids = {item["query_id"] for item in query_plan["queries"]}
-    for query in query_plan["queries"]:
-        batch = transport.search({
-            "query_id": query["query_id"],
-            "query": query["query"],
-            "page_size": page_size,
-        })
-        validate_discovery_batch(batch, query_ids=query_ids)
-        discovery_batches.append(batch)
-        discovered.extend(batch["records"])
+    discovery = run_multisource_discovery(
+        query_plan,
+        {"europe-pmc": transport},
+        page_size=page_size,
+    )
+    generic_selection = select_candidates(
+        discovery["records"],
+        seed=seed,
+        scorer=_europepmc_selector_score,
+        eligibility=_europepmc_full_text_eligibility,
+        max_papers=max_papers,
+        project_dir=project,
+        candidate_id=candidate_id,
+        run_id=normalized_run_id,
+    )
+    selected = _selected_europepmc_papers(discovery, generic_selection)
     return {
         "seed": seed,
         "seed_sha256": seed_digest,
         "run_id": normalized_run_id,
         "query_plan": query_plan,
-        "transport_handshake": handshake,
-        "discovery_batches": discovery_batches,
-        "selection": select_europepmc_candidates(
-            discovered,
-            seed=seed,
-            max_papers=max_papers,
-        ),
+        "transport_handshake": transport.handshake(),
+        "discovery_batches": discovery["batches"],
+        "selection": {
+            "provider": "europe-pmc",
+            "selected": selected,
+            "decisions": generic_selection["decisions"],
+            "duplicate_paper_ids": discovery["duplicate_paper_ids"],
+            "selector_artifact_path": generic_selection.get("artifact_path"),
+            "selector_artifact_sha256": generic_selection.get("artifact_sha256"),
+        },
     }
 
 

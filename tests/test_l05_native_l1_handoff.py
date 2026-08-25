@@ -8,6 +8,7 @@ from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
 from research_loop.commands import ledger as ledger_commands
 from research_loop.engine import main
 from research_loop.hypothesis_ledger import HypothesisLedger
+from research_loop.l05_native_context_gate import _is_native_l1
 from research_loop.providers.base import RunReceipt
 import research_loop.l05_curie as curie
 
@@ -83,12 +84,13 @@ def _freeze_native_pack(project: Path, seed: dict, *, run_id="CURIE001"):
     return curie.freeze_evidence_pack(project, pack)
 
 
-def _native_project(tmp_path: Path, *, bind_pack=True):
+def _native_project(tmp_path: Path, *, bind_pack=True, bind_profile=True):
     project = tmp_path / "project"
     project.mkdir()
     store = tmp_path / "hypotheses.sqlite"
     ledger = HypothesisLedger(store)
-    ledger.bind_project(project, profile_id=DEFAULT_NATIVE_PROFILE)
+    if bind_profile:
+        ledger.bind_project(project, profile_id=DEFAULT_NATIVE_PROFILE)
 
     candidate_dir = project / "01_Candidates"
     candidate_dir.mkdir(parents=True)
@@ -172,6 +174,21 @@ def test_native_l1_fails_closed_when_native_binding_is_missing(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "native L1 evidence binding" in captured.err
+
+
+def test_native_l1_detection_uses_native_binding_not_profile_sidecar(
+    tmp_path, monkeypatch, capsys
+):
+    project, store, _seed, _manifest = _native_project(
+        tmp_path, bind_profile=False
+    )
+    monkeypatch.setenv("RLR_HYPOTHESIS_STORE", str(store))
+
+    assert _is_native_l1(_args(project, store))
+    assert context.cmd_assemble_context(_args(project, store)) == 3
+    captured = capsys.readouterr()
+    assert "native L1 evidence binding gate" in captured.err
+    assert not (project / "08_Audit" / "deep_research").exists()
 
 
 def test_native_l1_revalidates_binding_at_actual_context_use(

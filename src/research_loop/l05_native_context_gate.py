@@ -28,14 +28,31 @@ from research_loop.preresearch import (
 )
 from research_loop.yamlio import _load_yaml_front
 
+_NATIVE_BINDING_ROOT = Path("08_Audit") / "research_seed_bindings" / "native"
+
 
 class NativeL1EvidenceGateError(ValueError):
     """Raised when native L1 lacks one exact validated Curie binding."""
 
 
+def _has_native_l1_binding(args) -> bool:
+    project = Path(args.project_dir)
+    candidate_id = str(getattr(args, "cand_id", "") or "").strip()
+    if not candidate_id:
+        return False
+    native_root = project / _NATIVE_BINDING_ROOT / candidate_id
+    return native_root.is_dir() and any(native_root.glob("*/L1_native_*.json"))
+
+
 def _is_native_l1(args) -> bool:
     if str(getattr(args, "node", "")) != "L1":
         return False
+    if _has_native_l1_binding(args):
+        # A native receipt must reach the native gate even if the optional
+        # hypothesis-ledger profile sidecar is absent or corrupt.  The gate
+        # then validates the exact binding and fails closed rather than
+        # falling through to legacy L1 acquisition.
+        return True
     project = Path(args.project_dir)
     path = binding_path(project)
     if not path.is_file():
@@ -46,6 +63,26 @@ def _is_native_l1(args) -> bool:
     except (OSError, json.JSONDecodeError, CompatibilityError):
         return False
     return profile.delta_schema_version == "2.1"
+
+
+def _require_native_l1_profile(project: Path) -> None:
+    """Reject a malformed or non-native profile before legacy assembly runs."""
+    path = binding_path(project)
+    if not path.is_file():
+        raise NativeL1EvidenceGateError(
+            "native L1 requires a native v2.1 hypothesis ledger profile binding"
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        profile = get_profile(str(payload.get("profile_id") or ""))
+    except (OSError, json.JSONDecodeError, CompatibilityError) as exc:
+        raise NativeL1EvidenceGateError(
+            "native L1 hypothesis ledger profile binding is invalid"
+        ) from exc
+    if profile.delta_schema_version != "2.1":
+        raise NativeL1EvidenceGateError(
+            "native L1 requires a v2.1 hypothesis ledger profile binding"
+        )
 
 
 def _selected_run_id(project: Path, seed: dict, args) -> str:
@@ -127,6 +164,7 @@ def install(context_module) -> None:
 
         project = Path(args.project_dir)
         try:
+            _require_native_l1_profile(project)
             seed = research_seed.load_l1_research_seed(project, str(args.cand_id))
             run_id = _selected_run_id(project, seed, args)
             binding = research_seed.load_l1_native_evidence_binding(

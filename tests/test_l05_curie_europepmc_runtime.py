@@ -151,7 +151,9 @@ def test_runtime_does_not_freeze_when_no_oa_full_text_is_available(tmp_path):
     assert not list((project / "09_Literature_Database" / "evidence_packs" / "l05").rglob("*.json"))
 
 
-def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(tmp_path):
+def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(
+    tmp_path, monkeypatch
+):
     """The public production runtime—not a test-only assembly—owns the full path."""
     project, seed = _project(tmp_path)
     pdf = tmp_path / "paper.pdf"
@@ -188,6 +190,29 @@ def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(tmp
         backend_id="paperqa2-fork-v2026.08.12/sparse-docs-v1",
     )
 
+    observed = {"planner": 0, "discovery": 0, "selector": 0}
+    original_plan = europepmc_runtime.build_multisource_query_plan
+    original_discovery = europepmc_runtime.run_multisource_discovery
+    original_selector = europepmc_runtime.select_candidates
+
+    def observe_plan(*args, **kwargs):
+        observed["planner"] += 1
+        assert kwargs["providers"] == ["europe-pmc"]
+        return original_plan(*args, **kwargs)
+
+    def observe_discovery(*args, **kwargs):
+        observed["discovery"] += 1
+        assert set(args[1]) == {"europe-pmc"}
+        return original_discovery(*args, **kwargs)
+
+    def observe_selector(*args, **kwargs):
+        observed["selector"] += 1
+        return original_selector(*args, **kwargs)
+
+    monkeypatch.setattr(europepmc_runtime, "build_multisource_query_plan", observe_plan)
+    monkeypatch.setattr(europepmc_runtime, "run_multisource_discovery", observe_discovery)
+    monkeypatch.setattr(europepmc_runtime, "select_candidates", observe_selector)
+
     result = europepmc_runtime.run_paperqa2_europepmc_acquisition(
         project,
         "C001",
@@ -215,6 +240,7 @@ def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(tmp
         item["retrieval"]["upstream_engine"] == "paperqa2"
         for item in frozen["evidence"]
     )
+    assert observed == {"planner": 1, "discovery": 1, "selector": 1}
 
 
 def test_cli_registers_thin_europepmc_acquisition_command(tmp_path, monkeypatch, capsys):
