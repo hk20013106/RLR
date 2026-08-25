@@ -131,6 +131,39 @@ def test_source_alignment_emits_unverified_exact_source_candidates_without_role(
     assert aligned[0]["runtime"] == runtime
 
 
+def test_source_alignment_emits_all_source_candidates_in_one_cross_page_chunk():
+    chunks = [{
+        "text": (
+            "The first workflow paragraph describes WGCNA pseudocells and "
+            "the second figure paragraph describes WGCNA module outputs."
+        ),
+        "locator": "Paper pages 5-6",
+        "section": "PaperQA2",
+        "score": 0.8,
+    }]
+    source_candidates = [
+        {
+            "paper_id": "P1",
+            "text": "The first workflow paragraph describes WGCNA pseudocells.",
+            "section": "Results",
+            "locator": "sec:7/p:7",
+        },
+        {
+            "paper_id": "P1",
+            "text": "The second figure paragraph describes WGCNA module outputs.",
+            "section": "Results",
+            "locator": "sec:7/p:9",
+        },
+    ]
+
+    aligned = align_paperqa2_chunks(
+        chunks=chunks,
+        source_candidates=source_candidates,
+    )
+
+    assert [item["locator"] for item in aligned] == ["sec:7/p:7", "sec:7/p:9"]
+
+
 def test_curie_runtime_keeps_unverified_boundary_before_verifier():
     paper = {
         "paper_id": "P1",

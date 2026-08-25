@@ -261,30 +261,32 @@ def align_paperqa2_chunks(*, chunks: list[dict], source_candidates: list[dict]) 
         if not ranked:
             continue
         ranked.sort(key=lambda item: (-item[0], item[1]))
-        coverage, source_index, source = ranked[0]
-        locator = _text(source.get("locator"), "source candidate locator")
-        if coverage < 0.5 or locator in seen_locators:
-            continue
-        seen_locators.add(locator)
-        aligned_item = {
-            "text": _text(source.get("text"), "source candidate text"),
-            "locator": locator,
-            "section": _text(source.get("section"), "source candidate section"),
-            "score": float(chunk.get("score", 0.0)),
-            "paperqa2": copy.deepcopy(chunk.get("paperqa2", {
-                "chunk_locator": _text(chunk.get("locator"), "PaperQA2 chunk locator"),
-                "chunk_sha256": hashlib.sha256(chunk_text.encode("utf-8")).hexdigest(),
-            })),
-            "source_alignment": {
-                "method": "token-coverage/v1",
-                "chunk_index": chunk_index,
-                "source_candidate_index": source_index,
-                "source_token_coverage": coverage,
-            },
-        }
-        if chunk.get("runtime") is not None:
-            aligned_item["runtime"] = copy.deepcopy(chunk["runtime"])
-        aligned.append(aligned_item)
+        for coverage, source_index, source in ranked:
+            if coverage < 0.5:
+                break
+            locator = _text(source.get("locator"), "source candidate locator")
+            if locator in seen_locators:
+                continue
+            seen_locators.add(locator)
+            aligned_item = {
+                "text": _text(source.get("text"), "source candidate text"),
+                "locator": locator,
+                "section": _text(source.get("section"), "source candidate section"),
+                "score": float(chunk.get("score", 0.0)),
+                "paperqa2": copy.deepcopy(chunk.get("paperqa2", {
+                    "chunk_locator": _text(chunk.get("locator"), "PaperQA2 chunk locator"),
+                    "chunk_sha256": hashlib.sha256(chunk_text.encode("utf-8")).hexdigest(),
+                })),
+                "source_alignment": {
+                    "method": "token-coverage/v1",
+                    "chunk_index": chunk_index,
+                    "source_candidate_index": source_index,
+                    "source_token_coverage": coverage,
+                },
+            }
+            if chunk.get("runtime") is not None:
+                aligned_item["runtime"] = copy.deepcopy(chunk["runtime"])
+            aligned.append(aligned_item)
     if not aligned:
         raise CurieContractError("PaperQA2 retrieved chunks could not align to source candidates")
     return aligned
