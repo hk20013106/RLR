@@ -164,6 +164,72 @@ def test_source_alignment_emits_all_source_candidates_in_one_cross_page_chunk():
     assert [item["locator"] for item in aligned] == ["sec:7/p:7", "sec:7/p:9"]
 
 
+def test_source_alignment_drops_below_threshold_candidates():
+    chunks = [{"text": "workflow pseudocells module outputs", "locator": "pages 5-6", "score": 0.8}]
+    source_candidates = [
+        {
+            "paper_id": "P1",
+            "text": "workflow pseudocells module outputs",
+            "section": "Results",
+            "locator": "sec:7/p:7",
+        },
+        {
+            "paper_id": "P1",
+            "text": "unrelated calcium phenotype",
+            "section": "Discussion",
+            "locator": "sec:9/p:2",
+        },
+    ]
+
+    aligned = align_paperqa2_chunks(
+        chunks=chunks,
+        source_candidates=source_candidates,
+    )
+
+    assert [item["locator"] for item in aligned] == ["sec:7/p:7"]
+
+
+def test_source_alignment_deduplicates_repeated_source_locator():
+    chunks = [{"text": "WGCNA pseudocells", "locator": "pages 5-6", "score": 0.8}]
+    source_candidates = [
+        {
+            "paper_id": "P1",
+            "text": "WGCNA pseudocells",
+            "section": "Results",
+            "locator": "sec:7/p:7",
+        },
+        {
+            "paper_id": "P1",
+            "text": "WGCNA pseudocells in single cells",
+            "section": "Results",
+            "locator": "sec:7/p:7",
+        },
+    ]
+
+    aligned = align_paperqa2_chunks(
+        chunks=chunks,
+        source_candidates=source_candidates,
+    )
+
+    assert [item["locator"] for item in aligned] == ["sec:7/p:7"]
+
+
+def test_source_alignment_rejects_unrelated_source_candidates():
+    chunks = [{"text": "WGCNA pseudocells", "locator": "pages 5-6", "score": 0.8}]
+    source_candidates = [{
+        "paper_id": "P1",
+        "text": "unrelated calcium phenotype",
+        "section": "Discussion",
+        "locator": "sec:9/p:2",
+    }]
+
+    with pytest.raises(CurieContractError, match="could not align"):
+        align_paperqa2_chunks(
+            chunks=chunks,
+            source_candidates=source_candidates,
+        )
+
+
 def test_curie_runtime_keeps_unverified_boundary_before_verifier():
     paper = {
         "paper_id": "P1",
