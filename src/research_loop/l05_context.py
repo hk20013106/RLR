@@ -173,7 +173,10 @@ def install(context_module) -> None:
                 raise L05ContextError(
                     "frozen EvidencePack is not derived from the selected acquisition run"
                 )
-            evidence_text = l05_curie.render_evidence_context(frozen)
+            evidence_text = l05_curie.render_evidence_context(
+                frozen,
+                allow_legacy_frozen_acquisition_metadata=True,
+            )
 
             rendered_path = Path(str(manifest["rendered_context_path"]))
             current_context = rendered_path.read_text(encoding="utf-8")
