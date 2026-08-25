@@ -59,6 +59,27 @@ def test_independent_source_verifier_preserves_contradictory_role():
     assert extract["role"] == "CONTRADICTORY"
 
 
+def test_independent_source_verifier_preserves_paperqa2_runtime_provenance():
+    candidate = _candidate()
+    candidate["retrieval"]["runtime"] = {
+        "schema_version": "PaperQA2Runtime/v1",
+        "package": "paper-qa",
+        "version": "2026.8.12",
+        "upstream_commit": "57e89f7223b0960d5ee5ea048c69e3c47e088572",
+    }
+    candidate["retrieval"]["paperqa2"] = {
+        "chunk_locator": "Positive pages 1-1",
+        "chunk_sha256": "a" * 64,
+    }
+    extract = ExactTextSourceVerifier().verify(
+        candidate,
+        source_bytes=b"Calcium handling differed under exercise.",
+        role="CONTEXT",
+    )
+    assert extract["retrieval"]["runtime"]["upstream_commit"].startswith("57e89f")
+    assert extract["retrieval"]["paperqa2"]["chunk_locator"] == "Positive pages 1-1"
+
+
 def test_independent_source_verifier_fails_when_exact_text_has_ambiguous_locations():
     text = b"Calcium handling differed under exercise."
     with pytest.raises(curie.CurieContractError, match="ambiguous|multiple|location"):

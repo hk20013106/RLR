@@ -13,6 +13,7 @@ from typing import Callable
 from .contracts import CurieContractError
 
 PAPERQA2_CANDIDATE_SCHEMA_VERSION = "L05PaperQA2Candidate/v1"
+PAPERQA2_RUNTIME_SCHEMA_VERSION = "PaperQA2Runtime/v1"
 
 
 def _text(value: object, name: str) -> str:
@@ -66,6 +67,18 @@ def validate_paperqa2_candidate(candidate: dict) -> dict:
     _text(retrieval.get("backend_id"), "PaperQA2 backend_id")
     if not isinstance(retrieval.get("source_identity"), dict) or not retrieval["source_identity"]:
         raise CurieContractError("PaperQA2 source_identity must be a non-empty object")
+    runtime = retrieval.get("runtime")
+    if runtime is not None:
+        if not isinstance(runtime, dict):
+            raise CurieContractError("PaperQA2 runtime provenance must be an object")
+        if runtime.get("schema_version") != PAPERQA2_RUNTIME_SCHEMA_VERSION:
+            raise CurieContractError("PaperQA2 runtime provenance schema_version is invalid")
+        for field in (
+            "package", "version", "upstream_repo", "upstream_tag", "upstream_commit",
+            "fork_repo", "python_executable", "paperqa_repo", "pqa_home",
+            "pdf_path", "pdf_sha256",
+        ):
+            _text(runtime.get(field), f"PaperQA2 runtime {field}")
     return json.loads(json.dumps(candidate))
 
 
@@ -121,6 +134,15 @@ class PaperQA2Retriever:
             }
             if isinstance(raw.get("score"), (int, float)) and not isinstance(raw.get("score"), bool):
                 candidate["retrieval"]["rerank_score"] = float(raw["score"])
+            for provenance_key in ("runtime", "paperqa2", "source_alignment"):
+                if provenance_key in raw:
+                    if not isinstance(raw[provenance_key], dict):
+                        raise CurieContractError(
+                            f"PaperQA2 backend {provenance_key} provenance must be an object"
+                        )
+                    candidate["retrieval"][provenance_key] = json.loads(
+                        json.dumps(raw[provenance_key])
+                    )
             candidates.append(validate_paperqa2_candidate(candidate))
         return candidates
 

@@ -771,10 +771,18 @@ class EuropePmcEvidenceVerifier:
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 raise CurieContractError("Europe PMC evidence candidate must be an object")
-            if candidate.get("schema_version") != EVIDENCE_CANDIDATE_SCHEMA_VERSION:
+            is_paperqa2_candidate = candidate.get("schema_version") == "L05PaperQA2Candidate/v1"
+            if (
+                candidate.get("schema_version") != EVIDENCE_CANDIDATE_SCHEMA_VERSION
+                and not is_paperqa2_candidate
+            ):
                 raise CurieContractError("Europe PMC evidence candidate schema_version is invalid")
             if candidate.get("verification_status") != "UNVERIFIED":
                 raise CurieContractError("Europe PMC evidence candidate must be UNVERIFIED")
+            if is_paperqa2_candidate:
+                from .paperqa2 import validate_paperqa2_candidate
+
+                candidate = validate_paperqa2_candidate(candidate)
             if candidate.get("paper_id") != snapshot.get("paper_id"):
                 raise CurieContractError("Europe PMC evidence candidate paper_id mismatch")
             locator = _require_text(candidate.get("locator"), "evidence candidate locator")
@@ -793,7 +801,10 @@ class EuropePmcEvidenceVerifier:
                 raise CurieContractError(
                     f"Europe PMC evidence section does not match source at locator {locator}"
                 )
-            role = _require_text(candidate.get("role"), "evidence candidate role")
+            role = _require_text(candidate.get("role") or "CONTEXT", "evidence candidate role")
+            upstream_retrieval = candidate.get("retrieval")
+            if not isinstance(upstream_retrieval, dict):
+                raise CurieContractError("Europe PMC evidence candidate retrieval is missing")
             extract = {
                 "schema_version": EVIDENCE_EXTRACT_SCHEMA_VERSION,
                 "evidence_id": "E_" + _sha({
@@ -816,5 +827,20 @@ class EuropePmcEvidenceVerifier:
                     "verifier": "europe-pmc-source-relocator/v1",
                 },
             }
+            if is_paperqa2_candidate:
+                extract["retrieval"]["upstream_engine"] = "paperqa2"
+                if upstream_retrieval.get("backend_id"):
+                    extract["retrieval"]["upstream_backend_id"] = str(
+                        upstream_retrieval["backend_id"]
+                    )
+                for provenance_key in ("runtime", "paperqa2", "source_alignment"):
+                    if provenance_key in upstream_retrieval:
+                        if not isinstance(upstream_retrieval[provenance_key], dict):
+                            raise CurieContractError(
+                                f"Europe PMC PaperQA2 {provenance_key} provenance must be an object"
+                            )
+                        extract["retrieval"][provenance_key] = json.loads(
+                            json.dumps(upstream_retrieval[provenance_key])
+                        )
             verified.append(validate_evidence_extract(extract))
         return verified

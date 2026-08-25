@@ -114,4 +114,13 @@ class ExactTextSourceVerifier:
             extract["retrieval"]["upstream_backend_id"] = str(
                 retrieval["backend_id"]
             )
+        for provenance_key in ("runtime", "paperqa2", "source_alignment"):
+            if provenance_key in retrieval:
+                if not isinstance(retrieval[provenance_key], dict):
+                    raise CurieContractError(
+                        f"source candidate {provenance_key} provenance must be an object"
+                    )
+                extract["retrieval"][provenance_key] = json.loads(
+                    json.dumps(retrieval[provenance_key])
+                )
         return validate_evidence_extract(extract)
