@@ -1,9 +1,14 @@
+import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 from research_loop import context, l0_contract, research_seed
 from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
+from research_loop.commands import ledger as ledger_commands
+from research_loop.engine import main
 from research_loop.hypothesis_ledger import HypothesisLedger
+from research_loop.providers.base import RunReceipt
 import research_loop.l05_curie as curie
 
 
@@ -181,6 +186,90 @@ def test_native_l1_revalidates_binding_at_actual_context_use(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "frozen L0.5 EvidencePack" in captured.err
+
+
+def test_native_l1_emit_delta_accepts_native_binding_without_legacy_research(
+    tmp_path, monkeypatch, capsys
+):
+    project, store, _seed, _manifest = _native_project(tmp_path)
+    monkeypatch.setenv("RLR_HYPOTHESIS_STORE", str(store))
+
+    assert context.cmd_assemble_context(_args(project, store)) == 0
+    assembled = capsys.readouterr()
+    manifest_path = next(
+        Path(line.split(":", 1)[1].strip())
+        for line in assembled.err.splitlines()
+        if line.startswith("[audit] context manifest:")
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert (manifest["pre_research"]["native_evidence_binding"])
+    assert not (manifest["pre_research"].get("evidence_artifacts"))
+
+    delta = tmp_path / "C001_L1_einstein_delta.v2.json"
+    delta.write_text(
+        json.dumps({
+            "schema_version": "2.1",
+            "hypotheses": [{
+                "proposal_key": key,
+                "statement": f"Statement {key}",
+                "operationalization": "measure the stated mechanism",
+                "falsification_criteria": ["the predicted pattern is absent"],
+                "rationale": "native binding regression",
+            } for key in ("one", "two", "three")],
+            "primary_proposal_key": "one",
+            "key_uncertainty": "the direct comparative evidence may be limited",
+        }),
+        encoding="utf-8",
+    )
+    prompt = tmp_path / "einstein_prompt.txt"
+    prompt.write_text(
+        Path(manifest["rendered_context_path"]).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    manifest_hash = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    rendered_hash = hashlib.sha256(
+        Path(manifest["rendered_context_path"]).read_bytes()
+    ).hexdigest()
+    receipt_path = tmp_path / "provider_receipt.json"
+    RunReceipt(
+        node="L1",
+        persona="Einstein",
+        provider="codex-main-agent",
+        timestamp="2026-08-25T00:00:00Z",
+        context_hash=rendered_hash,
+        project_id=manifest["project_id"],
+        candidate_id="C001",
+        round_id="1",
+        profile_id=manifest["profile_id"],
+        context_manifest_path=str(manifest_path),
+        context_manifest_hash=manifest_hash,
+        rendered_context_path=manifest["rendered_context_path"],
+        rendered_context_hash=rendered_hash,
+        prompt_file=str(prompt),
+        prompt_hash=hashlib.sha256(prompt.read_bytes()).hexdigest(),
+        provider_delta_path=str(delta),
+        provider_delta_hash=hashlib.sha256(delta.read_bytes()).hexdigest(),
+    ).write(receipt_path)
+
+    rc = main([
+        "emit-delta", str(project), "C001", "--node", "L1",
+        "--persona", "Einstein", "--file", str(delta),
+        "--knowledge-store", str(store),
+        "--context-manifest", str(manifest_path),
+        "--provider-receipt", str(receipt_path),
+    ])
+    captured = capsys.readouterr()
+    assert rc == 0, captured.err
+
+
+def test_v2_retry_delta_uses_append_only_path_when_content_changes(tmp_path):
+    canonical = tmp_path / "C001_L1_einstein_delta.v2.json"
+    canonical.write_text("first", encoding="utf-8")
+
+    assert ledger_commands._select_v2_delta_path(canonical, "first") == canonical
+    assert ledger_commands._select_v2_delta_path(canonical, "second") == (
+        tmp_path / "C001_L1_einstein_delta_retry2.v2.json"
+    )
 
 
 # Final CI revalidation marker: no runtime or assertion behavior changes.
