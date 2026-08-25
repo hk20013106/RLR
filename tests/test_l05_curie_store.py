@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import research_loop.l05_curie as curie
+from research_loop.l05_curie import store as store_module
 
 
 def _query_plan():
@@ -114,6 +115,22 @@ def _artifact_path(project_dir: Path, manifest: dict) -> Path:
     return project_dir / manifest["artifact_path"]
 
 
+def _build_retry_pack(version: int):
+    coverage = curie.judge_coverage(
+        {"covered": ["calcium_handling"], "gaps": []},
+        round_index=version,
+        max_rounds=3,
+    )
+    return _build_pack(
+        version=version,
+        parent_pack_sha256="f" * 64,
+        source_gap_request_id=f"EGR_V{version}",
+        query_plans=[_query_plan_for_round(version)],
+        coverage=coverage,
+        gaps=[],
+    )
+
+
 def test_build_is_deterministic_and_freeze_loads_exact_pack(tmp_path):
     first = _build_pack()
     second = _build_pack()
@@ -192,6 +209,54 @@ def test_build_rejects_pack_versions_beyond_bounded_acquisition_rounds():
             source_gap_request_id="EGR_V4",
             query_plans=[_query_plan_for_round(3)],
         )
+
+
+def test_load_and_render_allow_a_byte_verified_legacy_frozen_retry_pack(tmp_path):
+    manifest = curie.freeze_evidence_pack(tmp_path, _build_retry_pack(3))
+    path = _artifact_path(tmp_path, manifest)
+    legacy = json.loads(path.read_text(encoding="utf-8"))
+    legacy.pop("source_gap_request_id")
+    legacy["query_plans"][0]["round_index"] = 2
+    legacy["coverage"] = curie.judge_coverage(
+        {"covered": ["calcium_handling"], "gaps": []},
+        round_index=1,
+        max_rounds=3,
+    )
+    legacy["gaps"] = legacy["coverage"]["gaps"]
+    legacy["content_sha256"] = store_module._content_sha256(legacy)
+    raw = store_module._canonical_bytes(legacy)
+    path.write_bytes(raw)
+    legacy_manifest = {
+        **manifest,
+        "artifact_sha256": hashlib.sha256(raw).hexdigest(),
+        "content_sha256": legacy["content_sha256"],
+    }
+
+    loaded = curie.load_frozen_evidence_pack(
+        tmp_path,
+        legacy_manifest,
+        candidate_id="C001",
+        round_id="R1",
+        seed_sha256="a" * 64,
+    )
+
+    assert loaded["version"] == 3
+    assert "source_gap_request_id" not in loaded
+    with pytest.raises(curie.CurieContractError, match="source_gap_request_id"):
+        curie.render_evidence_context(loaded)
+    assert "L0.5 CURIE FROZEN EVIDENCEPACK" in curie.render_evidence_context(
+        loaded,
+        allow_legacy_frozen_acquisition_metadata=True,
+    )
+
+
+def test_freeze_keeps_retry_lineage_required_for_new_v2_packs(tmp_path):
+    malformed_ready = _build_retry_pack(2)
+    malformed_ready.pop("source_gap_request_id")
+    malformed_ready["content_sha256"] = store_module._content_sha256(malformed_ready)
+
+    with pytest.raises(curie.CurieContractError, match="source_gap_request_id"):
+        curie.freeze_evidence_pack(tmp_path, malformed_ready)
 
 
 @pytest.mark.parametrize(("field", "value"), [("query_plans", [_query_plan_for_round(1)]), ("coverage", _pass_coverage())])

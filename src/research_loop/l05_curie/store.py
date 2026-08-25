@@ -79,7 +79,12 @@ def _validate_selected_papers(selected_papers: object) -> list[dict]:
     return validated
 
 
-def _validate_pack_structure(pack: dict, *, expected_status: str | None = None) -> dict:
+def _validate_pack_structure(
+    pack: dict,
+    *,
+    expected_status: str | None = None,
+    allow_legacy_frozen_acquisition_metadata: bool = False,
+) -> dict:
     if not isinstance(pack, dict):
         raise CurieContractError("EvidencePack must be an object")
     if pack.get("schema_version") != EVIDENCE_PACK_SCHEMA_VERSION:
@@ -97,6 +102,19 @@ def _validate_pack_structure(pack: dict, *, expected_status: str | None = None) 
         raise CurieContractError(
             f"EvidencePack version must be an integer from 1 to {MAX_ACQUISITION_ROUNDS}"
         )
+    status = pack.get("status")
+    if status not in {"READY_TO_FREEZE", "FROZEN"}:
+        raise CurieContractError("EvidencePack status must be READY_TO_FREEZE or FROZEN")
+    if expected_status is not None and status != expected_status:
+        raise CurieContractError(f"EvidencePack status must be {expected_status}")
+    # Historical FROZEN artifacts predate strict retry/round metadata.  This
+    # compatibility mode is never used by build, freeze, or retry creation.
+    legacy_frozen_acquisition_metadata = (
+        allow_legacy_frozen_acquisition_metadata
+        and expected_status == "FROZEN"
+        and status == "FROZEN"
+    )
+
     parent_hash = pack.get("parent_pack_sha256")
     source_gap_request_id = pack.get("source_gap_request_id")
     if version == 1:
@@ -106,12 +124,11 @@ def _validate_pack_structure(pack: dict, *, expected_status: str | None = None) 
             raise CurieContractError("EvidencePack v1 must not have source_gap_request_id")
     else:
         _require_sha256(parent_hash, "EvidencePack parent_pack_sha256")
-        _require_text(source_gap_request_id, "EvidencePack source_gap_request_id")
-    status = pack.get("status")
-    if status not in {"READY_TO_FREEZE", "FROZEN"}:
-        raise CurieContractError("EvidencePack status must be READY_TO_FREEZE or FROZEN")
-    if expected_status is not None and status != expected_status:
-        raise CurieContractError(f"EvidencePack status must be {expected_status}")
+        if not (
+            legacy_frozen_acquisition_metadata
+            and source_gap_request_id in (None, "")
+        ):
+            _require_text(source_gap_request_id, "EvidencePack source_gap_request_id")
 
     query_plans = pack.get("query_plans")
     if not isinstance(query_plans, list) or not query_plans:
@@ -122,7 +139,7 @@ def _validate_pack_structure(pack: dict, *, expected_status: str | None = None) 
         plan = validate_query_plan(plan, seed_sha256=seed_sha256)
         if plan["candidate_id"] != candidate_id or plan["round_id"] != round_id:
             raise CurieContractError("QueryPlan identity does not match EvidencePack")
-        if plan["round_index"] != version:
+        if plan["round_index"] != version and not legacy_frozen_acquisition_metadata:
             raise CurieContractError("QueryPlan round_index must match EvidencePack version")
         if plan["plan_id"] in plan_ids:
             raise CurieContractError(f"duplicate QueryPlan plan_id: {plan['plan_id']}")
@@ -156,7 +173,7 @@ def _validate_pack_structure(pack: dict, *, expected_status: str | None = None) 
         evidence_ids.add(extract["evidence_id"])
 
     coverage = validate_coverage_decision(pack.get("coverage"))
-    if coverage["round_index"] != version:
+    if coverage["round_index"] != version and not legacy_frozen_acquisition_metadata:
         raise CurieContractError("coverage decision round_index must match EvidencePack version")
     gaps = pack.get("gaps")
     if not isinstance(gaps, list):
@@ -318,7 +335,11 @@ def load_frozen_evidence_pack(project_dir: str | Path, manifest: dict, *,
         pack = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CurieContractError(f"frozen EvidencePack is unreadable: {exc}") from exc
-    pack = _validate_pack_structure(pack, expected_status="FROZEN")
+    pack = _validate_pack_structure(
+        pack,
+        expected_status="FROZEN",
+        allow_legacy_frozen_acquisition_metadata=True,
+    )
     for field, expected in (
         ("candidate_id", candidate_id),
         ("round_id", round_id),
@@ -365,9 +386,15 @@ def next_pack_version(previous_pack: dict, *, gap_request: dict,
     )
 
 
-def render_evidence_context(pack: dict) -> str:
+def render_evidence_context(
+    pack: dict, *, allow_legacy_frozen_acquisition_metadata: bool = False
+) -> str:
     """Render only verified frozen evidence for Einstein's isolated L1 context."""
-    frozen = _validate_pack_structure(pack, expected_status="FROZEN")
+    frozen = _validate_pack_structure(
+        pack,
+        expected_status="FROZEN",
+        allow_legacy_frozen_acquisition_metadata=allow_legacy_frozen_acquisition_metadata,
+    )
     if frozen["coverage"]["verdict"] != "PASS":
         raise CurieContractError("L1 evidence context requires coverage PASS")
     papers = {paper["paper_id"]: paper for paper in frozen["selected_papers"]}
