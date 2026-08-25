@@ -103,6 +103,13 @@ def _build_pack(**overrides):
     return curie.build_evidence_pack(**kwargs)
 
 
+def _query_plan_for_round(round_index: int) -> dict:
+    plan = _query_plan()
+    plan["round_index"] = round_index
+    plan["plan_id"] = f"QP{round_index:03d}"
+    return plan
+
+
 def _artifact_path(project_dir: Path, manifest: dict) -> Path:
     return project_dir / manifest["artifact_path"]
 
@@ -146,13 +153,56 @@ def test_freeze_requires_coverage_pass(tmp_path):
                 }
             ],
         },
-        round_index=3,
+        round_index=1,
         max_rounds=3,
     )
     pack = _build_pack(coverage=insufficient, gaps=insufficient["gaps"])
 
     with pytest.raises(curie.CurieContractError, match="coverage.*PASS"):
         curie.freeze_evidence_pack(tmp_path, pack)
+
+
+@pytest.mark.parametrize(
+    ("version", "source_gap_request_id", "message"),
+    [
+        (1, "EGR_UNEXPECTED", "version 1.*source_gap_request_id"),
+        (2, None, "source_gap_request_id"),
+    ],
+)
+def test_build_enforces_gap_request_direction_for_each_pack_version(
+    version, source_gap_request_id, message
+):
+    kwargs = {
+        "version": version,
+        "query_plans": [_query_plan_for_round(version)],
+        "source_gap_request_id": source_gap_request_id,
+    }
+    if version > 1:
+        kwargs["parent_pack_sha256"] = "f" * 64
+
+    with pytest.raises(curie.CurieContractError, match=message):
+        _build_pack(**kwargs)
+
+
+def test_build_rejects_pack_versions_beyond_bounded_acquisition_rounds():
+    with pytest.raises(curie.CurieContractError, match="1 to 3"):
+        _build_pack(
+            version=4,
+            parent_pack_sha256="f" * 64,
+            source_gap_request_id="EGR_V4",
+            query_plans=[_query_plan_for_round(3)],
+        )
+
+
+@pytest.mark.parametrize(("field", "value"), [("query_plans", [_query_plan_for_round(1)]), ("coverage", _pass_coverage())])
+def test_build_requires_query_and_coverage_round_to_match_pack_version(field, value):
+    with pytest.raises(curie.CurieContractError, match="round_index.*EvidencePack version"):
+        _build_pack(
+            version=2,
+            parent_pack_sha256="f" * 64,
+            source_gap_request_id="EGR_V2",
+            **{field: value},
+        )
 
 
 def test_freeze_is_append_only_and_refuses_overwrite(tmp_path):
@@ -259,7 +309,11 @@ def test_gap_request_creates_new_version_with_parent_hash(tmp_path):
         discovery_receipts=[_discovery_batch()],
         selected_papers=_selected_papers(),
         evidence=_evidence(),
-        coverage=_pass_coverage(),
+        coverage=curie.judge_coverage(
+            {"covered": ["calcium_handling"], "gaps": []},
+            round_index=2,
+            max_rounds=3,
+        ),
         gaps=[],
     )
 

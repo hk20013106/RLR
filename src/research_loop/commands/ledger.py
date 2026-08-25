@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pitfall_ledger as pl
 
-from research_loop import deep_research, hypothesis_migration
+from research_loop import deep_research, hypothesis_migration, research_seed
 from research_loop.common import _append_decision, _now, _set_status, _stamp
 from research_loop.delta import (
     DELTA_PERSONA,
@@ -81,6 +81,39 @@ def _write_hypothesis_commit_receipt(project_dir, receipt):
     with target.open("x", encoding="utf-8") as handle:
         handle.write(raw)
     return target
+
+
+def _select_v2_delta_path(canonical_path: Path, content: str | None = None,
+                          *, retry_index: int | None = None) -> Path:
+    """Keep repeated emissions append-only while preserving first-write paths."""
+    canonical = Path(canonical_path)
+    suffix = "".join(canonical.suffixes)
+    base_name = canonical.name[:-len(suffix)] if suffix else canonical.name
+
+    def retry_path(index: int) -> Path:
+        return canonical.with_name(f"{base_name}_retry{index}{suffix}")
+
+    if retry_index is not None and int(retry_index) > 1:
+        index = int(retry_index)
+        while True:
+            candidate = retry_path(index)
+            if not candidate.exists():
+                return candidate
+            if content is None or candidate.read_text(encoding="utf-8") == content:
+                return candidate
+            index += 1
+    if not canonical.exists() or content is None:
+        return canonical
+    if canonical.read_text(encoding="utf-8") == content:
+        return canonical
+    index = 2
+    while True:
+        candidate = retry_path(index)
+        if not candidate.exists():
+            return candidate
+        if candidate.read_text(encoding="utf-8") == content:
+            return candidate
+        index += 1
 
 
 def _validate_native_receipts(
@@ -188,10 +221,36 @@ def _validate_native_receipts(
         raise LedgerError(
             "native L9b receipt requires finalized L9a in the authorized snapshot"
         )
-    recorded_evidence = (manifest.get("pre_research") or {}).get(
-        "evidence_artifacts"
-    )
-    if recorded_evidence:
+    pre_research = manifest.get("pre_research") or {}
+    native_binding = pre_research.get("native_evidence_binding")
+    recorded_evidence = pre_research.get("evidence_artifacts")
+    if native_binding is not None:
+        if not isinstance(native_binding, dict) or args.node != "L1":
+            raise LedgerError("native evidence binding is invalid for this emission")
+        run_id = str(pre_research.get("evidence_run_id") or "")
+        if not run_id:
+            raise LedgerError("native L1 context has no exact evidence_run_id")
+        try:
+            seed = research_seed.load_l1_research_seed(
+                args.project_dir, str(args.cand_id)
+            )
+            current_binding = research_seed.native_evidence_binding_manifest_entry(
+                args.project_dir, seed, run_id
+            )
+        except (
+            research_seed.ResearchSeedError,
+            OSError,
+            TypeError,
+            ValueError,
+            KeyError,
+        ) as exc:
+            raise LedgerError(f"exact native evidence binding is invalid: {exc}") from exc
+        if current_binding != native_binding:
+            raise LedgerError("native evidence binding changed since context assembly")
+        if str(native_binding.get("evidence_run_id") or "") != run_id:
+            raise LedgerError("native evidence binding run does not match context")
+        recorded_evidence = None
+    elif recorded_evidence:
         run_id = str(recorded_evidence.get("run_id") or "")
         try:
             current_evidence = deep_research.evidence_artifact_manifest(
@@ -244,6 +303,7 @@ def _validate_native_receipts(
         "provider_prompt_sha256": provider.prompt_hash,
         "provider_delta_sha256": provider.provider_delta_hash,
         "evidence_artifacts": recorded_evidence,
+        "native_evidence_binding": native_binding,
         "authorization_id": snapshot["authorization_id"],
         "authorization_artifact_sha256": snapshot["artifact_hash"],
     }
@@ -287,6 +347,18 @@ def _emit_delta_v2(args, data):
     if out_file is None:
         print(f"ERROR: cannot resolve v2 artifact path for {delta_key}", file=sys.stderr)
         return 2
+    native_pack_version = (
+        (provenance.get("native_evidence_binding") or {}).get(
+            "evidence_pack_version"
+        )
+        if isinstance(provenance, dict)
+        else None
+    )
+    out_file = _select_v2_delta_path(
+        out_file,
+        retry_index=(int(native_pack_version)
+                     if native_pack_version not in (None, "") else None),
+    )
     receipt_path = None
 
     def persist_finalized_artifacts(result):

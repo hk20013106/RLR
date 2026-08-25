@@ -6,20 +6,26 @@ on:
       - "src/research_loop/l05_curie/**"
       - "src/research_loop/l05_context.py"
       - "src/research_loop/l05_curie_cli.py"
+      - "src/research_loop/l05_native_binding.py"
+      - "src/research_loop/l05_native_context_gate.py"
       - "src/research_loop/research_seed.py"
       - "src/research_loop/context.py"
       - "src/research_loop/__init__.py"
       - "tests/test_l05_curie_*.py"
+      - "tests/test_l05_native_*.py"
       - ".github/workflows/l05-curie-ci.yml"
   pull_request:
     paths:
       - "src/research_loop/l05_curie/**"
       - "src/research_loop/l05_context.py"
       - "src/research_loop/l05_curie_cli.py"
+      - "src/research_loop/l05_native_binding.py"
+      - "src/research_loop/l05_native_context_gate.py"
       - "src/research_loop/research_seed.py"
       - "src/research_loop/context.py"
       - "src/research_loop/__init__.py"
       - "tests/test_l05_curie_*.py"
+      - "tests/test_l05_native_*.py"
       - ".github/workflows/l05-curie-ci.yml"
 
 concurrency:
@@ -51,4 +57,16 @@ jobs:
           tests/test_l05_curie_europepmc_discovery.py
           tests/test_l05_curie_europepmc_evidence.py
           tests/test_l05_curie_europepmc_runtime.py
+          tests/test_l05_curie_gap_loop.py
+          tests/test_l05_curie_native_runtime.py
+          tests/test_l05_curie_multisource_discovery.py
+          tests/test_l05_curie_provenance_hardening.py
+          tests/test_l05_curie_selector.py
+          tests/test_l05_curie_paperqa2.py
+          tests/test_l05_curie_paperqa2_runtime.py
+          tests/test_l05_curie_source_verifier.py
+          tests/test_l05_curie_semantic_verifier.py
+          tests/test_l05_curie_fullcycle.py
+          tests/test_l05_native_evidence_binding.py
+          tests/test_l05_native_l1_handoff.py
           -q

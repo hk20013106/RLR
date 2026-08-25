@@ -236,7 +236,7 @@ def test_research_seed_binding_v2_binds_and_revalidates_frozen_pack(tmp_path):
         )
 
 
-def test_native_l1_context_consumes_frozen_l05_evidence_not_legacy_summary(
+def test_native_l1_rejects_legacy_only_evidence_binding(
     tmp_path, monkeypatch, capsys
 ):
     project, store, artifact = _native_l1_project(tmp_path)
@@ -254,10 +254,7 @@ def test_native_l1_context_consumes_frozen_l05_evidence_not_legacy_summary(
         evidence_run_id=artifact["run_id"],
     )
 
-    assert context.cmd_assemble_context(args) == 0
-    rendered = capsys.readouterr().out
-    assert "=== L0.5 CURIE FROZEN EVIDENCEPACK ===" in rendered
-    assert "A located result." in rendered
-    assert "A located discussion statement." in rendered
-    assert "A located conclusion." in rendered
-    assert "=== PRE-RESEARCH (deep_research) [FULL] ===" not in rendered
+    assert context.cmd_assemble_context(args) == 3
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "native L1 evidence binding" in captured.err

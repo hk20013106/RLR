@@ -10,6 +10,7 @@ from pathlib import Path
 from .contracts import (
     EVIDENCE_PACK_MANIFEST_SCHEMA_VERSION,
     EVIDENCE_PACK_SCHEMA_VERSION,
+    MAX_ACQUISITION_ROUNDS,
     CurieContractError,
     _require_sha256,
     _require_text,
@@ -91,14 +92,21 @@ def _validate_pack_structure(pack: dict, *, expected_status: str | None = None) 
     if source_run_id is not None:
         _require_text(source_run_id, "EvidencePack source_run_id")
     version = pack.get("version")
-    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
-        raise CurieContractError("EvidencePack version must be a positive integer")
+    if (not isinstance(version, int) or isinstance(version, bool)
+            or not 1 <= version <= MAX_ACQUISITION_ROUNDS):
+        raise CurieContractError(
+            f"EvidencePack version must be an integer from 1 to {MAX_ACQUISITION_ROUNDS}"
+        )
     parent_hash = pack.get("parent_pack_sha256")
+    source_gap_request_id = pack.get("source_gap_request_id")
     if version == 1:
         if parent_hash not in (None, ""):
             raise CurieContractError("EvidencePack v1 must not have parent_pack_sha256")
+        if source_gap_request_id not in (None, ""):
+            raise CurieContractError("EvidencePack v1 must not have source_gap_request_id")
     else:
         _require_sha256(parent_hash, "EvidencePack parent_pack_sha256")
+        _require_text(source_gap_request_id, "EvidencePack source_gap_request_id")
     status = pack.get("status")
     if status not in {"READY_TO_FREEZE", "FROZEN"}:
         raise CurieContractError("EvidencePack status must be READY_TO_FREEZE or FROZEN")
@@ -114,6 +122,8 @@ def _validate_pack_structure(pack: dict, *, expected_status: str | None = None) 
         plan = validate_query_plan(plan, seed_sha256=seed_sha256)
         if plan["candidate_id"] != candidate_id or plan["round_id"] != round_id:
             raise CurieContractError("QueryPlan identity does not match EvidencePack")
+        if plan["round_index"] != version:
+            raise CurieContractError("QueryPlan round_index must match EvidencePack version")
         if plan["plan_id"] in plan_ids:
             raise CurieContractError(f"duplicate QueryPlan plan_id: {plan['plan_id']}")
         plan_ids.add(plan["plan_id"])
@@ -146,6 +156,8 @@ def _validate_pack_structure(pack: dict, *, expected_status: str | None = None) 
         evidence_ids.add(extract["evidence_id"])
 
     coverage = validate_coverage_decision(pack.get("coverage"))
+    if coverage["round_index"] != version:
+        raise CurieContractError("coverage decision round_index must match EvidencePack version")
     gaps = pack.get("gaps")
     if not isinstance(gaps, list):
         raise CurieContractError("EvidencePack gaps must be a list")
@@ -169,14 +181,22 @@ def build_evidence_pack(*, candidate_id: str, round_id: str, seed_sha256: str,
     candidate_id = _require_text(candidate_id, "candidate_id")
     round_id = _require_text(round_id, "round_id")
     seed_sha256 = _require_sha256(seed_sha256, "seed_sha256")
-    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
-        raise CurieContractError("version must be a positive integer")
+    if (not isinstance(version, int) or isinstance(version, bool)
+            or not 1 <= version <= MAX_ACQUISITION_ROUNDS):
+        raise CurieContractError(
+            f"version must be an integer from 1 to {MAX_ACQUISITION_ROUNDS}"
+        )
     if version == 1:
         if parent_pack_sha256 not in (None, ""):
             raise CurieContractError("version 1 cannot declare parent_pack_sha256")
+        if source_gap_request_id not in (None, ""):
+            raise CurieContractError("version 1 cannot declare source_gap_request_id")
         parent_pack_sha256 = None
     else:
         parent_pack_sha256 = _require_sha256(parent_pack_sha256, "parent_pack_sha256")
+        source_gap_request_id = _require_text(
+            source_gap_request_id, "source_gap_request_id"
+        )
     if source_gap_request_id is not None:
         source_gap_request_id = _require_text(source_gap_request_id, "source_gap_request_id")
     if source_run_id is not None:
@@ -258,8 +278,11 @@ def _validated_manifest_identity(manifest: dict, *, candidate_id: str,
         raise CurieContractError("EvidencePack manifest seed_sha256 does not match active ResearchSeed")
     _require_text(manifest.get("pack_id"), "EvidencePack manifest pack_id")
     version = manifest.get("version")
-    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
-        raise CurieContractError("EvidencePack manifest version must be a positive integer")
+    if (not isinstance(version, int) or isinstance(version, bool)
+            or not 1 <= version <= MAX_ACQUISITION_ROUNDS):
+        raise CurieContractError(
+            f"EvidencePack manifest version must be an integer from 1 to {MAX_ACQUISITION_ROUNDS}"
+        )
     _require_text(manifest.get("artifact_path"), "EvidencePack manifest artifact_path")
     _require_sha256(manifest.get("artifact_sha256"), "EvidencePack manifest artifact_sha256")
     _require_sha256(manifest.get("content_sha256"), "EvidencePack manifest content_sha256")

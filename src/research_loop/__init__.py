@@ -129,10 +129,20 @@ from research_loop.topology_extensions import install as _install_topology_exten
 
 _install_topology_extensions(topology)
 
+# Native v2.1 L1 evidence binding is installed on the canonical research_seed
+# module. It is independent of the historical Deep Research run bridge.
+from research_loop import research_seed as _research_seed_module
+from research_loop.l05_native_binding import install as _install_l05_native_binding
+
+_install_l05_native_binding(_research_seed_module)
+
 from research_loop.commands import lifecycle as _lifecycle
 from research_loop.commands import ledger as _ledger_commands
 from research_loop import context as _context
 from research_loop.conditional_routing import install as _install_conditional_routing
+from research_loop.l05_native_context_gate import (
+    install as _install_l05_native_context_gate,
+)
 from research_loop.l05_context import install as _install_l05_context
 from research_loop.hypothesis_recall_context import (
     install as _install_hypothesis_recall_context,
@@ -141,10 +151,13 @@ from research_loop.l45_ledger import install as _install_l45_ledger
 
 _install_l45_ledger(_ledger_commands)
 _install_conditional_routing(_lifecycle, _context)
-# L0.5 must sit inside recall: the canonical context and all legacy evidence
-# gates run first; Curie's frozen pack replaces the acquisition summary; only
-# then may the historical-recall extension add its separate frozen artifact.
+# For native v2.1 L1, replace the historical Deep Research acquisition gate
+# with the exact Curie binding gate before the frozen-pack injection wrapper is
+# installed. Historical v2.0 and every non-L1 node remain unchanged.
+_install_l05_native_context_gate(_context)
 _install_l05_context(_context)
+# Recall remains outermost so it can add only its separately authorized
+# historical snapshot after the canonical native evidence context is complete.
 _install_hypothesis_recall_context(_context, _ledger_commands)
 
 # CLI extensions are installed only after the canonical CLI module has defined
@@ -178,6 +191,8 @@ del _install_receipt_idempotency, _install_hypothesis_reactivation
 del _install_reactivation_constraints, _install_conditional_skip_constraints
 del _install_reactivation_compat
 del _install_topology_extensions, _install_l45_ledger
+del _install_l05_native_binding, _research_seed_module
+del _install_l05_native_context_gate
 del _install_conditional_routing, _install_l05_context
 del _install_hypothesis_recall_context
 del _install_hypothesis_pool_cli, _install_l05_europepmc_cli

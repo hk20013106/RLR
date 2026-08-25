@@ -1,0 +1,292 @@
+import hashlib
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+from research_loop import context, l0_contract, research_seed
+from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
+from research_loop.commands import ledger as ledger_commands
+from research_loop.engine import main
+from research_loop.hypothesis_ledger import HypothesisLedger
+from research_loop.l05_native_context_gate import _is_native_l1
+from research_loop.providers.base import RunReceipt
+import research_loop.l05_curie as curie
+
+
+def _freeze_native_pack(project: Path, seed: dict, *, run_id="CURIE001"):
+    seed_hash = research_seed.seed_sha256(seed)
+    plan = {
+        "schema_version": curie.QUERY_PLAN_SCHEMA_VERSION,
+        "candidate_id": "C001",
+        "round_id": "1",
+        "seed_sha256": seed_hash,
+        "plan_id": "QP001",
+        "round_index": 1,
+        "queries": [{
+            "query_id": "Q001",
+            "intent": "mechanism",
+            "query": "bat high heart rate cardiac physiology",
+            "providers": ["europe-pmc"],
+        }],
+    }
+    batch = {
+        "schema_version": curie.DISCOVERY_BATCH_SCHEMA_VERSION,
+        "provider": "europe-pmc",
+        "query_id": "Q001",
+        "receipt": {
+            "request_sha256": "1" * 64,
+            "response_sha256": "2" * 64,
+        },
+        "records": [{
+            "paper_id": "PMID:123",
+            "title": "Bat cardiac physiology",
+            "identifiers": {"pmid": "123"},
+        }],
+    }
+    selected = [{
+        "paper_id": "PMID:123",
+        "title": "Bat cardiac physiology",
+        "identifiers": {"pmid": "123"},
+        "selection": {
+            "decision": "INCLUDE",
+            "reason": "direct evidence",
+        },
+    }]
+    evidence = [{
+        "schema_version": curie.EVIDENCE_EXTRACT_SCHEMA_VERSION,
+        "evidence_id": "NATIVE_SENTINEL_EVIDENCE",
+        "paper_id": "PMID:123",
+        "section": "Results",
+        "text": "NATIVE_CURIE_SENTINEL: bats show a located cardiac physiology result.",
+        "locator": "Results paragraph 1",
+        "role": "CONTEXT",
+        "verification_status": "LOCATED",
+        "retrieval": {"engine": "fixture", "source_sha256": "3" * 64},
+    }]
+    coverage = curie.judge_coverage(
+        {"covered": ["verified_full_text_source"], "gaps": []},
+        round_index=1,
+        max_rounds=3,
+    )
+    pack = curie.build_evidence_pack(
+        candidate_id="C001",
+        round_id="1",
+        seed_sha256=seed_hash,
+        version=1,
+        query_plans=[plan],
+        discovery_receipts=[batch],
+        selected_papers=selected,
+        evidence=evidence,
+        coverage=coverage,
+        gaps=[],
+        source_run_id=run_id,
+    )
+    return curie.freeze_evidence_pack(project, pack)
+
+
+def _native_project(tmp_path: Path, *, bind_pack=True, bind_profile=True):
+    project = tmp_path / "project"
+    project.mkdir()
+    store = tmp_path / "hypotheses.sqlite"
+    ledger = HypothesisLedger(store)
+    if bind_profile:
+        ledger.bind_project(project, profile_id=DEFAULT_NATIVE_PROFILE)
+
+    candidate_dir = project / "01_Candidates"
+    candidate_dir.mkdir(parents=True)
+    source_input = l0_contract.build_source_input(
+        input_type="inline",
+        description="native Curie handoff fixture",
+        fmt="text",
+    )
+    contract = l0_contract.promote_to_current_schema(
+        l0_contract.build_initial_contract(
+            "C001",
+            "1",
+            "Why can bats sustain high heart rates?",
+            source_input,
+            "Cardiac physiology includes adaptive mechanisms.",
+        )
+    )
+    contract_path, contract_hash = l0_contract.write_contract(project, "C001", contract)
+    (candidate_dir / "C001.md").write_text(
+        "---\n"
+        "candidate_id: C001\n"
+        "title: Native Curie handoff fixture\n"
+        "question: duplicated frontmatter question must not be authoritative\n"
+        "claim: duplicated frontmatter claim must not be authoritative\n"
+        "round_type: initial\n"
+        "round_id: 1\n"
+        f"schema_version: {contract['schema_version']}\n"
+        f"input_contract_path: {contract_path.relative_to(project).as_posix()}\n"
+        f"input_contract_hash: {contract_hash}\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    seed = research_seed.load_l1_research_seed(project, "C001")
+    manifest = _freeze_native_pack(project, seed)
+    if bind_pack:
+        research_seed.write_l1_native_evidence_binding(
+            project, seed, manifest, "CURIE001"
+        )
+    return project, store, seed, manifest
+
+
+def _args(project: Path, store: Path):
+    return SimpleNamespace(
+        project_dir=str(project),
+        cand_id="C001",
+        node="L1",
+        authorization_id=None,
+        knowledge_store=str(store),
+        template_mode="contract",
+        pre_research_mode="full",
+        pre_research_token_budget=4000,
+        context_token_budget=12000,
+        evidence_run_id="CURIE001",
+    )
+
+
+def test_native_l1_consumes_curie_pack_without_legacy_pre_research(
+    tmp_path, monkeypatch, capsys
+):
+    project, store, _seed, _manifest = _native_project(tmp_path)
+    monkeypatch.setenv("RLR_HYPOTHESIS_STORE", str(store))
+
+    assert not (project / "02_Agent_Notes" / "_pre_research" / "L1_research.md").exists()
+    assert not (project / "08_Audit" / "deep_research").exists()
+
+    assert context.cmd_assemble_context(_args(project, store)) == 0
+    captured = capsys.readouterr()
+    assert "=== L0.5 CURIE FROZEN EVIDENCEPACK ===" in captured.out
+    assert "NATIVE_CURIE_SENTINEL" in captured.out
+    assert "=== PRE-RESEARCH (deep_research)" not in captured.out
+    assert "legacy_summary_injected" not in captured.out
+
+
+def test_native_l1_fails_closed_when_native_binding_is_missing(
+    tmp_path, monkeypatch, capsys
+):
+    project, store, _seed, _manifest = _native_project(tmp_path, bind_pack=False)
+    monkeypatch.setenv("RLR_HYPOTHESIS_STORE", str(store))
+
+    assert context.cmd_assemble_context(_args(project, store)) == 3
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "native L1 evidence binding" in captured.err
+
+
+def test_native_l1_detection_uses_native_binding_not_profile_sidecar(
+    tmp_path, monkeypatch, capsys
+):
+    project, store, _seed, _manifest = _native_project(
+        tmp_path, bind_profile=False
+    )
+    monkeypatch.setenv("RLR_HYPOTHESIS_STORE", str(store))
+
+    assert _is_native_l1(_args(project, store))
+    assert context.cmd_assemble_context(_args(project, store)) == 3
+    captured = capsys.readouterr()
+    assert "native L1 evidence binding gate" in captured.err
+    assert not (project / "08_Audit" / "deep_research").exists()
+
+
+def test_native_l1_revalidates_binding_at_actual_context_use(
+    tmp_path, monkeypatch, capsys
+):
+    project, store, _seed, manifest = _native_project(tmp_path)
+    monkeypatch.setenv("RLR_HYPOTHESIS_STORE", str(store))
+    pack_path = project / manifest["artifact_path"]
+    pack_path.write_text(pack_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+    assert context.cmd_assemble_context(_args(project, store)) == 3
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "frozen L0.5 EvidencePack" in captured.err
+
+
+def test_native_l1_emit_delta_accepts_native_binding_without_legacy_research(
+    tmp_path, monkeypatch, capsys
+):
+    project, store, _seed, _manifest = _native_project(tmp_path)
+    monkeypatch.setenv("RLR_HYPOTHESIS_STORE", str(store))
+
+    assert context.cmd_assemble_context(_args(project, store)) == 0
+    assembled = capsys.readouterr()
+    manifest_path = next(
+        Path(line.split(":", 1)[1].strip())
+        for line in assembled.err.splitlines()
+        if line.startswith("[audit] context manifest:")
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert (manifest["pre_research"]["native_evidence_binding"])
+    assert not (manifest["pre_research"].get("evidence_artifacts"))
+
+    delta = tmp_path / "C001_L1_einstein_delta.v2.json"
+    delta.write_text(
+        json.dumps({
+            "schema_version": "2.1",
+            "hypotheses": [{
+                "proposal_key": key,
+                "statement": f"Statement {key}",
+                "operationalization": "measure the stated mechanism",
+                "falsification_criteria": ["the predicted pattern is absent"],
+                "rationale": "native binding regression",
+            } for key in ("one", "two", "three")],
+            "primary_proposal_key": "one",
+            "key_uncertainty": "the direct comparative evidence may be limited",
+        }),
+        encoding="utf-8",
+    )
+    prompt = tmp_path / "einstein_prompt.txt"
+    prompt.write_text(
+        Path(manifest["rendered_context_path"]).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    manifest_hash = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    rendered_hash = hashlib.sha256(
+        Path(manifest["rendered_context_path"]).read_bytes()
+    ).hexdigest()
+    receipt_path = tmp_path / "provider_receipt.json"
+    RunReceipt(
+        node="L1",
+        persona="Einstein",
+        provider="codex-main-agent",
+        timestamp="2026-08-25T00:00:00Z",
+        context_hash=rendered_hash,
+        project_id=manifest["project_id"],
+        candidate_id="C001",
+        round_id="1",
+        profile_id=manifest["profile_id"],
+        context_manifest_path=str(manifest_path),
+        context_manifest_hash=manifest_hash,
+        rendered_context_path=manifest["rendered_context_path"],
+        rendered_context_hash=rendered_hash,
+        prompt_file=str(prompt),
+        prompt_hash=hashlib.sha256(prompt.read_bytes()).hexdigest(),
+        provider_delta_path=str(delta),
+        provider_delta_hash=hashlib.sha256(delta.read_bytes()).hexdigest(),
+    ).write(receipt_path)
+
+    rc = main([
+        "emit-delta", str(project), "C001", "--node", "L1",
+        "--persona", "Einstein", "--file", str(delta),
+        "--knowledge-store", str(store),
+        "--context-manifest", str(manifest_path),
+        "--provider-receipt", str(receipt_path),
+    ])
+    captured = capsys.readouterr()
+    assert rc == 0, captured.err
+
+
+def test_v2_retry_delta_uses_append_only_path_when_content_changes(tmp_path):
+    canonical = tmp_path / "C001_L1_einstein_delta.v2.json"
+    canonical.write_text("first", encoding="utf-8")
+
+    assert ledger_commands._select_v2_delta_path(canonical, "first") == canonical
+    assert ledger_commands._select_v2_delta_path(canonical, "second") == (
+        tmp_path / "C001_L1_einstein_delta_retry2.v2.json"
+    )
+
+
+# Final CI revalidation marker: no runtime or assertion behavior changes.
