@@ -141,6 +141,7 @@ def install(context_module) -> None:
                 )
 
             native_entry = pre_research.get("native_evidence_binding")
+            legacy_source_identity = not isinstance(native_entry, dict)
             if isinstance(native_entry, dict):
                 binding = research_seed.load_l1_native_evidence_binding(
                     project, seed, run_id
@@ -168,6 +169,7 @@ def install(context_module) -> None:
                 candidate_id=str(seed["candidate_id"]),
                 round_id=str(seed["round_id"]),
                 seed_sha256=research_seed.seed_sha256(seed),
+                allow_legacy_source_identity=legacy_source_identity,
             )
             if str(frozen.get("source_run_id") or "") != run_id:
                 raise L05ContextError(
@@ -176,6 +178,7 @@ def install(context_module) -> None:
             evidence_text = l05_curie.render_evidence_context(
                 frozen,
                 allow_legacy_frozen_acquisition_metadata=True,
+                allow_legacy_source_identity=legacy_source_identity,
             )
 
             rendered_path = Path(str(manifest["rendered_context_path"]))
