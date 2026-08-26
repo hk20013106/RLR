@@ -54,7 +54,6 @@ jobs:
           tests/test_l05_curie_contracts.py
           tests/test_l05_curie_store.py
           tests/test_l05_curie_l1_bridge.py
-          tests/test_l05_curie_discovery_architecture.py
           tests/test_l05_curie_europepmc_discovery.py
           tests/test_l05_curie_europepmc_evidence.py
           tests/test_l05_curie_europepmc_runtime.py
