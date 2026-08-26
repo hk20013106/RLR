@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -31,6 +32,13 @@ RESULT_SCHEMA_VERSION = "L05EuropePmcAcquisitionResult/v1"
 AUDIT_SCHEMA_VERSION = "L05EuropePmcAcquisitionManifest/v1"
 PAPERQA2_RESULT_SCHEMA_VERSION = "L05PaperQA2EuropePmcAcquisitionResult/v1"
 PAPERQA2_AUDIT_SCHEMA_VERSION = "L05PaperQA2EuropePmcAcquisitionManifest/v1"
+_PAPERQA2_MAX_INTENT_CHARS = 320
+_PAPERQA2_MAX_INTENT_TOKENS = 32
+_PAPERQA2_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "be", "best", "by", "can", "for", "from",
+    "how", "in", "is", "it", "of", "on", "or", "that", "the", "these",
+    "this", "to", "was", "what", "which", "with",
+})
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -293,6 +301,58 @@ def _paperqa2_semantic_target(seed: dict) -> str:
     return f"Scientific question: {question}\nHypothesis seed: {hypothesis}"
 
 
+def _paperqa2_retrieval_query(selected: dict, seed: dict, query_plan: dict) -> str:
+    """Build a bounded, paper-local query without changing evidence authority.
+
+    The selected title anchors retrieval to one paper. Existing QueryPlan text
+    and the canonical ResearchSeed provide the scientific focus, but the focus
+    is token-bounded so a long seed is not forwarded verbatim to PaperQA2.
+    This helper only returns a retrieval string; source verification and
+    semantic admission remain downstream authorities.
+    """
+    if not isinstance(selected, dict):
+        raise CurieContractError("PaperQA2 retrieval requires a selected paper object")
+    title = str(selected.get("title") or "").strip()
+    if not title:
+        raise CurieContractError("PaperQA2 retrieval requires a non-empty paper title anchor")
+    seed = seed if isinstance(seed, dict) else {}
+    query_plan = query_plan if isinstance(query_plan, dict) else {}
+    fragments = [
+        str(seed.get("scientific_question") or ""),
+        str(seed.get("hypothesis_seed") or ""),
+    ]
+    for item in query_plan.get("queries") or []:
+        if isinstance(item, dict):
+            fragments.append(str(item.get("query") or ""))
+    terms: list[str] = []
+    seen_terms: set[str] = set()
+    total_chars = 0
+    for raw in re.findall(
+        r"[^\W_]+(?:[-'][^\W_]+)*",
+        " ".join(fragments),
+        flags=re.UNICODE,
+    ):
+        token = raw.strip()
+        if not token or token.casefold() in _PAPERQA2_STOPWORDS or token.isdigit():
+            continue
+        token = token[:80]
+        folded = token.casefold()
+        if folded in seen_terms:
+            continue
+        if terms and total_chars + len(token) + 1 > _PAPERQA2_MAX_INTENT_CHARS:
+            break
+        terms.append(token)
+        seen_terms.add(folded)
+        total_chars += len(token) + (1 if len(terms) > 1 else 0)
+        if len(terms) >= _PAPERQA2_MAX_INTENT_TOKENS:
+            break
+    if not terms:
+        raise CurieContractError(
+            "PaperQA2 retrieval requires targeted scientific retrieval terms"
+        )
+    return f"{title} | retrieval focus: {' '.join(terms)}"
+
+
 def _admit_paperqa2_semantic_evidence(
     located: list[dict],
     *,
@@ -506,9 +566,12 @@ def run_paperqa2_europepmc_acquisition(
             source = retriever.retrieve(selected, seed=seed)
             source_snapshots.append(source["snapshot"])
             paper = {**selected, "pdf_path": str(pdf_path)}
+            paperqa_question = _paperqa2_retrieval_query(
+                selected, seed, prepared["query_plan"]
+            )
             result = paperqa_runtime.retrieve_and_verify(
                 paper=paper,
-                question=str(seed["scientific_question"]),
+                question=paperqa_question,
                 source_candidates=source["candidates"],
                 verify=lambda candidates, snapshot=source["snapshot"]: verifier.verify(
                     snapshot, candidates
@@ -535,6 +598,7 @@ def run_paperqa2_europepmc_acquisition(
             paperqa_audit.append({
                 "paper_id": paper_id,
                 "pdf_sha256": pdf_sha256,
+                "retrieval_query": paperqa_question,
                 "snapshot": source["snapshot"],
                 "chunk_count": len(result["chunks"]),
                 "unverified_evidence_ids": [item["evidence_id"] for item in result["unverified"]],
