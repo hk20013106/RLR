@@ -1,6 +1,7 @@
 import pytest
 
 import research_loop.l05_curie as curie
+from research_loop import research_seed
 from research_loop.l05_curie.multisource import (
     build_multisource_query_plan,
     run_multisource_discovery,
@@ -50,7 +51,7 @@ def _plan():
     }
     return build_multisource_query_plan(
         seed,
-        seed_sha256="a" * 64,
+        seed_sha256=research_seed.seed_sha256(seed),
         explicit_queries=["first query", "second query"],
         providers=["pubmed"],
     )
@@ -125,4 +126,32 @@ def test_selector_rejects_non_string_query_provenance():
                 "reason": "fixture",
             },
             eligibility=lambda _record: (False, "NO_SOURCE"),
+        )
+
+
+def test_selector_rejects_query_provenance_outside_authorized_plan():
+    record = {
+        "paper_id": "P1",
+        "title": "Paper",
+        "identifiers": {"pmid": "123"},
+        "metadata": {},
+        "provenance": {
+            "provider": "pubmed",
+            "originating_query_ids": ["FORGED"],
+        },
+    }
+    with pytest.raises(curie.CurieContractError, match="query|provenance"):
+        select_candidates(
+            [record],
+            seed={"scientific_question": "q", "hypothesis_seed": "h"},
+            scorer=lambda _record, _seed: {
+                "relevance": 0.5,
+                "directness": 0.5,
+                "methodological_value": 0.5,
+                "contradiction_value": 0.5,
+                "evidence_diversity": 0.5,
+                "reason": "fixture",
+            },
+            eligibility=lambda _record: (False, "NO_SOURCE"),
+            query_ids={"Q001"},
         )

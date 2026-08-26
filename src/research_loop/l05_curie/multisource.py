@@ -451,6 +451,12 @@ def build_multisource_query_plan(
 ) -> dict:
     if not isinstance(seed, dict):
         raise CurieContractError("ResearchSeed must be an object")
+    supplied_seed_sha256 = str(seed_sha256 or "").strip().lower()
+    canonical_seed_sha256 = _sha(seed)
+    if supplied_seed_sha256 != canonical_seed_sha256:
+        raise CurieContractError(
+            "seed_sha256 does not match the canonical ResearchSeed"
+        )
     candidate_id = _require_text(seed.get("candidate_id"), "ResearchSeed candidate_id")
     round_id = _require_text(seed.get("round_id"), "ResearchSeed round_id")
     provider_list = list(providers or _PROVIDERS)
@@ -484,7 +490,7 @@ def build_multisource_query_plan(
     identity = {
         "candidate_id": candidate_id,
         "round_id": round_id,
-        "seed_sha256": str(seed_sha256).lower(),
+        "seed_sha256": supplied_seed_sha256,
         "round_index": round_index,
         "queries": query_items,
     }
@@ -492,7 +498,7 @@ def build_multisource_query_plan(
         "schema_version": QUERY_PLAN_SCHEMA_VERSION,
         "candidate_id": candidate_id,
         "round_id": round_id,
-        "seed_sha256": str(seed_sha256).lower(),
+        "seed_sha256": supplied_seed_sha256,
         "plan_id": "QP_MULTI_" + _sha(identity)[:16],
         "round_index": round_index,
         "queries": query_items,

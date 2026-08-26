@@ -236,6 +236,15 @@ def test_research_seed_binding_v2_binds_and_revalidates_frozen_pack(tmp_path):
         )
 
 
+def test_research_seed_binding_rejects_non_object_json(tmp_path):
+    seed = _seed()
+    path = research_seed._evidence_binding_path(tmp_path, seed, "RUN_BAD")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("[]", encoding="utf-8")
+    with pytest.raises(research_seed.ResearchSeedError, match="object"):
+        research_seed.load_l1_evidence_binding(tmp_path, seed, "RUN_BAD")
+
+
 def test_native_l1_rejects_legacy_only_evidence_binding(
     tmp_path, monkeypatch, capsys
 ):

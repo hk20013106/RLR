@@ -96,7 +96,7 @@ def validate_selector_decision(decision: dict) -> dict:
     return json.loads(json.dumps(decision))
 
 
-def _query_ids(record: dict) -> list[str]:
+def _query_ids(record: dict, authorized_query_ids: set[str] | None = None) -> list[str]:
     provenance = record.get("provenance")
     if not isinstance(provenance, dict):
         raise CurieContractError("selector record has no discovery provenance")
@@ -116,6 +116,10 @@ def _query_ids(record: dict) -> list[str]:
             )
         if query_id not in query_ids:
             query_ids.append(query_id)
+        if authorized_query_ids is not None and query_id not in authorized_query_ids:
+            raise CurieContractError(
+                f"selector query provenance {query_id!r} is not authorized by the QueryPlan"
+            )
     return query_ids
 
 
@@ -140,11 +144,18 @@ def select_candidates(
     project_dir: str | Path | None = None,
     candidate_id: str | None = None,
     run_id: str | None = None,
+    query_ids: set[str] | None = None,
 ) -> dict:
     if not isinstance(records, list):
         raise CurieContractError("selector records must be a list")
     if not isinstance(max_papers, int) or isinstance(max_papers, bool) or max_papers < 1:
         raise CurieContractError("selector max_papers must be a positive integer")
+    if query_ids is not None and (
+        not isinstance(query_ids, set)
+        or not query_ids
+        or not all(isinstance(item, str) and item.strip() for item in query_ids)
+    ):
+        raise CurieContractError("selector query_ids must be a non-empty set of strings")
 
     decisions: list[dict] = []
     eligible: list[tuple[int, dict]] = []
@@ -169,7 +180,7 @@ def select_candidates(
                 methodological_value=0.0,
                 contradiction_value=0.0,
                 evidence_diversity=0.0,
-                originating_query_ids=_query_ids(record),
+                originating_query_ids=_query_ids(record, query_ids),
                 reason=f"Deterministic hard eligibility exclusion: {_text(reason_code, 'eligibility reason_code')}",
                 reason_code=str(reason_code),
             )
@@ -181,7 +192,7 @@ def select_candidates(
         decision = build_selector_decision(
             paper_id=paper_id,
             decision="RESERVE",
-            originating_query_ids=_query_ids(record),
+            originating_query_ids=_query_ids(record, query_ids),
             relevance=raw_score.get("relevance"),
             directness=raw_score.get("directness"),
             methodological_value=raw_score.get("methodological_value"),

@@ -176,6 +176,17 @@ def test_multisource_plan_and_orchestrator_execute_declared_providers(tmp_path):
         assert len(batch["receipt"]["response_sha256"]) == 64
 
 
+def test_multisource_plan_rejects_a_seed_hash_not_derived_from_seed():
+    seed = _seed()
+    with pytest.raises(curie.CurieContractError, match="seed_sha256"):
+        build_multisource_query_plan(
+            seed,
+            seed_sha256="f" * 64,
+            explicit_queries=["bat cardiac physiology"],
+            providers=["pubmed"],
+        )
+
+
 def test_multisource_is_the_only_canonical_discovery_orchestration_layer():
     assert callable(europepmc.canonicalize_europepmc_record)
     assert callable(europepmc.EuropePmcTransport)

@@ -250,6 +250,7 @@ def _prepare_europepmc_acquisition(
         project_dir=project,
         candidate_id=candidate_id,
         run_id=normalized_run_id,
+        query_ids={str(item["query_id"]) for item in query_plan["queries"]},
     )
     selected = _selected_europepmc_papers(discovery, generic_selection)
     return {

@@ -217,6 +217,8 @@ def load_l1_evidence_binding(
         raise ResearchSeedError(
             f"L1 research-seed evidence binding is missing or invalid: {exc}"
         ) from exc
+    if not isinstance(payload, dict):
+        raise ResearchSeedError("L1 research-seed evidence binding must be an object")
     expected_seed = manifest_entry(seed)
     if payload.get("schema_version") != EVIDENCE_BINDING_SCHEMA_VERSION:
         raise ResearchSeedError("L1 evidence binding schema is invalid")

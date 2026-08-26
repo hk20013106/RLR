@@ -76,6 +76,8 @@ def test_multisource_owns_query_lineage_without_installer():
     proc = _fresh(
         _block_installers("research_loop.l05_curie.provenance_hardening")
         + """
+import hashlib
+import json
 from research_loop.l05_curie.multisource import (
     build_multisource_query_plan,
     run_multisource_discovery,
@@ -95,7 +97,7 @@ seed = {
 }
 plan = build_multisource_query_plan(
     seed,
-    seed_sha256="a" * 64,
+    seed_sha256=hashlib.sha256(json.dumps(seed, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
     explicit_queries=["first query"],
     providers=["pubmed"],
 )
@@ -143,6 +145,8 @@ def test_multisource_binds_each_batch_to_the_current_query_and_provider():
     proc = _fresh(
         _block_installers("research_loop.l05_curie.provenance_hardening")
         + """
+import hashlib
+import json
 from research_loop.l05_curie import CurieContractError
 from research_loop.l05_curie import DISCOVERY_BATCH_SCHEMA_VERSION
 from research_loop.l05_curie import DISCOVERY_TRANSPORT_SCHEMA_VERSION
@@ -159,7 +163,7 @@ seed = {
 }
 plan = build_multisource_query_plan(
     seed,
-    seed_sha256="a" * 64,
+    seed_sha256=hashlib.sha256(json.dumps(seed, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
     explicit_queries=["first query", "second query"],
     providers=["pubmed"],
 )
@@ -210,6 +214,8 @@ def test_multisource_rejects_a_batch_from_another_query():
     proc = _fresh(
         _block_installers("research_loop.l05_curie.provenance_hardening")
         + """
+import hashlib
+import json
 from research_loop.l05_curie import CurieContractError
 from research_loop.l05_curie import DISCOVERY_BATCH_SCHEMA_VERSION
 from research_loop.l05_curie import DISCOVERY_TRANSPORT_SCHEMA_VERSION
@@ -226,7 +232,7 @@ seed = {
 }
 plan = build_multisource_query_plan(
     seed,
-    seed_sha256="a" * 64,
+    seed_sha256=hashlib.sha256(json.dumps(seed, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
     explicit_queries=["first query", "second query"],
     providers=["pubmed"],
 )
