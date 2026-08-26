@@ -72,6 +72,39 @@ assert store.build_evidence_pack.__module__ == "research_loop.l05_curie.store"
     assert proc.returncode == 0, proc.stderr
 
 
+def test_store_rejects_invalid_semantic_admission_without_installer():
+    proc = _fresh(
+        _block_installers("research_loop.l05_curie.semantic_pack")
+        + """
+from research_loop.l05_curie import CurieContractError, judge_coverage
+from research_loop.l05_curie import store
+
+coverage = judge_coverage(
+    {"covered": ["mechanism"], "gaps": []}, round_index=1, max_rounds=3
+)
+try:
+    store.build_evidence_pack(
+        candidate_id="C001",
+        round_id="1",
+        seed_sha256="a" * 64,
+        version=1,
+        query_plans=[],
+        discovery_receipts=[],
+        selected_papers=[],
+        evidence=[],
+        coverage=coverage,
+        gaps=[],
+        semantic_verifications=[],
+    )
+except CurieContractError as exc:
+    assert "semantic_verifications" in str(exc)
+else:
+    raise AssertionError("store accepted invalid semantic admission")
+"""
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
 def test_multisource_owns_query_lineage_without_installer():
     proc = _fresh(
         _block_installers("research_loop.l05_curie.provenance_hardening")

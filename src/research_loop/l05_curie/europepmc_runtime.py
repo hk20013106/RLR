@@ -18,6 +18,7 @@ from .contracts import CurieContractError, judge_coverage, validate_query_plan
 from .europepmc import EuropePmcEvidenceRetriever, EuropePmcEvidenceVerifier, EuropePmcTransport
 from .multisource import (
     build_multisource_query_plan,
+    # Keep legacy module-level re-exports; production calls the strict sibling below.
     run_multisource_discovery,
     run_multisource_discovery_strict,
 )
@@ -28,6 +29,7 @@ from .paperqa2_runtime import (
     validate_pinned_paperqa2_runtime,
 )
 from .semantic_verifier import SemanticEvidenceVerifier, admit_reasoning_evidence
+# Keep the legacy selector re-export for callers that imported it here.
 from .selector import select_candidates, select_candidates_strict
 from .store import build_evidence_pack, freeze_evidence_pack
 
