@@ -2,11 +2,17 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from research_loop import l0_contract, research_seed
-from research_loop.l05_curie import load_frozen_evidence_pack
+from research_loop.l05_curie import CurieContractError, load_frozen_evidence_pack
 from research_loop.l05_curie import europepmc_runtime
 from research_loop.l05_curie.europepmc_runtime import run_europepmc_acquisition
-from research_loop.l05_curie.paperqa2_runtime import PaperQA2CurieRuntime
+from research_loop.l05_curie.paperqa2_runtime import (
+    MIN_SOURCE_TOKEN_COVERAGE,
+    PaperQA2CurieRuntime,
+    align_paperqa2_chunks,
+)
 from research_loop import cli
 
 
@@ -74,6 +80,33 @@ def _search_payload(*, open_access=True):
     return json.dumps(
         {"hitCount": 1, "resultList": {"result": [result]}}, sort_keys=True
     ).encode("utf-8")
+
+
+def _supported_semantic_assessment(*, extract, claim):
+    assert claim != extract["text"]
+    assert "Scientific question:" in claim
+    assert "Hypothesis seed:" in claim
+    return {
+        "entailment": "SUPPORTED",
+        "scope_match": True,
+        "context_preserved": True,
+        "qualification_preserved": True,
+        "reason": "The located paragraph directly addresses the ResearchSeed semantic target.",
+    }
+
+
+def _located(evidence_id: str, text: str, locator: str) -> dict:
+    return {
+        "schema_version": "L05EvidenceExtract/v1",
+        "evidence_id": evidence_id,
+        "paper_id": "P1",
+        "section": "Results",
+        "text": text,
+        "locator": locator,
+        "role": "CONTEXT",
+        "verification_status": "LOCATED",
+        "retrieval": {"engine": "fixture", "source_sha256": "a" * 64},
+    }
 
 
 def test_runtime_freezes_end_to_end_europepmc_evidence_pack(tmp_path):
@@ -151,6 +184,104 @@ def test_runtime_does_not_freeze_when_no_oa_full_text_is_available(tmp_path):
     assert not list((project / "09_Literature_Database" / "evidence_packs" / "l05").rglob("*.json"))
 
 
+def test_paperqa2_production_runtime_requires_explicit_semantic_assessor(tmp_path):
+    project, _seed = _project(tmp_path)
+    runtime = PaperQA2CurieRuntime(
+        backend=lambda **_kwargs: [],
+        backend_id="paperqa2-fork-v2026.08.12/sparse-docs-v1",
+    )
+
+    with pytest.raises(CurieContractError, match="semantic assessor|self-claims"):
+        europepmc_runtime.run_paperqa2_europepmc_acquisition(
+            project,
+            "C001",
+            paperqa_runtime=runtime,
+            pdf_paths={},
+        )
+
+
+def test_confusable_above_threshold_extract_requires_real_semantic_authorization():
+    source_candidates = [
+        {
+            "paper_id": "P1",
+            "text": "WGCNA pseudocells were constructed before module detection and GO enrichment.",
+            "section": "Methods",
+            "locator": "sec:7/p:7",
+        },
+        {
+            "paper_id": "P1",
+            "text": (
+                "WGCNA modules were visualized in a generic network figure without "
+                "describing the pseudocell workflow."
+            ),
+            "section": "Results",
+            "locator": "sec:7/p:9",
+        },
+    ]
+    aligned = align_paperqa2_chunks(
+        chunks=[{
+            "text": (
+                "WGCNA pseudocells were constructed before module detection and GO enrichment. "
+                "WGCNA modules were visualized in a generic network figure."
+            ),
+            "locator": "PDF pages 7-9",
+            "score": 0.9,
+        }],
+        source_candidates=source_candidates,
+    )
+    assert [item["locator"] for item in aligned] == ["sec:7/p:7", "sec:7/p:9"]
+    assert all(
+        item["source_alignment"]["source_token_coverage"] >= MIN_SOURCE_TOKEN_COVERAGE
+        for item in aligned
+    )
+
+    target = _located("E_target", aligned[0]["text"], aligned[0]["locator"])
+    confusable = _located("E_confusable", aligned[1]["text"], aligned[1]["locator"])
+    semantic_target = (
+        "Scientific question: How was the scWGCNA workflow implemented?\n"
+        "Hypothesis seed: The workflow constructs pseudocells before WGCNA module detection."
+    )
+    seen_claims = []
+
+    def assessor(*, extract, claim):
+        seen_claims.append((extract["evidence_id"], claim))
+        if extract["evidence_id"] == "E_target":
+            return {
+                "entailment": "SUPPORTED",
+                "scope_match": True,
+                "context_preserved": True,
+                "qualification_preserved": True,
+                "reason": "The methods paragraph directly describes the requested workflow.",
+            }
+        return {
+            "entailment": "UNRELATED",
+            "scope_match": True,
+            "context_preserved": True,
+            "qualification_preserved": True,
+            "reason": "Shared WGCNA vocabulary does not make the figure paragraph evidence for the workflow.",
+        }
+
+    admitted, admitted_semantics, all_semantics = (
+        europepmc_runtime._admit_paperqa2_semantic_evidence(
+            [target, confusable],
+            semantic_target=semantic_target,
+            assessor=assessor,
+            assessor_id="fixture-semantic-assessor/v1",
+        )
+    )
+
+    assert [item["evidence_id"] for item in admitted] == ["E_target"]
+    assert [item["evidence_id"] for item in admitted_semantics] == ["E_target"]
+    assert {item["evidence_id"] for item in all_semantics} == {"E_target", "E_confusable"}
+    assert all(claim == semantic_target for _evidence_id, claim in seen_claims)
+    assert all(
+        claim != extract["text"]
+        for extract, (_evidence_id, claim) in zip(
+            [target, confusable], seen_claims, strict=True
+        )
+    )
+
+
 def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(
     tmp_path, monkeypatch
 ):
@@ -218,6 +349,8 @@ def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(
         "C001",
         paperqa_runtime=runtime,
         pdf_paths={"P_3cab82183e94295123ee": str(pdf)},
+        semantic_assessor=_supported_semantic_assessment,
+        semantic_assessor_id="fixture-semantic-assessor/v1",
         explicit_queries=["EXT_ID:22253597 AND SRC:MED"],
         max_papers=1,
         page_size=5,
@@ -240,6 +373,12 @@ def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(
         item["retrieval"]["upstream_engine"] == "paperqa2"
         for item in frozen["evidence"]
     )
+    audit = json.loads(
+        (project / result["acquisition_manifest_path"]).read_text(encoding="utf-8")
+    )
+    assert audit["paperqa2"][0]["reasoning_authorized_evidence_ids"] == [
+        item["evidence_id"] for item in frozen["evidence"]
+    ]
     assert observed == {"planner": 1, "discovery": 1, "selector": 1}
 
 
@@ -287,11 +426,19 @@ def test_cli_registers_pinned_paperqa2_production_command(tmp_path, monkeypatch,
         "--paperqa-repo", "paperqa-repo",
         "--pqa-home", "pqa-home",
         "--pdf-map", str(pdf_map),
+        "--semantic-assessor-command", "semantic-agent {prompt_file} {output_file}",
         "--query", "EXT_ID:22253597 AND SRC:MED",
         "--run-id", "PQA_CLI001",
     ])
 
     seen = {}
+    semantic_assessor = lambda **_kwargs: {
+        "entailment": "SUPPORTED",
+        "scope_match": True,
+        "context_preserved": True,
+        "qualification_preserved": True,
+        "reason": "fixture",
+    }
 
     class FakeBackend:
         backend_id = "paperqa2-fork-v2026.08.12/sparse-docs-v1"
@@ -308,6 +455,11 @@ def test_cli_registers_pinned_paperqa2_production_command(tmp_path, monkeypatch,
 
     import research_loop.l05_curie_cli as extension
     monkeypatch.setattr(extension, "PaperQA2SubprocessBackend", FakeBackend)
+    monkeypatch.setattr(
+        extension,
+        "_semantic_assessor_from_command",
+        lambda *_args, **_kwargs: (semantic_assessor, "fixture-semantic-command/v1"),
+    )
     monkeypatch.setattr(extension, "run_paperqa2_europepmc_acquisition", fake_run)
     assert args.func(args) == 0
     rendered = json.loads(capsys.readouterr().out)
@@ -315,4 +467,6 @@ def test_cli_registers_pinned_paperqa2_production_command(tmp_path, monkeypatch,
     assert seen["cand_id"] == "C001"
     assert seen["backend"]["bridge_script"] == "bridge.py"
     assert seen["pdf_paths"] == {"P1": "paper.pdf"}
+    assert seen["semantic_assessor"] is semantic_assessor
+    assert seen["semantic_assessor_id"] == "fixture-semantic-command/v1"
     assert seen["run_id"] == "PQA_CLI001"
