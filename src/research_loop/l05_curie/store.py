@@ -81,7 +81,7 @@ def _validate_selected_papers(selected_papers: object) -> list[dict]:
 
 def _validate_semantic_pack(pack: dict) -> dict:
     """Validate optional semantic admission at the EvidencePack owner boundary."""
-    if "semantic_verifications" not in pack:
+    if not isinstance(pack, dict) or "semantic_verifications" not in pack:
         return pack
     values = pack.get("semantic_verifications")
     if not isinstance(values, list) or not values:

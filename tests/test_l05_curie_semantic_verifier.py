@@ -1,3 +1,5 @@
+import hashlib
+
 import pytest
 
 import research_loop.l05_curie as curie
@@ -270,6 +272,27 @@ def test_load_runs_semantic_admission_before_complete_structure_validation(
     )
 
     assert events[0] == "semantic"
+
+
+def test_load_reports_non_object_pack_as_contract_error(tmp_path):
+    manifest = curie.freeze_evidence_pack(tmp_path, curie.build_evidence_pack(
+        **_pack_kwargs([_semantic()])
+    ))
+    artifact = tmp_path / manifest["artifact_path"]
+    artifact.write_bytes(b"null\n")
+    forged_manifest = {
+        **manifest,
+        "artifact_sha256": hashlib.sha256(b"null\n").hexdigest(),
+    }
+
+    with pytest.raises(curie.CurieContractError, match="EvidencePack"):
+        curie.load_frozen_evidence_pack(
+            tmp_path,
+            forged_manifest,
+            candidate_id="C001",
+            round_id="1",
+            seed_sha256="b" * 64,
+        )
 
 
 def test_evidence_pack_rejects_semantic_admission_missing_or_not_authorized():

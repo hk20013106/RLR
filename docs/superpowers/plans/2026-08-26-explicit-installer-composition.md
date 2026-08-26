@@ -99,10 +99,10 @@ The `install()` names are not package `__all__` exports, but external code may i
 - Test existing: `tests/test_l05_curie_multisource_discovery.py`
 - Test existing: `tests/test_l05_curie_provenance_hardening.py`
 
-- [ ] Add a fresh-interpreter test proving `store.build_evidence_pack` enforces semantic admission without calling `semantic_pack.install`.
-- [ ] Add a fresh-interpreter test proving `multisource.run_multisource_discovery` returns authoritative `originating_query_ids` without calling `provenance_hardening.install`.
-- [ ] Add a direct-selector test proving missing provenance fails closed without a patched `_query_ids`.
-- [ ] Run only the new tests and confirm RED for the expected missing direct ownership.
+- [x] Add a fresh-interpreter test proving `store.build_evidence_pack` enforces semantic admission without calling `semantic_pack.install`.
+- [x] Add a fresh-interpreter test proving `multisource.run_multisource_discovery` returns authoritative `originating_query_ids` without calling `provenance_hardening.install`.
+- [x] Add a direct-selector test proving missing provenance fails closed without a patched `_query_ids`.
+- [x] Run only the new tests and confirm RED for the expected missing direct ownership.
 
 ### Task 2: Staticize semantic admission
 
@@ -112,11 +112,11 @@ The `install()` names are not package `__all__` exports, but external code may i
 - Modify: `src/research_loop/l05_curie/__init__.py`
 - Test: `tests/test_l05_curie_explicit_composition.py`
 
-- [ ] Move semantic-pack validation into store-owned helpers and add the optional `semantic_verifications` keyword to `build_evidence_pack`.
-- [ ] Validate semantic records at build, freeze, and load boundaries before content/hash validation completes.
-- [ ] Remove the package initializer call to `semantic_pack.install` while preserving the module-level compatibility facade.
-- [ ] Run the new tests, all Curie store/semantic tests, then the relevant L0.5 suite.
-- [ ] Commit only this family.
+- [x] Move semantic-pack validation into store-owned helpers and add the optional `semantic_verifications` keyword to `build_evidence_pack`.
+- [x] Validate semantic records at build, freeze, and load boundaries before content/hash validation completes.
+- [x] Remove the package initializer call to `semantic_pack.install` while preserving the module-level compatibility facade.
+- [x] Run the new tests, all Curie store/semantic tests, then the relevant L0.5 suite.
+- [x] Commit only this family.
 
 ### Task 3: Staticize discovery provenance
 
@@ -128,11 +128,11 @@ The `install()` names are not package `__all__` exports, but external code may i
 - Test: `tests/test_l05_curie_explicit_composition.py`
 - Test: `tests/test_l05_curie_provenance_hardening.py`
 
-- [ ] Move canonical-record matching and query-lineage attachment into `multisource.py` and apply it before `run_multisource_discovery` returns.
-- [ ] Make selector provenance validation a native selector helper; remove the `UNKNOWN_QUERY` fallback for production selection.
-- [ ] Remove the package initializer call to `provenance_hardening.install` while preserving its callable no-op compatibility facade.
-- [ ] Run the new tests, all Curie discovery/selector/provenance tests, then the relevant L0.5 suite.
-- [ ] Commit only this family.
+- [x] Move canonical-record matching and query-lineage attachment into `multisource.py` and apply it before `run_multisource_discovery` returns.
+- [x] Make selector provenance validation a native selector helper; remove the `UNKNOWN_QUERY` fallback for production selection.
+- [x] Remove the package initializer call to `provenance_hardening.install` while preserving its callable no-op compatibility facade.
+- [x] Run the new tests, all Curie discovery/selector/provenance tests, then the relevant L0.5 suite.
+- [x] Commit only this family.
 
 ### Task 4: Review, full verification, and delivery gate
 
@@ -140,9 +140,9 @@ The `install()` names are not package `__all__` exports, but external code may i
 - Modify: `docs/superpowers/plans/2026-08-26-explicit-installer-composition.md` as checklist evidence only.
 
 - [ ] Run focused, relevant, and full `pytest` with fresh output and record exact counts.
-- [ ] Run compileall, `git diff --check`, and the CLI help smoke checks.
+- [x] Run compileall, `git diff --check`, and the CLI help smoke checks.
 - [ ] Perform a correctness review and a fresh thermo-nuclear review against the Phase C diff.
-- [ ] Fix all Critical/Important findings and rerun affected verification.
+- [x] Fix all Critical/Important findings and rerun affected verification.
 - [ ] Commit, push `codex/explicit-installer-composition`, create or update a Draft PR, and wait for exact-head CI.
 - [ ] Stop at the Phase C gate; do not merge and do not automatically refactor the remaining P2 or `UNCERTAIN` installers.
 
