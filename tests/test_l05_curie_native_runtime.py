@@ -127,6 +127,13 @@ def _transaction_root(tmp_path):
     )
 
 
+def _committed_transactions(tmp_path):
+    return [
+        path for path in _transaction_root(tmp_path).glob("*/commit.json")
+        if not path.parent.name.startswith(".")
+    ]
+
+
 def test_bind_initial_pack_establishes_native_active_v1(tmp_path):
     seed = _seed()
     first = _freeze(tmp_path, version=1, run_id="CURIE001")
@@ -204,7 +211,13 @@ def test_v3_is_last_authorized_native_pack(tmp_path):
 
 @pytest.mark.parametrize(
     "failure_step",
-    ["before_stage", "after_binding", "after_consumption", "during_activation"],
+    [
+        "before_stage",
+        "after_binding",
+        "after_consumption",
+        "during_activation",
+        "before_rename",
+    ],
 )
 def test_interrupted_retry_has_no_committed_intermediate_state(tmp_path, failure_step):
     seed, first, request, authorization = _initialized_retry_fixture(tmp_path)
@@ -222,7 +235,7 @@ def test_interrupted_retry_has_no_committed_intermediate_state(tmp_path, failure
         )
 
     assert research_seed.active_l1_native_evidence_run_id(tmp_path, seed) == "CURIE001"
-    assert not list(_transaction_root(tmp_path).glob("*/commit.json"))
+    assert not _committed_transactions(tmp_path)
     with pytest.raises(curie.CurieContractError, match="missing|invalid"):
         curie.load_gap_retry_consumption(
             tmp_path, seed, authorization, "CURIE002"
@@ -252,7 +265,7 @@ def test_interrupted_retry_replays_to_one_committed_transaction(tmp_path):
         _retry_acquire(tmp_path),
     )
     assert research_seed.active_l1_native_evidence_run_id(tmp_path, seed) == "CURIE002"
-    assert len(list(_transaction_root(tmp_path).glob("*/commit.json"))) == 1
+    assert len(_committed_transactions(tmp_path)) == 1
     assert result["activation"]["evidence_pack_version"] == 2
 
 
@@ -266,7 +279,7 @@ def test_committed_retry_replay_is_idempotent_and_rejects_different_run(tmp_path
         tmp_path, seed, first, request["request_id"], "CURIE002", acquire
     )
     assert replay == first_result
-    assert len(list(_transaction_root(tmp_path).glob("*/commit.json"))) == 1
+    assert len(_committed_transactions(tmp_path)) == 1
     with pytest.raises(curie.CurieContractError, match="run|provenance|replay"):
         run_authorized_retry(
             tmp_path,

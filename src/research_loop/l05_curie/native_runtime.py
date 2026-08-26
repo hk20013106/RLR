@@ -126,6 +126,11 @@ def run_authorized_retry(
             raise CurieContractError(
                 "native Curie retry replay acquisition_run_id does not match committed transaction"
             )
+        current_run = research_seed.active_l1_native_evidence_run_id(project_dir, seed)
+        if str(current_run or "") != str(acquisition_run_id):
+            raise CurieContractError(
+                "native Curie retry replay is not the current active lineage"
+            )
         return {
             "authorization": committed["authorization"],
             "consumption": committed["consumption"],

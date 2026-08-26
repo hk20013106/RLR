@@ -72,6 +72,15 @@ def _retry_transaction_dir(project_dir: str | Path, seed: dict,
     return _retry_transactions_dir(project_dir, seed) / token
 
 
+def _retry_commit_paths(project_dir: str | Path, seed: dict) -> list[Path]:
+    """Enumerate committed receipts while excluding crash-left staging dirs."""
+    root = _retry_transactions_dir(project_dir, seed)
+    return sorted(
+        path for path in root.glob("*/commit.json")
+        if not path.parent.name.startswith(".")
+    )
+
+
 def _load_pack(project_dir: Path, seed: dict, pack_manifest: dict, research_seed_module):
     from research_loop import l05_curie
 
@@ -107,7 +116,7 @@ def _parent_manifest(project_dir: Path, seed: dict, parent_pack_sha256: str,
             return manifest
     transaction_root = _retry_transactions_dir(project_dir, seed)
     if transaction_root.is_dir():
-        for commit_path in sorted(transaction_root.glob("*/commit.json")):
+        for commit_path in _retry_commit_paths(project_dir, seed):
             try:
                 commit = json.loads(commit_path.read_text(encoding="utf-8"))
                 binding_relative = commit["artifacts"]["binding"]["path"]
@@ -448,7 +457,7 @@ def install(research_seed_module) -> None:
                 run_ids.append(run_id)
         transaction_root = _retry_transactions_dir(project, seed)
         if transaction_root.is_dir():
-            for commit_path in sorted(transaction_root.glob("*/commit.json")):
+            for commit_path in _retry_commit_paths(project, seed):
                 transaction = _load_retry_transaction(
                     project, seed, commit_path.parent
                 )
@@ -624,7 +633,7 @@ def install(research_seed_module) -> None:
         if not root.is_dir():
             return None
         found = None
-        for commit_path in sorted(root.glob("*/commit.json")):
+        for commit_path in _retry_commit_paths(project, seed):
             transaction = _load_retry_transaction(project, seed, commit_path.parent)
             if transaction["acquisition_run_id"] != str(acquisition_run_id):
                 continue
@@ -641,7 +650,7 @@ def install(research_seed_module) -> None:
         if not root.is_dir():
             return None
         found = None
-        for commit_path in sorted(root.glob("*/commit.json")):
+        for commit_path in _retry_commit_paths(project, seed):
             transaction = _load_retry_transaction(project, seed, commit_path.parent)
             if str(transaction["authorization"].get("request_id") or "") != str(request_id):
                 continue
@@ -688,7 +697,7 @@ def install(research_seed_module) -> None:
             activations.append(payload)
         transaction_root = _retry_transactions_dir(project, seed)
         if transaction_root.is_dir():
-            for commit_path in sorted(transaction_root.glob("*/commit.json")):
+            for commit_path in _retry_commit_paths(project, seed):
                 transaction = _load_retry_transaction(
                     project, seed, commit_path.parent
                 )
@@ -726,7 +735,7 @@ def install(research_seed_module) -> None:
 
         allowed_failures = {
             None, "before_stage", "after_binding", "after_consumption",
-            "during_activation",
+            "during_activation", "before_rename",
         }
         if failure_step not in allowed_failures:
             raise research_seed_module.ResearchSeedError(
@@ -842,6 +851,7 @@ def install(research_seed_module) -> None:
             },
         }
         _write_durable_json(staging_dir / "commit.json", commit)
+        inject("before_rename")
         try:
             os.replace(staging_dir, final_dir)
         except FileExistsError:
