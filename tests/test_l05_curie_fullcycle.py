@@ -112,6 +112,7 @@ def _acquire_round(project, seed, *, version, run_id, text, parent=None, gap_id=
             "pubmed": _StaticTransport("pubmed", [pubmed_record]),
             "crossref": _StaticTransport("crossref", [crossref_record]),
         },
+        seed_sha256=seed_hash,
     )
     assert len(discovery["records"]) == 1
     record = discovery["records"][0]
@@ -130,6 +131,7 @@ def _acquire_round(project, seed, *, version, run_id, text, parent=None, gap_id=
         },
         eligibility=lambda _record: (True, ""),
         max_papers=1,
+        query_ids={"Q001"},
     )
     selected_decision = next(
         item for item in selection["decisions"] if item["decision"] == "INCLUDE"

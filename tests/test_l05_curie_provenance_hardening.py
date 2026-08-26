@@ -59,7 +59,15 @@ def _plan():
 
 def test_multisource_records_preserve_all_originating_query_ids_after_dedup():
     result = run_multisource_discovery(
-        _plan(), {"pubmed": _Transport()}, page_size=5
+        _plan(),
+        {"pubmed": _Transport()},
+        seed_sha256=research_seed.seed_sha256({
+            "candidate_id": "C001",
+            "round_id": "1",
+            "scientific_question": "question",
+            "hypothesis_seed": "hypothesis",
+        }),
+        page_size=5,
     )
     assert len(result["records"]) == 1
     assert result["records"][0]["provenance"]["originating_query_ids"] == [
@@ -75,7 +83,11 @@ def test_multisource_rejects_records_without_source_identity():
             return batch
 
     with pytest.raises(curie.CurieContractError, match="raw_record_sha256"):
-        run_multisource_discovery(_plan(), {"pubmed": MissingSourceIdentity()})
+        run_multisource_discovery(
+            _plan(),
+            {"pubmed": MissingSourceIdentity()},
+            seed_sha256=_plan()["seed_sha256"],
+        )
 
 
 def test_selector_fails_closed_instead_of_inventing_unknown_query_provenance():
@@ -99,6 +111,7 @@ def test_selector_fails_closed_instead_of_inventing_unknown_query_provenance():
                 "reason": "fixture",
             },
             eligibility=lambda _record: (False, "NO_SOURCE"),
+            query_ids={"Q001"},
         )
 
 
@@ -126,6 +139,7 @@ def test_selector_rejects_non_string_query_provenance():
                 "reason": "fixture",
             },
             eligibility=lambda _record: (False, "NO_SOURCE"),
+            query_ids={"Q001"},
         )
 
 

@@ -134,7 +134,11 @@ class Transport:
         }
 
 
-result = run_multisource_discovery(plan, {"pubmed": Transport()})
+result = run_multisource_discovery(
+    plan,
+    {"pubmed": Transport()},
+    seed_sha256=hashlib.sha256(json.dumps(seed, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+)
 assert result["records"][0]["provenance"]["originating_query_ids"] == ["Q001"]
 """
     )
@@ -200,7 +204,11 @@ class Transport:
 
 
 try:
-    run_multisource_discovery(plan, {"pubmed": Transport()})
+    run_multisource_discovery(
+        plan,
+        {"pubmed": Transport()},
+        seed_sha256=hashlib.sha256(json.dumps(seed, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+    )
 except CurieContractError:
     pass
 else:
@@ -269,7 +277,11 @@ class Transport:
 
 
 try:
-    run_multisource_discovery(plan, {"pubmed": Transport()})
+    run_multisource_discovery(
+        plan,
+        {"pubmed": Transport()},
+        seed_sha256=hashlib.sha256(json.dumps(seed, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+    )
 except CurieContractError:
     pass
 else:
@@ -306,6 +318,7 @@ try:
             "reason": "fixture",
         },
         eligibility=lambda _record: (True, "OK"),
+        query_ids={"Q001"},
     )
 except l05_curie.CurieContractError:
     pass

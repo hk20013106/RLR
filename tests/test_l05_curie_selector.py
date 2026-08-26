@@ -84,6 +84,7 @@ def test_hard_eligibility_exclusion_overrides_cognitive_score():
             bool(record["identifiers"].get("pmcid") and record["metadata"].get("is_open_access")),
             "NO_RETRIEVABLE_SOURCE",
         ),
+        query_ids={"Q001"},
     )
     decisions = {item["paper_id"]: item for item in result["decisions"]}
     assert decisions["P1"]["decision"] == "EXCLUDE"
@@ -108,6 +109,7 @@ def test_contradictory_value_can_promote_evidence_instead_of_penalizing_it():
         scorer=scorer,
         max_papers=1,
         eligibility=lambda _record: (True, ""),
+        query_ids={"Q001"},
     )
     included = [item for item in result["decisions"] if item["decision"] == "INCLUDE"]
     assert included[0]["paper_id"] == "P2"
@@ -132,6 +134,7 @@ def test_selector_persists_all_include_exclude_reserve_decisions(tmp_path):
         project_dir=tmp_path,
         candidate_id="C001",
         run_id="RUN1",
+        query_ids={"Q001"},
     )
     assert {item["decision"] for item in result["decisions"]} == {"INCLUDE", "RESERVE", "EXCLUDE"}
     receipt = tmp_path / result["artifact_path"]

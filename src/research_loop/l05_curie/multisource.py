@@ -733,10 +733,15 @@ class SemanticScholarTransport(_BaseTransport):
         }
 
 
-def run_multisource_discovery(plan: dict, transports: dict[str, object], *,
-                              page_size: int = 25,
-                              allow_partial: bool = False) -> dict:
-    validate_query_plan(plan, seed_sha256=str(plan.get("seed_sha256") or ""))
+def run_multisource_discovery(
+    plan: dict,
+    transports: dict[str, object],
+    *,
+    seed_sha256: str,
+    page_size: int = 25,
+    allow_partial: bool = False,
+) -> dict:
+    validate_query_plan(plan, seed_sha256=seed_sha256)
     query_ids = {str(item["query_id"]) for item in plan["queries"]}
     batches = []
     records = []

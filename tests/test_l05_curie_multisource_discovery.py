@@ -166,7 +166,12 @@ def test_multisource_plan_and_orchestrator_execute_declared_providers(tmp_path):
         "crossref": CrossrefTransport(tmp_path, candidate_id="C001", run_id="RUN1", http_get=lambda _u, _t: fixtures["crossref"]),
         "semantic-scholar": SemanticScholarTransport(tmp_path, candidate_id="C001", run_id="RUN1", http_get=lambda _u, _t: fixtures["semantic"]),
     }
-    result = run_multisource_discovery(plan, transports, page_size=5)
+    result = run_multisource_discovery(
+        plan,
+        transports,
+        seed_sha256=seed_hash,
+        page_size=5,
+    )
     assert len(result["batches"]) == 4
     assert len(result["records"]) == 1
     assert result["records"][0]["identifiers"]["doi"] == "10.1000/abc"
@@ -174,6 +179,13 @@ def test_multisource_plan_and_orchestrator_execute_declared_providers(tmp_path):
     for batch in result["batches"]:
         assert len(batch["receipt"]["request_sha256"]) == 64
         assert len(batch["receipt"]["response_sha256"]) == 64
+    tampered_plan = {**plan, "seed_sha256": "f" * 64}
+    with pytest.raises(curie.CurieContractError, match="seed_sha256"):
+        run_multisource_discovery(
+            tampered_plan,
+            transports,
+            seed_sha256=seed_hash,
+        )
 
 
 def test_multisource_plan_rejects_a_seed_hash_not_derived_from_seed():
