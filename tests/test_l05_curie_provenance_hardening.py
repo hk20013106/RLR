@@ -99,3 +99,30 @@ def test_selector_fails_closed_instead_of_inventing_unknown_query_provenance():
             },
             eligibility=lambda _record: (False, "NO_SOURCE"),
         )
+
+
+def test_selector_rejects_non_string_query_provenance():
+    record = {
+        "paper_id": "P1",
+        "title": "Paper",
+        "identifiers": {"pmid": "123"},
+        "metadata": {},
+        "provenance": {
+            "provider": "pubmed",
+            "originating_query_ids": [7],
+        },
+    }
+    with pytest.raises(curie.CurieContractError, match="query|provenance"):
+        select_candidates(
+            [record],
+            seed={"scientific_question": "q", "hypothesis_seed": "h"},
+            scorer=lambda _record, _seed: {
+                "relevance": 0.5,
+                "directness": 0.5,
+                "methodological_value": 0.5,
+                "contradiction_value": 0.5,
+                "evidence_diversity": 0.5,
+                "reason": "fixture",
+            },
+            eligibility=lambda _record: (False, "NO_SOURCE"),
+        )

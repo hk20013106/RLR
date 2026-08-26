@@ -105,7 +105,11 @@ def _query_ids(record: dict) -> list[str]:
         raise CurieContractError("selector record has no originating query provenance")
     query_ids: list[str] = []
     for value in values:
-        query_id = str(value or "").strip()
+        if not isinstance(value, str):
+            raise CurieContractError(
+                "selector originating query provenance must contain only strings"
+            )
+        query_id = value.strip()
         if not query_id:
             raise CurieContractError(
                 "selector originating query provenance contains an empty query_id"

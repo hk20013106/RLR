@@ -153,7 +153,10 @@ def install(context_module) -> None:
                 # New native v2.1 runtime is gated earlier and cannot reach this
                 # branch without an explicit native binding.
                 binding = research_seed.load_l1_evidence_binding(
-                    project, seed, run_id
+                    project,
+                    seed,
+                    run_id,
+                    allow_legacy_source_identity=legacy_source_identity,
                 )
                 injection_mode = "l05_frozen_pack"
                 native_mode = False
