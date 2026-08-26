@@ -79,6 +79,59 @@ def _validate_selected_papers(selected_papers: object) -> list[dict]:
     return validated
 
 
+def _validate_semantic_pack(pack: dict) -> dict:
+    """Validate optional semantic admission at the EvidencePack owner boundary."""
+    if "semantic_verifications" not in pack:
+        return pack
+    values = pack.get("semantic_verifications")
+    if not isinstance(values, list) or not values:
+        raise CurieContractError(
+            "EvidencePack semantic_verifications must be a non-empty list when present"
+        )
+    from .semantic_verifier import (
+        evidence_extract_sha256,
+        reasoning_authorized,
+        validate_semantic_verification,
+    )
+
+    evidence = pack.get("evidence")
+    if not isinstance(evidence, list) or not evidence:
+        raise CurieContractError("semantic EvidencePack requires non-empty evidence")
+    evidence_by_id = {str(item.get("evidence_id") or ""): item for item in evidence}
+    if "" in evidence_by_id or len(evidence_by_id) != len(evidence):
+        raise CurieContractError(
+            "semantic EvidencePack evidence identities are invalid or duplicated"
+        )
+    semantic_by_id = {}
+    for value in values:
+        result = validate_semantic_verification(value)
+        evidence_id = result["evidence_id"]
+        if evidence_id in semantic_by_id:
+            raise CurieContractError(
+                f"duplicate semantic verification for evidence {evidence_id}"
+            )
+        semantic_by_id[evidence_id] = result
+    if set(semantic_by_id) != set(evidence_by_id):
+        raise CurieContractError(
+            "semantic verification evidence IDs must match EvidencePack evidence exactly"
+        )
+    for evidence_id, result in semantic_by_id.items():
+        extract = evidence_by_id[evidence_id]
+        if str(result["paper_id"]) != str(extract.get("paper_id") or ""):
+            raise CurieContractError(
+                f"semantic verification paper identity mismatch for evidence {evidence_id}"
+            )
+        if str(result["extract_sha256"]) != evidence_extract_sha256(extract):
+            raise CurieContractError(
+                f"semantic verification exact extract SHA mismatch for evidence {evidence_id}; evidence changed"
+            )
+        if not reasoning_authorized(result):
+            raise CurieContractError(
+                f"semantic verification for evidence {evidence_id} is not reasoning-authorized"
+            )
+    return pack
+
+
 def _validate_pack_structure(
     pack: dict,
     *,
@@ -193,7 +246,8 @@ def build_evidence_pack(*, candidate_id: str, round_id: str, seed_sha256: str,
                         evidence: list[dict], coverage: dict, gaps: list[dict],
                         parent_pack_sha256: str | None = None,
                         source_gap_request_id: str | None = None,
-                        source_run_id: str | None = None) -> dict:
+                        source_run_id: str | None = None,
+                        semantic_verifications: list[dict] | None = None) -> dict:
     """Build a deterministic, validated pack that is not yet authorized for L1."""
     candidate_id = _require_text(candidate_id, "candidate_id")
     round_id = _require_text(round_id, "round_id")
@@ -237,12 +291,16 @@ def build_evidence_pack(*, candidate_id: str, round_id: str, seed_sha256: str,
         "gaps": copy.deepcopy(gaps),
         "status": "READY_TO_FREEZE",
     }
+    if semantic_verifications is not None:
+        pack["semantic_verifications"] = copy.deepcopy(semantic_verifications)
+    _validate_semantic_pack(pack)
     pack["content_sha256"] = _content_sha256(pack)
     return _validate_pack_structure(pack, expected_status="READY_TO_FREEZE")
 
 
 def freeze_evidence_pack(project_dir: str | Path, pack: dict) -> dict:
     """Persist one immutable FROZEN pack and return its exact artifact manifest."""
+    _validate_semantic_pack(pack)
     ready = _validate_pack_structure(pack, expected_status="READY_TO_FREEZE")
     if ready["coverage"]["verdict"] != "PASS":
         raise CurieContractError("EvidencePack coverage verdict must be PASS before freeze")
@@ -340,6 +398,7 @@ def load_frozen_evidence_pack(project_dir: str | Path, manifest: dict, *,
         expected_status="FROZEN",
         allow_legacy_frozen_acquisition_metadata=True,
     )
+    _validate_semantic_pack(pack)
     for field, expected in (
         ("candidate_id", candidate_id),
         ("round_id", round_id),
