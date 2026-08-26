@@ -45,7 +45,7 @@ Before the rename there is no committed consumption and no active retry lineage.
 - Modify: `tests/test_l05_native_evidence_binding.py`
 - Modify: `tests/test_l05_curie_gap_loop.py` only if authorization replay assertions need a focused helper
 
-- [ ] **Step 1: Add a deterministic test hook and failure matrix tests before implementation**
+- [x] **Step 1: Add a deterministic test hook and failure matrix tests before implementation**
 
 Extend the existing native runtime fixtures with a helper that runs one valid v1-to-v2 retry and a failure injector that raises at named transaction steps. Add tests for:
 
@@ -99,7 +99,7 @@ def test_committed_retry_replay_is_idempotent_and_rejects_different_run(tmp_path
 
 The tests must also assert that a staged directory may remain after an injected crash but cannot be discovered by active-lineage or consumption readers, that v1 remains immutable, and that the activation receipt has one parent and one next version.
 
-- [ ] **Step 2: Run the new tests and confirm RED**
+- [x] **Step 2: Run the new tests and confirm RED**
 
 Run:
 
@@ -109,7 +109,7 @@ python -m pytest tests/test_l05_curie_native_runtime.py tests/test_l05_native_ev
 
 Expected: the new failure-injection arguments are rejected or the old three-write path leaves a committed consumption/activation artifact for at least one injected boundary. This RED result must be caused by the missing atomic protocol, not test collection or import failure.
 
-- [ ] **Step 3: Commit the RED checkpoint**
+- [x] **Step 3: Commit the RED checkpoint**
 
 ```powershell
 git add tests/test_l05_curie_native_runtime.py tests/test_l05_native_evidence_binding.py tests/test_l05_curie_gap_loop.py
@@ -124,7 +124,7 @@ git commit -m "test: specify atomic l05 retry activation"
 - Modify: `src/research_loop/l05_native_binding.py`
 - Modify: `src/research_loop/l05_curie/gap_loop.py` only where committed transaction consumption lookup must be recognized
 
-- [ ] **Step 1: Add canonical transaction paths and atomic directory commit helpers**
+- [x] **Step 1: Add canonical transaction paths and atomic directory commit helpers**
 
 In `l05_native_binding.py`, add helpers that derive a safe transaction id from `authorization_id`, build a sibling staging directory, write canonical JSON with exclusive deterministic paths, calculate artifact hashes, and commit with `os.replace`. A final transaction is valid only when `commit.json` agrees with all sibling bytes and all payload lineage checks pass. Never let a staging path participate in `_load_activations`, `active_l1_native_evidence_run_id`, or retry authorization consumption checks.
 
@@ -144,17 +144,17 @@ def _commit_retry_transaction(project_dir: str | Path, seed: dict,
 
 The transaction commit receipt must include `schema_version`, `authorization_id`, `candidate_id`, `round_id`, `acquisition_run_id`, `authorization`, and the canonical SHA-256 hashes and relative paths for `binding.json`, `consumption.json`, and `activation.json`. The activation payload must reference the binding entry inside the same final transaction directory. All writes must use canonical bytes; a failure before rename must not create a final `commit.json`.
 
-- [ ] **Step 2: Make retry readers derive state from committed transactions**
+- [x] **Step 2: Make retry readers derive state from committed transactions**
 
 Update binding and activation readers to discover a committed retry transaction for a run id, validate its receipt and sibling files, and return the embedded canonical payload. Include committed transaction activations in `_load_activations` in version order, while retaining legacy v1 activation compatibility. Update `active_l1_native_evidence_run_id` and `unique_l1_native_evidence_run_id` to use the combined validated activation view.
 
 Update `gap_loop.load_gap_retry_consumption` and `authorize_gap_retry` so a committed transaction is the authoritative source for consumption when the legacy `consumed/<request>.json` path is absent. A committed authorization cannot be authorized again; an incomplete staging directory does not count as consumed.
 
-- [ ] **Step 3: Route `run_authorized_retry` through the transaction commit**
+- [x] **Step 3: Route `run_authorized_retry` through the transaction commit**
 
 Replace the calls to `write_l1_native_evidence_binding`, `consume_gap_retry_authorization`, and `activate_l1_native_evidence_binding` with one call to the installed/native transaction commit API. Preserve the returned result shape (`authorization`, `consumption`, `activation`, `binding`, `evidence_pack`, and `evidence_pack_content_sha256`) so existing production callers remain compatible. The injected failure hook is test-only plumbing and defaults to `None` in production.
 
-- [ ] **Step 4: Run the same tests and confirm GREEN**
+- [x] **Step 4: Run the same tests and confirm GREEN**
 
 Run:
 
@@ -164,7 +164,7 @@ python -m pytest tests/test_l05_curie_native_runtime.py tests/test_l05_native_ev
 
 Expected: PASS, including every failure-injection point, replay idempotency, no false consumption, no orphan active lineage, and immutable v1 EvidencePack behavior.
 
-- [ ] **Step 5: Commit the GREEN checkpoint**
+- [x] **Step 5: Commit the GREEN checkpoint**
 
 ```powershell
 git add src/research_loop/l05_curie/native_runtime.py src/research_loop/l05_native_binding.py src/research_loop/l05_curie/gap_loop.py
@@ -180,11 +180,11 @@ git commit -m "fix: make l05 retry activation atomic"
 - Modify: `tests/test_l05_curie_fullcycle.py` only if a production retry path needs a characterization assertion
 - Create: `docs/testing/2026-08-26-atomic-retry.tdd.md`
 
-- [ ] **Step 1: Add recovery assertions for every crash boundary**
+- [x] **Step 1: Add recovery assertions for every crash boundary**
 
 Verify after each interrupted attempt that the parent remains active, no committed transaction is visible, the retry request can be re-authorized, and no frozen historical pack bytes changed. Verify after successful replay that exactly one final transaction exists, `load_gap_retry_consumption` returns the same receipt, and a second identical call returns byte-equivalent binding/consumption/activation objects.
 
-- [ ] **Step 2: Run the focused and neighboring suites**
+- [x] **Step 2: Run the focused and neighboring suites**
 
 ```powershell
 python -m pytest tests/test_l05_curie_native_runtime.py tests/test_l05_native_evidence_binding.py tests/test_l05_curie_gap_loop.py tests/test_l05_curie_fullcycle.py -q
@@ -192,11 +192,11 @@ python -m pytest tests/test_l05_curie_native_runtime.py tests/test_l05_native_ev
 
 Record the exact pass count and exit status in the TDD evidence report. Do not claim crash consistency from unit tests that do not inspect persisted paths.
 
-- [ ] **Step 3: Write the TDD evidence report**
+- [x] **Step 3: Write the TDD evidence report**
 
 Document the plan path, RED output, GREEN output, each failure boundary, replay guarantee, persisted-state assertions, and known gap that a process-level power loss is represented by the filesystem atomic-rename contract plus deterministic injected failures.
 
-- [ ] **Step 4: Commit the characterization/evidence checkpoint**
+- [x] **Step 4: Commit the characterization/evidence checkpoint**
 
 ```powershell
 git add tests/test_l05_curie_native_runtime.py tests/test_l05_native_evidence_binding.py tests/test_l05_curie_fullcycle.py docs/testing/2026-08-26-atomic-retry.tdd.md
@@ -212,7 +212,7 @@ git commit -m "test: document l05 retry recovery guarantees"
 - Review: `src/research_loop/l05_curie/gap_loop.py`
 - Review: all Phase B tests and the TDD evidence report
 
-- [ ] **Step 1: Run full pytest and integrity checks**
+- [x] **Step 1: Run full pytest and integrity checks**
 
 ```powershell
 python -m pytest -q
@@ -223,7 +223,7 @@ python run_loop.py --help
 
 Record exact exit status, pass/fail/skip counts, and any warnings.
 
-- [ ] **Step 2: Perform separate correctness and thermo-nuclear reviews**
+- [x] **Step 2: Perform separate correctness and thermo-nuclear reviews**
 
 Correctness review must confirm: one final transaction directory is the only committed retry authority; every failure boundary leaves the parent active; committed replay is idempotent; no retry can consume twice; activation lineage is contiguous; frozen EvidencePacks are read-only; and legacy v1 paths remain compatible.
 
