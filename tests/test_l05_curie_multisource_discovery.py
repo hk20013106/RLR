@@ -2,6 +2,8 @@ import pytest
 
 from research_loop import research_seed
 import research_loop.l05_curie as curie
+import research_loop.l05_curie.europepmc as europepmc
+import research_loop.l05_curie.europepmc_runtime as europepmc_runtime
 from research_loop.l05_curie.multisource import (
     PubMedTransport,
     OpenAlexTransport,
@@ -172,3 +174,21 @@ def test_multisource_plan_and_orchestrator_execute_declared_providers(tmp_path):
     for batch in result["batches"]:
         assert len(batch["receipt"]["request_sha256"]) == 64
         assert len(batch["receipt"]["response_sha256"]) == 64
+
+
+def test_multisource_is_the_only_canonical_discovery_orchestration_layer():
+    assert callable(europepmc.canonicalize_europepmc_record)
+    assert callable(europepmc.EuropePmcTransport)
+    assert callable(europepmc.EuropePmcEvidenceRetriever)
+    assert callable(europepmc.EuropePmcEvidenceVerifier)
+
+    assert callable(europepmc_runtime.build_multisource_query_plan)
+    assert callable(europepmc_runtime.run_multisource_discovery)
+    assert callable(europepmc_runtime.select_candidates)
+
+    for name in (
+        "build_europepmc_query_plan",
+        "deduplicate_discovery_records",
+        "select_europepmc_candidates",
+    ):
+        assert not hasattr(europepmc, name), name
