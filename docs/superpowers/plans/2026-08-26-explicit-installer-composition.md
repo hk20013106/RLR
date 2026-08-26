@@ -143,8 +143,8 @@ The `install()` names are not package `__all__` exports, but external code may i
 - [x] Run compileall, `git diff --check`, and the CLI help smoke checks.
 - [x] Perform a correctness review and a fresh thermo-nuclear review against the Phase C diff.
 - [x] Fix all Critical/Important findings and rerun affected verification.
-- [ ] Commit, push `codex/explicit-installer-composition`, create or update a Draft PR, and wait for exact-head CI.
-- [ ] Stop at the Phase C gate; do not merge and do not automatically refactor the remaining P2 or `UNCERTAIN` installers.
+- [x] Commit, push `codex/explicit-installer-composition`, create or update a Draft PR, and wait for exact-head CI.
+- [x] Stop at the Phase C gate; do not merge and do not automatically refactor the remaining P2 or `UNCERTAIN` installers.
 
 ## Verification evidence
 
@@ -155,6 +155,7 @@ The `install()` names are not package `__all__` exports, but external code may i
 - Static checks: `compileall`, both CLI `--help` smoke checks, and `git diff --check` passed.
 - Fresh correctness review: no Critical/Important/Minor findings.
 - Fresh thermo-nuclear review: no Critical/Important findings; one Minor compatibility re-export note was documented and retained intentionally.
+- Exact-head CI for `31f4aec`: CI Windows Test passed in `9m39s`; L0.5 Contracts, L0.5 Europe PMC live smoke, L4 targeted runtime, and L4 Full suite all passed. The superseded CI run was cancelled by the subsequent documentation push and is not counted as a failure.
 
 ## Self-review against the specification
 
