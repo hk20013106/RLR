@@ -71,4 +71,3 @@ The tests inject deterministic exceptions at filesystem transaction boundaries;
 they do not simulate power loss at the operating-system level. The production
 guarantee relies on the platform's atomic same-volume directory rename and the
 receipt/hash validation performed on recovery.
-
