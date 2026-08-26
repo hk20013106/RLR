@@ -18,6 +18,7 @@ from .contracts import CurieContractError, judge_coverage, validate_query_plan
 from .europepmc import EuropePmcEvidenceRetriever, EuropePmcEvidenceVerifier, EuropePmcTransport
 from .multisource import (
     build_multisource_query_plan,
+    run_multisource_discovery,
     run_multisource_discovery_strict,
 )
 from .native_runtime import bind_initial_curie_pack
@@ -27,7 +28,7 @@ from .paperqa2_runtime import (
     validate_pinned_paperqa2_runtime,
 )
 from .semantic_verifier import SemanticEvidenceVerifier, admit_reasoning_evidence
-from .selector import select_candidates_strict
+from .selector import select_candidates, select_candidates_strict
 from .store import build_evidence_pack, freeze_evidence_pack
 
 RESULT_SCHEMA_VERSION = "L05EuropePmcAcquisitionResult/v1"
