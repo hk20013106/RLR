@@ -84,6 +84,8 @@ import research_loop.l05_curie.multisource as multisource
 from research_loop.l05_curie import DISCOVERY_BATCH_SCHEMA_VERSION
 from research_loop.l05_curie import DISCOVERY_TRANSPORT_SCHEMA_VERSION
 
+assert not hasattr(multisource, "_record_matches")
+
 
 seed = {
     "candidate_id": "C001",
@@ -91,9 +93,6 @@ seed = {
     "scientific_question": "question",
     "hypothesis_seed": "hypothesis",
 }
-multisource._record_matches = lambda *_args: (_ for _ in ()).throw(
-    AssertionError("discovery must not infer query lineage after deduplication")
-)
 plan = build_multisource_query_plan(
     seed,
     seed_sha256="a" * 64,
@@ -124,13 +123,151 @@ class Transport:
                 "title": "Paper",
                 "identifiers": {"pmid": "123"},
                 "metadata": {},
-                "provenance": {"provider": "pubmed"},
+                "provenance": {
+                    "provider": "pubmed",
+                    "raw_record_sha256": "3" * 64,
+                    "originating_query_ids": ["FORGED"],
+                },
             }],
         }
 
 
 result = run_multisource_discovery(plan, {"pubmed": Transport()})
 assert result["records"][0]["provenance"]["originating_query_ids"] == ["Q001"]
+"""
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_multisource_binds_each_batch_to_the_current_query_and_provider():
+    proc = _fresh(
+        _block_installers("research_loop.l05_curie.provenance_hardening")
+        + """
+from research_loop.l05_curie import CurieContractError
+from research_loop.l05_curie import DISCOVERY_BATCH_SCHEMA_VERSION
+from research_loop.l05_curie import DISCOVERY_TRANSPORT_SCHEMA_VERSION
+from research_loop.l05_curie.multisource import (
+    build_multisource_query_plan,
+    run_multisource_discovery,
+)
+
+seed = {
+    "candidate_id": "C001",
+    "round_id": "1",
+    "scientific_question": "question",
+    "hypothesis_seed": "hypothesis",
+}
+plan = build_multisource_query_plan(
+    seed,
+    seed_sha256="a" * 64,
+    explicit_queries=["first query", "second query"],
+    providers=["pubmed"],
+)
+
+
+class Transport:
+    def handshake(self):
+        return {
+            "schema_version": DISCOVERY_TRANSPORT_SCHEMA_VERSION,
+            "provider": "pubmed",
+            "capabilities": ["search:test"],
+        }
+
+    def search(self, request):
+        return {
+            "schema_version": DISCOVERY_BATCH_SCHEMA_VERSION,
+            "provider": "other-provider",
+            "query_id": "Q001",
+            "receipt": {
+                "request_sha256": "1" * 64,
+                "response_sha256": "2" * 64,
+            },
+            "records": [{
+                "paper_id": "P1",
+                "title": "Paper",
+                "identifiers": {"pmid": "123"},
+                "metadata": {},
+                "provenance": {
+                    "provider": "other-provider",
+                    "raw_record_sha256": "3" * 64,
+                },
+            }],
+        }
+
+
+try:
+    run_multisource_discovery(plan, {"pubmed": Transport()})
+except CurieContractError:
+    pass
+else:
+    raise AssertionError("discovery must bind returned batch to current query/provider")
+"""
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_multisource_rejects_a_batch_from_another_query():
+    proc = _fresh(
+        _block_installers("research_loop.l05_curie.provenance_hardening")
+        + """
+from research_loop.l05_curie import CurieContractError
+from research_loop.l05_curie import DISCOVERY_BATCH_SCHEMA_VERSION
+from research_loop.l05_curie import DISCOVERY_TRANSPORT_SCHEMA_VERSION
+from research_loop.l05_curie.multisource import (
+    build_multisource_query_plan,
+    run_multisource_discovery,
+)
+
+seed = {
+    "candidate_id": "C001",
+    "round_id": "1",
+    "scientific_question": "question",
+    "hypothesis_seed": "hypothesis",
+}
+plan = build_multisource_query_plan(
+    seed,
+    seed_sha256="a" * 64,
+    explicit_queries=["first query", "second query"],
+    providers=["pubmed"],
+)
+
+
+class Transport:
+    def handshake(self):
+        return {
+            "schema_version": DISCOVERY_TRANSPORT_SCHEMA_VERSION,
+            "provider": "pubmed",
+            "capabilities": ["search:test"],
+        }
+
+    def search(self, request):
+        return {
+            "schema_version": DISCOVERY_BATCH_SCHEMA_VERSION,
+            "provider": "pubmed",
+            "query_id": "Q001",
+            "receipt": {
+                "request_sha256": "1" * 64,
+                "response_sha256": "2" * 64,
+            },
+            "records": [{
+                "paper_id": "P1",
+                "title": "Paper",
+                "identifiers": {"pmid": "123"},
+                "metadata": {},
+                "provenance": {
+                    "provider": "pubmed",
+                    "raw_record_sha256": "3" * 64,
+                },
+            }],
+        }
+
+
+try:
+    run_multisource_discovery(plan, {"pubmed": Transport()})
+except CurieContractError:
+    pass
+else:
+    raise AssertionError("discovery must bind each batch to its current query")
 """
     )
     assert proc.returncode == 0, proc.stderr

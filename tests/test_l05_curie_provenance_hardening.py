@@ -33,7 +33,10 @@ class _Transport:
                 "title": "Shared paper",
                 "identifiers": {"pmid": "123"},
                 "metadata": {"abstract": "mechanism"},
-                "provenance": {"provider": self.provider},
+                "provenance": {
+                    "provider": self.provider,
+                    "raw_record_sha256": "3" * 64,
+                },
             }],
         }
 
@@ -61,6 +64,17 @@ def test_multisource_records_preserve_all_originating_query_ids_after_dedup():
     assert result["records"][0]["provenance"]["originating_query_ids"] == [
         "Q001", "Q002"
     ]
+
+
+def test_multisource_rejects_records_without_source_identity():
+    class MissingSourceIdentity(_Transport):
+        def search(self, request):
+            batch = super().search(request)
+            del batch["records"][0]["provenance"]["raw_record_sha256"]
+            return batch
+
+    with pytest.raises(curie.CurieContractError, match="raw_record_sha256"):
+        run_multisource_discovery(_plan(), {"pubmed": MissingSourceIdentity()})
 
 
 def test_selector_fails_closed_instead_of_inventing_unknown_query_provenance():

@@ -755,7 +755,13 @@ def run_multisource_discovery(plan: dict, transports: dict[str, object], *,
                     "query": query["query"],
                     "page_size": page_size,
                 })
-                validate_discovery_batch(batch, query_ids=query_ids)
+                validate_discovery_batch(
+                    batch,
+                    query_ids=query_ids,
+                    expected_query_id=str(query["query_id"]),
+                    expected_provider=provider,
+                    require_source_identity=True,
+                )
             except Exception as exc:
                 if not allow_partial:
                     if isinstance(exc, CurieContractError):
