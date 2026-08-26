@@ -283,17 +283,50 @@ def _paperqa_pdf_path(pdf_paths: object, paper_id: str) -> tuple[Path, str]:
     return path, digest
 
 
-def _exact_source_claim_assessor(*, extract: dict, claim: str) -> dict:
-    """Admit only a claim identical to the already LOCATED source text."""
-    if claim != extract.get("text"):
-        raise CurieContractError("exact-source semantic claim differs from its LOCATED extract")
-    return {
-        "entailment": "SUPPORTED",
-        "scope_match": True,
-        "context_preserved": True,
-        "qualification_preserved": True,
-        "reason": "Claim is identical to the independently LOCATED source text.",
-    }
+def _paperqa2_semantic_target(seed: dict) -> str:
+    question = str(seed.get("scientific_question") or "").strip()
+    hypothesis = str(seed.get("hypothesis_seed") or "").strip()
+    if not question or not hypothesis:
+        raise CurieContractError(
+            "PaperQA2 semantic admission requires ResearchSeed question and hypothesis"
+        )
+    return f"Scientific question: {question}\nHypothesis seed: {hypothesis}"
+
+
+def _admit_paperqa2_semantic_evidence(
+    located: list[dict],
+    *,
+    semantic_target: str,
+    assessor: Callable,
+    assessor_id: str,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Semantically assess LOCATED evidence against the ResearchSeed target.
+
+    Source fidelity and semantic relevance remain separate authorities. Every
+    LOCATED extract receives a semantic record for audit; only reasoning-
+    authorized extracts and their matching semantic records may enter a
+    semantic EvidencePack.
+    """
+    if not callable(assessor):
+        raise CurieContractError("PaperQA2 semantic assessor must be callable")
+    semantic_target = str(semantic_target or "").strip()
+    assessor_id = str(assessor_id or "").strip()
+    if not semantic_target:
+        raise CurieContractError("PaperQA2 semantic target must be non-empty")
+    if not assessor_id:
+        raise CurieContractError("PaperQA2 semantic assessor_id must be non-empty")
+    verifier = SemanticEvidenceVerifier(assessor=assessor, assessor_id=assessor_id)
+    all_semantics = [
+        verifier.verify(extract, claim=semantic_target)
+        for extract in located
+    ]
+    admitted = admit_reasoning_evidence(located, all_semantics)
+    admitted_ids = {item["evidence_id"] for item in admitted}
+    admitted_semantics = [
+        item for item in all_semantics
+        if item["evidence_id"] in admitted_ids
+    ]
+    return admitted, admitted_semantics, all_semantics
 
 
 def run_europepmc_acquisition(
@@ -414,6 +447,8 @@ def run_paperqa2_europepmc_acquisition(
     *,
     paperqa_runtime: PaperQA2CurieRuntime,
     pdf_paths: dict[str, str | Path],
+    semantic_assessor: Callable | None = None,
+    semantic_assessor_id: str = "l05-paperqa2-semantic-assessor/v2",
     explicit_queries: list[str] | None = None,
     max_papers: int = 3,
     page_size: int = 25,
@@ -426,6 +461,14 @@ def run_paperqa2_europepmc_acquisition(
         raise CurieContractError("PaperQA2 production runtime must be PaperQA2CurieRuntime")
     if paperqa_runtime.backend_id != PAPERQA2_BACKEND_ID:
         raise CurieContractError("PaperQA2 production runtime backend_id is not the pinned backend")
+    if not callable(semantic_assessor):
+        raise CurieContractError(
+            "PaperQA2 production acquisition requires an explicit semantic assessor; "
+            "exact-source self-claims cannot authorize reasoning evidence"
+        )
+    semantic_assessor_id = str(semantic_assessor_id or "").strip()
+    if not semantic_assessor_id:
+        raise CurieContractError("PaperQA2 semantic_assessor_id must be non-empty")
     project = Path(project_dir)
     candidate_id = str(cand_id)
     prepared = _prepare_europepmc_acquisition(
@@ -443,6 +486,7 @@ def run_paperqa2_europepmc_acquisition(
     seed_digest = prepared["seed_sha256"]
     normalized_run_id = prepared["run_id"]
     selection = prepared["selection"]
+    semantic_target = _paperqa2_semantic_target(seed)
     source_snapshots: list[dict] = []
     located_evidence: list[dict] = []
     semantic_verifications: list[dict] = []
@@ -456,10 +500,6 @@ def run_paperqa2_europepmc_acquisition(
             timeout=timeout,
         )
         verifier = EuropePmcEvidenceVerifier(project, candidate_id=candidate_id)
-        semantic_verifier = SemanticEvidenceVerifier(
-            assessor=_exact_source_claim_assessor,
-            assessor_id="l05-exact-source-claim/v1",
-        )
         for selected in selection["selected"]:
             paper_id = str(selected["paper_id"])
             pdf_path, pdf_sha256 = _paperqa_pdf_path(pdf_paths, paper_id)
@@ -484,17 +524,14 @@ def run_paperqa2_europepmc_acquisition(
                         "PaperQA2 runtime PDF path does not match the selected PDF"
                     )
             located = result["located"]
-            semantics = [
-                semantic_verifier.verify(extract, claim=str(extract["text"]))
-                for extract in located
-            ]
-            admitted = admit_reasoning_evidence(located, semantics)
-            if len(admitted) != len(located):
-                raise CurieContractError(
-                    "exact-source semantic admission rejected a LOCATED PaperQA2 extract"
-                )
+            admitted, admitted_semantics, all_semantics = _admit_paperqa2_semantic_evidence(
+                located,
+                semantic_target=semantic_target,
+                assessor=semantic_assessor,
+                assessor_id=semantic_assessor_id,
+            )
             located_evidence.extend(admitted)
-            semantic_verifications.extend(semantics)
+            semantic_verifications.extend(admitted_semantics)
             paperqa_audit.append({
                 "paper_id": paper_id,
                 "pdf_sha256": pdf_sha256,
@@ -502,7 +539,9 @@ def run_paperqa2_europepmc_acquisition(
                 "chunk_count": len(result["chunks"]),
                 "unverified_evidence_ids": [item["evidence_id"] for item in result["unverified"]],
                 "located_evidence_ids": [item["evidence_id"] for item in located],
-                "semantic_verification_ids": [item["verification_id"] for item in semantics],
+                "semantic_verification_ids": [item["verification_id"] for item in all_semantics],
+                "reasoning_authorized_evidence_ids": [item["evidence_id"] for item in admitted],
+                "semantic_verifications": all_semantics,
             })
 
     coverage = _coverage_for(source_snapshots, located_evidence, round_index=1)
