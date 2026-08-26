@@ -1,6 +1,9 @@
 import research_loop.l05_curie as curie
 from research_loop.l05_curie import europepmc_runtime
-from research_loop.l05_curie.paperqa2_runtime import align_paperqa2_chunks
+from research_loop.l05_curie.paperqa2_runtime import (
+    MIN_SOURCE_TOKEN_COVERAGE,
+    align_paperqa2_chunks,
+)
 
 
 def _located(evidence_id: str, text: str, locator: str) -> dict:
@@ -52,16 +55,42 @@ def test_confusable_above_threshold_extract_requires_real_semantic_authorization
         "instead of self-claiming each LOCATED extract"
     )
 
-    target = _located(
-        "E_target",
-        "WGCNA pseudocells were constructed before module detection and GO enrichment.",
-        "sec:7/p:7",
+    source_candidates = [
+        {
+            "paper_id": "P1",
+            "text": "WGCNA pseudocells were constructed before module detection and GO enrichment.",
+            "section": "Methods",
+            "locator": "sec:7/p:7",
+        },
+        {
+            "paper_id": "P1",
+            "text": (
+                "WGCNA modules were visualized in a generic network figure without "
+                "describing the pseudocell workflow."
+            ),
+            "section": "Results",
+            "locator": "sec:7/p:9",
+        },
+    ]
+    aligned = align_paperqa2_chunks(
+        chunks=[{
+            "text": (
+                "WGCNA pseudocells were constructed before module detection and GO enrichment. "
+                "WGCNA modules were visualized in a generic network figure."
+            ),
+            "locator": "PDF pages 7-9",
+            "score": 0.9,
+        }],
+        source_candidates=source_candidates,
     )
-    confusable = _located(
-        "E_confusable",
-        "WGCNA modules were visualized in a generic network figure without describing the pseudocell workflow.",
-        "sec:7/p:9",
+    assert [item["locator"] for item in aligned] == ["sec:7/p:7", "sec:7/p:9"]
+    assert all(
+        item["source_alignment"]["source_token_coverage"] >= MIN_SOURCE_TOKEN_COVERAGE
+        for item in aligned
     )
+
+    target = _located("E_target", aligned[0]["text"], aligned[0]["locator"])
+    confusable = _located("E_confusable", aligned[1]["text"], aligned[1]["locator"])
     semantic_target = (
         "Scientific question: How was the scWGCNA workflow implemented?\n"
         "Hypothesis seed: The workflow constructs pseudocells before WGCNA module detection."
