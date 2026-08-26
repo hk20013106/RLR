@@ -1,3 +1,6 @@
+import hashlib
+import json
+
 import pytest
 
 from research_loop import research_seed
@@ -83,13 +86,36 @@ def _initialized_retry_fixture(tmp_path):
 
 def _retry_acquire(tmp_path):
     def acquire(auth):
-        return _freeze(
-            tmp_path,
-            version=auth["next_version"],
-            run_id="CURIE002",
-            parent=auth["parent_pack_sha256"],
-            gap_id=auth["source_gap_request_id"],
-        )
+        try:
+            return _freeze(
+                tmp_path,
+                version=auth["next_version"],
+                run_id="CURIE002",
+                parent=auth["parent_pack_sha256"],
+                gap_id=auth["source_gap_request_id"],
+            )
+        except curie.CurieContractError as exc:
+            if "already exists" not in str(exc):
+                raise
+            path = (
+                tmp_path / "09_Literature_Database" / "evidence_packs" / "l05"
+                / "C001" / f"EP_C001_R1_v{auth['next_version']}.json"
+            )
+            raw = path.read_bytes()
+            pack = json.loads(raw.decode("utf-8"))
+            return {
+                "schema_version": curie.EVIDENCE_PACK_MANIFEST_SCHEMA_VERSION,
+                "candidate_id": pack["candidate_id"],
+                "round_id": pack["round_id"],
+                "seed_sha256": pack["seed_sha256"],
+                "pack_id": pack["pack_id"],
+                "version": pack["version"],
+                "artifact_path": "09_Literature_Database/evidence_packs/l05/C001/"
+                f"EP_C001_R1_v{auth['next_version']}.json",
+                "artifact_sha256": hashlib.sha256(raw).hexdigest(),
+                "content_sha256": pack["content_sha256"],
+                "status": "FROZEN",
+            }
 
     return acquire
 
