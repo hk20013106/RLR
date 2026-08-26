@@ -2,8 +2,10 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from research_loop import l0_contract, research_seed
-from research_loop.l05_curie import load_frozen_evidence_pack
+from research_loop.l05_curie import CurieContractError, load_frozen_evidence_pack
 from research_loop.l05_curie import europepmc_runtime
 from research_loop.l05_curie.europepmc_runtime import run_europepmc_acquisition
 from research_loop.l05_curie.paperqa2_runtime import PaperQA2CurieRuntime
@@ -74,6 +76,19 @@ def _search_payload(*, open_access=True):
     return json.dumps(
         {"hitCount": 1, "resultList": {"result": [result]}}, sort_keys=True
     ).encode("utf-8")
+
+
+def _supported_semantic_assessment(*, extract, claim):
+    assert claim != extract["text"]
+    assert "Scientific question:" in claim
+    assert "Hypothesis seed:" in claim
+    return {
+        "entailment": "SUPPORTED",
+        "scope_match": True,
+        "context_preserved": True,
+        "qualification_preserved": True,
+        "reason": "The located paragraph directly addresses the ResearchSeed semantic target.",
+    }
 
 
 def test_runtime_freezes_end_to_end_europepmc_evidence_pack(tmp_path):
@@ -151,6 +166,22 @@ def test_runtime_does_not_freeze_when_no_oa_full_text_is_available(tmp_path):
     assert not list((project / "09_Literature_Database" / "evidence_packs" / "l05").rglob("*.json"))
 
 
+def test_paperqa2_production_runtime_requires_explicit_semantic_assessor(tmp_path):
+    project, _seed = _project(tmp_path)
+    runtime = PaperQA2CurieRuntime(
+        backend=lambda **_kwargs: [],
+        backend_id="paperqa2-fork-v2026.08.12/sparse-docs-v1",
+    )
+
+    with pytest.raises(CurieContractError, match="semantic assessor|self-claims"):
+        europepmc_runtime.run_paperqa2_europepmc_acquisition(
+            project,
+            "C001",
+            paperqa_runtime=runtime,
+            pdf_paths={},
+        )
+
+
 def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(
     tmp_path, monkeypatch
 ):
@@ -218,6 +249,8 @@ def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(
         "C001",
         paperqa_runtime=runtime,
         pdf_paths={"P_3cab82183e94295123ee": str(pdf)},
+        semantic_assessor=_supported_semantic_assessment,
+        semantic_assessor_id="fixture-semantic-assessor/v1",
         explicit_queries=["EXT_ID:22253597 AND SRC:MED"],
         max_papers=1,
         page_size=5,
@@ -240,6 +273,12 @@ def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(
         item["retrieval"]["upstream_engine"] == "paperqa2"
         for item in frozen["evidence"]
     )
+    audit = json.loads(
+        (project / result["acquisition_manifest_path"]).read_text(encoding="utf-8")
+    )
+    assert audit["paperqa2"][0]["reasoning_authorized_evidence_ids"] == [
+        frozen["evidence"][0]["evidence_id"]
+    ]
     assert observed == {"planner": 1, "discovery": 1, "selector": 1}
 
 
