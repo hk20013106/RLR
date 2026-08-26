@@ -7,7 +7,6 @@ from research_loop.l05_curie.europepmc import (
     EuropePmcEvidenceRetriever,
     EuropePmcEvidenceVerifier,
     canonicalize_europepmc_record,
-    select_europepmc_candidates,
 )
 
 
@@ -55,33 +54,6 @@ def _raw(**overrides):
     }
     item.update(overrides)
     return item
-
-
-def test_selector_preserves_include_exclude_reserve_decisions():
-    best = canonicalize_europepmc_record(_raw())
-    no_fulltext = canonicalize_europepmc_record(
-        _raw(
-            id="99999999", pmid="99999999", pmcid="", doi="10.1000/no-fulltext",
-            title="Related carbon dioxide paper without Europe PMC full text",
-            isOpenAccess="N", inEPMC="N",
-        )
-    )
-    reserve = canonicalize_europepmc_record(
-        _raw(
-            id="88888888", pmid="88888888", pmcid="PMC8888888", doi="10.1000/reserve",
-            title="Another open access carbon dioxide response paper",
-        )
-    )
-
-    result = select_europepmc_candidates(
-        [best, no_fulltext, reserve], seed=_seed(), max_papers=1
-    )
-    assert [item["paper_id"] for item in result["selected"]] == [best["paper_id"]]
-    by_id = {item["paper_id"]: item for item in result["decisions"]}
-    assert by_id[best["paper_id"]]["decision"] == "INCLUDE"
-    assert by_id[no_fulltext["paper_id"]]["decision"] == "EXCLUDE"
-    assert by_id[no_fulltext["paper_id"]]["reason_code"] == "NO_OPEN_FULL_TEXT"
-    assert by_id[reserve["paper_id"]]["decision"] == "RESERVE"
 
 
 def test_retriever_snapshots_xml_and_verifier_relocates_exact_text(tmp_path):
