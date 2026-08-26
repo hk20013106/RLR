@@ -320,6 +320,35 @@ def test_registered_local_payload_has_first_priority(tmp_path):
     assert calls == []
 
 
+def test_normalized_source_text_removes_html_tags_but_preserves_scientific_inequalities():
+    normalized = cc.normalized_source_text(
+        "<p>Methods: FDR < 0.01; p < 0.05; x > 3.</p>"
+    )
+
+    assert "methods" in normalized
+    assert "fdr < 0.01" in normalized
+    assert "p < 0.05" in normalized
+    assert "x > 3" in normalized
+    assert "<p>" not in normalized
+    assert "</p>" not in normalized
+
+
+def test_jats_methods_extract_remains_contiguous_with_entities_and_inequalities():
+    payload = (
+        "<article><body><sec id='methods'><title>Methods</title><p>"
+        "We retained genes with FDR&lt;&#x2009;0.01 and p &lt; 0.05 and x &gt; 3. "
+        + "The retained method description is substantive and reproducible. " * 20
+        + "</p></sec><sec><title>Results</title><p>Results.</p></sec></body></article>"
+    )
+
+    methods = cc.extract_methods_section(payload, "application/xml")
+
+    assert methods is not None
+    assert "FDR< 0.01" in methods["text"]
+    assert "p < 0.05" in methods["text"]
+    assert cc.extract_is_contiguous(payload, methods["text"])
+
+
 def test_resolver_preserves_exact_source_bytes_and_hash_on_persistence(tmp_path):
     contract = cc.build_retrieval_contract(_asset())
     raw_payload = A1_XML.replace("><", ">\r\n<").encode("utf-8")

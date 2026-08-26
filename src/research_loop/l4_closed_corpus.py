@@ -268,7 +268,10 @@ def _fetch(value):
 
 def normalized_source_text(value):
     value = html.unescape(str(value or ""))
-    value = re.sub(r"<[^>]+>", " ", value)
+    # Scientific inequalities such as ``FDR < 0.01`` are common in source
+    # text. JATS payloads often encode them as ``&lt;``; after unescaping,
+    # a broad ``<...>`` pattern would otherwise discard real evidence.
+    value = re.sub(r"</?[A-Za-z][^>]*>|<\?[^>]*>|<![^>]*>", " ", value)
     return re.sub(r"\s+", " ", value).strip().casefold()
 
 
