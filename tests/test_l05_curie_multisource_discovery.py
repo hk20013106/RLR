@@ -118,7 +118,46 @@ def test_cross_provider_dedup_merges_identifier_graph_and_provenance():
     assert len(duplicates) == 2
 
 
-def test_cross_provider_identity_bridge_conflict_fails_closed():
+def test_dedup_recomputes_canonical_id_independent_of_provider_order():
+    europe = europepmc.canonicalize_europepmc_record({
+        "id": "EU1", "source": "AGR", "doi": "10.1000/ABC", "pmid": "123",
+        "title": "Provider neutral identity", "authorString": "A Author",
+        "pubYear": "2025",
+    })
+    pubmed = canonicalize_pubmed_record({
+        "uid": "123", "title": "Provider neutral identity",
+        "articleids": [{"idtype": "pubmed", "value": "123"}],
+    })
+
+    forward, _forward_duplicates = deduplicate_provider_records([europe, pubmed])
+    reverse, _reverse_duplicates = deduplicate_provider_records([pubmed, europe])
+
+    assert len(forward) == len(reverse) == 1
+    assert forward[0]["paper_id"] == "P_21e82b6410993caee6a5"
+    assert reverse[0]["paper_id"] == "P_21e82b6410993caee6a5"
+    assert forward[0]["identifiers"] == {"doi": "10.1000/abc", "pmid": "123"}
+    assert reverse[0]["identifiers"] == forward[0]["identifiers"]
+
+
+def test_dedup_merges_a_transitive_multi_identifier_graph():
+    records = [
+        canonicalize_crossref_record({"DOI": "10.1000/bridge", "title": ["Bridge"]}),
+        canonicalize_pubmed_record({"uid": "456", "title": "Bridge"}),
+        europepmc.canonicalize_europepmc_record({
+            "id": "EU2", "source": "AGR", "doi": "10.1000/bridge", "pmid": "456",
+            "title": "Bridge", "authorString": "A Author", "pubYear": "2025",
+        }),
+    ]
+
+    unique, duplicates = deduplicate_provider_records(records)
+
+    assert len(unique) == 1
+    assert unique[0]["paper_id"] == "P_4b8e31b09e5f55676573"
+    assert unique[0]["identifiers"] == {"doi": "10.1000/bridge", "pmid": "456"}
+    assert duplicates == sorted(duplicates)
+
+
+def test_cross_provider_identity_conflict_fails_closed():
     records = [
         canonicalize_pubmed_record({
             "uid": "123", "title": "Paper A",
@@ -131,7 +170,7 @@ def test_cross_provider_identity_bridge_conflict_fails_closed():
             "externalIds": {"PubMed": "123", "DOI": "10.1000/b"},
         }),
     ]
-    with pytest.raises(curie.CurieContractError, match="bridges|conflict|identity"):
+    with pytest.raises(curie.CurieContractError, match="cross-provider identity conflict"):
         deduplicate_provider_records(records)
 
 
