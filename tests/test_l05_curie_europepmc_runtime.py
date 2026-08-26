@@ -277,7 +277,7 @@ def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(
         (project / result["acquisition_manifest_path"]).read_text(encoding="utf-8")
     )
     assert audit["paperqa2"][0]["reasoning_authorized_evidence_ids"] == [
-        frozen["evidence"][0]["evidence_id"]
+        item["evidence_id"] for item in frozen["evidence"]
     ]
     assert observed == {"planner": 1, "discovery": 1, "selector": 1}
 
@@ -326,11 +326,19 @@ def test_cli_registers_pinned_paperqa2_production_command(tmp_path, monkeypatch,
         "--paperqa-repo", "paperqa-repo",
         "--pqa-home", "pqa-home",
         "--pdf-map", str(pdf_map),
+        "--semantic-assessor-command", "semantic-agent {prompt_file} {output_file}",
         "--query", "EXT_ID:22253597 AND SRC:MED",
         "--run-id", "PQA_CLI001",
     ])
 
     seen = {}
+    semantic_assessor = lambda **_kwargs: {
+        "entailment": "SUPPORTED",
+        "scope_match": True,
+        "context_preserved": True,
+        "qualification_preserved": True,
+        "reason": "fixture",
+    }
 
     class FakeBackend:
         backend_id = "paperqa2-fork-v2026.08.12/sparse-docs-v1"
@@ -347,6 +355,11 @@ def test_cli_registers_pinned_paperqa2_production_command(tmp_path, monkeypatch,
 
     import research_loop.l05_curie_cli as extension
     monkeypatch.setattr(extension, "PaperQA2SubprocessBackend", FakeBackend)
+    monkeypatch.setattr(
+        extension,
+        "_semantic_assessor_from_command",
+        lambda *_args, **_kwargs: (semantic_assessor, "fixture-semantic-command/v1"),
+    )
     monkeypatch.setattr(extension, "run_paperqa2_europepmc_acquisition", fake_run)
     assert args.func(args) == 0
     rendered = json.loads(capsys.readouterr().out)
@@ -354,4 +367,6 @@ def test_cli_registers_pinned_paperqa2_production_command(tmp_path, monkeypatch,
     assert seen["cand_id"] == "C001"
     assert seen["backend"]["bridge_script"] == "bridge.py"
     assert seen["pdf_paths"] == {"P1": "paper.pdf"}
+    assert seen["semantic_assessor"] is semantic_assessor
+    assert seen["semantic_assessor_id"] == "fixture-semantic-command/v1"
     assert seen["run_id"] == "PQA_CLI001"
