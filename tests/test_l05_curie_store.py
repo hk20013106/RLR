@@ -115,6 +115,44 @@ def test_build_rejects_discovery_records_without_source_identity():
         _build_pack(discovery_receipts=[batch])
 
 
+def test_build_rejects_discovery_provider_not_declared_by_query_plan():
+    batch = _discovery_batch()
+    batch["provider"] = "crossref"
+    batch["records"][0]["provenance"]["provider"] = "crossref"
+    with pytest.raises(curie.CurieContractError, match="provider"):
+        _build_pack(discovery_receipts=[batch])
+
+
+def test_load_requires_source_identity_unless_legacy_mode_is_explicit(tmp_path):
+    manifest = curie.freeze_evidence_pack(tmp_path, _build_pack())
+    path = _artifact_path(tmp_path, manifest)
+    pack = json.loads(path.read_text(encoding="utf-8"))
+    del pack["discovery_receipts"][0]["records"][0]["provenance"]
+    pack["content_sha256"] = store_module._content_sha256(pack)
+    raw = store_module._canonical_bytes(pack)
+    path.write_bytes(raw)
+    manifest["content_sha256"] = pack["content_sha256"]
+    manifest["artifact_sha256"] = hashlib.sha256(raw).hexdigest()
+
+    with pytest.raises(curie.CurieContractError, match="provenance|raw_record_sha256"):
+        curie.load_frozen_evidence_pack(
+            tmp_path,
+            manifest,
+            candidate_id="C001",
+            round_id="R1",
+            seed_sha256="a" * 64,
+        )
+    loaded = curie.load_frozen_evidence_pack(
+        tmp_path,
+        manifest,
+        candidate_id="C001",
+        round_id="R1",
+        seed_sha256="a" * 64,
+        allow_legacy_source_identity=True,
+    )
+    assert loaded["status"] == "FROZEN"
+
+
 def _query_plan_for_round(round_index: int) -> dict:
     plan = _query_plan()
     plan["round_index"] = round_index
