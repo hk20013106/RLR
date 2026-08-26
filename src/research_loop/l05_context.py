@@ -27,6 +27,15 @@ class L05ContextError(ValueError):
     """Raised when L1 cannot consume its frozen L0.5 evidence state."""
 
 
+def _legacy_source_identity_mode(pre_research: dict) -> bool:
+    """Allow legacy provenance only when the native binding marker is absent."""
+    if "native_evidence_binding" not in pre_research:
+        return True
+    if not isinstance(pre_research["native_evidence_binding"], dict):
+        raise L05ContextError("native_evidence_binding marker is malformed")
+    return False
+
+
 def _manifest_path(stderr_text: str) -> Path:
     prefix = "[audit] context manifest:"
     matches = [
@@ -141,7 +150,7 @@ def install(context_module) -> None:
                 )
 
             native_entry = pre_research.get("native_evidence_binding")
-            legacy_source_identity = not isinstance(native_entry, dict)
+            legacy_source_identity = _legacy_source_identity_mode(pre_research)
             if isinstance(native_entry, dict):
                 binding = research_seed.load_l1_native_evidence_binding(
                     project, seed, run_id
