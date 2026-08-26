@@ -15,7 +15,7 @@ from research_loop.l05_curie.multisource import (
     canonicalize_crossref_record,
     canonicalize_semantic_scholar_record,
     deduplicate_provider_records,
-    run_multisource_discovery,
+    run_multisource_discovery_strict,
 )
 
 
@@ -166,7 +166,7 @@ def test_multisource_plan_and_orchestrator_execute_declared_providers(tmp_path):
         "crossref": CrossrefTransport(tmp_path, candidate_id="C001", run_id="RUN1", http_get=lambda _u, _t: fixtures["crossref"]),
         "semantic-scholar": SemanticScholarTransport(tmp_path, candidate_id="C001", run_id="RUN1", http_get=lambda _u, _t: fixtures["semantic"]),
     }
-    result = run_multisource_discovery(
+    result = run_multisource_discovery_strict(
         plan,
         transports,
         seed_sha256=seed_hash,
@@ -181,7 +181,7 @@ def test_multisource_plan_and_orchestrator_execute_declared_providers(tmp_path):
         assert len(batch["receipt"]["response_sha256"]) == 64
     tampered_plan = {**plan, "seed_sha256": "f" * 64}
     with pytest.raises(curie.CurieContractError, match="seed_sha256"):
-        run_multisource_discovery(
+        run_multisource_discovery_strict(
             tampered_plan,
             transports,
             seed_sha256=seed_hash,
@@ -206,8 +206,8 @@ def test_multisource_is_the_only_canonical_discovery_orchestration_layer():
     assert callable(europepmc.EuropePmcEvidenceVerifier)
 
     assert callable(europepmc_runtime.build_multisource_query_plan)
-    assert callable(europepmc_runtime.run_multisource_discovery)
-    assert callable(europepmc_runtime.select_candidates)
+    assert callable(europepmc_runtime.run_multisource_discovery_strict)
+    assert callable(europepmc_runtime.select_candidates_strict)
 
     for name in (
         "build_europepmc_query_plan",

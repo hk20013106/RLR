@@ -138,7 +138,7 @@ def _ranking(decision: dict) -> tuple[float, float, float, float, float]:
     )
 
 
-def select_candidates(
+def _select_candidates(
     records: list[dict], *, seed: dict,
     scorer: Callable[[dict, dict], dict],
     eligibility: Callable[[dict], tuple[bool, str]],
@@ -237,3 +237,54 @@ def select_candidates(
         result["artifact_path"] = relative.as_posix()
         result["artifact_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
     return result
+
+
+def select_candidates(
+    records: list[dict], *, seed: dict,
+    scorer: Callable[[dict, dict], dict],
+    eligibility: Callable[[dict], tuple[bool, str]],
+    max_papers: int = 3,
+    project_dir: str | Path | None = None,
+    candidate_id: str | None = None,
+    run_id: str | None = None,
+) -> dict:
+    """Select candidates through the legacy, unbound selector entry point.
+
+    Canonical runtimes must use :func:`select_candidates_strict` so every
+    record's query lineage is checked against the current QueryPlan.
+    """
+    return _select_candidates(
+        records,
+        seed=seed,
+        scorer=scorer,
+        eligibility=eligibility,
+        max_papers=max_papers,
+        project_dir=project_dir,
+        candidate_id=candidate_id,
+        run_id=run_id,
+        query_ids=None,
+    )
+
+
+def select_candidates_strict(
+    records: list[dict], *, seed: dict,
+    scorer: Callable[[dict, dict], dict],
+    eligibility: Callable[[dict], tuple[bool, str]],
+    max_papers: int = 3,
+    project_dir: str | Path | None = None,
+    candidate_id: str | None = None,
+    run_id: str | None = None,
+    query_ids: set[str],
+) -> dict:
+    """Select candidates with QueryPlan-authorized query lineage."""
+    return _select_candidates(
+        records,
+        seed=seed,
+        scorer=scorer,
+        eligibility=eligibility,
+        max_papers=max_papers,
+        project_dir=project_dir,
+        candidate_id=candidate_id,
+        run_id=run_id,
+        query_ids=query_ids,
+    )

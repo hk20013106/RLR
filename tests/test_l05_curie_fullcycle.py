@@ -9,14 +9,14 @@ from research_loop.l05_curie.multisource import (
     build_multisource_query_plan,
     canonicalize_crossref_record,
     canonicalize_pubmed_record,
-    run_multisource_discovery,
+    run_multisource_discovery_strict,
 )
 from research_loop.l05_curie.native_runtime import (
     bind_initial_curie_pack,
     run_authorized_retry,
 )
 from research_loop.l05_curie.paperqa2 import PaperQA2Retriever
-from research_loop.l05_curie.selector import select_candidates
+from research_loop.l05_curie.selector import select_candidates_strict
 from research_loop.l05_curie.semantic_verifier import (
     SemanticEvidenceVerifier,
     admit_reasoning_evidence,
@@ -106,7 +106,7 @@ def _acquire_round(project, seed, *, version, run_id, text, parent=None, gap_id=
         "published": {"date-parts": [[2025]]},
     })
     crossref_record["provenance"]["originating_query_ids"] = ["Q001"]
-    discovery = run_multisource_discovery(
+    discovery = run_multisource_discovery_strict(
         plan,
         {
             "pubmed": _StaticTransport("pubmed", [pubmed_record]),
@@ -118,7 +118,7 @@ def _acquire_round(project, seed, *, version, run_id, text, parent=None, gap_id=
     record = discovery["records"][0]
     record["provenance"]["originating_query_ids"] = ["Q001"]
 
-    selection = select_candidates(
+    selection = select_candidates_strict(
         [record],
         seed=seed,
         scorer=lambda _record, _seed: {

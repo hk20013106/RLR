@@ -733,7 +733,7 @@ class SemanticScholarTransport(_BaseTransport):
         }
 
 
-def run_multisource_discovery(
+def _run_multisource_discovery(
     plan: dict,
     transports: dict[str, object],
     *,
@@ -811,3 +811,43 @@ def run_multisource_discovery(
         "duplicate_paper_ids": duplicates,
         "failures": failures,
     }
+
+
+def run_multisource_discovery(
+    plan: dict,
+    transports: dict[str, object],
+    *,
+    page_size: int = 25,
+    allow_partial: bool = False,
+) -> dict:
+    """Run the legacy self-consistent discovery entry point.
+
+    Canonical runtimes must use :func:`run_multisource_discovery_strict` so
+    the externally derived ResearchSeed digest cannot be replaced by a
+    self-declared QueryPlan value.
+    """
+    return _run_multisource_discovery(
+        plan,
+        transports,
+        seed_sha256=None,
+        page_size=page_size,
+        allow_partial=allow_partial,
+    )
+
+
+def run_multisource_discovery_strict(
+    plan: dict,
+    transports: dict[str, object],
+    *,
+    seed_sha256: str,
+    page_size: int = 25,
+    allow_partial: bool = False,
+) -> dict:
+    """Run discovery bound to an externally derived canonical seed digest."""
+    return _run_multisource_discovery(
+        plan,
+        transports,
+        seed_sha256=seed_sha256,
+        page_size=page_size,
+        allow_partial=allow_partial,
+    )

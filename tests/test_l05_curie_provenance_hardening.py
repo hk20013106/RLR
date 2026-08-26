@@ -5,8 +5,9 @@ from research_loop import research_seed
 from research_loop.l05_curie.multisource import (
     build_multisource_query_plan,
     run_multisource_discovery,
+    run_multisource_discovery_strict,
 )
-from research_loop.l05_curie.selector import select_candidates
+from research_loop.l05_curie.selector import select_candidates_strict
 
 
 class _Transport:
@@ -77,7 +78,7 @@ def test_multisource_rejects_records_without_source_identity():
             return batch
 
     with pytest.raises(curie.CurieContractError, match="raw_record_sha256"):
-        run_multisource_discovery(
+        run_multisource_discovery_strict(
             _plan(),
             {"pubmed": MissingSourceIdentity()},
             seed_sha256=_plan()["seed_sha256"],
@@ -93,7 +94,7 @@ def test_selector_fails_closed_instead_of_inventing_unknown_query_provenance():
         "provenance": {"provider": "pubmed"},
     }
     with pytest.raises(curie.CurieContractError, match="query|provenance"):
-        select_candidates(
+        select_candidates_strict(
             [record],
             seed={"scientific_question": "q", "hypothesis_seed": "h"},
             scorer=lambda _record, _seed: {
@@ -121,7 +122,7 @@ def test_selector_rejects_non_string_query_provenance():
         },
     }
     with pytest.raises(curie.CurieContractError, match="query|provenance"):
-        select_candidates(
+        select_candidates_strict(
             [record],
             seed={"scientific_question": "q", "hypothesis_seed": "h"},
             scorer=lambda _record, _seed: {
@@ -149,7 +150,7 @@ def test_selector_rejects_query_provenance_outside_authorized_plan():
         },
     }
     with pytest.raises(curie.CurieContractError, match="query|provenance"):
-        select_candidates(
+        select_candidates_strict(
             [record],
             seed={"scientific_question": "q", "hypothesis_seed": "h"},
             scorer=lambda _record, _seed: {

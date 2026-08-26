@@ -87,7 +87,7 @@ The Curie tests import `research_loop.l05_curie` plus direct submodules (`store`
 
 ### C5 — compatibility facades and migration constraints
 
-The `install()` names are not package `__all__` exports, but external code may import them by module path. Therefore `semantic_pack.install()` and `provenance_hardening.install()` remain callable no-op facades with explicit documentation after staticization. Existing frozen EvidencePacks, schema versions, public function signatures, and error classes remain unchanged. The new canonical runtime passes an external seed hash and authorized query-ID set; both parameters remain optional for old public callers, whose self-consistency behavior is preserved. No legacy installer outside the two selected families is deleted in this phase.
+The `install()` names are not package `__all__` exports, but external code may import them by module path. Therefore `semantic_pack.install()` and `provenance_hardening.install()` remain callable no-op facades with explicit documentation after staticization. Existing frozen EvidencePacks, schema versions, legacy public function signatures, and error classes remain unchanged. Canonical Europe PMC acquisition uses separate strict discovery and selector entry points that require the externally derived seed digest and authorized QueryPlan IDs; the legacy entry points remain available only for historical self-consistent callers. Legacy source identity is admitted only through the explicit non-native context compatibility route; native binding, retry, and research-seed validation remain strict. No legacy installer outside the two selected families is deleted in this phase.
 
 ## Implementation tasks
 
@@ -142,7 +142,7 @@ The `install()` names are not package `__all__` exports, but external code may i
 - [ ] Run focused, relevant, and full `pytest` with fresh output and record exact counts.
 - [x] Run compileall, `git diff --check`, and the CLI help smoke checks.
 - [ ] Perform a correctness review and a fresh thermo-nuclear review against the Phase C diff.
-- [x] Fix all Critical/Important findings and rerun affected verification.
+- [ ] Fix all Critical/Important findings and rerun affected verification.
 - [ ] Commit, push `codex/explicit-installer-composition`, create or update a Draft PR, and wait for exact-head CI.
 - [ ] Stop at the Phase C gate; do not merge and do not automatically refactor the remaining P2 or `UNCERTAIN` installers.
 

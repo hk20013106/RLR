@@ -80,7 +80,7 @@ import hashlib
 import json
 from research_loop.l05_curie.multisource import (
     build_multisource_query_plan,
-    run_multisource_discovery,
+    run_multisource_discovery_strict,
 )
 import research_loop.l05_curie.multisource as multisource
 from research_loop.l05_curie import DISCOVERY_BATCH_SCHEMA_VERSION
@@ -134,7 +134,7 @@ class Transport:
         }
 
 
-result = run_multisource_discovery(
+result = run_multisource_discovery_strict(
     plan,
     {"pubmed": Transport()},
     seed_sha256=hashlib.sha256(json.dumps(seed, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
@@ -156,7 +156,7 @@ from research_loop.l05_curie import DISCOVERY_BATCH_SCHEMA_VERSION
 from research_loop.l05_curie import DISCOVERY_TRANSPORT_SCHEMA_VERSION
 from research_loop.l05_curie.multisource import (
     build_multisource_query_plan,
-    run_multisource_discovery,
+    run_multisource_discovery_strict,
 )
 
 seed = {
@@ -204,7 +204,7 @@ class Transport:
 
 
 try:
-    run_multisource_discovery(
+    run_multisource_discovery_strict(
         plan,
         {"pubmed": Transport()},
         seed_sha256=hashlib.sha256(json.dumps(seed, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
@@ -229,7 +229,7 @@ from research_loop.l05_curie import DISCOVERY_BATCH_SCHEMA_VERSION
 from research_loop.l05_curie import DISCOVERY_TRANSPORT_SCHEMA_VERSION
 from research_loop.l05_curie.multisource import (
     build_multisource_query_plan,
-    run_multisource_discovery,
+    run_multisource_discovery_strict,
 )
 
 seed = {
@@ -277,7 +277,7 @@ class Transport:
 
 
 try:
-    run_multisource_discovery(
+    run_multisource_discovery_strict(
         plan,
         {"pubmed": Transport()},
         seed_sha256=hashlib.sha256(json.dumps(seed, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
@@ -296,11 +296,11 @@ def test_selector_requires_query_lineage_without_installer():
         _block_installers("research_loop.l05_curie.provenance_hardening")
         + """
 from research_loop import l05_curie
-from research_loop.l05_curie.selector import select_candidates
+from research_loop.l05_curie.selector import select_candidates_strict
 
 
 try:
-    select_candidates(
+    select_candidates_strict(
         [{
             "paper_id": "P1",
             "title": "Paper",
