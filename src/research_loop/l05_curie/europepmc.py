@@ -1,6 +1,6 @@
-"""Europe PMC acquisition primitives for the L0.5 Curie runtime.
+"""Europe PMC provider-specific acquisition primitives for L0.5 Curie.
 
-Discovery, selection, source retrieval, and verification are deliberately
+Discovery transport, source retrieval, and verification are deliberately
 separated. A retriever may propose candidate extracts, but only the independent
 verifier may emit `L05EvidenceExtract/v1` records with `LOCATED` status.
 """
@@ -19,7 +19,6 @@ from .contracts import (
     DISCOVERY_BATCH_SCHEMA_VERSION,
     DISCOVERY_TRANSPORT_SCHEMA_VERSION,
     EVIDENCE_EXTRACT_SCHEMA_VERSION,
-    QUERY_PLAN_SCHEMA_VERSION,
     CurieContractError,
     validate_evidence_extract,
 )
@@ -32,14 +31,6 @@ HttpGet = Callable[[str, int], bytes]
 
 _SAFE_TOKEN = re.compile(r"[^A-Za-z0-9_.-]+")
 _DOI_PREFIX = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.IGNORECASE)
-_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{2,}")
-_STOPWORDS = {
-    "about", "after", "also", "among", "because", "before", "between",
-    "could", "from", "have", "into", "more", "most", "other", "than",
-    "that", "their", "there", "these", "this", "through", "under", "using",
-    "what", "when", "where", "which", "with", "would", "does", "how", "why",
-    "the", "and", "are", "for", "not", "can", "its", "our", "they", "them",
-}
 _TARGET_SECTION_WORDS = ("result", "discussion", "conclusion")
 _SOURCE_ROOT = Path("09_Literature_Database") / "source_snapshots" / "l05"
 
@@ -180,192 +171,6 @@ def canonicalize_europepmc_record(raw: dict) -> dict:
     }
 
 
-def _copy_record(record: dict) -> dict:
-    return {
-        **record,
-        "identifiers": dict(record.get("identifiers") or {}),
-        "metadata": {
-            **(record.get("metadata") or {}),
-            "publication_types": list(
-                (record.get("metadata") or {}).get("publication_types") or []
-            ),
-        },
-        "provenance": dict(record.get("provenance") or {}),
-    }
-
-
-def _stable_identifiers(record: dict) -> set[tuple[str, str]]:
-    identifiers = record.get("identifiers")
-    if not isinstance(identifiers, dict):
-        return set()
-    return {
-        (key, str(identifiers[key]))
-        for key in ("doi", "pmid", "pmcid")
-        if str(identifiers.get(key) or "").strip()
-    }
-
-
-def _merge_discovery_record(primary: dict, duplicate: dict) -> None:
-    primary_ids = primary["identifiers"]
-    duplicate_ids = duplicate.get("identifiers") or {}
-    for key in ("doi", "pmid", "pmcid"):
-        left = str(primary_ids.get(key) or "")
-        right = str(duplicate_ids.get(key) or "")
-        if left and right and left != right:
-            raise CurieContractError(
-                f"Europe PMC duplicate records conflict on canonical {key}: {left} != {right}"
-            )
-    for key, value in duplicate_ids.items():
-        if value and not primary_ids.get(key):
-            primary_ids[key] = value
-
-    primary_meta = primary["metadata"]
-    duplicate_meta = duplicate.get("metadata") or {}
-    for key in ("authors", "year", "journal", "abstract"):
-        if not primary_meta.get(key) and duplicate_meta.get(key):
-            primary_meta[key] = duplicate_meta[key]
-    for key in ("is_open_access", "in_europe_pmc"):
-        primary_meta[key] = bool(primary_meta.get(key) or duplicate_meta.get(key))
-    publication_types = list(primary_meta.get("publication_types") or [])
-    for value in duplicate_meta.get("publication_types") or []:
-        if value not in publication_types:
-            publication_types.append(value)
-    primary_meta["publication_types"] = publication_types
-
-    provenance = primary["provenance"]
-    source_records = provenance.get("source_records")
-    if not isinstance(source_records, list):
-        source_records = [{
-            key: provenance.get(key)
-            for key in ("provider", "source", "ext_id", "raw_record_sha256")
-            if provenance.get(key) is not None
-        }]
-    duplicate_provenance = duplicate.get("provenance") or {}
-    source_records.append({
-        key: duplicate_provenance.get(key)
-        for key in ("provider", "source", "ext_id", "raw_record_sha256")
-        if duplicate_provenance.get(key) is not None
-    })
-    provenance["source_records"] = source_records
-
-
-def deduplicate_discovery_records(records: list[dict]) -> tuple[list[dict], list[str]]:
-    """Deduplicate by stable identifier overlap and merge richer source metadata."""
-    if not isinstance(records, list):
-        raise CurieContractError("discovery records must be a list")
-    unique: list[dict] = []
-    duplicates: list[str] = []
-    paper_owner: dict[str, int] = {}
-    identifier_owner: dict[tuple[str, str], int] = {}
-
-    for record in records:
-        if not isinstance(record, dict):
-            raise CurieContractError("discovery record must be an object")
-        paper_id = _require_text(record.get("paper_id"), "discovery record paper_id")
-        stable_ids = _stable_identifiers(record)
-        owners = {
-            owner for identity in stable_ids
-            if (owner := identifier_owner.get(identity)) is not None
-        }
-        if paper_id in paper_owner:
-            owners.add(paper_owner[paper_id])
-        if len(owners) > 1:
-            raise CurieContractError(
-                "Europe PMC record bridges multiple canonical papers with conflicting identity clusters"
-            )
-        if owners:
-            owner = next(iter(owners))
-            _merge_discovery_record(unique[owner], record)
-            duplicates.append(paper_id)
-            paper_owner[paper_id] = owner
-            for identity in _stable_identifiers(unique[owner]):
-                identifier_owner[identity] = owner
-            continue
-
-        owner = len(unique)
-        canonical = _copy_record(record)
-        unique.append(canonical)
-        paper_owner[paper_id] = owner
-        for identity in stable_ids:
-            identifier_owner[identity] = owner
-    return unique, duplicates
-
-
-def _keywords(text: str) -> list[str]:
-    values: list[str] = []
-    seen: set[str] = set()
-    for token in _TOKEN.findall(text):
-        lowered = token.casefold()
-        if lowered in _STOPWORDS or lowered in seen:
-            continue
-        seen.add(lowered)
-        values.append(token)
-    return values
-
-
-def build_europepmc_query_plan(
-    seed: dict,
-    *,
-    seed_sha256: str,
-    round_index: int = 1,
-    explicit_queries: list[str] | None = None,
-) -> dict:
-    """Project one canonical ResearchSeed into an auditable Europe PMC QueryPlan."""
-    if not isinstance(seed, dict):
-        raise CurieContractError("ResearchSeed must be an object")
-    candidate_id = _require_text(seed.get("candidate_id"), "ResearchSeed candidate_id")
-    round_id = _require_text(seed.get("round_id"), "ResearchSeed round_id")
-    question = _require_text(seed.get("scientific_question"), "ResearchSeed scientific_question")
-    hypothesis = _require_text(seed.get("hypothesis_seed"), "ResearchSeed hypothesis_seed")
-    if not isinstance(round_index, int) or isinstance(round_index, bool) or not 1 <= round_index <= 3:
-        raise CurieContractError("round_index must be an integer from 1 to 3")
-
-    queries: list[tuple[str, str]] = []
-    if explicit_queries is not None:
-        if not isinstance(explicit_queries, list) or not explicit_queries:
-            raise CurieContractError("explicit_queries must be a non-empty list")
-        for query in explicit_queries:
-            queries.append(("operator_reproducible_query", _require_text(query, "explicit query")))
-    else:
-        question_terms = _keywords(question)[:10]
-        hypothesis_terms = _keywords(hypothesis)[:10]
-        combined = list(dict.fromkeys(question_terms + hypothesis_terms))[:14]
-        if not combined:
-            raise CurieContractError("ResearchSeed produced no searchable Europe PMC terms")
-        queries.append(("seed_question_hypothesis", f"({' '.join(combined)}) AND (OPEN_ACCESS:y)"))
-
-    query_items = [
-        {
-            "query_id": f"Q{index:03d}",
-            "intent": intent,
-            "query": query,
-            "providers": [PROVIDER],
-        }
-        for index, (intent, query) in enumerate(queries, 1)
-    ]
-    identity = {
-        "candidate_id": candidate_id,
-        "round_id": round_id,
-        "seed_sha256": str(seed_sha256).lower(),
-        "round_index": round_index,
-        "queries": query_items,
-    }
-    return {
-        "schema_version": QUERY_PLAN_SCHEMA_VERSION,
-        "candidate_id": candidate_id,
-        "round_id": round_id,
-        "seed_sha256": str(seed_sha256).lower(),
-        "plan_id": "QP_EPMC_" + _sha(identity)[:16],
-        "round_index": round_index,
-        "queries": query_items,
-        "coverage_targets": [
-            "verified_full_text_source",
-            "located_results_or_interpretation",
-        ],
-        "planner": "curie-europepmc-seed-planner/v1",
-    }
-
-
 def _default_http_get(url: str, timeout: int) -> bytes:
     request = Request(
         url,
@@ -483,94 +288,6 @@ class EuropePmcTransport:
             "hit_count": int(payload.get("hitCount") or 0) if isinstance(payload, dict) else 0,
             "next_cursor_mark": str(payload.get("nextCursorMark") or "") if isinstance(payload, dict) else "",
         }
-
-
-def _relevance_score(record: dict, seed: dict) -> int:
-    seed_text = " ".join((
-        _require_text(seed.get("scientific_question"), "seed scientific_question"),
-        _require_text(seed.get("hypothesis_seed"), "seed hypothesis_seed"),
-    ))
-    terms = {item.casefold() for item in _keywords(seed_text)}
-    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
-    haystack = " ".join((
-        str(record.get("title") or ""),
-        str(metadata.get("abstract") or ""),
-    )).casefold()
-    matched = sum(1 for term in terms if term in haystack)
-    return matched
-
-
-def select_europepmc_candidates(
-    records: list[dict], *, seed: dict, max_papers: int = 3
-) -> dict:
-    """Rank candidates while preserving INCLUDE/EXCLUDE/RESERVE decisions."""
-    if not isinstance(max_papers, int) or isinstance(max_papers, bool) or max_papers < 1:
-        raise CurieContractError("max_papers must be a positive integer")
-    unique, duplicates = deduplicate_discovery_records(records)
-    eligible: list[tuple[int, int, dict]] = []
-    decisions: list[dict] = []
-
-    for index, record in enumerate(unique):
-        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
-        identifiers = record.get("identifiers") if isinstance(record.get("identifiers"), dict) else {}
-        score = _relevance_score(record, seed)
-        has_full_text = bool(
-            identifiers.get("pmcid")
-            and metadata.get("is_open_access") is True
-            and metadata.get("in_europe_pmc") is True
-        )
-        if not has_full_text:
-            decisions.append({
-                "paper_id": record["paper_id"],
-                "decision": "EXCLUDE",
-                "reason_code": "NO_OPEN_FULL_TEXT",
-                "reason": "Europe PMC does not expose an OA PMCID full-text source for this record.",
-                "score": score,
-            })
-            continue
-        eligible.append((score, -index, record))
-
-    eligible.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    selected_ids = {item[2]["paper_id"] for item in eligible[:max_papers]}
-    for score, _neg_index, record in eligible:
-        included = record["paper_id"] in selected_ids
-        decision = "INCLUDE" if included else "RESERVE"
-        decisions.append({
-            "paper_id": record["paper_id"],
-            "decision": decision,
-            "reason_code": "SELECTED_FOR_FULL_TEXT" if included else "CAPACITY_RESERVE",
-            "reason": (
-                "Selected for Europe PMC full-text retrieval."
-                if included else
-                "Eligible OA full text retained as reserve after the retrieval cap."
-            ),
-            "score": score,
-        })
-
-    selected: list[dict] = []
-    decisions_by_id = {item["paper_id"]: item for item in decisions}
-    for _score, _neg_index, record in eligible[:max_papers]:
-        decision = decisions_by_id[record["paper_id"]]
-        selected.append({
-            "paper_id": record["paper_id"],
-            "title": record["title"],
-            "identifiers": dict(record.get("identifiers") or {}),
-            "metadata": dict(record.get("metadata") or {}),
-            "provenance": dict(record.get("provenance") or {}),
-            "selection": {
-                "decision": "INCLUDE",
-                "reason": decision["reason"],
-                "reason_code": decision["reason_code"],
-                "score": decision["score"],
-            },
-        })
-
-    return {
-        "provider": PROVIDER,
-        "selected": selected,
-        "decisions": decisions,
-        "duplicate_paper_ids": duplicates,
-    }
 
 
 def _parse_target_paragraphs(raw: bytes) -> list[dict]:
