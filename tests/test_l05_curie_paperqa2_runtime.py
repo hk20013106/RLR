@@ -27,10 +27,10 @@ def test_external_backend_requires_real_runtime_paths(tmp_path):
     with pytest.raises(CurieContractError, match="python|bridge|runtime"):
         PaperQA2SubprocessBackend(
             python_executable=tmp_path / "missing-python.exe",
-        bridge_script=tmp_path / "missing-bridge.py",
-        paperqa_repo=tmp_path,
-        pqa_home=tmp_path / "pqa-home",
-    )
+            bridge_script=tmp_path / "missing-bridge.py",
+            paperqa_repo=tmp_path,
+            pqa_home=tmp_path / "pqa-home",
+        )
 
 
 def test_external_backend_preserves_exact_runtime_provenance(tmp_path):
@@ -162,6 +162,34 @@ def test_source_alignment_emits_all_source_candidates_in_one_cross_page_chunk():
     )
 
     assert [item["locator"] for item in aligned] == ["sec:7/p:7", "sec:7/p:9"]
+
+
+def test_source_alignment_keeps_strongest_chunk_per_locator_and_versions_provenance():
+    chunks = [
+        {
+            "text": "WGCNA pseudocell unrelated filler",
+            "locator": "PDF chunk 0",
+            "score": 0.6,
+        },
+        {
+            "text": "WGCNA pseudocell module detection",
+            "locator": "PDF chunk 1",
+            "score": 0.9,
+        },
+    ]
+    source_candidates = [{
+        "paper_id": "P1",
+        "text": "WGCNA pseudocell module detection",
+        "section": "Methods",
+        "locator": "sec:7/p:7",
+    }]
+
+    aligned = align_paperqa2_chunks(chunks=chunks, source_candidates=source_candidates)
+
+    assert len(aligned) == 1
+    assert aligned[0]["source_alignment"]["chunk_index"] == 1
+    assert aligned[0]["source_alignment"]["source_token_coverage"] == 1.0
+    assert aligned[0]["source_alignment"]["method"] == "token-coverage-multimatch/v2"
 
 
 def test_source_alignment_drops_below_threshold_candidates():
