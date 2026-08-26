@@ -297,8 +297,11 @@ def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(
             return XML
         raise AssertionError(url)
 
-    runtime = PaperQA2CurieRuntime(
-        backend=lambda **kwargs: [{
+    seen_question = {}
+
+    def paperqa_backend(**kwargs):
+        seen_question["value"] = kwargs["question"]
+        return [{
             "text": "Rca1p was required for the transcriptional response to carbon dioxide.",
             "section": "PaperQA2",
             "locator": "PDF page 1",
@@ -317,7 +320,10 @@ def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(
                 "pdf_path": str(pdf),
                 "pdf_sha256": hashlib.sha256(pdf.read_bytes()).hexdigest(),
             },
-        }],
+        }]
+
+    runtime = PaperQA2CurieRuntime(
+        backend=paperqa_backend,
         backend_id="paperqa2-fork-v2026.08.12/sparse-docs-v1",
     )
 
@@ -373,9 +379,13 @@ def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(
         item["retrieval"]["upstream_engine"] == "paperqa2"
         for item in frozen["evidence"]
     )
+    assert "The bZIP Transcription Factor Rca1p" in seen_question["value"]
+    assert "carbon" in seen_question["value"].casefold()
+    assert seen_question["value"] != seed["scientific_question"]
     audit = json.loads(
         (project / result["acquisition_manifest_path"]).read_text(encoding="utf-8")
     )
+    assert audit["paperqa2"][0]["retrieval_query"] == seen_question["value"]
     assert audit["paperqa2"][0]["reasoning_authorized_evidence_ids"] == [
         item["evidence_id"] for item in frozen["evidence"]
     ]
@@ -470,3 +480,62 @@ def test_cli_registers_pinned_paperqa2_production_command(tmp_path, monkeypatch,
     assert seen["semantic_assessor"] is semantic_assessor
     assert seen["semantic_assessor_id"] == "fixture-semantic-command/v1"
     assert seen["run_id"] == "PQA_CLI001"
+
+
+def test_paperqa2_retrieval_query_combines_paper_anchor_and_targeted_method_intent():
+    selected = {"title": "General developmental transcriptomics study"}
+    seed = {
+        "scientific_question": (
+            "Which WGCNA pseudocell construction and module detection method "
+            "best captures developmental cell-state programs?"
+        ),
+        "hypothesis_seed": "WGCNA modules expose coordinated developmental programs.",
+    }
+    query_plan = {
+        "queries": [{
+            "query": "WGCNA pseudocell construction module detection",
+            "intent": "operator_reproducible_query",
+        }],
+    }
+
+    query = europepmc_runtime._paperqa2_retrieval_query(
+        selected, seed, query_plan
+    )
+
+    assert selected["title"] in query
+    assert "WGCNA" in query
+    assert "pseudocell" in query
+    assert "module" in query
+    assert query != selected["title"]
+
+
+def test_paperqa2_retrieval_query_bounds_long_non_ascii_seed():
+    selected = {"title": "Paper-local anchor"}
+    long_question = "这是一个用于检验检索边界的超长科学问题" * 200
+    seed = {
+        "scientific_question": long_question,
+        "hypothesis_seed": "需要定位具体方法机制",
+    }
+    query_plan = {"queries": [{"query": long_question, "intent": "seed_question_hypothesis"}]}
+
+    query = europepmc_runtime._paperqa2_retrieval_query(
+        selected, seed, query_plan
+    )
+
+    assert selected["title"] in query
+    assert len(query) < len(long_question)
+    assert query != long_question
+
+
+def test_paperqa2_retrieval_query_fails_closed_without_title_or_target_terms():
+    with pytest.raises(CurieContractError, match="paper title"):
+        europepmc_runtime._paperqa2_retrieval_query(
+            {}, {"scientific_question": "method", "hypothesis_seed": "target"}, {}
+        )
+
+    with pytest.raises(CurieContractError, match="targeted scientific retrieval terms"):
+        europepmc_runtime._paperqa2_retrieval_query(
+            {"title": "Paper"},
+            {"scientific_question": "", "hypothesis_seed": ""},
+            {"queries": []},
+        )
