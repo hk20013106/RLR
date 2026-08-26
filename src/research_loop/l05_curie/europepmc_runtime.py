@@ -239,6 +239,7 @@ def _prepare_europepmc_acquisition(
     discovery = run_multisource_discovery(
         query_plan,
         {"europe-pmc": transport},
+        seed_sha256=seed_digest,
         page_size=page_size,
     )
     generic_selection = select_candidates(
