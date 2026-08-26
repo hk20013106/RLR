@@ -8,7 +8,11 @@ from research_loop import l0_contract, research_seed
 from research_loop.l05_curie import CurieContractError, load_frozen_evidence_pack
 from research_loop.l05_curie import europepmc_runtime
 from research_loop.l05_curie.europepmc_runtime import run_europepmc_acquisition
-from research_loop.l05_curie.paperqa2_runtime import PaperQA2CurieRuntime
+from research_loop.l05_curie.paperqa2_runtime import (
+    MIN_SOURCE_TOKEN_COVERAGE,
+    PaperQA2CurieRuntime,
+    align_paperqa2_chunks,
+)
 from research_loop import cli
 
 
@@ -88,6 +92,20 @@ def _supported_semantic_assessment(*, extract, claim):
         "context_preserved": True,
         "qualification_preserved": True,
         "reason": "The located paragraph directly addresses the ResearchSeed semantic target.",
+    }
+
+
+def _located(evidence_id: str, text: str, locator: str) -> dict:
+    return {
+        "schema_version": "L05EvidenceExtract/v1",
+        "evidence_id": evidence_id,
+        "paper_id": "P1",
+        "section": "Results",
+        "text": text,
+        "locator": locator,
+        "role": "CONTEXT",
+        "verification_status": "LOCATED",
+        "retrieval": {"engine": "fixture", "source_sha256": "a" * 64},
     }
 
 
@@ -180,6 +198,88 @@ def test_paperqa2_production_runtime_requires_explicit_semantic_assessor(tmp_pat
             paperqa_runtime=runtime,
             pdf_paths={},
         )
+
+
+def test_confusable_above_threshold_extract_requires_real_semantic_authorization():
+    source_candidates = [
+        {
+            "paper_id": "P1",
+            "text": "WGCNA pseudocells were constructed before module detection and GO enrichment.",
+            "section": "Methods",
+            "locator": "sec:7/p:7",
+        },
+        {
+            "paper_id": "P1",
+            "text": (
+                "WGCNA modules were visualized in a generic network figure without "
+                "describing the pseudocell workflow."
+            ),
+            "section": "Results",
+            "locator": "sec:7/p:9",
+        },
+    ]
+    aligned = align_paperqa2_chunks(
+        chunks=[{
+            "text": (
+                "WGCNA pseudocells were constructed before module detection and GO enrichment. "
+                "WGCNA modules were visualized in a generic network figure."
+            ),
+            "locator": "PDF pages 7-9",
+            "score": 0.9,
+        }],
+        source_candidates=source_candidates,
+    )
+    assert [item["locator"] for item in aligned] == ["sec:7/p:7", "sec:7/p:9"]
+    assert all(
+        item["source_alignment"]["source_token_coverage"] >= MIN_SOURCE_TOKEN_COVERAGE
+        for item in aligned
+    )
+
+    target = _located("E_target", aligned[0]["text"], aligned[0]["locator"])
+    confusable = _located("E_confusable", aligned[1]["text"], aligned[1]["locator"])
+    semantic_target = (
+        "Scientific question: How was the scWGCNA workflow implemented?\n"
+        "Hypothesis seed: The workflow constructs pseudocells before WGCNA module detection."
+    )
+    seen_claims = []
+
+    def assessor(*, extract, claim):
+        seen_claims.append((extract["evidence_id"], claim))
+        if extract["evidence_id"] == "E_target":
+            return {
+                "entailment": "SUPPORTED",
+                "scope_match": True,
+                "context_preserved": True,
+                "qualification_preserved": True,
+                "reason": "The methods paragraph directly describes the requested workflow.",
+            }
+        return {
+            "entailment": "UNRELATED",
+            "scope_match": True,
+            "context_preserved": True,
+            "qualification_preserved": True,
+            "reason": "Shared WGCNA vocabulary does not make the figure paragraph evidence for the workflow.",
+        }
+
+    admitted, admitted_semantics, all_semantics = (
+        europepmc_runtime._admit_paperqa2_semantic_evidence(
+            [target, confusable],
+            semantic_target=semantic_target,
+            assessor=assessor,
+            assessor_id="fixture-semantic-assessor/v1",
+        )
+    )
+
+    assert [item["evidence_id"] for item in admitted] == ["E_target"]
+    assert [item["evidence_id"] for item in admitted_semantics] == ["E_target"]
+    assert {item["evidence_id"] for item in all_semantics} == {"E_target", "E_confusable"}
+    assert all(claim == semantic_target for _evidence_id, claim in seen_claims)
+    assert all(
+        claim != extract["text"]
+        for extract, (_evidence_id, claim) in zip(
+            [target, confusable], seen_claims, strict=True
+        )
+    )
 
 
 def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(
