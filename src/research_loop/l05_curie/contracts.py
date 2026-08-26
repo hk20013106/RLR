@@ -119,7 +119,7 @@ def validate_discovery_batch(
     query_ids: set[str],
     expected_query_id: str | None = None,
     expected_provider: str | None = None,
-    expected_providers: set[str] | None = None,
+    expected_providers_by_query: dict[str, set[str]] | None = None,
     require_source_identity: bool = False,
 ) -> dict:
     """Validate normalized discovery metadata and bind it to an executed query."""
@@ -142,7 +142,9 @@ def validate_discovery_batch(
         raise CurieContractError(
             f"discovery batch provider {provider!r} does not match executed provider {expected_provider!r}"
         )
-    if expected_providers is not None and provider not in expected_providers:
+    if expected_providers_by_query is not None and provider not in expected_providers_by_query.get(
+        query_id, set()
+    ):
         raise CurieContractError(
             f"discovery batch provider {provider!r} is not declared for query {query_id!r}"
         )

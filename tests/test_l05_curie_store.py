@@ -123,6 +123,11 @@ def test_build_rejects_discovery_provider_not_declared_by_query_plan():
         _build_pack(discovery_receipts=[batch])
 
 
+def test_build_rejects_non_object_discovery_receipt_with_contract_error():
+    with pytest.raises(curie.CurieContractError, match="discovery batch|object"):
+        _build_pack(discovery_receipts=[None])
+
+
 def test_load_requires_source_identity_unless_legacy_mode_is_explicit(tmp_path):
     manifest = curie.freeze_evidence_pack(tmp_path, _build_pack())
     path = _artifact_path(tmp_path, manifest)

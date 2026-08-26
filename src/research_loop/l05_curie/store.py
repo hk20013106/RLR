@@ -222,7 +222,7 @@ def _validate_pack_structure(
         validate_discovery_batch(
             batch,
             query_ids=query_ids,
-            expected_providers=query_providers.get(str(batch.get("query_id")), set()),
+            expected_providers_by_query=query_providers,
             require_source_identity=require_source_identity,
         )
 
