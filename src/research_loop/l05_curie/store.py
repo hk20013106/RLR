@@ -169,6 +169,9 @@ def _validate_pack_structure(
         and expected_status == "FROZEN"
         and status == "FROZEN"
     )
+    # The only relaxed path is an explicit historical frozen-artifact load.
+    # New packs and all normal in-memory validation must carry source identity.
+    require_source_identity = not legacy_frozen_acquisition_metadata
 
     parent_hash = pack.get("parent_pack_sha256")
     source_gap_request_id = pack.get("source_gap_request_id")
@@ -208,7 +211,11 @@ def _validate_pack_structure(
     if not isinstance(discovery_receipts, list):
         raise CurieContractError("EvidencePack discovery_receipts must be a list")
     for batch in discovery_receipts:
-        validate_discovery_batch(batch, query_ids=query_ids)
+        validate_discovery_batch(
+            batch,
+            query_ids=query_ids,
+            require_source_identity=require_source_identity,
+        )
 
     selected_papers = _validate_selected_papers(pack.get("selected_papers"))
     selected_ids = {paper["paper_id"] for paper in selected_papers}

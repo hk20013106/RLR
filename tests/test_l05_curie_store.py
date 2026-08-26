@@ -41,6 +41,10 @@ def _discovery_batch():
                 "paper_id": "PMID:123",
                 "title": "Cardiac physiology in bats",
                 "identifiers": {"pmid": "123"},
+                "provenance": {
+                    "provider": "pubmed",
+                    "raw_record_sha256": "4" * 64,
+                },
             }
         ],
     }
@@ -102,6 +106,13 @@ def _build_pack(**overrides):
     }
     kwargs.update(overrides)
     return curie.build_evidence_pack(**kwargs)
+
+
+def test_build_rejects_discovery_records_without_source_identity():
+    batch = _discovery_batch()
+    del batch["records"][0]["provenance"]
+    with pytest.raises(curie.CurieContractError, match="provenance|raw_record_sha256"):
+        _build_pack(discovery_receipts=[batch])
 
 
 def _query_plan_for_round(round_index: int) -> dict:

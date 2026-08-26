@@ -51,6 +51,10 @@ def _pack_manifest(tmp_path, *, run_id="CURIE001", version=1,
             "paper_id": "PMID:22253597",
             "title": "Rca1p carbon dioxide sensing",
             "identifiers": {"pmid": "22253597", "pmcid": "PMC3257301"},
+            "provenance": {
+                "provider": "europe-pmc",
+                "raw_record_sha256": "3" * 64,
+            },
         }],
     }
     selected = [{
