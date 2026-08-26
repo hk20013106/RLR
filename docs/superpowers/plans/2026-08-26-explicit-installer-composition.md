@@ -148,10 +148,10 @@ The `install()` names are not package `__all__` exports, but external code may i
 
 ## Verification evidence
 
-- Final implementation HEAD before this evidence update: `0511253`.
+- Final implementation HEAD before this evidence update: `019f0d3`.
 - Focused Curie composition/provenance/runtime tests: `30 passed in 10.00s`.
 - Relevant L0.5 suite (`l05|research_seed` test files): `140 passed in 10.77s`.
-- Full canonical-source pytest run: `1040 passed in 567.76s (0:09:27)`.
+- Full canonical-source pytest run at `019f0d3`: `1040 passed in 570.92s (0:09:30)`.
 - Static checks: `compileall`, both CLI `--help` smoke checks, and `git diff --check` passed.
 - Fresh correctness review: no Critical/Important/Minor findings.
 - Fresh thermo-nuclear review: no Critical/Important findings; one Minor compatibility re-export note was documented and retained intentionally.
