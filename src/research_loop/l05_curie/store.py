@@ -97,6 +97,8 @@ def _validate_semantic_pack(pack: dict) -> dict:
     evidence = pack.get("evidence")
     if not isinstance(evidence, list) or not evidence:
         raise CurieContractError("semantic EvidencePack requires non-empty evidence")
+    if any(not isinstance(item, dict) for item in evidence):
+        raise CurieContractError("semantic EvidencePack evidence must contain objects")
     evidence_by_id = {str(item.get("evidence_id") or ""): item for item in evidence}
     if "" in evidence_by_id or len(evidence_by_id) != len(evidence):
         raise CurieContractError(
@@ -393,12 +395,12 @@ def load_frozen_evidence_pack(project_dir: str | Path, manifest: dict, *,
         pack = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CurieContractError(f"frozen EvidencePack is unreadable: {exc}") from exc
+    _validate_semantic_pack(pack)
     pack = _validate_pack_structure(
         pack,
         expected_status="FROZEN",
         allow_legacy_frozen_acquisition_metadata=True,
     )
-    _validate_semantic_pack(pack)
     for field, expected in (
         ("candidate_id", candidate_id),
         ("round_id", round_id),

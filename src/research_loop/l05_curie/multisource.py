@@ -389,64 +389,17 @@ def _merge(primary: dict, duplicate: dict) -> None:
     for item in incoming.get("source_records") or [_source_record(duplicate)]:
         if item not in sources:
             sources.append(item)
-
-
-def _record_matches(canonical: dict, observed: dict) -> bool:
-    if str(canonical.get("paper_id") or "") == str(observed.get("paper_id") or ""):
-        return True
-    left = _stable_ids(canonical)
-    right = _stable_ids(observed)
-    return bool(left and right and left.intersection(right))
-
-
-def _attach_originating_queries(result: dict) -> dict:
-    """Attach the authoritative QueryPlan lineage to each deduplicated record."""
-    if not isinstance(result, dict):
-        raise CurieContractError("multi-source discovery result must be an object")
-    batches = result.get("batches")
-    records = result.get("records")
-    if not isinstance(batches, list) or not isinstance(records, list):
-        raise CurieContractError(
-            "multi-source discovery result must contain batch and record lists"
-        )
-
-    query_ids_by_index: list[list[str]] = [[] for _ in records]
-    for batch in batches:
-        if not isinstance(batch, dict):
-            raise CurieContractError("discovery batch provenance must be an object")
-        query_id = str(batch.get("query_id") or "").strip()
-        if not query_id:
-            raise CurieContractError("discovery batch has no authoritative query_id")
-        batch_records = batch.get("records")
-        if not isinstance(batch_records, list):
-            raise CurieContractError("discovery batch records must be a list")
-        for observed in batch_records:
-            matches = [
-                index
-                for index, canonical in enumerate(records)
-                if _record_matches(canonical, observed)
-            ]
-            if len(matches) != 1:
-                raise CurieContractError(
-                    "discovery query provenance cannot resolve exactly one canonical paper"
-                )
-            lineage = query_ids_by_index[matches[0]]
-            if query_id not in lineage:
-                lineage.append(query_id)
-
-    hardened = copy.deepcopy(result)
-    for index, record in enumerate(hardened["records"]):
-        lineage = query_ids_by_index[index]
-        if not lineage:
-            raise CurieContractError(
-                "canonical discovery paper has no originating query provenance"
-            )
-        provenance = record.get("provenance")
-        if not isinstance(provenance, dict):
-            provenance = {}
-            record["provenance"] = provenance
-        provenance["originating_query_ids"] = lineage
-    return hardened
+    left_query_ids = primary["provenance"].get("originating_query_ids")
+    if not isinstance(left_query_ids, list):
+        left_query_ids = []
+        primary["provenance"]["originating_query_ids"] = left_query_ids
+    incoming_query_ids = incoming.get("originating_query_ids")
+    if not isinstance(incoming_query_ids, list):
+        incoming_query_ids = []
+    for query_id in incoming_query_ids:
+        query_id = str(query_id or "").strip()
+        if query_id and query_id not in left_query_ids:
+            left_query_ids.append(query_id)
 
 
 def deduplicate_provider_records(records: list[dict]) -> tuple[list[dict], list[str]]:
@@ -817,13 +770,21 @@ def run_multisource_discovery(plan: dict, transports: dict[str, object], *,
                 })
                 continue
             batches.append(batch)
-            records.extend(batch["records"])
+            for record in batch["records"]:
+                canonical = copy.deepcopy(record)
+                provenance = canonical.get("provenance")
+                if not isinstance(provenance, dict):
+                    provenance = {}
+                    canonical["provenance"] = provenance
+                # QueryPlan, not provider payload, is the authority for lineage.
+                provenance["originating_query_ids"] = [str(query["query_id"])]
+                records.append(canonical)
     canonical, duplicates = deduplicate_provider_records(records)
-    return _attach_originating_queries({
+    return {
         "schema_version": "L05MultiSourceDiscovery/v1",
         "query_plan_id": str(plan["plan_id"]),
         "batches": batches,
         "records": canonical,
         "duplicate_paper_ids": duplicates,
         "failures": failures,
-    })
+    }

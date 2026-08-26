@@ -80,6 +80,7 @@ from research_loop.l05_curie.multisource import (
     build_multisource_query_plan,
     run_multisource_discovery,
 )
+import research_loop.l05_curie.multisource as multisource
 from research_loop.l05_curie import DISCOVERY_BATCH_SCHEMA_VERSION
 from research_loop.l05_curie import DISCOVERY_TRANSPORT_SCHEMA_VERSION
 
@@ -90,6 +91,9 @@ seed = {
     "scientific_question": "question",
     "hypothesis_seed": "hypothesis",
 }
+multisource._record_matches = lambda *_args: (_ for _ in ()).throw(
+    AssertionError("discovery must not infer query lineage after deduplication")
+)
 plan = build_multisource_query_plan(
     seed,
     seed_sha256="a" * 64,
@@ -164,6 +168,19 @@ except l05_curie.CurieContractError:
     pass
 else:
     raise AssertionError("selector accepted a record without query provenance")
+"""
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_historical_curie_installers_are_explicit_noop_facades():
+    proc = _fresh(
+        """
+from research_loop.l05_curie.provenance_hardening import install as install_provenance
+from research_loop.l05_curie.semantic_pack import install as install_semantic
+
+assert install_provenance() is None
+assert install_semantic() is None
 """
     )
     assert proc.returncode == 0, proc.stderr
