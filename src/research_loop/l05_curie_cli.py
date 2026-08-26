@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -15,6 +16,15 @@ from research_loop.l05_curie.paperqa2_runtime import (
     PaperQA2CurieRuntime,
     PaperQA2SubprocessBackend,
 )
+from research_loop.providers import CommandProvider, ProviderError
+
+_SEMANTIC_ASSESSMENT_SCHEMA = {
+    "entailment": "SUPPORTED | CONTRADICTED | AMBIGUOUS | UNRELATED",
+    "scope_match": bool,
+    "context_preserved": bool,
+    "qualification_preserved": bool,
+    "reason": str,
+}
 
 
 def cmd_l05_acquire_europepmc(args) -> int:
@@ -54,6 +64,58 @@ def _load_pdf_paths(path: str) -> dict[str, str]:
     return paths
 
 
+def _semantic_assessor_from_command(
+    command: str,
+    *,
+    run_dir: str | Path,
+    timeout: int,
+):
+    """Adapt an explicit headless command to the fixed semantic-assessor contract."""
+    command = str(command or "").strip()
+    if not command:
+        raise CurieContractError("PaperQA2 semantic assessor command must be non-empty")
+    try:
+        provider = CommandProvider({"command": command, "timeout": timeout})
+    except ProviderError as exc:
+        raise CurieContractError(f"PaperQA2 semantic assessor is invalid: {exc}") from exc
+    root = Path(run_dir)
+    counter = 0
+
+    def assessor(*, extract: dict, claim: str) -> dict:
+        nonlocal counter
+        counter += 1
+        context = (
+            "Assess whether the independently LOCATED scientific extract supports, "
+            "contradicts, is ambiguous for, or is unrelated to the ResearchSeed target. "
+            "Judge scope, context, and qualification preservation. Do not rewrite the "
+            "extract or claim.\n\n"
+            + json.dumps(
+                {"claim": claim, "extract": extract},
+                indent=2,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        try:
+            result = provider.run_agent(
+                "L0.5",
+                "SemanticVerifier",
+                context,
+                output_schema=_SEMANTIC_ASSESSMENT_SCHEMA,
+                run_dir=root / f"assessment_{counter:04d}",
+            )
+        except Exception as exc:
+            raise CurieContractError(
+                f"PaperQA2 semantic assessor command failed: {exc}"
+            ) from exc
+        if not isinstance(result, dict):
+            raise CurieContractError("PaperQA2 semantic assessor command must return JSON object")
+        return result
+
+    command_sha = hashlib.sha256(command.encode("utf-8")).hexdigest()
+    return assessor, f"l05-semantic-command-sha256/{command_sha}"
+
+
 def cmd_l05_acquire_paperqa2_europepmc(args) -> int:
     try:
         backend = PaperQA2SubprocessBackend(
@@ -67,11 +129,18 @@ def cmd_l05_acquire_paperqa2_europepmc(args) -> int:
             backend=backend,
             backend_id=backend.backend_id,
         )
+        semantic_assessor, semantic_assessor_id = _semantic_assessor_from_command(
+            args.semantic_assessor_command,
+            run_dir=Path(args.pqa_home) / "semantic-assessor" / str(args.cand_id),
+            timeout=args.semantic_assessor_timeout,
+        )
         result = run_paperqa2_europepmc_acquisition(
             args.project_dir,
             args.cand_id,
             paperqa_runtime=runtime,
             pdf_paths=_load_pdf_paths(args.pdf_map),
+            semantic_assessor=semantic_assessor,
+            semantic_assessor_id=semantic_assessor_id,
             explicit_queries=args.queries or None,
             max_papers=args.max_papers,
             page_size=args.page_size,
@@ -124,6 +193,15 @@ def install(cli_module) -> None:
         paperqa.add_argument("--paperqa-repo", required=True)
         paperqa.add_argument("--pqa-home", required=True)
         paperqa.add_argument("--pdf-map", required=True)
+        paperqa.add_argument(
+            "--semantic-assessor-command",
+            required=True,
+            help=(
+                "headless command template for semantic assessment; must write the JSON "
+                "assessment to {output_file} and may read {prompt_file}"
+            ),
+        )
+        paperqa.add_argument("--semantic-assessor-timeout", type=int, default=300)
         paperqa.add_argument(
             "--query", dest="queries", action="append", default=None,
             help="explicit reproducible Europe PMC query (repeatable)",
