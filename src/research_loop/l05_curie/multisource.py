@@ -8,6 +8,7 @@ can reach downstream Curie stages.
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -390,6 +391,64 @@ def _merge(primary: dict, duplicate: dict) -> None:
             sources.append(item)
 
 
+def _record_matches(canonical: dict, observed: dict) -> bool:
+    if str(canonical.get("paper_id") or "") == str(observed.get("paper_id") or ""):
+        return True
+    left = _stable_ids(canonical)
+    right = _stable_ids(observed)
+    return bool(left and right and left.intersection(right))
+
+
+def _attach_originating_queries(result: dict) -> dict:
+    """Attach the authoritative QueryPlan lineage to each deduplicated record."""
+    if not isinstance(result, dict):
+        raise CurieContractError("multi-source discovery result must be an object")
+    batches = result.get("batches")
+    records = result.get("records")
+    if not isinstance(batches, list) or not isinstance(records, list):
+        raise CurieContractError(
+            "multi-source discovery result must contain batch and record lists"
+        )
+
+    query_ids_by_index: list[list[str]] = [[] for _ in records]
+    for batch in batches:
+        if not isinstance(batch, dict):
+            raise CurieContractError("discovery batch provenance must be an object")
+        query_id = str(batch.get("query_id") or "").strip()
+        if not query_id:
+            raise CurieContractError("discovery batch has no authoritative query_id")
+        batch_records = batch.get("records")
+        if not isinstance(batch_records, list):
+            raise CurieContractError("discovery batch records must be a list")
+        for observed in batch_records:
+            matches = [
+                index
+                for index, canonical in enumerate(records)
+                if _record_matches(canonical, observed)
+            ]
+            if len(matches) != 1:
+                raise CurieContractError(
+                    "discovery query provenance cannot resolve exactly one canonical paper"
+                )
+            lineage = query_ids_by_index[matches[0]]
+            if query_id not in lineage:
+                lineage.append(query_id)
+
+    hardened = copy.deepcopy(result)
+    for index, record in enumerate(hardened["records"]):
+        lineage = query_ids_by_index[index]
+        if not lineage:
+            raise CurieContractError(
+                "canonical discovery paper has no originating query provenance"
+            )
+        provenance = record.get("provenance")
+        if not isinstance(provenance, dict):
+            provenance = {}
+            record["provenance"] = provenance
+        provenance["originating_query_ids"] = lineage
+    return hardened
+
+
 def deduplicate_provider_records(records: list[dict]) -> tuple[list[dict], list[str]]:
     if not isinstance(records, list):
         raise CurieContractError("provider discovery records must be a list")
@@ -760,11 +819,11 @@ def run_multisource_discovery(plan: dict, transports: dict[str, object], *,
             batches.append(batch)
             records.extend(batch["records"])
     canonical, duplicates = deduplicate_provider_records(records)
-    return {
+    return _attach_originating_queries({
         "schema_version": "L05MultiSourceDiscovery/v1",
         "query_plan_id": str(plan["plan_id"]),
         "batches": batches,
         "records": canonical,
         "duplicate_paper_ids": duplicates,
         "failures": failures,
-    }
+    })

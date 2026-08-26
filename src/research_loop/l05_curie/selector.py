@@ -97,11 +97,22 @@ def validate_selector_decision(decision: dict) -> dict:
 
 
 def _query_ids(record: dict) -> list[str]:
-    provenance = record.get("provenance") if isinstance(record.get("provenance"), dict) else {}
+    provenance = record.get("provenance")
+    if not isinstance(provenance, dict):
+        raise CurieContractError("selector record has no discovery provenance")
     values = provenance.get("originating_query_ids") or []
-    if not isinstance(values, list):
-        values = []
-    return [str(item) for item in values if str(item).strip()] or ["UNKNOWN_QUERY"]
+    if not isinstance(values, list) or not values:
+        raise CurieContractError("selector record has no originating query provenance")
+    query_ids: list[str] = []
+    for value in values:
+        query_id = str(value or "").strip()
+        if not query_id:
+            raise CurieContractError(
+                "selector originating query provenance contains an empty query_id"
+            )
+        if query_id not in query_ids:
+            query_ids.append(query_id)
+    return query_ids
 
 
 def _ranking(decision: dict) -> tuple[float, float, float, float, float]:
