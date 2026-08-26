@@ -156,6 +156,11 @@ def test_load_requires_source_identity_unless_legacy_mode_is_explicit(tmp_path):
         allow_legacy_source_identity=True,
     )
     assert loaded["status"] == "FROZEN"
+    rendered = curie.render_evidence_context(
+        loaded,
+        allow_legacy_source_identity=True,
+    )
+    assert "E001" in rendered
 
 
 def _query_plan_for_round(round_index: int) -> dict:

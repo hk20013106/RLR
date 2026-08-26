@@ -466,13 +466,17 @@ def next_pack_version(previous_pack: dict, *, gap_request: dict,
 
 
 def render_evidence_context(
-    pack: dict, *, allow_legacy_frozen_acquisition_metadata: bool = False
+    pack: dict,
+    *,
+    allow_legacy_frozen_acquisition_metadata: bool = False,
+    allow_legacy_source_identity: bool = False,
 ) -> str:
     """Render only verified frozen evidence for Einstein's isolated L1 context."""
     frozen = _validate_pack_structure(
         pack,
         expected_status="FROZEN",
         allow_legacy_frozen_acquisition_metadata=allow_legacy_frozen_acquisition_metadata,
+        allow_legacy_frozen_source_identity=allow_legacy_source_identity,
     )
     if frozen["coverage"]["verdict"] != "PASS":
         raise CurieContractError("L1 evidence context requires coverage PASS")
