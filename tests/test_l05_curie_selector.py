@@ -84,7 +84,6 @@ def test_hard_eligibility_exclusion_overrides_cognitive_score():
             bool(record["identifiers"].get("pmcid") and record["metadata"].get("is_open_access")),
             "NO_RETRIEVABLE_SOURCE",
         ),
-        query_ids={"Q001"},
     )
     decisions = {item["paper_id"]: item for item in result["decisions"]}
     assert decisions["P1"]["decision"] == "EXCLUDE"

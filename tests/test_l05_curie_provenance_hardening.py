@@ -61,12 +61,6 @@ def test_multisource_records_preserve_all_originating_query_ids_after_dedup():
     result = run_multisource_discovery(
         _plan(),
         {"pubmed": _Transport()},
-        seed_sha256=research_seed.seed_sha256({
-            "candidate_id": "C001",
-            "round_id": "1",
-            "scientific_question": "question",
-            "hypothesis_seed": "hypothesis",
-        }),
         page_size=5,
     )
     assert len(result["records"]) == 1

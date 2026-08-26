@@ -87,7 +87,7 @@ The Curie tests import `research_loop.l05_curie` plus direct submodules (`store`
 
 ### C5 — compatibility facades and migration constraints
 
-The `install()` names are not package `__all__` exports, but external code may import them by module path. Therefore `semantic_pack.install()` and `provenance_hardening.install()` remain callable no-op facades with explicit documentation after staticization. Existing frozen EvidencePacks, schema versions, public function signatures, and error classes remain unchanged. No legacy installer outside the two selected families is deleted in this phase.
+The `install()` names are not package `__all__` exports, but external code may import them by module path. Therefore `semantic_pack.install()` and `provenance_hardening.install()` remain callable no-op facades with explicit documentation after staticization. Existing frozen EvidencePacks, schema versions, public function signatures, and error classes remain unchanged. The new canonical runtime passes an external seed hash and authorized query-ID set; both parameters remain optional for old public callers, whose self-consistency behavior is preserved. No legacy installer outside the two selected families is deleted in this phase.
 
 ## Implementation tasks
 
