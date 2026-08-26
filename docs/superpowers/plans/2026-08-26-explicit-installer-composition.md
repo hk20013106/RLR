@@ -139,12 +139,22 @@ The `install()` names are not package `__all__` exports, but external code may i
 **Files:**
 - Modify: `docs/superpowers/plans/2026-08-26-explicit-installer-composition.md` as checklist evidence only.
 
-- [ ] Run focused, relevant, and full `pytest` with fresh output and record exact counts.
+- [x] Run focused, relevant, and full `pytest` with fresh output and record exact counts.
 - [x] Run compileall, `git diff --check`, and the CLI help smoke checks.
-- [ ] Perform a correctness review and a fresh thermo-nuclear review against the Phase C diff.
-- [ ] Fix all Critical/Important findings and rerun affected verification.
+- [x] Perform a correctness review and a fresh thermo-nuclear review against the Phase C diff.
+- [x] Fix all Critical/Important findings and rerun affected verification.
 - [ ] Commit, push `codex/explicit-installer-composition`, create or update a Draft PR, and wait for exact-head CI.
 - [ ] Stop at the Phase C gate; do not merge and do not automatically refactor the remaining P2 or `UNCERTAIN` installers.
+
+## Verification evidence
+
+- Final implementation HEAD before this evidence update: `0511253`.
+- Focused Curie composition/provenance/runtime tests: `30 passed in 10.00s`.
+- Relevant L0.5 suite (`l05|research_seed` test files): `140 passed in 10.77s`.
+- Full canonical-source pytest run: `1040 passed in 567.76s (0:09:27)`.
+- Static checks: `compileall`, both CLI `--help` smoke checks, and `git diff --check` passed.
+- Fresh correctness review: no Critical/Important/Minor findings.
+- Fresh thermo-nuclear review: no Critical/Important findings; one Minor compatibility re-export note was documented and retained intentionally.
 
 ## Self-review against the specification
 
