@@ -1,8 +1,9 @@
-"""Acceptance contract for the single ProviderExecutor process boundary."""
+"""Behavior and authority contracts for the R3 process boundary."""
+from __future__ import annotations
 
-# This contract is intentionally run again after retiring the old subprocess proxy.
 import importlib
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -12,49 +13,84 @@ def _executor_module():
     return importlib.import_module("research_loop.providers.executor")
 
 
-def test_provider_process_spawning_has_one_canonical_owner():
-    root = Path(__file__).resolve().parents[1]
-    executor_source = (root / "src/research_loop/providers/executor.py").read_text(
-        encoding="utf-8"
+def _runner_module():
+    return importlib.import_module("research_loop.process_runner")
+
+
+class _StreamingObserver:
+    def __init__(self) -> None:
+        self.first_stdout = threading.Event()
+        self.chunks: list[bytes] = []
+
+    def on_stdout(self, chunk: bytes) -> None:
+        self.chunks.append(bytes(chunk))
+        if b"stream-ready" in b"".join(self.chunks):
+            self.first_stdout.set()
+
+
+def test_process_runner_streams_stdout_before_process_exit():
+    module = _runner_module()
+    runner = module.ProcessRunner()
+    observer = _StreamingObserver()
+    outcome: dict[str, object] = {}
+
+    def invoke() -> None:
+        outcome["result"] = runner.run(
+            [
+                sys.executable,
+                "-c",
+                "import time; print('stream-ready', flush=True); time.sleep(1.5); print('done')",
+            ],
+            timeout=5,
+            observer=observer,
+        )
+
+    thread = threading.Thread(target=invoke, daemon=True)
+    thread.start()
+    assert observer.first_stdout.wait(0.8), "stdout was buffered until process exit"
+    assert thread.is_alive(), "process exited before streaming behavior could be observed"
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    result = outcome["result"]
+    assert result.returncode == 0
+    assert "stream-ready" in result.stdout
+    assert "done" in result.stdout
+
+
+def test_process_runner_reports_hard_timeout_and_cleanup():
+    module = _runner_module()
+    result = module.ProcessRunner().run(
+        [sys.executable, "-c", "import time; time.sleep(5)"],
+        timeout=0.1,
     )
-    observability_source = (
-        root / "src/research_loop/provider_runtime_observability.py"
-    ).read_text(encoding="utf-8")
-
-    assert "subprocess.Popen(" in executor_source
-    assert "_subprocess.Popen(" not in observability_source
-    assert "_SubprocessProxy" not in observability_source
+    assert result.terminal_state == "timed_out"
+    assert result.process_tree_cleanup["attempted"] is True
+    assert result.process_tree_cleanup["alive_after_cleanup"] is False
 
 
-def test_provider_executor_captures_text_output():
-    module = _executor_module()
-    executor = module.ProviderExecutor()
-
-    result = executor.run(
-        [sys.executable, "-c", "print('provider-ok')"],
-        timeout=10,
+def test_provider_executor_is_thin_facade_over_process_runner():
+    executor = _executor_module()
+    runner = _runner_module()
+    assert executor.ProcessRunner is runner.ProcessRunner
+    assert "subprocess" not in Path(executor.__file__).read_text(encoding="utf-8")
+    result = executor.ProviderExecutor().run(
+        [sys.executable, "-c", "print('provider-ok')"], timeout=5
     )
-
-    assert isinstance(result, module.ProviderExecutionResult)
     assert result.returncode == 0
     assert result.stdout.strip() == "provider-ok"
-    assert result.stderr == ""
 
 
 def test_provider_executor_normalizes_nonzero_exit():
     module = _executor_module()
-    executor = module.ProviderExecutor()
-
     with pytest.raises(module.ProviderExecutionError) as excinfo:
-        executor.run(
+        module.ProviderExecutor().run(
             [
                 sys.executable,
                 "-c",
                 "import sys; print('bad-out'); print('bad-err', file=sys.stderr); sys.exit(7)",
             ],
-            timeout=10,
+            timeout=5,
         )
-
     error = excinfo.value
     assert error.returncode == 7
     assert "bad-out" in error.stdout
@@ -64,27 +100,48 @@ def test_provider_executor_normalizes_nonzero_exit():
 
 def test_provider_executor_normalizes_timeout():
     module = _executor_module()
-    executor = module.ProviderExecutor()
-
     with pytest.raises(module.ProviderExecutionError) as excinfo:
-        executor.run(
-            [sys.executable, "-c", "import time; time.sleep(2)"],
-            timeout=0.05,
+        module.ProviderExecutor().run(
+            [sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.1
         )
-
     error = excinfo.value
     assert error.timed_out is True
-    assert error.timeout == 0.05
+    assert error.timeout == 0.1
 
 
-def test_active_provider_and_deep_research_paths_use_executor_boundary():
-    import research_loop.deep_research as deep_research
-    import research_loop.providers.base as provider_base
+def test_external_execution_authority_is_not_duplicated_across_research_modules():
+    root = Path(__file__).resolve().parents[1]
+    paths = [
+        "src/research_loop/providers/base.py",
+        "src/research_loop/deep_research.py",
+        "src/research_loop/l4_inventory.py",
+        "src/research_loop/l4_pipeline.py",
+        "src/research_loop/method_evidence.py",
+        "src/research_loop/method_review_navigation.py",
+        "src/research_loop/l05_curie/paperqa2_runtime.py",
+    ]
+    for relative in paths:
+        source = (root / relative).read_text(encoding="utf-8")
+        assert "subprocess.run(" not in source, relative
+        assert "subprocess.Popen(" not in source, relative
 
-    provider_source = Path(provider_base.__file__).read_text(encoding="utf-8")
-    deep_source = Path(deep_research.__file__).read_text(encoding="utf-8")
-    assert "subprocess.run(" not in provider_source
-    assert "DEFAULT_EXECUTOR.run(" in provider_source
-    assert "subprocess.run(" not in deep_source
-    assert "DEFAULT_EXECUTOR.run(" in deep_source
-    assert callable(deep_research.DEFAULT_EXECUTOR.run)
+
+def test_observability_is_not_a_process_owner():
+    import research_loop.provider_runtime_observability as observability
+
+    source = Path(observability.__file__).read_text(encoding="utf-8")
+    assert "subprocess.Popen(" not in source
+    assert "_SubprocessProxy" not in source
+    assert "_BoundedReader" not in source
+
+
+def test_maintenance_reuses_shared_process_runner_contract():
+    runner = _runner_module()
+    from rlr_maintenance import bounded_process
+
+    assert bounded_process.ProcessRunner is runner.ProcessRunner
+    result = bounded_process.run_bounded_process(
+        [sys.executable, "-c", "print('maintenance-ok')"], timeout=5
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == "maintenance-ok"
