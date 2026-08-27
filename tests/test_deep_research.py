@@ -17,6 +17,7 @@ from research_loop import deep_research as dr
 from research_loop import deep_research_task as dr_task
 from research_loop import gates
 from research_loop import engine
+from research_loop.hypothesis_ledger import binding_path as hypothesis_binding_path
 from research_loop.preresearch import PRE_RESEARCH_MAP
 import run_loop
 
@@ -616,6 +617,10 @@ def _sentinel_codex_project(tmp_path, monkeypatch, runtime_extra=None):
                           "--question", "Q", "--claim", "C", "--input", "data"],
                          capture_output=True, text=True)
     cand_id = new.stdout.splitlines()[0]
+    # This fixture tests the historical Deep Research process/host runtime,
+    # not native v2.1 L0.5. Remove the profile binding so L1 retains the
+    # legacy research contract without weakening native L0.5 authority.
+    hypothesis_binding_path(project).unlink()
     skill = tmp_path / "academic-research-suite"
     skill.mkdir()
     (skill / "manifest.json").write_text("{}", encoding="utf-8")
