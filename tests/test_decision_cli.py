@@ -98,4 +98,4 @@ def test_cli_decision_new_to_idea_proposed_writes_existing_log_contract(tmp_path
     assert "current_status: IDEA_PROPOSED" in candidate_text
     next_step = _run_module_cli("next-step", str(project), candidate_id, store=store)
     assert next_step.returncode == 0, next_step.stderr
-    assert json.loads(next_step.stdout)["node"] == "L1"
+    assert json.loads(next_step.stdout)["node"] == "L0.5"
