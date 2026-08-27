@@ -1,5 +1,6 @@
 """Acceptance contract for the single ProviderExecutor process boundary."""
 
+# This contract is intentionally run again after retiring the old subprocess proxy.
 import importlib
 import sys
 from pathlib import Path
