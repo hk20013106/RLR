@@ -12,10 +12,11 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 import sys
 import unicodedata
 from pathlib import Path
+
+from research_loop.process_runner import DEFAULT_PROCESS_RUNNER, ProcessRunner
 
 from .contracts import CurieContractError
 from .paperqa2 import PAPERQA2_RUNTIME_SCHEMA_VERSION, PaperQA2Retriever
@@ -99,12 +100,14 @@ class PaperQA2SubprocessBackend:
         paperqa_repo: str | Path,
         pqa_home: str | Path,
         timeout_seconds: int = 300,
+        runner: ProcessRunner | None = None,
     ) -> None:
         self.python_executable = Path(python_executable).resolve()
         self.bridge_script = Path(bridge_script).resolve()
         self.paperqa_repo = Path(paperqa_repo).resolve()
         self.pqa_home = Path(pqa_home).resolve()
         self.backend_id = PAPERQA2_BACKEND_ID
+        self.runner = runner or DEFAULT_PROCESS_RUNNER
         if not self.python_executable.is_file():
             raise CurieContractError(f"PaperQA2 Python executable is missing: {self.python_executable}")
         if not self.bridge_script.is_file():
@@ -134,22 +137,21 @@ class PaperQA2SubprocessBackend:
         environment = os.environ.copy()
         environment["PQA_HOME"] = str(self.pqa_home)
         try:
-            completed = subprocess.run(
+            completed = self.runner.run(
                 [str(self.python_executable), str(self.bridge_script)],
                 cwd=str(self.paperqa_repo),
                 env=environment,
-                input=json.dumps(request, ensure_ascii=False),
-                capture_output=True,
-                text=True,
+                input_text=json.dumps(request, ensure_ascii=False),
+                timeout=self.timeout_seconds,
                 encoding="utf-8",
                 errors="strict",
-                timeout=self.timeout_seconds,
-                check=False,
             )
-        except subprocess.TimeoutExpired as exc:
-            raise CurieContractError("PaperQA2 subprocess timed out") from exc
         except OSError as exc:
-            raise CurieContractError(f"PaperQA2 subprocess could not start: {exc}") from exc
+            raise CurieContractError(
+                f"PaperQA2 subprocess could not start: {exc}"
+            ) from exc
+        if completed.terminal_state == "timed_out":
+            raise CurieContractError("PaperQA2 subprocess timed out")
         if completed.returncode != 0:
             raise CurieContractError(
                 f"PaperQA2 subprocess failed with exit code {completed.returncode}"
