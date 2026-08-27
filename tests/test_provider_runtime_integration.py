@@ -6,6 +6,7 @@ from pathlib import Path
 
 from research_loop import deep_research
 from research_loop import l4_inventory
+from research_loop import l4_pipeline
 from research_loop import method_evidence
 from research_loop import method_review_navigation
 from research_loop.provider_runtime_observability import _CONTEXT
@@ -17,7 +18,12 @@ FIXTURE = Path(__file__).parent / "fixtures" / "fake_codex_jsonl.py"
 def test_l4_wrappers_do_not_own_provider_processes():
     """L4 extensions keep scientific contracts but delegate provider execution."""
     assert callable(deep_research.execute_provider_invocation)
-    for module in (l4_inventory, method_evidence, method_review_navigation):
+    for module in (
+        l4_inventory,
+        l4_pipeline,
+        method_evidence,
+        method_review_navigation,
+    ):
         assert not hasattr(module, "subprocess")
         source = Path(module.__file__).read_text(encoding="utf-8")
         assert "execute_provider_invocation(" in source
