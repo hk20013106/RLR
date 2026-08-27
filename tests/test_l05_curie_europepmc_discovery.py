@@ -46,6 +46,22 @@ def test_europepmc_canonicalizer_normalizes_provider_identity():
     assert first["provenance"]["provider"] == "europe-pmc"
 
 
+def test_europepmc_provider_ids_are_provenance_not_metadata_identity():
+    first = canonicalize_europepmc_record(_core_result(
+        id="EUROPE-A", source="AGR", doi="", pmid="", pmcid="",
+    ))
+    second = canonicalize_europepmc_record(_core_result(
+        id="EUROPE-B", source="PPR", doi="", pmid="", pmcid="",
+    ))
+
+    assert first["paper_id"] == "P_58f38d2b4c251d5d12c2"
+    assert second["paper_id"] == first["paper_id"]
+    assert first["identifiers"] == {}
+    assert second["identifiers"] == {}
+    assert first["provenance"]["source"] == "AGR"
+    assert first["provenance"]["ext_id"] == "EUROPE-A"
+
+
 def test_europepmc_transport_persists_raw_response_and_binds_receipt(tmp_path):
     payload = {
         "hitCount": 1,
