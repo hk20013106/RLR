@@ -82,14 +82,7 @@ from research_loop import deep_research_task as _deep_research_task_module
 from research_loop.provider_runtime_observability import (
     install as _install_provider_runtime_observability,
 )
-from research_loop.provider_runtime_compat import (
-    install as _install_provider_runtime_compat,
-)
-
 _install_provider_runtime_observability(deep_research, _deep_research_task_module)
-_install_provider_runtime_compat(
-    deep_research, _deep_research_task_module, _l4_pipeline_module
-)
 
 from research_loop import hypothesis_contracts as hypothesis_contracts
 from research_loop.method_contracts import install as _install_method_contracts
@@ -180,7 +173,7 @@ del _install_l4_path_safety, _install_l4_lineage
 del _install_l4_registry_projection_integrity
 del _install_l4_inventory_projection, _install_l4_evidence_bundle
 del _install_l4_runtime_compat, _install_l45_context_binding
-del _install_provider_runtime_observability, _install_provider_runtime_compat
+del _install_provider_runtime_observability
 del _deep_research_task_module
 del _l4_pipeline_module, _l4_lineage_module
 del _l4_provenance_module, _l4_inventory_module
