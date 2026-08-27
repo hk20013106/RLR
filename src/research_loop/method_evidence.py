@@ -9,7 +9,6 @@ from __future__ import annotations
 import html
 import json
 import re
-import subprocess
 from pathlib import Path
 
 from research_loop.user_sources import registered_sources, verify_registered_source
@@ -633,15 +632,11 @@ with a real accepted method anchor, or a truthful source-blocked candidate.
         )
         command[0] = dr.resolve_subprocess_executable(command[0])
         execution_command, invocation_kwargs = dr.subprocess_invocation(command, prompt)
-        try:
-            completed = subprocess.run(
-                execution_command, capture_output=True, text=True,
-                encoding="utf-8", errors="strict", timeout=spec.timeout,
-                check=False, **invocation_kwargs,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise dr.DeepResearchError(f"Academic Research CLI invocation failed: {exc}") from exc
-        receipt = dr.skill_receipt(
+        completed = dr.execute_provider_invocation(
+        execution_command, invocation_kwargs, timeout=spec.timeout,
+        label='Academic Research CLI',
+    )
+    receipt = dr.skill_receipt(
             spec.backend, command, prompt, skill_version,
             exit_code=completed.returncode, stdout_hash=dr._sha(completed.stdout),
             model=spec.model,

@@ -1029,6 +1029,32 @@ def render_pre_research_markdown(artifact: dict) -> str:
     return f"""# Pre-Research: {artifact['node']}\n\n## Runtime digest\nVerified Academic Research evidence pack `{artifact['run_id']}` with paper IDs: {', '.join(identifiers)}.\n\n## Evidence pack\n- {artifact['path']}\n\n## Query log\n{queries}\n\n## Tool receipt\n- {receipt['backend']} / {receipt['skill']} {receipt.get('skill_version', '')}; command_hash={receipt['command_hash']}; prompt_hash={receipt['prompt_hash']}\n\n## Source count\n{len(artifact.get('papers', []))}\n"""
 
 
+def execute_provider_invocation(
+    execution_command,
+    invocation_kwargs: dict,
+    *,
+    timeout: float | None,
+    label: str = "Academic Research CLI",
+):
+    """Execute one provider command through the canonical provider boundary."""
+    try:
+        return DEFAULT_EXECUTOR.run(
+            execution_command,
+            timeout=timeout,
+            input_text=invocation_kwargs.get("input"),
+            check=False,
+            encoding="utf-8",
+            errors="strict",
+        )
+    except ProviderExecutionError as exc:
+        detail = exc.stderr.strip() or str(exc)
+        if exc.timed_out:
+            raise DeepResearchError(
+                f"{label} timed out after {exc.timeout}s: {detail}"
+            ) from exc
+        raise DeepResearchError(f"{label} invocation failed: {detail}") from exc
+
+
 def run_and_persist(
     project_dir: str | Path,
     candidate_id: str,
@@ -1052,24 +1078,9 @@ def run_and_persist(
     command, prompt = build_invocation(spec, node, question, claim, work_dir, result_context)
     command[0] = resolve_subprocess_executable(command[0])
     execution_command, invocation_kwargs = subprocess_invocation(command, prompt)
-    try:
-        completed = DEFAULT_EXECUTOR.run(
-            execution_command,
-            timeout=spec.timeout,
-            input_text=invocation_kwargs.get("input"),
-            check=False,
-            encoding="utf-8",
-            errors="strict",
-        )
-    except ProviderExecutionError as exc:
-        detail = exc.stderr.strip() or str(exc)
-        if exc.timed_out:
-            raise DeepResearchError(
-                f"Academic Research CLI timed out after {exc.timeout}s: {detail}"
-            ) from exc
-        raise DeepResearchError(
-            f"Academic Research CLI invocation failed: {detail}"
-        ) from exc
+    completed = execute_provider_invocation(
+        execution_command, invocation_kwargs, timeout=spec.timeout
+    )
     receipt = skill_receipt(
         spec.backend,
         command,

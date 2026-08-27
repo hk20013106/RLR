@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import copy
 import json
-import subprocess
 from pathlib import Path
 
 
@@ -398,22 +397,11 @@ def install(deep_research_module) -> None:
         execution_command, invocation_kwargs = dr.subprocess_invocation(
             command, prompt
         )
-        try:
-            completed = subprocess.run(
-                execution_command,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="strict",
-                timeout=spec.timeout,
-                check=False,
-                **invocation_kwargs,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise dr.DeepResearchError(
-                f"Academic Research CLI invocation failed: {exc}"
-            ) from exc
-        receipt = dr.skill_receipt(
+        completed = dr.execute_provider_invocation(
+        execution_command, invocation_kwargs, timeout=spec.timeout,
+        label='Academic Research CLI',
+    )
+    receipt = dr.skill_receipt(
             spec.backend,
             command,
             prompt,

@@ -1,6 +1,6 @@
 """Real-time provider supervision over the canonical ProviderExecutor boundary.
 
-ProviderExecutor owns process spawning, hard timeouts, and process-tree cleanup.
+ProcessRunner owns process mechanics, hard timeouts, and process-tree cleanup.
 This module is deliberately non-owning: it interprets provider JSONL, publishes
 runtime status, applies semantic inactivity policy, and persists replayable
 runtime receipts. Detached-task compatibility is installed here so there is no
@@ -21,11 +21,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from research_loop.process_runner import DEFAULT_PROCESS_RUNNER
 from research_loop.providers.executor import (
     ProviderExecutionError,
     ProviderExecutionResult,
     ProviderExecutor,
-    run_bounded_process,
 )
 
 try:  # Optional at import time; requirements install it in supported runtime.
@@ -520,7 +520,7 @@ def run_observed_provider(
     )
 
     try:
-        bounded = run_bounded_process(
+        bounded = DEFAULT_PROCESS_RUNNER.run(
             prepared,
             timeout=job_timeout,
             cwd=effective_cwd,
