@@ -7,7 +7,7 @@ from typing import Callable
 from research_loop import research_seed
 
 from .contracts import CurieContractError
-from .gap_loop import authorize_gap_retry, consume_gap_retry_authorization
+from .gap_loop import authorize_gap_retry
 from .store import load_frozen_evidence_pack
 
 
@@ -106,6 +106,8 @@ def run_authorized_retry(
     request_id: str,
     acquisition_run_id: str,
     acquire: Callable[[dict], dict],
+    *,
+    failure_step: str | None = None,
 ) -> dict:
     """Run one authorized Curie retry and atomically advance active evidence lineage.
 
@@ -113,6 +115,33 @@ def run_authorized_retry(
     frozen EvidencePack manifest.  The new binding is not activated until all
     version, parent, gap-request and source-run lineage checks pass.
     """
+    try:
+        committed = research_seed.load_l1_native_retry_commit(
+            project_dir, seed, request_id
+        )
+    except research_seed.ResearchSeedError as exc:
+        raise CurieContractError(f"native Curie retry commit is invalid: {exc}") from exc
+    if committed is not None:
+        if str(committed["acquisition_run_id"]) != str(acquisition_run_id):
+            raise CurieContractError(
+                "native Curie retry replay acquisition_run_id does not match committed transaction"
+            )
+        current_run = research_seed.active_l1_native_evidence_run_id(project_dir, seed)
+        if str(current_run or "") != str(acquisition_run_id):
+            raise CurieContractError(
+                "native Curie retry replay is not the current active lineage"
+            )
+        return {
+            "authorization": committed["authorization"],
+            "consumption": committed["consumption"],
+            "activation": committed["activation"],
+            "binding": committed["binding_entry"],
+            "evidence_pack": committed["evidence_pack"],
+            "evidence_pack_content_sha256": str(
+                committed["binding"]["pack_lineage"]["content_sha256"]
+            ),
+        }
+
     authorization = authorize_gap_retry(
         project_dir, seed, active_pack_manifest, request_id
     )
@@ -128,30 +157,22 @@ def run_authorized_retry(
         acquisition_run_id,
     )
     try:
-        binding = research_seed.write_l1_native_evidence_binding(
+        committed = research_seed.commit_l1_native_retry(
             project_dir,
             seed,
+            active_pack_manifest,
             new_manifest,
             acquisition_run_id,
-            retry_authorization=authorization,
+            authorization,
+            failure_step=failure_step,
         )
     except research_seed.ResearchSeedError as exc:
-        raise CurieContractError(f"native Curie retry binding failed: {exc}") from exc
-
-    consumption = consume_gap_retry_authorization(
-        project_dir, seed, authorization, acquisition_run_id
-    )
-    try:
-        activation = research_seed.activate_l1_native_evidence_binding(
-            project_dir, seed, acquisition_run_id
-        )
-    except research_seed.ResearchSeedError as exc:
-        raise CurieContractError(f"native Curie retry activation failed: {exc}") from exc
+        raise CurieContractError(f"native Curie retry commit failed: {exc}") from exc
     return {
         "authorization": authorization,
-        "consumption": consumption,
-        "activation": activation,
-        "binding": binding,
+        "consumption": committed["consumption"],
+        "activation": committed["activation"],
+        "binding": committed["binding_entry"],
         "evidence_pack": new_manifest,
         "evidence_pack_content_sha256": str(pack["content_sha256"]),
     }

@@ -129,6 +129,27 @@ def validate_gap_retry_authorization(seed: dict, authorization: dict) -> dict:
     return _validate_retry_authorization(seed, authorization)
 
 
+def _committed_retry_authorization(
+    project_dir: str | Path, seed: dict, request_id: str
+) -> dict | None:
+    """Return a committed transaction's authorization for idempotent replay."""
+    loader = getattr(research_seed, "load_l1_native_retry_commit", None)
+    if loader is None:
+        return None
+    try:
+        transaction = loader(project_dir, seed, request_id)
+    except research_seed.ResearchSeedError as exc:
+        raise CurieContractError(
+            f"committed L05 retry transaction is invalid: {exc}"
+        ) from exc
+    if transaction is None:
+        return None
+    authorization = transaction.get("authorization")
+    if not isinstance(authorization, dict):
+        raise CurieContractError("committed L05 retry transaction has no authorization")
+    return _validate_retry_authorization(seed, authorization)
+
+
 def open_gap_request(
     project_dir: str | Path,
     seed: dict,
@@ -204,6 +225,9 @@ def authorize_gap_retry(
         raise CurieContractError(
             f"maximum of {MAX_ACQUISITION_ROUNDS} Curie acquisition rounds reached"
         )
+    committed = _committed_retry_authorization(project_dir, seed, request_id)
+    if committed is not None:
+        return committed
     consumed = _consumption_path(project_dir, seed, request_id)
     if consumed.exists():
         raise CurieContractError("EvidenceGapRequest retry authorization was already consumed")
@@ -225,6 +249,23 @@ def authorize_gap_retry(
     return _validate_retry_authorization(seed, authorization)
 
 
+def build_gap_retry_consumption(
+    seed: dict, authorization: dict, acquisition_run_id: str
+) -> dict:
+    """Build the retry-consumption receipt without making it durable."""
+    validated = _validate_retry_authorization(seed, authorization)
+    request_id = str(validated["request_id"])
+    run_id = _safe(acquisition_run_id, "acquisition_run_id")
+    return {
+        "schema_version": CONSUMPTION_SCHEMA_VERSION,
+        "authorization_id": str(validated["authorization_id"]),
+        "request_id": request_id,
+        "acquisition_run_id": run_id,
+        "next_version": int(validated["next_version"]),
+        "parent_pack_sha256": str(validated["parent_pack_sha256"]),
+    }
+
+
 def consume_gap_retry_authorization(
     project_dir: str | Path,
     seed: dict,
@@ -234,15 +275,7 @@ def consume_gap_retry_authorization(
     """Persist append-only consumption after a successful authorized retry."""
     validated = _validate_retry_authorization(seed, authorization)
     request_id = str(validated["request_id"])
-    run_id = _safe(acquisition_run_id, "acquisition_run_id")
-    receipt = {
-        "schema_version": CONSUMPTION_SCHEMA_VERSION,
-        "authorization_id": str(validated["authorization_id"]),
-        "request_id": request_id,
-        "acquisition_run_id": run_id,
-        "next_version": int(validated["next_version"]),
-        "parent_pack_sha256": str(validated["parent_pack_sha256"]),
-    }
+    receipt = build_gap_retry_consumption(seed, validated, acquisition_run_id)
     path = _consumption_path(project_dir, seed, request_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     raw = _canonical_bytes(receipt)
@@ -275,6 +308,19 @@ def load_gap_retry_consumption(
         "parent_pack_sha256": str(validated["parent_pack_sha256"]),
     }
     path = _consumption_path(project_dir, seed, request_id)
+    if not path.exists():
+        loader = getattr(research_seed, "load_l1_native_retry_commit", None)
+        if loader is not None:
+            try:
+                transaction = loader(project_dir, seed, request_id)
+            except research_seed.ResearchSeedError as exc:
+                raise CurieContractError(
+                    f"committed L05 retry transaction is invalid: {exc}"
+                ) from exc
+            if transaction is not None:
+                receipt = transaction.get("consumption")
+                if receipt == expected:
+                    return receipt
     try:
         receipt = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
