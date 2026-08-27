@@ -78,7 +78,7 @@ No projection may write scientific truth back into the ledger. All projection ou
 
 ### Root cause
 
-`scientific_question` is currently an L0 string. It has no stable identity, version lineage, or explicit lifecycle. Hypotheses can evolve across rounds, while the research question cannot be audited at the same semantic level.
+`scientific_question` is currently an L0 string. It has no stable identity or version lineage. Hypotheses can evolve across rounds, while the research question cannot be audited at the same semantic level.
 
 ### Minimal model
 
@@ -92,19 +92,24 @@ Required concepts:
 - `definition_hash`: deterministic identity of the version;
 - `created_at` / creation event provenance;
 - occurrence binding to project/candidate/round;
-- lineage relation for revised questions.
+- `REVISION_OF` lineage for revised questions.
 
-Minimal lifecycle semantics:
+Do not create a separate question status machine. A question version is active because a round is bound to it; terminality is already represented by the existing candidate/round decision flow.
 
-- `KEEP`: same question version continues;
-- `REVISE`: create a new question version linked by `REVISION_OF`;
-- `CLOSE`: question is no longer active for future continuation.
+### Decision authority
 
-Do not create a large status vocabulary.
+L0 must never decide whether the scientific question should change. That is a scientific decision.
+
+For a continuing `REVISE` loop, the existing L10b decision authority explicitly declares one minimal `question_action` in the next-round proposal:
+
+- `KEEP`: the child round keeps the current `question_id`;
+- `REVISE`: the proposal supplies one new question statement, which becomes a new immutable version linked by `REVISION_OF`.
+
+No `CLOSE` question status is needed: if there is no continuation, the existing terminal candidate/round decision already closes that research path.
 
 ### L0 contract behavior
 
-Native L0 must retain human-readable `scientific_question` for prompt/context compatibility, but must also bind it to the authoritative `question_id`/question occurrence.
+Native L0 retains human-readable `scientific_question` for prompt/context compatibility and binds it to the authoritative `question_id`/question occurrence.
 
 For an initial round:
 
@@ -113,9 +118,10 @@ For an initial round:
 
 For a continuation:
 
-- explicit KEEP reuses the parent question version;
-- explicit REVISE creates a new immutable version with `REVISION_OF` lineage;
-- no silent inference from changed text.
+- consume the committed parent L10b next-round proposal;
+- `question_action=KEEP` reuses the exact parent question version;
+- `question_action=REVISE` creates the declared new version with `REVISION_OF` lineage;
+- changed question text without an authorized L10b `REVISE` fails closed.
 
 The existing L0 contract remains the single L0 validator. Any schema change must be versioned once at that canonical owner; no CLI/context-specific validators.
 
@@ -202,13 +208,13 @@ current_epistemic_status
 profile_hash
 ```
 
-The profile should contain concise scientific summaries plus stable IDs/provenance refs, not duplicate full papers or large artifacts.
+The profile contains concise scientific summaries plus stable IDs/provenance refs, not duplicate full papers or large artifacts.
 
 ### Ranking behavior
 
 `hypothesis_candidate(...)` may carry an EvidenceProfile snapshot/hash. `pairwise_prompt_payload(...)` must present the evidence profiles used for that comparison.
 
-The ranking artifact must preserve the profile hash so a judgment can be replayed/audited against the exact evidence state used at ranking time.
+The ranking artifact preserves the profile hash so a judgment can be replayed/audited against the exact evidence state used at ranking time.
 
 Ranking remains advisory. It cannot change:
 
@@ -222,7 +228,7 @@ Ranking remains advisory. It cannot change:
 ## Data flow across one loop
 
 ```text
-Q1 created at L0
+Q1 created/bound at L0
   ↓
 H1/H2 created at L1 and linked ADDRESSES Q1
   ↓
@@ -240,9 +246,11 @@ advisory ranking compares evidence, not naked text
   ↓
 L10b formal decision remains authoritative
   ↓
-if REVISE and the question changes: Q2 REVISION_OF Q1
+if L10b REVISE:
+  question_action KEEP   → child keeps Q1
+  question_action REVISE → Q2 REVISION_OF Q1
   ↓
-next round hypotheses ADDRESSES Q2
+next-round hypotheses ADDRESSES the authorized question version
 ```
 
 ## Likely code ownership
@@ -251,7 +259,7 @@ Production changes should stay concentrated in existing canonical owners plus on
 
 - `src/research_loop/l0_contract.py` — canonical native L0 question binding/schema validation;
 - `src/research_loop/hypothesis_ledger.py` — authoritative question facts and event-to-projection access;
-- `src/research_loop/hypothesis_contracts.py` — only where existing node deltas need explicit question/relation fields;
+- `src/research_loop/hypothesis_contracts.py` — L10b next-round question action and only other explicit relation fields required by the existing delta model;
 - `src/research_loop/ranking.py` — consume EvidenceProfile without replacing scheduler logic;
 - optionally create `src/research_loop/scientific_state.py` — pure/read-only transformation from ledger facts to relations and EvidenceProfile.
 
@@ -268,9 +276,10 @@ TDD is required. Tests must prove behavior at the actual authority boundaries.
 ### P0-1 tests
 
 - initial native round creates/binds exactly one question version;
-- KEEP continuation preserves question identity;
-- REVISE creates a new version with explicit `REVISION_OF` lineage;
-- changed question text without explicit revision fails closed;
+- L10b `question_action=KEEP` continuation preserves question identity;
+- L10b `question_action=REVISE` creates a new version with explicit `REVISION_OF` lineage;
+- changed question text without explicit L10b authorization fails closed;
+- L0 cannot independently choose a question revision;
 - append-only question facts cannot be modified/deleted.
 
 ### P0-2 tests
@@ -295,7 +304,7 @@ One native end-to-end fixture should demonstrate:
 ```text
 Q1 → H1
 H1 receives contradictory evidence
-L10b REVISE
+L10b REVISE + question_action=REVISE
 Q2 REVISION_OF Q1
 H2 ADDRESSES Q2
 new evidence supports H2
@@ -309,7 +318,7 @@ This test proves software semantics only, not scientific truth.
 P0 is complete only when:
 
 1. every new native round has an authoritative question identity;
-2. question revisions are explicit and auditable across rounds;
+2. question revisions are explicit, L10b-authorized, and auditable across rounds;
 3. the existing ledger can deterministically project the core scientific relations without a second source of truth;
 4. every ranked hypothesis is accompanied by an exact evidence profile/hash;
 5. pairwise ranking judges evidence rather than hypothesis prose alone;
