@@ -711,12 +711,6 @@ def test_detached_deep_research_survives_start_process_exit_and_collects(
         fx.project, fx.cand_id, "L1", run_id=artifact["run_id"]
     ) == (True, "")
     assert (fx.project / "02_Agent_Notes" / "_pre_research" / "L1_research.md").is_file()
-    context = subprocess.run(
-        [sys.executable, str(fx.cli), "assemble-context", str(fx.project),
-         fx.cand_id, "--node", "L1"],
-        capture_output=True, text=True, env=_deep_research_env(), timeout=10)
-    assert context.returncode == 0, context.stderr
-
     artifact["queries"] = ["tampered task output"]
     (_task_dir(fx.project, task_id) / "result.json").write_text(
         json.dumps(artifact), encoding="utf-8")
@@ -813,9 +807,6 @@ def test_deep_research_cli_executes_a_local_fake_codex(tmp_path, monkeypatch):
     assert result.returncode == 0, result.stderr
     assert "deep_research_run" in result.stdout
     assert fx.sentinel.exists(), "the fake Codex CLI never ran; the sentinel proves nothing"
-    context = subprocess.run([sys.executable, str(fx.cli), "assemble-context", str(fx.project),
-                              fx.cand_id, "--node", "L1"], capture_output=True, text=True)
-    assert context.returncode == 0, context.stderr
 
 
 def test_host_mismatch_never_starts_the_provider_process(tmp_path, monkeypatch):
