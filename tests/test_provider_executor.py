@@ -1,10 +1,13 @@
 """Behavior and authority contracts for the R3 process boundary."""
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -145,3 +148,65 @@ def test_maintenance_reuses_shared_process_runner_contract():
     )
     assert result.returncode == 0
     assert result.stdout.strip() == "maintenance-ok"
+
+
+def test_paperqa2_uses_generic_runner_without_provider_semantics(tmp_path):
+    from research_loop.l05_curie import paperqa2_runtime as runtime
+
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"pdf-fixture")
+    bridge = tmp_path / "bridge.py"
+    bridge.write_text("# fake bridge\n", encoding="utf-8")
+    repo = tmp_path / "paperqa"
+    repo.mkdir()
+    calls: list[tuple[object, dict]] = []
+
+    class FakeRunner:
+        def run(self, command, **kwargs):
+            calls.append((command, kwargs))
+            request = json.loads(kwargs["input_text"])
+            pdf_sha256 = hashlib.sha256(Path(request["pdf_path"]).read_bytes()).hexdigest()
+            payload = {
+                "engine": "paperqa2",
+                "runtime": {
+                    "schema_version": runtime.PAPERQA2_RUNTIME_SCHEMA_VERSION,
+                    **runtime._PINNED_RUNTIME,
+                    "pdf_sha256": pdf_sha256,
+                },
+                "hits": [{
+                    "text": "retrieved chunk",
+                    "locator": "page:1",
+                    "section": "Results",
+                    "score": 0.9,
+                }],
+            }
+            return SimpleNamespace(
+                returncode=0,
+                terminal_state="completed",
+                stdout=json.dumps(payload),
+                stderr="",
+            )
+
+    backend = runtime.PaperQA2SubprocessBackend(
+        python_executable=sys.executable,
+        bridge_script=bridge,
+        paperqa_repo=repo,
+        pqa_home=tmp_path / "pqa-home",
+        timeout_seconds=17,
+        runner=FakeRunner(),
+    )
+    hits = backend(
+        paper={
+            "paper_id": "P1",
+            "title": "Paper",
+            "identifiers": {"doi": "10.1/example"},
+            "pdf_path": str(pdf),
+        },
+        question="What was found?",
+    )
+
+    assert len(calls) == 1
+    assert calls[0][1]["timeout"] == 17
+    assert calls[0][1]["cwd"] == str(repo.resolve())
+    assert hits[0]["text"] == "retrieved chunk"
+    assert hits[0]["runtime"]["pdf_sha256"] == hashlib.sha256(pdf.read_bytes()).hexdigest()
