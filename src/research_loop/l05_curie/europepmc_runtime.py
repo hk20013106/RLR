@@ -17,7 +17,12 @@ from research_loop import research_seed
 
 from .contracts import CurieContractError, judge_coverage, validate_query_plan
 from .europepmc import EuropePmcEvidenceRetriever, EuropePmcEvidenceVerifier, EuropePmcTransport
-from .multisource import build_multisource_query_plan, run_multisource_discovery
+from .multisource import (
+    build_multisource_query_plan,
+    # Keep legacy module-level re-exports; production calls the strict sibling below.
+    run_multisource_discovery,
+    run_multisource_discovery_strict,
+)
 from .native_runtime import bind_initial_curie_pack
 from .paperqa2_runtime import (
     PAPERQA2_BACKEND_ID,
@@ -25,7 +30,8 @@ from .paperqa2_runtime import (
     validate_pinned_paperqa2_runtime,
 )
 from .semantic_verifier import SemanticEvidenceVerifier, admit_reasoning_evidence
-from .selector import select_candidates
+# Keep the legacy selector re-export for callers that imported it here.
+from .selector import select_candidates, select_candidates_strict
 from .store import build_evidence_pack, freeze_evidence_pack
 
 RESULT_SCHEMA_VERSION = "L05EuropePmcAcquisitionResult/v1"
@@ -244,12 +250,13 @@ def _prepare_europepmc_acquisition(
         http_get=http_get,
         timeout=timeout,
     )
-    discovery = run_multisource_discovery(
+    discovery = run_multisource_discovery_strict(
         query_plan,
         {"europe-pmc": transport},
+        seed_sha256=seed_digest,
         page_size=page_size,
     )
-    generic_selection = select_candidates(
+    generic_selection = select_candidates_strict(
         discovery["records"],
         seed=seed,
         scorer=_europepmc_selector_score,
@@ -258,6 +265,7 @@ def _prepare_europepmc_acquisition(
         project_dir=project,
         candidate_id=candidate_id,
         run_id=normalized_run_id,
+        query_ids={str(item["query_id"]) for item in query_plan["queries"]},
     )
     selected = _selected_europepmc_papers(discovery, generic_selection)
     return {

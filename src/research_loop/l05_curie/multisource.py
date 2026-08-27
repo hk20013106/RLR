@@ -8,6 +8,7 @@ can reach downstream Curie stages.
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -388,6 +389,17 @@ def _merge(primary: dict, duplicate: dict) -> None:
     for item in incoming.get("source_records") or [_source_record(duplicate)]:
         if item not in sources:
             sources.append(item)
+    left_query_ids = primary["provenance"].get("originating_query_ids")
+    if not isinstance(left_query_ids, list):
+        left_query_ids = []
+        primary["provenance"]["originating_query_ids"] = left_query_ids
+    incoming_query_ids = incoming.get("originating_query_ids")
+    if not isinstance(incoming_query_ids, list):
+        incoming_query_ids = []
+    for query_id in incoming_query_ids:
+        query_id = str(query_id or "").strip()
+        if query_id and query_id not in left_query_ids:
+            left_query_ids.append(query_id)
 
 
 def deduplicate_provider_records(records: list[dict]) -> tuple[list[dict], list[str]]:
@@ -439,6 +451,12 @@ def build_multisource_query_plan(
 ) -> dict:
     if not isinstance(seed, dict):
         raise CurieContractError("ResearchSeed must be an object")
+    supplied_seed_sha256 = str(seed_sha256 or "").strip().lower()
+    canonical_seed_sha256 = _sha(seed)
+    if supplied_seed_sha256 != canonical_seed_sha256:
+        raise CurieContractError(
+            "seed_sha256 does not match the canonical ResearchSeed"
+        )
     candidate_id = _require_text(seed.get("candidate_id"), "ResearchSeed candidate_id")
     round_id = _require_text(seed.get("round_id"), "ResearchSeed round_id")
     provider_list = list(providers or _PROVIDERS)
@@ -472,7 +490,7 @@ def build_multisource_query_plan(
     identity = {
         "candidate_id": candidate_id,
         "round_id": round_id,
-        "seed_sha256": str(seed_sha256).lower(),
+        "seed_sha256": supplied_seed_sha256,
         "round_index": round_index,
         "queries": query_items,
     }
@@ -480,7 +498,7 @@ def build_multisource_query_plan(
         "schema_version": QUERY_PLAN_SCHEMA_VERSION,
         "candidate_id": candidate_id,
         "round_id": round_id,
-        "seed_sha256": str(seed_sha256).lower(),
+        "seed_sha256": supplied_seed_sha256,
         "plan_id": "QP_MULTI_" + _sha(identity)[:16],
         "round_index": round_index,
         "queries": query_items,
@@ -715,10 +733,21 @@ class SemanticScholarTransport(_BaseTransport):
         }
 
 
-def run_multisource_discovery(plan: dict, transports: dict[str, object], *,
-                              page_size: int = 25,
-                              allow_partial: bool = False) -> dict:
-    validate_query_plan(plan, seed_sha256=str(plan.get("seed_sha256") or ""))
+def _run_multisource_discovery(
+    plan: dict,
+    transports: dict[str, object],
+    *,
+    seed_sha256: str | None = None,
+    page_size: int = 25,
+    allow_partial: bool = False,
+) -> dict:
+    # Existing callers may omit the new external binding; keep that legacy
+    # entry point self-consistent while current runtimes pass the canonical hash.
+    expected_seed_sha256 = (
+        str(plan.get("seed_sha256") or "")
+        if seed_sha256 is None else seed_sha256
+    )
+    validate_query_plan(plan, seed_sha256=expected_seed_sha256)
     query_ids = {str(item["query_id"]) for item in plan["queries"]}
     batches = []
     records = []
@@ -743,7 +772,13 @@ def run_multisource_discovery(plan: dict, transports: dict[str, object], *,
                     "query": query["query"],
                     "page_size": page_size,
                 })
-                validate_discovery_batch(batch, query_ids=query_ids)
+                validate_discovery_batch(
+                    batch,
+                    query_ids=query_ids,
+                    expected_query_id=str(query["query_id"]),
+                    expected_provider=provider,
+                    require_source_identity=True,
+                )
             except Exception as exc:
                 if not allow_partial:
                     if isinstance(exc, CurieContractError):
@@ -758,7 +793,15 @@ def run_multisource_discovery(plan: dict, transports: dict[str, object], *,
                 })
                 continue
             batches.append(batch)
-            records.extend(batch["records"])
+            for record in batch["records"]:
+                canonical = copy.deepcopy(record)
+                provenance = canonical.get("provenance")
+                if not isinstance(provenance, dict):
+                    provenance = {}
+                    canonical["provenance"] = provenance
+                # QueryPlan, not provider payload, is the authority for lineage.
+                provenance["originating_query_ids"] = [str(query["query_id"])]
+                records.append(canonical)
     canonical, duplicates = deduplicate_provider_records(records)
     return {
         "schema_version": "L05MultiSourceDiscovery/v1",
@@ -768,3 +811,43 @@ def run_multisource_discovery(plan: dict, transports: dict[str, object], *,
         "duplicate_paper_ids": duplicates,
         "failures": failures,
     }
+
+
+def run_multisource_discovery(
+    plan: dict,
+    transports: dict[str, object],
+    *,
+    page_size: int = 25,
+    allow_partial: bool = False,
+) -> dict:
+    """Run the legacy self-consistent discovery entry point.
+
+    Canonical runtimes must use :func:`run_multisource_discovery_strict` so
+    the externally derived ResearchSeed digest cannot be replaced by a
+    self-declared QueryPlan value.
+    """
+    return _run_multisource_discovery(
+        plan,
+        transports,
+        seed_sha256=None,
+        page_size=page_size,
+        allow_partial=allow_partial,
+    )
+
+
+def run_multisource_discovery_strict(
+    plan: dict,
+    transports: dict[str, object],
+    *,
+    seed_sha256: str,
+    page_size: int = 25,
+    allow_partial: bool = False,
+) -> dict:
+    """Run discovery bound to an externally derived canonical seed digest."""
+    return _run_multisource_discovery(
+        plan,
+        transports,
+        seed_sha256=seed_sha256,
+        page_size=page_size,
+        allow_partial=allow_partial,
+    )

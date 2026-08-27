@@ -41,6 +41,10 @@ def _freeze_native_pack(project: Path, seed: dict, *, run_id="CURIE001"):
             "paper_id": "PMID:123",
             "title": "Bat cardiac physiology",
             "identifiers": {"pmid": "123"},
+            "provenance": {
+                "provider": "europe-pmc",
+                "raw_record_sha256": "3" * 64,
+            },
         }],
     }
     selected = [{

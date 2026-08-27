@@ -96,12 +96,33 @@ def validate_selector_decision(decision: dict) -> dict:
     return json.loads(json.dumps(decision))
 
 
-def _query_ids(record: dict) -> list[str]:
-    provenance = record.get("provenance") if isinstance(record.get("provenance"), dict) else {}
+def _query_ids(
+    record: dict, authorized_query_ids: set[str] | None = None
+) -> list[str]:
+    provenance = record.get("provenance")
+    if not isinstance(provenance, dict):
+        raise CurieContractError("selector record has no discovery provenance")
     values = provenance.get("originating_query_ids") or []
-    if not isinstance(values, list):
-        values = []
-    return [str(item) for item in values if str(item).strip()] or ["UNKNOWN_QUERY"]
+    if not isinstance(values, list) or not values:
+        raise CurieContractError("selector record has no originating query provenance")
+    query_ids: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            raise CurieContractError(
+                "selector originating query provenance must contain only strings"
+            )
+        query_id = value.strip()
+        if not query_id:
+            raise CurieContractError(
+                "selector originating query provenance contains an empty query_id"
+            )
+        if query_id not in query_ids:
+            query_ids.append(query_id)
+        if authorized_query_ids is not None and query_id not in authorized_query_ids:
+            raise CurieContractError(
+                f"selector query provenance {query_id!r} is not authorized by the QueryPlan"
+            )
+    return query_ids
 
 
 def _ranking(decision: dict) -> tuple[float, float, float, float, float]:
@@ -117,7 +138,7 @@ def _ranking(decision: dict) -> tuple[float, float, float, float, float]:
     )
 
 
-def select_candidates(
+def _select_candidates(
     records: list[dict], *, seed: dict,
     scorer: Callable[[dict, dict], dict],
     eligibility: Callable[[dict], tuple[bool, str]],
@@ -125,11 +146,18 @@ def select_candidates(
     project_dir: str | Path | None = None,
     candidate_id: str | None = None,
     run_id: str | None = None,
+    query_ids: set[str] | None = None,
 ) -> dict:
     if not isinstance(records, list):
         raise CurieContractError("selector records must be a list")
     if not isinstance(max_papers, int) or isinstance(max_papers, bool) or max_papers < 1:
         raise CurieContractError("selector max_papers must be a positive integer")
+    if query_ids is not None and (
+        not isinstance(query_ids, set)
+        or not query_ids
+        or not all(isinstance(item, str) and item.strip() for item in query_ids)
+    ):
+        raise CurieContractError("selector query_ids must be a non-empty set of strings")
 
     decisions: list[dict] = []
     eligible: list[tuple[int, dict]] = []
@@ -154,7 +182,7 @@ def select_candidates(
                 methodological_value=0.0,
                 contradiction_value=0.0,
                 evidence_diversity=0.0,
-                originating_query_ids=_query_ids(record),
+                originating_query_ids=_query_ids(record, query_ids),
                 reason=f"Deterministic hard eligibility exclusion: {_text(reason_code, 'eligibility reason_code')}",
                 reason_code=str(reason_code),
             )
@@ -166,7 +194,7 @@ def select_candidates(
         decision = build_selector_decision(
             paper_id=paper_id,
             decision="RESERVE",
-            originating_query_ids=_query_ids(record),
+            originating_query_ids=_query_ids(record, query_ids),
             relevance=raw_score.get("relevance"),
             directness=raw_score.get("directness"),
             methodological_value=raw_score.get("methodological_value"),
@@ -209,3 +237,54 @@ def select_candidates(
         result["artifact_path"] = relative.as_posix()
         result["artifact_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
     return result
+
+
+def select_candidates(
+    records: list[dict], *, seed: dict,
+    scorer: Callable[[dict, dict], dict],
+    eligibility: Callable[[dict], tuple[bool, str]],
+    max_papers: int = 3,
+    project_dir: str | Path | None = None,
+    candidate_id: str | None = None,
+    run_id: str | None = None,
+) -> dict:
+    """Select candidates through the legacy, unbound selector entry point.
+
+    Canonical runtimes must use :func:`select_candidates_strict` so every
+    record's query lineage is checked against the current QueryPlan.
+    """
+    return _select_candidates(
+        records,
+        seed=seed,
+        scorer=scorer,
+        eligibility=eligibility,
+        max_papers=max_papers,
+        project_dir=project_dir,
+        candidate_id=candidate_id,
+        run_id=run_id,
+        query_ids=None,
+    )
+
+
+def select_candidates_strict(
+    records: list[dict], *, seed: dict,
+    scorer: Callable[[dict, dict], dict],
+    eligibility: Callable[[dict], tuple[bool, str]],
+    max_papers: int = 3,
+    project_dir: str | Path | None = None,
+    candidate_id: str | None = None,
+    run_id: str | None = None,
+    query_ids: set[str],
+) -> dict:
+    """Select candidates with QueryPlan-authorized query lineage."""
+    return _select_candidates(
+        records,
+        seed=seed,
+        scorer=scorer,
+        eligibility=eligibility,
+        max_papers=max_papers,
+        project_dir=project_dir,
+        candidate_id=candidate_id,
+        run_id=run_id,
+        query_ids=query_ids,
+    )

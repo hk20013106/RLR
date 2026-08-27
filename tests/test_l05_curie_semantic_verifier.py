@@ -1,7 +1,10 @@
+import hashlib
+
 import pytest
 
 import research_loop.l05_curie as curie
 import research_loop.l05_curie.semantic_verifier as semantic_module
+from research_loop.l05_curie import store as store_module
 from research_loop.l05_curie.semantic_verifier import (
     SEMANTIC_VERIFICATION_SCHEMA_VERSION,
     SemanticEvidenceVerifier,
@@ -210,6 +213,15 @@ def test_semantic_pack_rejects_replayed_judgment_on_changed_extract():
         curie.build_evidence_pack(**kwargs)
 
 
+def test_semantic_pack_reports_malformed_evidence_as_contract_error():
+    semantic = _semantic()
+    kwargs = _pack_kwargs([semantic])
+    kwargs["evidence"] = [None]
+
+    with pytest.raises(curie.CurieContractError, match="evidence"):
+        curie.build_evidence_pack(**kwargs)
+
+
 def test_semantic_validator_recomputes_non_delegable_policy_verdict():
     result = _semantic()
     result["scope_match"] = False
@@ -228,6 +240,59 @@ def test_evidence_pack_freezes_exact_semantic_admission_provenance(tmp_path):
         tmp_path, manifest, candidate_id="C001", round_id="1", seed_sha256="b" * 64
     )
     assert frozen["semantic_verifications"] == [semantic]
+
+
+def test_load_runs_semantic_admission_before_complete_structure_validation(
+    tmp_path, monkeypatch
+):
+    semantic = _semantic()
+    manifest = curie.freeze_evidence_pack(tmp_path, curie.build_evidence_pack(
+        **_pack_kwargs([semantic])
+    ))
+    events = []
+    original_semantic = store_module._validate_semantic_pack
+    original_structure = store_module._validate_pack_structure
+
+    def observe_semantic(pack):
+        events.append("semantic")
+        return original_semantic(pack)
+
+    def observe_structure(*args, **kwargs):
+        events.append("structure")
+        return original_structure(*args, **kwargs)
+
+    monkeypatch.setattr(store_module, "_validate_semantic_pack", observe_semantic)
+    monkeypatch.setattr(store_module, "_validate_pack_structure", observe_structure)
+    curie.load_frozen_evidence_pack(
+        tmp_path,
+        manifest,
+        candidate_id="C001",
+        round_id="1",
+        seed_sha256="b" * 64,
+    )
+
+    assert events[0] == "semantic"
+
+
+def test_load_reports_non_object_pack_as_contract_error(tmp_path):
+    manifest = curie.freeze_evidence_pack(tmp_path, curie.build_evidence_pack(
+        **_pack_kwargs([_semantic()])
+    ))
+    artifact = tmp_path / manifest["artifact_path"]
+    artifact.write_bytes(b"null\n")
+    forged_manifest = {
+        **manifest,
+        "artifact_sha256": hashlib.sha256(b"null\n").hexdigest(),
+    }
+
+    with pytest.raises(curie.CurieContractError, match="EvidencePack"):
+        curie.load_frozen_evidence_pack(
+            tmp_path,
+            forged_manifest,
+            candidate_id="C001",
+            round_id="1",
+            seed_sha256="b" * 64,
+        )
 
 
 def test_evidence_pack_rejects_semantic_admission_missing_or_not_authorized():

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from research_loop import context, deep_research, l0_contract, research_seed
+from research_loop import context, deep_research, l0_contract, l05_context, research_seed
 from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
 from research_loop.hypothesis_ledger import HypothesisLedger
 import research_loop.l05_curie as curie
@@ -234,6 +234,24 @@ def test_research_seed_binding_v2_binds_and_revalidates_frozen_pack(tmp_path):
         research_seed.load_l1_evidence_binding(
             tmp_path, seed, artifact["run_id"]
         )
+
+
+def test_research_seed_binding_rejects_non_object_json(tmp_path):
+    seed = _seed()
+    path = research_seed._evidence_binding_path(tmp_path, seed, "RUN_BAD")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("[]", encoding="utf-8")
+    with pytest.raises(research_seed.ResearchSeedError, match="object"):
+        research_seed.load_l1_evidence_binding(tmp_path, seed, "RUN_BAD")
+
+
+def test_context_distinguishes_missing_legacy_marker_from_malformed_native_marker():
+    assert l05_context._legacy_source_identity_mode({}) is True
+    assert l05_context._legacy_source_identity_mode(
+        {"native_evidence_binding": {"schema_version": "L1NativeEvidenceBinding/v1"}}
+    ) is False
+    with pytest.raises(l05_context.L05ContextError, match="native_evidence_binding"):
+        l05_context._legacy_source_identity_mode({"native_evidence_binding": None})
 
 
 def test_native_l1_rejects_legacy_only_evidence_binding(

@@ -5,6 +5,7 @@ from research_loop.l05_curie.selector import (
     SELECTOR_DECISION_SCHEMA_VERSION,
     build_selector_decision,
     select_candidates,
+    select_candidates_strict,
     validate_selector_decision,
 )
 
@@ -102,12 +103,13 @@ def test_contradictory_value_can_promote_evidence_instead_of_penalizing_it():
             return _score(relevance=0.8, directness=0.8, contradiction_value=1.0)
         return _score(relevance=0.8, directness=0.8, contradiction_value=0.0)
 
-    result = select_candidates(
+    result = select_candidates_strict(
         records,
         seed={"scientific_question": "question", "hypothesis_seed": "hypothesis"},
         scorer=scorer,
         max_papers=1,
         eligibility=lambda _record: (True, ""),
+        query_ids={"Q001"},
     )
     included = [item for item in result["decisions"] if item["decision"] == "INCLUDE"]
     assert included[0]["paper_id"] == "P2"
@@ -120,7 +122,7 @@ def test_selector_persists_all_include_exclude_reserve_decisions(tmp_path):
         _record("P2", pmcid="PMC2", oa=True, in_epmc=True),
         _record("P3"),
     ]
-    result = select_candidates(
+    result = select_candidates_strict(
         records,
         seed={"scientific_question": "question", "hypothesis_seed": "hypothesis"},
         scorer=lambda _r, _s: _score(),
@@ -132,6 +134,7 @@ def test_selector_persists_all_include_exclude_reserve_decisions(tmp_path):
         project_dir=tmp_path,
         candidate_id="C001",
         run_id="RUN1",
+        query_ids={"Q001"},
     )
     assert {item["decision"] for item in result["decisions"]} == {"INCLUDE", "RESERVE", "EXCLUDE"}
     receipt = tmp_path / result["artifact_path"]

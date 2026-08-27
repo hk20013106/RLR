@@ -21,11 +21,6 @@ from .contracts import (
 )
 from .interfaces import DiscoveryTransport, EvidenceRetriever
 
-# Install optional semantic-admission validation on the canonical store before
-# any public or downstream module captures its build/freeze/load functions.
-from . import store as _store
-from .semantic_pack import install as _install_semantic_pack
-_install_semantic_pack(_store)
 from .store import (
     build_evidence_pack,
     freeze_evidence_pack,
@@ -45,21 +40,6 @@ from .gap_loop import (
     validate_gap_retry_authorization,
 )
 
-# Multi-source query lineage is owned by the orchestrator, not by provider
-# payloads or Selector guesses. Install fail-closed provenance enforcement on
-# the canonical modules before callers import their public functions.
-from . import multisource as _multisource
-from . import selector as _selector
-from .provenance_hardening import install as _install_provenance_hardening
-_install_provenance_hardening(_multisource, _selector)
-
-del (
-    _install_provenance_hardening,
-    _install_semantic_pack,
-    _multisource,
-    _selector,
-    _store,
-)
 
 __all__ = [
     "AUTH_SCHEMA_VERSION",

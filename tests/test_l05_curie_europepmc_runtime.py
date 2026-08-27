@@ -329,8 +329,8 @@ def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(
 
     observed = {"planner": 0, "discovery": 0, "selector": 0}
     original_plan = europepmc_runtime.build_multisource_query_plan
-    original_discovery = europepmc_runtime.run_multisource_discovery
-    original_selector = europepmc_runtime.select_candidates
+    original_discovery = europepmc_runtime.run_multisource_discovery_strict
+    original_selector = europepmc_runtime.select_candidates_strict
 
     def observe_plan(*args, **kwargs):
         observed["planner"] += 1
@@ -347,8 +347,8 @@ def test_paperqa2_production_runtime_composes_selected_source_to_native_pack(
         return original_selector(*args, **kwargs)
 
     monkeypatch.setattr(europepmc_runtime, "build_multisource_query_plan", observe_plan)
-    monkeypatch.setattr(europepmc_runtime, "run_multisource_discovery", observe_discovery)
-    monkeypatch.setattr(europepmc_runtime, "select_candidates", observe_selector)
+    monkeypatch.setattr(europepmc_runtime, "run_multisource_discovery_strict", observe_discovery)
+    monkeypatch.setattr(europepmc_runtime, "select_candidates_strict", observe_selector)
 
     result = europepmc_runtime.run_paperqa2_europepmc_acquisition(
         project,

@@ -202,7 +202,9 @@ def write_l1_evidence_binding(project_dir, seed, run_id) -> dict:
     return evidence_binding_manifest_entry(project_dir, seed, run_id)
 
 
-def load_l1_evidence_binding(project_dir, seed, run_id) -> dict:
+def load_l1_evidence_binding(
+    project_dir, seed, run_id, *, allow_legacy_source_identity: bool = False
+) -> dict:
     """Load and revalidate ResearchSeed, exact run, and frozen EvidencePack."""
     from research_loop import l05_curie
 
@@ -215,6 +217,8 @@ def load_l1_evidence_binding(project_dir, seed, run_id) -> dict:
         raise ResearchSeedError(
             f"L1 research-seed evidence binding is missing or invalid: {exc}"
         ) from exc
+    if not isinstance(payload, dict):
+        raise ResearchSeedError("L1 research-seed evidence binding must be an object")
     expected_seed = manifest_entry(seed)
     if payload.get("schema_version") != EVIDENCE_BINDING_SCHEMA_VERSION:
         raise ResearchSeedError("L1 evidence binding schema is invalid")
@@ -240,6 +244,7 @@ def load_l1_evidence_binding(project_dir, seed, run_id) -> dict:
             candidate_id=str(seed["candidate_id"]),
             round_id=str(seed["round_id"]),
             seed_sha256=expected_seed["seed_sha256"],
+            allow_legacy_source_identity=allow_legacy_source_identity,
         )
     except l05_curie.CurieContractError as exc:
         raise ResearchSeedError(f"frozen L0.5 EvidencePack is invalid: {exc}") from exc

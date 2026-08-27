@@ -40,7 +40,9 @@ def _freeze(tmp_path, *, version=1, run_id=None, parent=None, gap_id=None):
         "query_id": f"Q{version}",
         "receipt": {"request_sha256": "1" * 64, "response_sha256": "2" * 64},
         "records": [{"paper_id": f"P{version}", "title": "Evidence",
-                     "identifiers": {"pmid": str(version)}}],
+                     "identifiers": {"pmid": str(version)},
+                     "provenance": {"provider": "europe-pmc",
+                                    "raw_record_sha256": str(version) * 64}}],
     }
     evidence = [{
         "schema_version": curie.EVIDENCE_EXTRACT_SCHEMA_VERSION,

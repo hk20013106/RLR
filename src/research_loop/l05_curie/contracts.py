@@ -113,15 +113,41 @@ def validate_transport_handshake(handshake: dict) -> dict:
     return copy.deepcopy(handshake)
 
 
-def validate_discovery_batch(batch: dict, *, query_ids: set[str]) -> dict:
+def validate_discovery_batch(
+    batch: dict,
+    *,
+    query_ids: set[str],
+    expected_query_id: str | None = None,
+    expected_provider: str | None = None,
+    expected_providers_by_query: dict[str, set[str]] | None = None,
+    require_source_identity: bool = False,
+) -> dict:
     """Validate normalized discovery metadata and bind it to an executed query."""
     batch = _require_dict(batch, "discovery batch")
     if batch.get("schema_version") != DISCOVERY_BATCH_SCHEMA_VERSION:
         raise CurieContractError("discovery batch schema_version is invalid")
-    _require_text(batch.get("provider"), "discovery batch provider")
+    provider = _require_text(batch.get("provider"), "discovery batch provider")
     query_id = _require_text(batch.get("query_id"), "discovery batch query_id")
     if query_id not in query_ids:
         raise CurieContractError(f"discovery batch query_id {query_id!r} is not in the QueryPlan")
+    if expected_query_id is not None and query_id != _require_text(
+        expected_query_id, "expected discovery query_id"
+    ):
+        raise CurieContractError(
+            f"discovery batch query_id {query_id!r} does not match executed query {expected_query_id!r}"
+        )
+    if expected_provider is not None and provider != _require_text(
+        expected_provider, "expected discovery provider"
+    ):
+        raise CurieContractError(
+            f"discovery batch provider {provider!r} does not match executed provider {expected_provider!r}"
+        )
+    if expected_providers_by_query is not None and provider not in expected_providers_by_query.get(
+        query_id, set()
+    ):
+        raise CurieContractError(
+            f"discovery batch provider {provider!r} is not declared for query {query_id!r}"
+        )
     receipt = _require_dict(batch.get("receipt"), "discovery batch receipt")
     _require_sha256(receipt.get("request_sha256"), "discovery receipt request_sha256")
     _require_sha256(receipt.get("response_sha256"), "discovery receipt response_sha256")
@@ -134,6 +160,21 @@ def validate_discovery_batch(batch: dict, *, query_ids: set[str]) -> dict:
         _require_text(record.get("title"), "discovery record title")
         if not isinstance(record.get("identifiers"), dict):
             raise CurieContractError("discovery record identifiers must be an object")
+        if require_source_identity:
+            provenance = _require_dict(
+                record.get("provenance"), "discovery record provenance"
+            )
+            record_provider = _require_text(
+                provenance.get("provider"), "discovery record provenance provider"
+            )
+            if record_provider != provider:
+                raise CurieContractError(
+                    "discovery record provenance provider must match discovery batch provider"
+                )
+            _require_sha256(
+                provenance.get("raw_record_sha256"),
+                "discovery record provenance raw_record_sha256",
+            )
     return copy.deepcopy(batch)
 
 

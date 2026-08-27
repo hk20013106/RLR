@@ -27,6 +27,15 @@ class L05ContextError(ValueError):
     """Raised when L1 cannot consume its frozen L0.5 evidence state."""
 
 
+def _legacy_source_identity_mode(pre_research: dict) -> bool:
+    """Allow legacy provenance only when the native binding marker is absent."""
+    if "native_evidence_binding" not in pre_research:
+        return True
+    if not isinstance(pre_research["native_evidence_binding"], dict):
+        raise L05ContextError("native_evidence_binding marker is malformed")
+    return False
+
+
 def _manifest_path(stderr_text: str) -> Path:
     prefix = "[audit] context manifest:"
     matches = [
@@ -141,6 +150,7 @@ def install(context_module) -> None:
                 )
 
             native_entry = pre_research.get("native_evidence_binding")
+            legacy_source_identity = _legacy_source_identity_mode(pre_research)
             if isinstance(native_entry, dict):
                 binding = research_seed.load_l1_native_evidence_binding(
                     project, seed, run_id
@@ -152,7 +162,10 @@ def install(context_module) -> None:
                 # New native v2.1 runtime is gated earlier and cannot reach this
                 # branch without an explicit native binding.
                 binding = research_seed.load_l1_evidence_binding(
-                    project, seed, run_id
+                    project,
+                    seed,
+                    run_id,
+                    allow_legacy_source_identity=legacy_source_identity,
                 )
                 injection_mode = "l05_frozen_pack"
                 native_mode = False
@@ -168,6 +181,7 @@ def install(context_module) -> None:
                 candidate_id=str(seed["candidate_id"]),
                 round_id=str(seed["round_id"]),
                 seed_sha256=research_seed.seed_sha256(seed),
+                allow_legacy_source_identity=legacy_source_identity,
             )
             if str(frozen.get("source_run_id") or "") != run_id:
                 raise L05ContextError(
@@ -176,6 +190,7 @@ def install(context_module) -> None:
             evidence_text = l05_curie.render_evidence_context(
                 frozen,
                 allow_legacy_frozen_acquisition_metadata=True,
+                allow_legacy_source_identity=legacy_source_identity,
             )
 
             rendered_path = Path(str(manifest["rendered_context_path"]))
