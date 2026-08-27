@@ -398,10 +398,10 @@ def install(deep_research_module) -> None:
             command, prompt
         )
         completed = dr.execute_provider_invocation(
-        execution_command, invocation_kwargs, timeout=spec.timeout,
-        label='Academic Research CLI',
-    )
-    receipt = dr.skill_receipt(
+            execution_command, invocation_kwargs, timeout=spec.timeout,
+            label="Academic Research CLI",
+        )
+        receipt = dr.skill_receipt(
             spec.backend,
             command,
             prompt,

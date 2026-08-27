@@ -633,10 +633,10 @@ with a real accepted method anchor, or a truthful source-blocked candidate.
         command[0] = dr.resolve_subprocess_executable(command[0])
         execution_command, invocation_kwargs = dr.subprocess_invocation(command, prompt)
         completed = dr.execute_provider_invocation(
-        execution_command, invocation_kwargs, timeout=spec.timeout,
-        label='Academic Research CLI',
-    )
-    receipt = dr.skill_receipt(
+            execution_command, invocation_kwargs, timeout=spec.timeout,
+            label="Academic Research CLI",
+        )
+        receipt = dr.skill_receipt(
             spec.backend, command, prompt, skill_version,
             exit_code=completed.returncode, stdout_hash=dr._sha(completed.stdout),
             model=spec.model,
