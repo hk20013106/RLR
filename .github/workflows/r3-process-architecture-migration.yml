@@ -1,0 +1,97 @@
+name: R3 process architecture migration
+
+on:
+  push:
+    branches:
+      - codex/pr38-r3-provider-executor
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/pr38-r3-provider-executor
+      - name: Remove duplicate provider process owners
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              if old not in text:
+                  raise SystemExit(f"missing anchor in {path}: {old[:80]!r}")
+              p.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          # Observability consumes the generic runner; it does not own process mechanics.
+          replace_once(
+              "src/research_loop/provider_runtime_observability.py",
+              "from research_loop.providers.executor import (\n    ProviderExecutionError,\n    ProviderExecutionResult,\n    ProviderExecutor,\n    run_bounded_process,\n)\n",
+              "from research_loop.process_runner import DEFAULT_PROCESS_RUNNER\nfrom research_loop.providers.executor import (\n    ProviderExecutionError,\n    ProviderExecutionResult,\n    ProviderExecutor,\n)\n",
+          )
+          replace_once(
+              "src/research_loop/provider_runtime_observability.py",
+              "        bounded = run_bounded_process(\n",
+              "        bounded = DEFAULT_PROCESS_RUNNER.run(\n",
+          )
+          replace_once(
+              "src/research_loop/provider_runtime_observability.py",
+              "ProviderExecutor owns process spawning, hard timeouts, and process-tree cleanup.\nThis module is deliberately non-owning: it interprets provider JSONL, publishes\n",
+              "ProcessRunner owns process mechanics, hard timeouts, and process-tree cleanup.\nThis module is deliberately non-owning: it interprets provider JSONL, publishes\n",
+          )
+
+          # Deep Research owns provider invocation semantics exactly once.
+          p = Path("src/research_loop/deep_research.py")
+          text = p.read_text(encoding="utf-8")
+          helper = '''\n\ndef execute_provider_invocation(\n    execution_command,\n    invocation_kwargs: dict,\n    *,\n    timeout: float | None,\n    label: str = "Academic Research CLI",\n):\n    """Execute one provider command through the canonical provider boundary."""\n    try:\n        return DEFAULT_EXECUTOR.run(\n            execution_command,\n            timeout=timeout,\n            input_text=invocation_kwargs.get("input"),\n            check=False,\n            encoding="utf-8",\n            errors="strict",\n        )\n    except ProviderExecutionError as exc:\n        detail = exc.stderr.strip() or str(exc)\n        if exc.timed_out:\n            raise DeepResearchError(\n                f"{label} timed out after {exc.timeout}s: {detail}"\n            ) from exc\n        raise DeepResearchError(f"{label} invocation failed: {detail}") from exc\n'''
+          anchor = "\n\ndef run_and_persist(\n"
+          if "def execute_provider_invocation(" not in text:
+              if anchor not in text:
+                  raise SystemExit("missing deep_research run_and_persist anchor")
+              text = text.replace(anchor, helper + anchor, 1)
+          old = '''    try:\n        completed = DEFAULT_EXECUTOR.run(\n            execution_command,\n            timeout=spec.timeout,\n            input_text=invocation_kwargs.get("input"),\n            check=False,\n            encoding="utf-8",\n            errors="strict",\n        )\n    except ProviderExecutionError as exc:\n        detail = exc.stderr.strip() or str(exc)\n        if exc.timed_out:\n            raise DeepResearchError(\n                f"Academic Research CLI timed out after {exc.timeout}s: {detail}"\n            ) from exc\n        raise DeepResearchError(\n            f"Academic Research CLI invocation failed: {detail}"\n        ) from exc\n'''
+          new = '''    completed = execute_provider_invocation(\n        execution_command, invocation_kwargs, timeout=spec.timeout\n    )\n'''
+          if old not in text:
+              raise SystemExit("missing deep_research executor block")
+          p.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          def migrate_wrapper(path, module_expr, label):
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              text = text.replace("import subprocess\n", "", 1)
+              search_from = text.index("execution_command, invocation_kwargs")
+              start = text.index("    try:\n        completed = subprocess.run(", search_from)
+              end = text.index("    receipt =", start)
+              call = (
+                  f"    completed = {module_expr}.execute_provider_invocation(\n"
+                  f"        execution_command, invocation_kwargs, timeout=spec.timeout,\n"
+                  f"        label={label!r},\n"
+                  f"    )\n"
+              )
+              p.write_text(text[:start] + call + text[end:], encoding="utf-8")
+
+          migrate_wrapper(
+              "src/research_loop/l4_inventory.py", "dr", "L4A method-inventory CLI"
+          )
+          migrate_wrapper(
+              "src/research_loop/l4_pipeline.py", "_deep_research", "L4A Academic Research CLI"
+          )
+          migrate_wrapper(
+              "src/research_loop/method_evidence.py", "dr", "Academic Research CLI"
+          )
+          migrate_wrapper(
+              "src/research_loop/method_review_navigation.py", "dr", "Academic Research CLI"
+          )
+      - name: Commit migration
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/research_loop/provider_runtime_observability.py src/research_loop/deep_research.py src/research_loop/l4_inventory.py src/research_loop/l4_pipeline.py src/research_loop/method_evidence.py src/research_loop/method_review_navigation.py
+          git commit -m "refactor: centralize provider invocation semantics"
+          git push origin HEAD:codex/pr38-r3-provider-executor
