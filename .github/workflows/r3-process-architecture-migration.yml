@@ -28,7 +28,6 @@ jobs:
                   raise SystemExit(f"missing anchor in {path}: {old[:80]!r}")
               p.write_text(text.replace(old, new, 1), encoding="utf-8")
 
-          # Observability consumes the generic runner; it does not own process mechanics.
           replace_once(
               "src/research_loop/provider_runtime_observability.py",
               "from research_loop.providers.executor import (\n    ProviderExecutionError,\n    ProviderExecutionResult,\n    ProviderExecutor,\n    run_bounded_process,\n)\n",
@@ -45,7 +44,6 @@ jobs:
               "ProcessRunner owns process mechanics, hard timeouts, and process-tree cleanup.\nThis module is deliberately non-owning: it interprets provider JSONL, publishes\n",
           )
 
-          # Deep Research owns provider invocation semantics exactly once.
           p = Path("src/research_loop/deep_research.py")
           text = p.read_text(encoding="utf-8")
           helper = '''\n\ndef execute_provider_invocation(\n    execution_command,\n    invocation_kwargs: dict,\n    *,\n    timeout: float | None,\n    label: str = "Academic Research CLI",\n):\n    """Execute one provider command through the canonical provider boundary."""\n    try:\n        return DEFAULT_EXECUTOR.run(\n            execution_command,\n            timeout=timeout,\n            input_text=invocation_kwargs.get("input"),\n            check=False,\n            encoding="utf-8",\n            errors="strict",\n        )\n    except ProviderExecutionError as exc:\n        detail = exc.stderr.strip() or str(exc)\n        if exc.timed_out:\n            raise DeepResearchError(\n                f"{label} timed out after {exc.timeout}s: {detail}"\n            ) from exc\n        raise DeepResearchError(f"{label} invocation failed: {detail}") from exc\n'''
@@ -64,9 +62,15 @@ jobs:
               p = Path(path)
               text = p.read_text(encoding="utf-8")
               text = text.replace("import subprocess\n", "", 1)
-              search_from = text.index("execution_command, invocation_kwargs")
-              start = text.index("    try:\n        completed = subprocess.run(", search_from)
-              end = text.index("    receipt =", start)
+              hit = text.find("completed = subprocess.run(")
+              if hit < 0:
+                  raise SystemExit(f"missing subprocess owner in {path}")
+              start = text.rfind("    try:", 0, hit)
+              if start < 0:
+                  raise SystemExit(f"missing try boundary in {path}")
+              end = text.find("    receipt =", hit)
+              if end < 0:
+                  raise SystemExit(f"missing receipt boundary in {path}")
               call = (
                   f"    completed = {module_expr}.execute_provider_invocation(\n"
                   f"        execution_command, invocation_kwargs, timeout=spec.timeout,\n"
