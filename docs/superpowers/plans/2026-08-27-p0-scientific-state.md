@@ -4,7 +4,7 @@
 
 **Goal:** Close the three P0 gaps as one coherent path: first-class ResearchQuestion lifecycle, deterministic scientific-state relations, and evidence-aware hypothesis ranking.
 
-**Architecture:** Keep `HypothesisLedger` as the only scientific fact authority. Add question facts to the same SQLite store, project committed ledger facts into a read-only Scientific State view, derive `EvidenceProfile` from that projection, and feed the profile into the existing ranking machinery without replacing Elo, DAG authority, or formal decisions.
+**Architecture:** `HypothesisLedger` remains the only scientific fact authority. Question facts live in the same SQLite store; Scientific State and `EvidenceProfile` are deterministic read-only projections; the existing ranking scheduler consumes those profiles without changing Elo, DAG authority, or formal decisions.
 
 **Tech Stack:** Python stdlib, SQLite, existing JSON Schema/jsonschema contracts, existing RLR CLI/runtime, pytest.
 
@@ -12,49 +12,49 @@
 
 ## Global Constraints
 
-- Target only native v2.1/new runs; do not enlarge v2.0 compatibility.
-- `HypothesisLedger` remains the single scientific persistence authority.
+- Target native v2.1/new runs only; do not enlarge v2.0 compatibility.
+- `HypothesisLedger` is the single scientific persistence authority.
 - Graphs, EvidenceProfiles, ranking artifacts, and reports are rebuildable projections only.
-- Do not add Neo4j, ORKG, OpenAlex, MLflow, DVC, AiiDA, LangGraph, or a second ledger/database in P0.
+- Do not add Neo4j, ORKG, OpenAlex, MLflow, DVC, AiiDA, LangGraph, or another scientific-state database.
 - Do not change the DAG or create a new decision authority.
-- L10b owns any Question revision decision; L0/new-candidate may only bind/validate an already-authorized Question identity.
-- Preserve existing ranking scheduler, A/B+B/A fairness, checkpoint/replay, and advisory-only semantics.
-- TDD: write a failing boundary test before each production change.
-- No unrelated refactor, formatting sweep, dependency upgrade, or legacy migration work.
+- L10b owns Question revision decisions; intake/L0 may only bind or verify an already-authorized identity.
+- Preserve ranking scheduler, A/B+B/A fairness, checkpoint/replay, and advisory-only semantics.
+- Use TDD and the smallest change at each canonical owner.
+- No unrelated refactor, dependency upgrade, compatibility patch stack, or legacy migration.
 
 ---
 
 ## File Structure
 
-- Modify `src/research_loop/hypothesis_ledger.py`: question tables/binding APIs; deterministic graph projection query support; ranking inputs source.
-- Modify `src/research_loop/hypothesis_contracts.py`: native-v2.1 L10b `question_transition` contract only.
-- Modify `src/research_loop/commands/lifecycle.py`: initial/continuation question binding at candidate creation and fail-closed validation.
-- Modify `src/research_loop/commands/continuation.py`: freeze L10b question transition and question identity into loop memory.
-- Modify `templates/layers/L10b_final_decision.md`: tell Oppenheimer when/how to emit question transition; dynamic schema remains authority.
-- Create `src/research_loop/scientific_state.py`: pure transformations from ledger graph facts to normalized relations and `EvidenceProfile`; no writes, no provider/filesystem authority.
-- Modify `src/research_loop/ranking.py`: carry EvidenceProfile snapshots/hashes into candidate snapshots and pairwise prompt/checkpoint validation.
-- Test primarily in `tests/test_hypothesis_ledger.py`, `tests/test_ranking_cli.py`, `tests/test_cross_round_e2e.py`; add one focused `tests/test_scientific_state.py` for pure projection behavior.
+- Modify `src/research_loop/hypothesis_ledger.py`: Question storage/binding; graph query support; ranking input enrichment.
+- Modify `src/research_loop/hypothesis_contracts.py`: native-v2.1 L10b `question_transition` contract.
+- Modify `src/research_loop/commands/lifecycle.py`: native candidate Question binding.
+- Modify `src/research_loop/commands/continuation.py`: freeze Question identity/transition into loop memory.
+- Modify `templates/layers/L10b_final_decision.md`: concise Question-transition instruction.
+- Create `src/research_loop/scientific_state.py`: pure projection and EvidenceProfile construction.
+- Modify `src/research_loop/ranking.py`: carry profile snapshots/hashes into prompts/checkpoints.
+- Modify tests in `tests/test_hypothesis_ledger.py`, `tests/test_cross_round_e2e.py`, `tests/test_ranking_cli.py`.
+- Create `tests/test_scientific_state.py`.
 
 ---
 
-### Task 1: First-class Question facts in the existing ledger
+### Task 1: First-class ResearchQuestion facts in the existing ledger
 
 **Files:**
 - Modify: `src/research_loop/hypothesis_ledger.py`
-- Test: `tests/test_hypothesis_ledger.py`
+- Modify: `tests/test_hypothesis_ledger.py`
 
 **Interfaces:**
-- Produce `HypothesisLedger.bind_question(project_dir, candidate_id, round_id, statement, *, parent_question_id=None, relationship=None, source_commit_seq=None) -> dict`.
-- Produce `HypothesisLedger.question_binding(project_dir, candidate_id, round_id) -> dict`.
-- Returned binding keys: `question_id`, `question_family_id`, `statement`, `parent_question_id`, `relationship`, `candidate_id`, `round_id`.
-- Initial question: `parent_question_id=None`, `relationship=None`.
-- Revised question: same family as parent and `relationship="REVISION_OF"`.
-- KEEP continuation: same `question_id` in a new occurrence; no new version.
+- `HypothesisLedger.bind_question(project_dir, candidate_id, round_id, statement, *, parent_question_id=None, relationship=None, source_commit_seq=None) -> dict`
+- `HypothesisLedger.question_binding(project_dir, candidate_id, round_id) -> dict`
+- Initial: no parent, no relationship.
+- KEEP: parent supplied, `relationship=None`, statement must equal parent after normalization; create only a new occurrence pointing to the same `question_id`.
+- REVISE: parent supplied, `relationship="REVISION_OF"`, statement must differ; create a new version in the parent's family.
 
-- [ ] **Step 1: Write failing ledger tests for initial, KEEP, REVISE, append-only behavior**
+- [ ] **Step 1: Write failing tests for initial, KEEP, REVISE, idempotency, append-only behavior**
 
 ```python
-def test_question_binding_is_first_class_and_append_only(tmp_path):
+def test_question_binding_is_versioned_and_append_only(tmp_path):
     project = tmp_path / "P"
     project.mkdir()
     ledger = HypothesisLedger(tmp_path / "shared.sqlite")
@@ -62,12 +62,13 @@ def test_question_binding_is_first_class_and_append_only(tmp_path):
 
     q1 = ledger.bind_question(project, "C1", "1", "Does A alter B?")
     kept = ledger.bind_question(
-        project, "C2", "2", "Does A alter B?", parent_question_id=q1["question_id"],
-        relationship="KEEP",
+        project, "C2", "2", "Does A alter B?",
+        parent_question_id=q1["question_id"],
     )
     revised = ledger.bind_question(
         project, "C3", "3", "Under condition X, does A alter B?",
-        parent_question_id=q1["question_id"], relationship="REVISION_OF",
+        parent_question_id=q1["question_id"],
+        relationship="REVISION_OF",
         source_commit_seq=7,
     )
 
@@ -75,22 +76,21 @@ def test_question_binding_is_first_class_and_append_only(tmp_path):
     assert revised["question_id"] != q1["question_id"]
     assert revised["question_family_id"] == q1["question_family_id"]
     assert revised["parent_question_id"] == q1["question_id"]
+    assert revised["relationship"] == "REVISION_OF"
     assert ledger.question_binding(project, "C3", "3") == revised
 ```
 
-Add direct SQLite mutation assertions mirroring existing append-only hypothesis tests: UPDATE/DELETE of question families/versions/occurrences must raise `sqlite3.IntegrityError`.
+Add mutation tests proving UPDATE/DELETE of Question family/version/occurrence rows raises `sqlite3.IntegrityError`. Add a conflicting rebind test proving one project/candidate/round cannot point to two Question versions.
 
-- [ ] **Step 2: Run the focused test and verify failure**
+- [ ] **Step 2: Run focused tests and confirm they fail**
 
-Run:
 ```powershell
-rtk proxy python -m pytest tests\test_hypothesis_ledger.py -k "question_binding" -q
+rtk proxy python -m pytest tests\test_hypothesis_ledger.py -k "question_binding or question_append" -q
 ```
-Expected: FAIL because question tables/APIs do not yet exist.
 
-- [ ] **Step 3: Implement the minimal ledger model**
+Expected: FAIL because Question tables/APIs do not exist.
 
-In `_initialize()` add only these append-only tables/triggers:
+- [ ] **Step 3: Implement the minimum tables in the existing store**
 
 ```sql
 CREATE TABLE IF NOT EXISTS question_families (
@@ -117,18 +117,25 @@ CREATE TABLE IF NOT EXISTS question_occurrences (
 );
 ```
 
-Use existing `normalize_statement`, `_uuid`, transaction, project-binding checks, and append-only trigger style. Do not create a second connection/store abstraction.
+Use existing `normalize_statement`, `_uuid`, project-binding checks, transaction style, and append-only triggers. Derive initial family identity from normalized Question text. Derive `definition_hash` from `{question_family_id, normalized_statement}` so retries are deterministic within a family.
 
-`KEEP` means create only a new occurrence pointing at the parent version. `REVISION_OF` means create one new immutable version in the parent's family, then its occurrence. Identical retries must be idempotent; conflicting rebinding of the same project/candidate/round must fail closed.
+- [ ] **Step 4: Add a native-v2.1 L1 integrity test**
 
-- [ ] **Step 4: Run focused ledger tests**
+For a project bound with profile `v2.1-catalog-1`, committing L1 without a Question occurrence for that candidate/round must raise `LedgerError`. A v2.0 historical fixture must retain its existing behavior; do not migrate it.
+
+- [ ] **Step 5: Implement the native-v2.1 L1 precondition in `commit_delta`**
+
+Before normalizing a native-v2.1 L1 submission, resolve exactly one Question occurrence for `(project_id, candidate_id, round_id)`. Fail closed if absent or ambiguous. Do not add a new validator module.
+
+- [ ] **Step 6: Run focused ledger tests**
 
 ```powershell
-rtk proxy python -m pytest tests\test_hypothesis_ledger.py -k "question_binding" -q
+rtk proxy python -m pytest tests\test_hypothesis_ledger.py -k "question or native" -q
 ```
+
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add src/research_loop/hypothesis_ledger.py tests/test_hypothesis_ledger.py
@@ -137,115 +144,128 @@ git commit -m "feat: add first-class research questions to ledger"
 
 ---
 
-### Task 2: Put Question transition under L10b authority and bind continuations
+### Task 2: Bind Question lifecycle to L10b continuation authority
 
 **Files:**
 - Modify: `src/research_loop/hypothesis_contracts.py`
-- Modify: `src/research_loop/commands/continuation.py`
 - Modify: `src/research_loop/commands/lifecycle.py`
+- Modify: `src/research_loop/commands/continuation.py`
 - Modify: `templates/layers/L10b_final_decision.md`
-- Test: `tests/test_hypothesis_ledger.py`
-- Test: `tests/test_cross_round_e2e.py`
+- Modify: `tests/test_hypothesis_ledger.py`
+- Modify: `tests/test_cross_round_e2e.py`
 
 **Interfaces:**
-- Native v2.1 L10b adds `question_transition`:
+- Native-v2.1 L10b adds:
 
 ```json
 {
-  "action": "KEEP|REVISE|CLOSE",
-  "reason": "non-empty",
-  "statement": "required only for REVISE"
+  "question_transition": {
+    "action": "KEEP",
+    "reason": "The original research question remains the correct scope."
+  }
 }
 ```
 
-- If L10b `decision == "REVISE"`, `question_transition` is required and action must be `KEEP` or `REVISE` because a child round will be opened.
-- `REVISE` requires a non-empty new statement.
-- `KEEP` must not silently accept a changed statement.
-- `CLOSE` is valid only when no continuation is being opened.
-- Loop memory carries `question_id`, `question_family_id`, `question_transition` and the source L10b commit cursor/hash already available through the ledger snapshot.
+or:
 
-- [ ] **Step 1: Write failing contract tests**
-
-Add assertions that native v2.1 accepts:
-
-```python
-{"decision": "REVISE", ..., "question_transition": {
-    "action": "KEEP", "reason": "same research question"
-}}
+```json
+{
+  "question_transition": {
+    "action": "REVISE",
+    "statement": "Under condition X, does A alter B?",
+    "reason": "The completed round narrowed the valid scope."
+  }
+}
 ```
 
-and:
+`CLOSE` is permitted only for terminal decisions that do not open a child round. If `decision == "REVISE"`, the transition is required and its action is `KEEP` or `REVISE`.
 
-```python
-{"decision": "REVISE", ..., "question_transition": {
-    "action": "REVISE", "statement": "Refined question", "reason": "evidence narrowed scope"
-}}
-```
+- [ ] **Step 1: Write failing native-v2.1 L10b schema tests**
 
-Reject `decision=REVISE` with missing transition, and reject `action=REVISE` without statement. Do not change v2.0 schemas.
+Use a complete valid native L10b payload. Verify: `decision=REVISE` + KEEP passes; `decision=REVISE` + REVISE with statement passes; missing transition fails; REVISE without statement fails; `decision=REVISE` + CLOSE fails. Verify v2.0 schema is unchanged.
 
-- [ ] **Step 2: Run contract tests and verify failure**
+- [ ] **Step 2: Run schema tests and confirm failure**
 
 ```powershell
 rtk proxy python -m pytest tests\test_hypothesis_ledger.py -k "question_transition" -q
 ```
-Expected: FAIL on missing schema support.
 
-- [ ] **Step 3: Add only the v2.1 L10b schema extension**
+Expected: FAIL because v2.1 has no Question transition field/rules.
 
-Build `_question_transition` once and add it to `_V21_NODE_SCHEMAS["L10b"]`. Use JSON-Schema conditional rules rather than a second Python validator. Do not create CLI-specific validation logic.
+- [ ] **Step 3: Extend only `_V21_NODE_SCHEMAS["L10b"]`**
 
-- [ ] **Step 4: Write failing continuation test**
+Create one `_question_transition` schema object and JSON-Schema conditionals. Do not add a CLI-side duplicate validator. Do not modify the v2.0 schema registry.
 
-Extend the native cross-round fixture so round 1 is bound to Q1, L10b emits `question_transition`, loop-memory preserves it, and child creation must produce either the same question ID (`KEEP`) or Q2 with `REVISION_OF Q1` (`REVISE`). A user-supplied continuation question that conflicts with the authorized transition must return error code 2 before the child candidate is committed.
+- [ ] **Step 4: Write failing native candidate/continuation tests**
 
-- [ ] **Step 5: Run continuation test and verify failure**
+The initial `new-candidate` path must bind the contract's `scientific_question` in the activated ledger before a native L1 can be committed. For continuation:
+
+```python
+q1 = ledger.question_binding(project, parent_candidate, "1")
+transition = memory["question_transition"]
+assert memory["question_id"] == q1["question_id"]
+assert transition["action"] in {"KEEP", "REVISE"}
+```
+
+KEEP must create a child occurrence with Q1. REVISE must create Q2 with `REVISION_OF Q1`. Supplying a child question that differs from the L10b-authorized text must fail before the child candidate is finalized.
+
+- [ ] **Step 5: Run continuation tests and confirm failure**
 
 ```powershell
 rtk proxy python -m pytest tests\test_cross_round_e2e.py -k "question" -q
 ```
-Expected: FAIL because loop memory/candidate creation does not bind question identity.
 
-- [ ] **Step 6: Implement initial and continuation binding at the existing candidate-creation seam**
+Expected: FAIL because candidate creation and loop memory do not yet carry Question identity.
 
-In `cmd_new_candidate`/its current helper path:
+- [ ] **Step 6: Implement initial binding in `cmd_new_candidate`**
+
+After strict native intake has produced the final `scientific_question` and deterministic candidate/round IDs, call:
 
 ```python
-if initial_native:
-    q = ledger.bind_question(project_dir, cand_id, round_id, contract["scientific_question"])
-else:
-    transition = mem["question_transition"]
-    if transition["action"] == "KEEP":
-        expected = mem["question_statement"]
-        if normalize_statement(contract["scientific_question"]) != normalize_statement(expected):
-            raise ValueError("continuation question changed without L10b REVISE authority")
-        q = ledger.bind_question(..., parent_question_id=mem["question_id"], relationship="KEEP")
-    elif transition["action"] == "REVISE":
-        expected = transition["statement"]
-        if normalize_statement(contract["scientific_question"]) != normalize_statement(expected):
-            raise ValueError("continuation question does not match L10b-authorized revision")
-        q = ledger.bind_question(..., parent_question_id=mem["question_id"], relationship="REVISION_OF",
-                                 source_commit_seq=mem["hypothesis_ledger"]["as_of_commit_seq"])
+question_binding = ledger.bind_question(
+    project_dir,
+    cand_id,
+    str(contract["round_id"]),
+    contract["scientific_question"],
+)
 ```
 
-Do not let L0 or CLI invent a revision. L0 remains a validation/binding boundary only.
+Do this only on the activated native path. Preserve deterministic retry semantics and fail candidate creation if the ledger binding conflicts.
 
-In `_build_loop_memory`, read the source candidate's ledger `question_binding(...)`, copy its IDs/statement, and freeze the normalized L10b `question_transition`.
+- [ ] **Step 7: Freeze Question authority in `_build_loop_memory`**
 
-Update `templates/layers/L10b_final_decision.md` with one concise rule: if opening a revised round, explicitly decide whether the ResearchQuestion is KEEP or REVISE; never change it implicitly.
+Load the source round's Question via `ledger.question_binding(project_dir, cand_id, source_round_id)` and add these fields to loop memory:
 
-- [ ] **Step 7: Run focused contract + cross-round tests**
+```python
+memory["question_id"] = source_question["question_id"]
+memory["question_family_id"] = source_question["question_family_id"]
+memory["question_statement"] = source_question["statement"]
+memory["question_transition"] = l10["question_transition"]
+```
+
+The transition comes only from the finalized L10b delta; do not infer it by comparing strings.
+
+- [ ] **Step 8: Implement continuation binding in `cmd_new_candidate`**
+
+For KEEP, require normalized child `scientific_question` to equal `memory["question_statement"]`, then call `bind_question` with the parent ID and no relationship. For REVISE, require normalized child text to equal `memory["question_transition"]["statement"]`, then call `bind_question` with `relationship="REVISION_OF"` and the parent ID. Use the frozen source ledger cursor as `source_commit_seq`.
+
+- [ ] **Step 9: Update the L10b layer instruction**
+
+Add one rule to `templates/layers/L10b_final_decision.md`: when a continuation is proposed, explicitly choose KEEP or REVISE for the ResearchQuestion; never silently rewrite the Question.
+
+- [ ] **Step 10: Run focused tests**
 
 ```powershell
 rtk proxy python -m pytest tests\test_hypothesis_ledger.py tests\test_cross_round_e2e.py -k "question" -q
 ```
+
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
-git add src/research_loop/hypothesis_contracts.py src/research_loop/commands/continuation.py src/research_loop/commands/lifecycle.py templates/layers/L10b_final_decision.md tests/test_hypothesis_ledger.py tests/test_cross_round_e2e.py
-git commit -m "feat: bind question lifecycle to L10b continuation authority"
+git add src/research_loop/hypothesis_contracts.py src/research_loop/commands/lifecycle.py src/research_loop/commands/continuation.py templates/layers/L10b_final_decision.md tests/test_hypothesis_ledger.py tests/test_cross_round_e2e.py
+git commit -m "feat: bind question lifecycle to L10b authority"
 ```
 
 ---
@@ -258,58 +278,58 @@ git commit -m "feat: bind question lifecycle to L10b continuation authority"
 - Create: `tests/test_scientific_state.py`
 
 **Interfaces:**
-- `HypothesisLedger.graph(hypothesis_id, *, as_of=None) -> dict` remains the public graph seam.
-- Graph nodes may include `question`, `hypothesis_version`, `analysis_run`, and `evidence`.
-- Graph edges use only: `ADDRESSES`, `REVISION_OF`, `DERIVED_FROM`, `TESTS`, `PRODUCES`, `SUPPORTS`, `CONTRADICTS`, `INCONCLUSIVE_FOR`, `FALSIFIES`.
-- Every edge contains `subject_id`, `predicate`, `object_id`, `source_event_id` or `source_delta_hash`, `source_node`, `commit_seq`, `round_id`, and `artifact_ref` when available.
-- `src/research_loop/scientific_state.py` exports pure helpers `normalize_edges(graph_facts) -> list[dict]` and `build_evidence_profile(graph) -> dict`.
+- Keep `HypothesisLedger.graph(hypothesis_id, *, as_of=None) -> dict` as the public graph seam.
+- Allowed predicates: `ADDRESSES`, `REVISION_OF`, `DERIVED_FROM`, `TESTS`, `PRODUCES`, `SUPPORTS`, `CONTRADICTS`, `INCONCLUSIVE_FOR`, `FALSIFIES`.
+- Every projected edge carries provenance: `subject_id`, `predicate`, `object_id`, `source_event_id` or `source_delta_hash`, `source_node`, `commit_seq`, `round_id`, and artifact reference when one exists.
+- `scientific_state.py` is pure/read-only; it may not write ledger rows or import engine/provider/CLI modules.
 
-- [ ] **Step 1: Write failing projection tests from committed real ledger events**
+- [ ] **Step 1: Write a failing projection fixture using finalized L1/L6/L7/L8/L8.5/L9a data**
 
-Create a fixture that commits L1, L6, L7, L8, L8.5 and L9a against one hypothesis/question. Assert at minimum:
+The fixture binds Q1, commits H1, a tested result, explicit support/contradiction/inconclusive relations, and a falsification event. Assert:
 
 ```python
-predicates = {(e["predicate"], e["object_id"]) for e in graph["edges"]}
-assert ("ADDRESSES", q1["question_id"]) in predicates
-assert ("SUPPORTS", hid) in predicates
-assert ("CONTRADICTS", hid) in predicates
-assert ("INCONCLUSIVE_FOR", hid) in predicates
-assert ("FALSIFIES", hid) in predicates
+edges = ledger.graph(hid)["edges"]
+assert any(e["predicate"] == "ADDRESSES" and e["object_id"] == q1["question_id"] for e in edges)
+assert any(e["predicate"] == "SUPPORTS" and e["object_id"] == hid for e in edges)
+assert any(e["predicate"] == "CONTRADICTS" and e["object_id"] == hid for e in edges)
+assert any(e["predicate"] == "INCONCLUSIVE_FOR" and e["object_id"] == hid for e in edges)
+assert any(e["predicate"] == "FALSIFIES" and e["object_id"] == hid for e in edges)
 ```
 
-Also assert two calls at the same `as_of` return byte-equivalent canonical JSON and that no edge is inferred from unstructured reason prose.
+Also assert the same `as_of` cursor yields identical `canonical_json(graph)` and that prose alone never creates an edge.
 
-- [ ] **Step 2: Run and verify failure**
+- [ ] **Step 2: Run projection test and confirm failure**
 
 ```powershell
 rtk proxy python -m pytest tests\test_scientific_state.py -q
 ```
-Expected: FAIL because `graph()` still exposes no useful edges.
 
-- [ ] **Step 3: Extend existing `HypothesisLedger.graph()` instead of adding a graph store**
+Expected: FAIL because current `graph()` returns no useful edges.
 
-Query only finalized emissions/events up to `as_of`. Derive:
+- [ ] **Step 3: Extend the existing graph projection, not persistence**
 
-- `ADDRESSES`: join hypothesis occurrence to question occurrence on project/candidate/round.
-- `REVISION_OF`: from immutable hypothesis/question parent lineage already stored.
-- `TESTS`/`PRODUCES`: from finalized L7 emission and its normalized L7 payload/evidence records; derive a stable projection-only run ID from the L7 `delta_hash`, e.g. `RUN:<delta_hash>`.
-- `SUPPORTS`/`CONTRADICTS`/`INCONCLUSIVE_FOR`: only from explicit L8/L8.5 relation events/payloads.
-- `FALSIFIES`: only from finalized L9a `FALSIFIED` event with evidence IDs.
+Use only finalized emissions/events up to `as_of`.
 
-Do not infer `DERIVED_FROM` unless the committed L10b proposal explicitly provides parent IDs/relationship.
+- `ADDRESSES`: join hypothesis and Question occurrences by project/candidate/round.
+- Question `REVISION_OF`: from immutable Question version lineage.
+- Hypothesis `REVISION_OF`/`DERIVED_FROM`: only from explicit committed L10b successor metadata.
+- `TESTS` and `PRODUCES`: derive a projection-only run node `RUN:<L7 delta_hash>` from a finalized L7 emission and its explicit `hypothesis_ids`/result evidence IDs.
+- `SUPPORTS`, `CONTRADICTS`, `INCONCLUSIVE_FOR`: only explicit L8/L8.5 relations.
+- `FALSIFIES`: only finalized L9a FALSIFIED events with referenced evidence.
 
-Keep ordering deterministic: sort nodes by `(kind,id)` and edges by `(subject_id,predicate,object_id,commit_seq)`.
+Sort nodes by `(kind, id)` and edges by `(subject_id, predicate, object_id, commit_seq)`.
 
-- [ ] **Step 4: Implement pure normalization helpers**
+- [ ] **Step 4: Create pure helpers in `scientific_state.py`**
 
-`scientific_state.py` must import no engine/provider/CLI module. It may use `hashlib`, `json`, and immutable dict/list transformations only.
+Implement `normalize_edges(edges: list[dict]) -> list[dict]` to canonicalize ordering and reject unknown predicates. Do not create a graph query language or cache.
 
-- [ ] **Step 5: Run projection + existing ledger replay tests**
+- [ ] **Step 5: Run projection plus ledger replay tests**
 
 ```powershell
 rtk proxy python -m pytest tests\test_scientific_state.py tests\test_hypothesis_ledger.py -q
 ```
-Expected: PASS; existing `verify(rebuild=True)` semantics remain intact.
+
+Expected: PASS and existing `verify(rebuild=True)` remains green.
 
 - [ ] **Step 6: Commit**
 
@@ -330,80 +350,60 @@ git commit -m "feat: project scientific relations from ledger facts"
 - Modify: `tests/test_ranking_cli.py`
 
 **Interfaces:**
-- `build_evidence_profile(graph) -> dict` returns:
+- `build_evidence_profile(graph: dict) -> dict`
+- Profile fields: `hypothesis_id`, `statement`, `falsification_criteria`, `question_id`, `supporting_evidence`, `contradicting_evidence`, `inconclusive_evidence`, `falsification_events`, `result_relations`, `unresolved_attacks`, `current_epistemic_status`, `profile_hash`.
+- `HypothesisLedger.ranking_inputs(...)` attaches the profile and hash for each ranked hypothesis using the same authorized ledger state/cursor used by that ranking call.
+- `ranking.hypothesis_candidate(...)` and `pairwise_prompt_payload(...)` preserve the profile snapshot/hash.
 
-```python
-{
-    "hypothesis_id": str,
-    "statement": str,
-    "falsification_criteria": list[str],
-    "question_id": str | None,
-    "supporting_evidence": list[dict],
-    "contradicting_evidence": list[dict],
-    "inconclusive_evidence": list[dict],
-    "falsification_events": list[dict],
-    "result_relations": list[dict],
-    "unresolved_attacks": list[dict],
-    "current_epistemic_status": str,
-    "profile_hash": str,
-}
-```
+- [ ] **Step 1: Write a failing EvidenceProfile test**
 
-- `HypothesisLedger.ranking_inputs(...)` adds `evidence_profile` and `evidence_profile_hash` to each candidate using the same authorized ledger cursor used for the ranking stage.
-- `ranking.hypothesis_candidate(...)` accepts those fields.
-- `pairwise_prompt_payload(...)` physically includes the two evidence profiles.
-- Checkpoint candidate snapshot equality continues to reject resume when profile evidence/hash changed.
+Assert support, contradiction, inconclusive, falsification, Question identity, status, and deterministic `profile_hash`. The profile may contain concise summaries/reasons and stable provenance IDs; it must not duplicate full papers or large artifacts.
 
-- [ ] **Step 1: Write failing EvidenceProfile test**
-
-Assert exact classification of support/contradiction/inconclusive/falsification relations and deterministic hash. Full paper text/artifacts must not be copied into the profile.
-
-- [ ] **Step 2: Run focused profile test and verify failure**
+- [ ] **Step 2: Run profile test and confirm failure**
 
 ```powershell
 rtk proxy python -m pytest tests\test_scientific_state.py -k "evidence_profile" -q
 ```
-Expected: FAIL.
+
+Expected: FAIL because no profile builder exists.
 
 - [ ] **Step 3: Implement `build_evidence_profile` as a pure projection**
 
-Use canonical JSON hashing. Preserve stable IDs, concise summaries/reasons, source node/commit/event/artifact refs. Sort every list deterministically before hashing.
+Canonicalize and sort every list before hashing. Build `profile_hash` from canonical JSON of all profile fields except `profile_hash` itself.
 
-- [ ] **Step 4: Write failing ranking tests**
+- [ ] **Step 4: Write failing ranking integration tests**
 
-In `tests/test_ranking_cli.py`, build C1 and C2 with different finalized evidence, then assert:
+Build two finalized hypotheses with different evidence. After `ranking-shadow`, assert each stored candidate has `evidence_profile` and matching `evidence_profile_hash`, and each raw pairwise prompt contains both profiles.
 
-```python
-snapshot = artifact["hypothesis_candidates"][0]
-assert snapshot["evidence_profile_hash"] == snapshot["evidence_profile"]["profile_hash"]
-raw = artifact["pairwise_judgments"][0]["raw_verdicts"][0]
-assert raw["prompt_payload"]["positions"]["A"]["evidence_profile"]
-assert raw["prompt_payload"]["positions"]["B"]["evidence_profile"]
-```
+Create a checkpoint, then finalize additional evidence for one hypothesis. Resume with the stale checkpoint and assert fail-closed before provider execution because the candidate snapshot/profile hash changed.
 
-Create a resume checkpoint, add/finalize new evidence for one hypothesis, rerun with `--resume`, and assert fail-closed before provider execution because candidate snapshots/profile hashes differ.
-
-- [ ] **Step 5: Run ranking tests and verify failure**
+- [ ] **Step 5: Run ranking tests and confirm failure**
 
 ```powershell
 rtk proxy python -m pytest tests\test_ranking_cli.py -k "evidence_profile or resume" -q
 ```
-Expected: FAIL before production changes.
 
-- [ ] **Step 6: Thread EvidenceProfile through the existing ranking seam**
+Expected: FAIL before ranking integration is implemented.
 
-Change only candidate snapshot/prompt fields; do not alter `_choose_pair`, `_apply_elo`, A/B+B/A adjudication, scheduler, ranking result semantics, or formal decision comparison.
+- [ ] **Step 6: Enrich `HypothesisLedger.ranking_inputs`**
 
-Update `pairwise_prompt_payload` instruction to require comparison of the supplied evidence state and explicitly treat contradictory/falsifying evidence as adverse evidence. Keep response schema unchanged (`A|B`, reason).
+For every candidate/hypothesis, call the existing graph seam at the ranking-visible ledger state, build one EvidenceProfile, and return both profile and hash. Do not create a second ranking data store.
 
-- [ ] **Step 7: Run ranking + projection tests**
+- [ ] **Step 7: Thread profiles through existing `ranking.py` snapshots/prompts**
+
+Add `evidence_profile` and `evidence_profile_hash` to candidate snapshots. `pairwise_prompt_payload` must present the profiles and instruct the judge to weigh supporting versus contradictory/falsifying evidence. Keep the response schema `A|B` plus concise reason.
+
+Do not modify `_choose_pair`, `_apply_elo`, A/B+B/A fairness, scheduler state, formal decision comparison, or advisory-only behavior.
+
+- [ ] **Step 8: Run projection and ranking tests**
 
 ```powershell
 rtk proxy python -m pytest tests\test_scientific_state.py tests\test_ranking_cli.py -q
 ```
+
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add src/research_loop/scientific_state.py src/research_loop/hypothesis_ledger.py src/research_loop/ranking.py tests/test_scientific_state.py tests/test_ranking_cli.py
@@ -412,69 +412,61 @@ git commit -m "feat: rank hypotheses from evidence profiles"
 
 ---
 
-### Task 5: Cross-round acceptance and full regression
+### Task 5: Native cross-round acceptance and regression qualification
 
 **Files:**
 - Modify: `tests/test_cross_round_e2e.py`
-- Modify only if required by real failures: the canonical owner identified by the failing invariant; no patch-only compatibility helpers.
 
 **Interfaces:**
-- Acceptance path: `Q1 -> H1 -> contradictory evidence -> L10b REVISE + question transition -> child Q1 KEEP or Q2 REVISION_OF Q1 -> H2 ADDRESSES child question -> new support evidence -> ranking artifact contains distinct EvidenceProfiles`.
+- Acceptance flow: `Q1 -> H1 -> contradictory evidence -> L10b REVISE -> Question KEEP or Q2 REVISION_OF Q1 -> H2 ADDRESSES child Question -> new evidence -> ranking compares EvidenceProfiles`.
 
-- [ ] **Step 1: Add one integrated native-v2.1 acceptance test**
+- [ ] **Step 1: Add one end-to-end native-v2.1 acceptance test**
 
-The test must use public/production seams for project/candidate creation, committed deltas, loop-memory, continuation creation, ledger graph, and ranking command. Assert no formal candidate status changes after ranking.
+Use production/public seams for project/candidate creation, finalized deltas, loop-memory, continuation creation, ledger graph, and ranking command. Verify ranking does not mutate formal candidate status or epistemic status.
 
 - [ ] **Step 2: Run the acceptance test**
 
 ```powershell
 rtk proxy python -m pytest tests\test_cross_round_e2e.py -k "scientific_state" -q
 ```
+
 Expected: PASS after Tasks 1–4.
 
-- [ ] **Step 3: Run affected contract/context/CLI tests**
+- [ ] **Step 3: Run the affected regression set**
 
 ```powershell
 rtk proxy python -m pytest tests\test_hypothesis_ledger.py tests\test_scientific_state.py tests\test_ranking_cli.py tests\test_cross_round_e2e.py tests\test_l0_input_contract.py tests\test_l0_completion_contract.py -q
 ```
+
 Expected: PASS.
 
-- [ ] **Step 4: Run full regression**
+- [ ] **Step 4: Run the full suite**
 
 ```powershell
 rtk proxy python -m pytest -q
 ```
-Expected: all collected tests pass; report any skips exactly.
 
-- [ ] **Step 5: Run repository integrity and CLI smoke checks**
+Expected: all collected tests pass; report skipped tests exactly.
+
+- [ ] **Step 5: Run repository/CLI integrity checks**
 
 ```powershell
 rtk git diff --check
 python run_loop.py --help
 python research_loop_v04.py --help
 ```
-Expected: zero diff-check errors and both commands exit successfully.
 
-- [ ] **Step 6: Architecture review before completion**
+Expected: zero diff-check errors and successful CLI help exits.
 
-Verify from the final diff:
+- [ ] **Step 6: Review the final diff against architecture invariants**
 
-```text
-- exactly one scientific fact store: HypothesisLedger SQLite
-- no graph database/new KG framework
-- no second Question/Evidence ledger
-- no new DAG node or decision authority
-- L10b is the only question-revision decision owner
-- Scientific State and EvidenceProfile are rebuildable projections
-- ranking remains advisory and its Elo/fairness machinery is unchanged
-- no P1/P2 dependencies entered the branch
-```
+The final diff must show exactly one scientific fact store (`HypothesisLedger` SQLite), no graph database, no second Question/Evidence ledger, no new DAG node, L10b as the only Question-revision decision owner, rebuildable Scientific State/EvidenceProfile projections, unchanged ranking authority, and no P1/P2 dependencies.
 
-- [ ] **Step 7: Final commit**
+- [ ] **Step 7: Commit the acceptance test if it is not already part of a previous task commit**
 
 ```bash
 git add tests/test_cross_round_e2e.py
 git commit -m "test: cover P0 scientific state full loop"
 ```
 
-If no file changed in this task because the integrated test was already committed with a preceding task, do not create an empty commit.
+If `git diff --quiet -- tests/test_cross_round_e2e.py` reports no changes, skip this commit rather than creating an empty commit.
