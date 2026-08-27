@@ -1,0 +1,60 @@
+name: R2 legacy Deep Research test migration
+
+on:
+  push:
+    branches:
+      - codex/pr38-r2-explicit-l05
+
+permissions:
+  contents: write
+
+jobs:
+  migrate-test-fixture:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/pr38-r2-explicit-l05
+      - name: Make Deep Research runtime fixture explicitly legacy
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("tests/test_deep_research.py")
+          text = path.read_text(encoding="utf-8")
+
+          import_anchor = "from research_loop import engine\n"
+          import_line = "from research_loop.hypothesis_ledger import binding_path as hypothesis_binding_path\n"
+          if import_line not in text:
+              if import_anchor not in text:
+                  raise SystemExit("missing import anchor")
+              text = text.replace(import_anchor, import_anchor + import_line, 1)
+
+          fixture_anchor = "    cand_id = new.stdout.splitlines()[0]\n    skill = tmp_path / \"academic-research-suite\"\n"
+          fixture_replacement = (
+              "    cand_id = new.stdout.splitlines()[0]\n"
+              "    # This fixture tests the historical Deep Research process/host runtime,\n"
+              "    # not native v2.1 L0.5. Remove the profile binding so L1 retains the\n"
+              "    # legacy research contract without weakening native L0.5 authority.\n"
+              "    hypothesis_binding_path(project).unlink()\n"
+              "    skill = tmp_path / \"academic-research-suite\"\n"
+          )
+          if fixture_replacement not in text:
+              if fixture_anchor not in text:
+                  raise SystemExit("missing sentinel fixture anchor")
+              text = text.replace(fixture_anchor, fixture_replacement, 1)
+
+          path.write_text(text, encoding="utf-8")
+      - name: Commit migration
+        shell: bash
+        run: |
+          if git diff --quiet -- tests/test_deep_research.py; then
+            echo "No migration needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/test_deep_research.py
+          git commit -m "test: keep legacy Deep Research runtime tests on legacy profile"
+          git push origin HEAD:codex/pr38-r2-explicit-l05
