@@ -171,7 +171,7 @@ def test_run_and_persist_writes_l4_extended_schema(monkeypatch, tmp_path):
         stderr = "schema rejected"
 
     monkeypatch.setattr(dr, "resolve_subprocess_executable", lambda value: value)
-    monkeypatch.setattr(dr.subprocess, "run", lambda *args, **kwargs: _Completed())
+    monkeypatch.setattr(dr, "execute_provider_invocation", lambda *args, **kwargs: _Completed())
 
     with pytest.raises(dr.DeepResearchError, match="exited 1"):
         dr.run_and_persist(

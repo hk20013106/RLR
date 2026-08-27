@@ -10,7 +10,6 @@ import datetime as _dt
 import hashlib
 import json
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -545,13 +544,10 @@ def run_l4a_discovery(
     prompt = build_l4a_prompt(question, claim)
     command[0] = _deep_research.resolve_subprocess_executable(command[0])
     execution_command, invocation_kwargs = _deep_research.subprocess_invocation(command, prompt)
-    try:
-        completed = subprocess.run(
-            execution_command, capture_output=True, text=True, encoding="utf-8",
-            errors="strict", timeout=spec.timeout, check=False, **invocation_kwargs,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise _deep_research.DeepResearchError(f"L4A Academic Research CLI invocation failed: {exc}") from exc
+    completed = _deep_research.execute_provider_invocation(
+        execution_command, invocation_kwargs, timeout=spec.timeout,
+        label='L4A Academic Research CLI',
+    )
     receipt = _deep_research.skill_receipt(
         spec.backend, command, prompt, skill_version,
         exit_code=completed.returncode,

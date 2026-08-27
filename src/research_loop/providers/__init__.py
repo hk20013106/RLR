@@ -3,6 +3,10 @@
 Split out of the historical orchestrator.py. `orchestrator` remains as a
 compat shim re-exporting this surface. Providers never import the engine.
 """
+from research_loop.providers.executor import (
+    DEFAULT_EXECUTOR, ProviderExecutionError, ProviderExecutionResult,
+    ProviderExecutor,
+)
 from research_loop.providers.base import (
     ProviderError, AgentProvider, _schema_repr, _compose_auto_prompt,
     _run_command_agent, run_text_command, RunReceipt, now,
@@ -37,5 +41,6 @@ def make_provider(spec, override_type=None):
 __all__ = [
     "ProviderError", "AgentProvider", "ProviderConfig", "load_config",
     "ManualProvider", "CommandProvider", "HeadlessProvider", "make_provider",
-    "RunReceipt", "now", "run_text_command",
+    "ProviderExecutor", "ProviderExecutionResult", "ProviderExecutionError",
+    "DEFAULT_EXECUTOR", "RunReceipt", "now", "run_text_command",
 ]

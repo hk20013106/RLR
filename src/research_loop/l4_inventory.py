@@ -12,7 +12,6 @@ import datetime as dt
 import hashlib
 import json
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -564,21 +563,10 @@ def run_discovery(
     prompt = build_prompt(question, claim)
     command[0] = dr.resolve_subprocess_executable(command[0])
     execution_command, invocation_kwargs = dr.subprocess_invocation(command, prompt)
-    try:
-        completed = subprocess.run(
-            execution_command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="strict",
-            timeout=spec.timeout,
-            check=False,
-            **invocation_kwargs,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise dr.DeepResearchError(
-            f"L4A method-inventory invocation failed: {exc}"
-        ) from exc
+    completed = dr.execute_provider_invocation(
+        execution_command, invocation_kwargs, timeout=spec.timeout,
+        label='L4A method-inventory CLI',
+    )
     receipt = dr.skill_receipt(
         spec.backend,
         command,
