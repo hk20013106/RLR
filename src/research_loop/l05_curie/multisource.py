@@ -27,9 +27,6 @@ from .contracts import (
     validate_query_plan,
     validate_transport_handshake,
 )
-from .europepmc import normalize_doi, normalize_pmcid, normalize_pmid
-
-
 HttpGet = Callable[[str, int], bytes]
 _PROVIDERS = ("europe-pmc", "pubmed", "openalex", "crossref", "semantic-scholar")
 _STABLE_NAMESPACES = (
@@ -44,6 +41,7 @@ _AUDIT_ROOT = Path("08_Audit") / "l05_acquisition"
 _SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
 _YEAR = re.compile(r"(?:19|20)\d{2}")
 _TAGS = re.compile(r"<[^>]+>")
+_DOI_PREFIX = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.IGNORECASE)
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -81,6 +79,23 @@ def _year(value: object) -> str:
     return match.group(0) if match else ""
 
 
+def normalize_doi(value: object) -> str:
+    text = str(value or "").strip()
+    return _DOI_PREFIX.sub("", text).strip().rstrip(".").lower() if text else ""
+
+
+def normalize_pmid(value: object) -> str:
+    text = str(value or "").strip()
+    return text if text.isdigit() else ""
+
+
+def normalize_pmcid(value: object) -> str:
+    text = str(value or "").strip().upper().replace("_", "")
+    if text.isdigit():
+        text = "PMC" + text
+    return text if re.fullmatch(r"PMC\d+", text) else ""
+
+
 def _metadata_fingerprint(title: str, year: str = "", authors: str = "") -> str:
     return _sha({
         "title": " ".join(title.casefold().split()),
@@ -97,28 +112,26 @@ def _paper_id(identifiers: dict, *, title: str, year: str = "", authors: str = "
     return "P_" + _sha(("metadata", _metadata_fingerprint(title, year, authors)))[:20]
 
 
-def _record(provider: str, raw: dict, *, title: str, identifiers: dict,
+def canonicalize_provider_record(provider: str, raw: dict, *, title: str, identifiers: dict,
             authors: str = "", year: str = "", journal: str = "",
             abstract: str = "", publication_types: list[str] | None = None,
-            is_open_access: bool = False) -> dict:
+            is_open_access: bool = False, extra_metadata: dict | None = None,
+            extra_provenance: dict | None = None) -> dict:
     title = _require_text(title, f"{provider} result title")
     identifiers = {key: str(value) for key, value in identifiers.items() if str(value or "").strip()}
+    metadata = {
+        "authors": authors, "year": year, "journal": journal, "abstract": abstract,
+        "publication_types": list(publication_types or []), "is_open_access": bool(is_open_access),
+    }
+    metadata.update(dict(extra_metadata or {}))
+    provenance = {"provider": provider, "raw_record_sha256": hashlib.sha256(_canonical_bytes(raw)).hexdigest()}
+    provenance.update({key: value for key, value in dict(extra_provenance or {}).items() if value})
     return {
         "paper_id": _paper_id(identifiers, title=title, year=year, authors=authors),
         "title": title,
         "identifiers": identifiers,
-        "metadata": {
-            "authors": authors,
-            "year": year,
-            "journal": journal,
-            "abstract": abstract,
-            "publication_types": list(publication_types or []),
-            "is_open_access": bool(is_open_access),
-        },
-        "provenance": {
-            "provider": provider,
-            "raw_record_sha256": hashlib.sha256(_canonical_bytes(raw)).hexdigest(),
-        },
+        "metadata": metadata,
+        "provenance": provenance,
     }
 
 
@@ -155,7 +168,7 @@ def canonicalize_pubmed_record(raw: dict) -> dict:
     pub_types = raw.get("pubtype") or []
     if isinstance(pub_types, str):
         pub_types = [pub_types]
-    return _record(
+    return canonicalize_provider_record(
         "pubmed",
         raw,
         title=str(raw.get("title") or ""),
@@ -227,7 +240,7 @@ def canonicalize_openalex_record(raw: dict) -> dict:
     primary = raw.get("primary_location") if isinstance(raw.get("primary_location"), dict) else {}
     source = primary.get("source") if isinstance(primary.get("source"), dict) else {}
     oa = raw.get("open_access") if isinstance(raw.get("open_access"), dict) else {}
-    return _record(
+    return canonicalize_provider_record(
         "openalex",
         raw,
         title=str(raw.get("title") or raw.get("display_name") or ""),
@@ -268,7 +281,7 @@ def canonicalize_crossref_record(raw: dict) -> dict:
     ) if isinstance(links, list) else False
     abstract = _TAGS.sub(" ", str(raw.get("abstract") or ""))
     abstract = " ".join(abstract.split())
-    return _record(
+    return canonicalize_provider_record(
         "crossref",
         raw,
         title=_first(raw.get("title")),
@@ -308,7 +321,7 @@ def canonicalize_semantic_scholar_record(raw: dict) -> dict:
         for item in authors_raw
         if isinstance(item, dict) and str(item.get("name") or "").strip()
     ) if isinstance(authors_raw, list) else ""
-    return _record(
+    return canonicalize_provider_record(
         "semantic-scholar",
         raw,
         title=str(raw.get("title") or ""),
@@ -336,9 +349,8 @@ def _stable_ids(record: dict) -> set[tuple[str, str]]:
 def _source_record(record: dict) -> dict:
     provenance = record.get("provenance") if isinstance(record.get("provenance"), dict) else {}
     return {
-        key: provenance[key]
-        for key in ("provider", "raw_record_sha256")
-        if provenance.get(key) is not None
+        key: value for key, value in provenance.items()
+        if key != "source_records" and value is not None
     }
 
 
@@ -405,40 +417,45 @@ def _merge(primary: dict, duplicate: dict) -> None:
 def deduplicate_provider_records(records: list[dict]) -> tuple[list[dict], list[str]]:
     if not isinstance(records, list):
         raise CurieContractError("provider discovery records must be a list")
-    unique: list[dict] = []
-    duplicates: list[str] = []
-    paper_owner: dict[str, int] = {}
-    id_owner: dict[tuple[str, str], int] = {}
-    for record in records:
+    parents = list(range(len(records)))
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+    def union(left: int, right: int) -> None:
+        left, right = find(left), find(right)
+        if left != right:
+            parents[max(left, right)] = min(left, right)
+    owners: dict[tuple[str, str], int] = {}
+    for index, record in enumerate(records):
         if not isinstance(record, dict):
             raise CurieContractError("provider discovery record must be an object")
-        paper_id = _require_text(record.get("paper_id"), "provider discovery paper_id")
+        _require_text(record.get("paper_id"), "provider discovery paper_id")
         identities = _stable_ids(record)
-        owners = {
-            owner for identity in identities
-            if (owner := id_owner.get(identity)) is not None
-        }
-        if paper_id in paper_owner:
-            owners.add(paper_owner[paper_id])
-        if len(owners) > 1:
-            raise CurieContractError(
-                "provider record bridges multiple canonical identity clusters"
-            )
-        if owners:
-            owner = next(iter(owners))
-            _merge(unique[owner], record)
-            duplicates.append(paper_id)
-            paper_owner[paper_id] = owner
-            for identity in _stable_ids(unique[owner]):
-                id_owner[identity] = owner
-            continue
-        owner = len(unique)
-        canonical = _copy_record(record)
-        unique.append(canonical)
-        paper_owner[paper_id] = owner
+        if not identities:
+            metadata = record.get("metadata") or {}
+            identities = {("metadata", _metadata_fingerprint(record["title"], str(metadata.get("year") or ""), str(metadata.get("authors") or "")))}
         for identity in identities:
-            id_owner[identity] = owner
-    return unique, duplicates
+            if identity in owners:
+                union(index, owners[identity])
+            else:
+                owners[identity] = index
+    groups: dict[int, list[dict]] = {}
+    for index, record in enumerate(records):
+        groups.setdefault(find(index), []).append(record)
+    unique, duplicates = [], []
+    for group in groups.values():
+        ordered = sorted(group, key=lambda item: (str(item["paper_id"]), _canonical_bytes(_source_record(item))))
+        merged = _copy_record(ordered[0])
+        for record in ordered[1:]:
+            _merge(merged, record)
+        metadata = merged["metadata"]
+        merged["paper_id"] = _paper_id(merged["identifiers"], title=merged["title"], year=str(metadata.get("year") or ""), authors=str(metadata.get("authors") or ""))
+        merged["provenance"]["source_records"].sort(key=_canonical_bytes)
+        unique.append(merged)
+        duplicates.extend(str(record["paper_id"]) for record in ordered[1:])
+    return sorted(unique, key=lambda record: record["paper_id"]), sorted(duplicates)
 
 
 def build_multisource_query_plan(

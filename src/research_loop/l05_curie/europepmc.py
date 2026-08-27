@@ -22,6 +22,7 @@ from .contracts import (
     CurieContractError,
     validate_evidence_extract,
 )
+from .multisource import canonicalize_provider_record, normalize_doi, normalize_pmcid, normalize_pmid
 
 PROVIDER = "europe-pmc"
 BASE_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest"
@@ -30,7 +31,6 @@ EVIDENCE_CANDIDATE_SCHEMA_VERSION = "L05EvidenceCandidate/v1"
 HttpGet = Callable[[str, int], bytes]
 
 _SAFE_TOKEN = re.compile(r"[^A-Za-z0-9_.-]+")
-_DOI_PREFIX = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.IGNORECASE)
 _TARGET_SECTION_WORDS = ("result", "discussion", "conclusion")
 _SOURCE_ROOT = Path("09_Literature_Database") / "source_snapshots" / "l05"
 
@@ -70,39 +70,6 @@ def _element_text(element: ET.Element) -> str:
     return _normalize_text(" ".join(element.itertext()))
 
 
-def normalize_doi(value: object) -> str:
-    if value is None:
-        return ""
-    text = str(value).strip()
-    if not text:
-        return ""
-    text = _DOI_PREFIX.sub("", text).strip().rstrip(".")
-    return text.lower()
-
-
-def normalize_pmid(value: object) -> str:
-    text = str(value or "").strip()
-    return text if text.isdigit() else ""
-
-
-def normalize_pmcid(value: object) -> str:
-    text = str(value or "").strip().upper().replace("_", "")
-    if not text:
-        return ""
-    if text.isdigit():
-        text = "PMC" + text
-    if re.fullmatch(r"PMC\d+", text):
-        return text
-    return ""
-
-
-def _metadata_fingerprint(raw: dict) -> str:
-    title = " ".join(str(raw.get("title") or "").casefold().split())
-    year = str(raw.get("pubYear") or "").strip()
-    author = str(raw.get("authorString") or "").split(",", 1)[0].casefold().strip()
-    return _sha({"title": title, "year": year, "first_author": author})
-
-
 def canonicalize_europepmc_record(raw: dict) -> dict:
     """Normalize one Europe PMC core result to a provider-neutral paper record."""
     if not isinstance(raw, dict):
@@ -118,25 +85,11 @@ def canonicalize_europepmc_record(raw: dict) -> dict:
     if not pmcid and source == "PMC":
         pmcid = normalize_pmcid(ext_id)
 
-    if doi:
-        identity = ("doi", doi)
-    elif pmid:
-        identity = ("pmid", pmid)
-    elif pmcid:
-        identity = ("pmcid", pmcid)
-    elif source and ext_id:
-        identity = ("source", f"{source}:{ext_id}")
-    else:
-        identity = ("metadata", _metadata_fingerprint(raw))
-    paper_id = "P_" + _sha(identity)[:20]
-
     identifiers = {}
     for key, value in (
         ("doi", doi),
         ("pmid", pmid),
         ("pmcid", pmcid),
-        ("europepmc_source", source),
-        ("europepmc_id", ext_id),
     ):
         if value:
             identifiers[key] = value
@@ -149,26 +102,15 @@ def canonicalize_europepmc_record(raw: dict) -> dict:
     if not isinstance(pub_types, list):
         pub_types = []
 
-    return {
-        "paper_id": paper_id,
-        "title": title,
-        "identifiers": identifiers,
-        "metadata": {
-            "authors": str(raw.get("authorString") or "").strip(),
-            "year": str(raw.get("pubYear") or "").strip(),
-            "journal": str(raw.get("journalTitle") or "").strip(),
-            "abstract": str(raw.get("abstractText") or "").strip(),
-            "publication_types": [str(item) for item in pub_types if str(item).strip()],
-            "is_open_access": str(raw.get("isOpenAccess") or "").upper() == "Y",
-            "in_europe_pmc": str(raw.get("inEPMC") or "").upper() == "Y",
-        },
-        "provenance": {
-            "provider": PROVIDER,
-            "source": source,
-            "ext_id": ext_id,
-            "raw_record_sha256": hashlib.sha256(_canonical_bytes(raw)).hexdigest(),
-        },
-    }
+    return canonicalize_provider_record(
+        PROVIDER, raw, title=title, identifiers=identifiers,
+        authors=str(raw.get("authorString") or "").strip(), year=str(raw.get("pubYear") or "").strip(),
+        journal=str(raw.get("journalTitle") or "").strip(), abstract=str(raw.get("abstractText") or "").strip(),
+        publication_types=[str(item) for item in pub_types if str(item).strip()],
+        is_open_access=str(raw.get("isOpenAccess") or "").upper() == "Y",
+        extra_metadata={"in_europe_pmc": str(raw.get("inEPMC") or "").upper() == "Y"},
+        extra_provenance={"source": source, "ext_id": ext_id},
+    )
 
 
 def _default_http_get(url: str, timeout: int) -> bytes:
