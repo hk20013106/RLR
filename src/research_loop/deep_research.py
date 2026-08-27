@@ -12,9 +12,10 @@ import json
 import os as _os
 import re
 import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from research_loop.providers.executor import DEFAULT_EXECUTOR, ProviderExecutionError
 
 
 SCHEMA_VERSION = "1.0"
@@ -1052,16 +1053,36 @@ def run_and_persist(
     command[0] = resolve_subprocess_executable(command[0])
     execution_command, invocation_kwargs = subprocess_invocation(command, prompt)
     try:
-        completed = subprocess.run(execution_command, capture_output=True, text=True,
-                                   encoding="utf-8", errors="strict",
-                                   timeout=spec.timeout, check=False, **invocation_kwargs)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise DeepResearchError(f"Academic Research CLI invocation failed: {exc}") from exc
-    receipt = skill_receipt(spec.backend, command, prompt, skill_version,
-                            exit_code=completed.returncode, stdout_hash=_sha(completed.stdout),
-                            model=spec.model)
+        completed = DEFAULT_EXECUTOR.run(
+            execution_command,
+            timeout=spec.timeout,
+            input_text=invocation_kwargs.get("input"),
+            check=False,
+            encoding="utf-8",
+            errors="strict",
+        )
+    except ProviderExecutionError as exc:
+        detail = exc.stderr.strip() or str(exc)
+        if exc.timed_out:
+            raise DeepResearchError(
+                f"Academic Research CLI timed out after {exc.timeout}s: {detail}"
+            ) from exc
+        raise DeepResearchError(
+            f"Academic Research CLI invocation failed: {detail}"
+        ) from exc
+    receipt = skill_receipt(
+        spec.backend,
+        command,
+        prompt,
+        skill_version,
+        exit_code=completed.returncode,
+        stdout_hash=_sha(completed.stdout),
+        model=spec.model,
+    )
     if completed.returncode != 0:
-        raise DeepResearchError(f"Academic Research CLI exited {completed.returncode}: {completed.stderr.strip()}")
+        raise DeepResearchError(
+            f"Academic Research CLI exited {completed.returncode}: {completed.stderr.strip()}"
+        )
     artifact = persist_run(
         project_dir, candidate_id, node, _parse_cli_output(completed.stdout),
         receipt, result_context, project_id=project_id, round_id=round_id,
