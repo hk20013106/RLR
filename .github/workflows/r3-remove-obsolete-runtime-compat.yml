@@ -1,0 +1,52 @@
+name: R3 remove obsolete runtime compat
+
+on:
+  push:
+    branches:
+      - codex/pr38-r3-provider-executor
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/pr38-r3-provider-executor
+      - name: Remove obsolete subprocess-proxy installer
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path('src/research_loop/__init__.py')
+          text = path.read_text(encoding='utf-8')
+          text = text.replace(
+              'from research_loop.provider_runtime_compat import (\n    install as _install_provider_runtime_compat,\n)\n\n',
+              '',
+              1,
+          )
+          text = text.replace(
+              '_install_provider_runtime_observability(deep_research, _deep_research_task_module)\n_install_provider_runtime_compat(\n    deep_research, _deep_research_task_module, _l4_pipeline_module\n)\n',
+              '_install_provider_runtime_observability(deep_research, _deep_research_task_module)\n',
+              1,
+          )
+          text = text.replace(
+              'del _install_provider_runtime_observability, _install_provider_runtime_compat\n',
+              'del _install_provider_runtime_observability\n',
+              1,
+          )
+          if '_install_provider_runtime_compat' in text:
+              raise SystemExit('provider runtime compat reference remains')
+          path.write_text(text, encoding='utf-8')
+      - name: Commit cleanup and remove helper workflow
+        shell: bash
+        run: |
+          git rm src/research_loop/provider_runtime_compat.py
+          git rm .github/workflows/r3-remove-obsolete-runtime-compat.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/research_loop/__init__.py
+          git commit -m "refactor: retire obsolete subprocess proxy compat"
+          git push origin HEAD:codex/pr38-r3-provider-executor
