@@ -14,13 +14,17 @@ from research_loop.provider_runtime_observability import _CONTEXT
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_codex_jsonl.py"
 
 
-def test_native_l4a_inventory_provider_boundary_is_observed():
-    """The native L4A owner must share PR #14's subprocess runtime proxy."""
-    assert l4_inventory.subprocess is deep_research.subprocess
+def test_l4_wrappers_do_not_own_provider_processes():
+    """L4 extensions keep scientific contracts but delegate provider execution."""
+    assert callable(deep_research.execute_provider_invocation)
+    for module in (l4_inventory, method_evidence, method_review_navigation):
+        assert not hasattr(module, "subprocess")
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        assert "execute_provider_invocation(" in source
 
 
 def test_active_deep_research_provider_boundary_is_observed(tmp_path, monkeypatch):
-    """The final installed run_and_persist owner must not bypass the runtime proxy."""
+    """The canonical provider invocation helper feeds the JSONL observer."""
     monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "stream")
     monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.01")
     runtime_dir = tmp_path / "runtime"
@@ -36,7 +40,7 @@ def test_active_deep_research_provider_boundary_is_observed(tmp_path, monkeypatc
     }
     token = _CONTEXT.set(context)
     try:
-        completed = method_review_navigation.subprocess.run(
+        completed = deep_research.execute_provider_invocation(
             [
                 sys.executable,
                 str(FIXTURE),
@@ -45,12 +49,8 @@ def test_active_deep_research_provider_boundary_is_observed(tmp_path, monkeypatc
                 "--output-last-message",
                 str(legacy_final),
             ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="strict",
+            {},
             timeout=3,
-            check=False,
         )
     finally:
         _CONTEXT.reset(token)
@@ -61,5 +61,3 @@ def test_active_deep_research_provider_boundary_is_observed(tmp_path, monkeypatc
     final = json.loads((runtime_dir / "final_output.json").read_text(encoding="utf-8"))
     assert final["schema_version"] == "1.0"
     assert (runtime_dir / "runtime_receipt.json").is_file()
-    assert method_review_navigation.subprocess is deep_research.subprocess
-    assert method_evidence.subprocess is deep_research.subprocess
