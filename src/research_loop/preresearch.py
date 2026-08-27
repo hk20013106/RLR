@@ -138,30 +138,12 @@ PRE_RESEARCH_MAP = {
            "queries": []},
     "L4": {"budget": LIT_RUNTIME_DIGEST_TOKEN_BUDGET,
            "type": "literature_review", "skill": "academic-research-suite",
-           "description": "Search methodology papers: WGCNA cross-species, module preservation, convergent transcriptomics",
-           "queries": [
-               "WGCNA module preservation cross-species Zsummary",
-               "module trait correlation WGCNA cardiac tissue",
-               "gene set enrichment GSEA ranked kME WGCNA",
-               "signed vs unsigned WGCNA network cardiac",
-               "module preservation statistics Zsummary medianRank",
-           ]},
+           "description": "Search methodology papers relevant to the current scientific question and selected analysis strategy",
+           "queries": []},
     "L7": {"budget": 0, "type": "code_search", "skill": "github-search",
-           "description": "Search GitHub/Bioconductor for WGCNA pipelines, GSEA wrappers, ECM score tools",
-           "queries": [
-               "WGCNA pipeline R script cross-species module preservation",
-               "clusterProfiler GSEA kME ranked gene list R",
-               "ECM extracellular matrix score gene set R",
-               "WGCNA signed network soft threshold power R",
-           ]},
+           "description": "Search reusable code and packages for the currently approved analysis strategy and required software/tasks",
+           "queries": []},
     "L8.5": {"budget": 0, "type": "literature_verification", "skill": "academic-research-suite",
-             "description": "Search PubMed/EuropePMC for papers that CONFIRM or "
-                            "CONTRADICT the actual L7/L8 findings (grounded in the "
-                            "real results, not just the question)",
-             "queries": [
-                 "cardiac gene expression co-expression module cross-species",
-                 "convergent evolution heart rate adaptation molecular mechanisms",
-                 "WGCNA module preservation validation cross-species transcriptomics",
-                 "bat shrew cardiac transcriptome comparative genomics",
-             ]},
+             "description": "Search literature that confirms or contradicts the actual L7/L8 findings",
+             "queries": []},
 }
