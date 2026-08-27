@@ -1,4 +1,4 @@
-"""Conditional L1→L3 routing with auditable L2 skip receipts."""
+"""Conditional lifecycle routing with auditable native and L2 decisions."""
 from __future__ import annotations
 
 import contextlib
@@ -8,6 +8,7 @@ import json
 import sys
 from pathlib import Path
 
+from research_loop import research_seed
 from research_loop.node_skips import (
     NodeSkipError,
     ensure_l2_skip_receipt,
@@ -49,6 +50,89 @@ def _skip_block(receipt: dict) -> str:
         "L3 must still independently assess testability, redundancy, feasibility, novelty,",
         "impact, and the predeclared falsification criteria.",
     ])
+
+
+def _native_l05_route(lifecycle, args):
+    """Return native L0.5 routing state, or ``None`` for non-native calls."""
+    project = Path(args.project_dir)
+    candidate_file = lifecycle._candidate_file(project, args.cand_id)
+    if not candidate_file.is_file():
+        return None
+    try:
+        status = lifecycle._load_yaml_front(candidate_file).get("current_status", "NEW")
+    except Exception:
+        return None
+    if status != "IDEA_PROPOSED":
+        return None
+
+    profile_id = lifecycle.PROFILE_V20
+    if lifecycle.binding_path(project).exists():
+        try:
+            profile_id = lifecycle._ledger_for(
+                project, getattr(args, "knowledge_store", None)
+            ).project_profile(project)
+        except lifecycle.LedgerError as exc:
+            return {"error": f"cannot resolve project profile: {exc}"}
+    try:
+        _, node_map, _ = lifecycle.topology_for_profile(profile_id)
+    except Exception as exc:
+        return {"error": f"cannot resolve project topology: {exc}"}
+    if "L0.5" not in node_map:
+        return None
+
+    try:
+        seed = lifecycle.research_seed.load_l1_research_seed(project, args.cand_id)
+        run_id = lifecycle.research_seed.active_l1_native_evidence_run_id(project, seed)
+        if not run_id:
+            run_id = lifecycle.research_seed.unique_l1_native_evidence_run_id(project, seed)
+        if run_id:
+            lifecycle.research_seed.load_l1_native_evidence_binding(
+                project, seed, str(run_id)
+            )
+    except lifecycle.research_seed.ResearchSeedError as exc:
+        return {"error": f"L0.5 frozen evidence binding is invalid: {exc}"}
+
+    return {
+        "project": project,
+        "profile_id": profile_id,
+        "node_map": node_map,
+        "run_id": str(run_id) if run_id else None,
+    }
+
+
+def _l05_packet(lifecycle, route: dict) -> dict:
+    project = route["project"]
+    profile_id = route["profile_id"]
+    node_info = route["node_map"]["L0.5"]
+    profile = lifecycle.get_profile(profile_id)
+    packet = {
+        "node": "L0.5",
+        "persona": node_info["persona"],
+        "is_parallel": node_info.get("is_parallel", False),
+        "is_execution": node_info.get("is_execution", False),
+        "context_files": node_info["context_inputs"],
+        "action_hint": node_info["action_hint"],
+        "advance_command": node_info.get("advance_command"),
+        "advance_status": node_info.get("advance_status"),
+        "advance_reason": node_info.get("advance_reason"),
+        "template_path": None,
+        "persona_template_path": None,
+        "tools_policy": node_info.get("tools_policy"),
+        "everos_read_scopes": lifecycle._everos_scopes_for(
+            node_info, project.name
+        ),
+        "knowledge_base": node_info.get("knowledge_base"),
+        "node_kind": "research",
+        "research_required": bool(node_info.get("research_required")),
+        "research_persona": node_info.get("research_persona"),
+        "pre_research": node_info.get("pre_research"),
+        "profile_id": profile.profile_id,
+        "schema_version": profile.delta_schema_version,
+        "topology_version": profile.topology_version,
+        "persona_catalog_version": profile.persona_catalog_version,
+        "pitfall_warnings": lifecycle._pitfall_warnings_for_node(project, "L0.5"),
+    }
+    return packet
 
 
 def install(lifecycle_module, context_module) -> None:
@@ -191,6 +275,39 @@ def install(lifecycle_module, context_module) -> None:
         print(rendered, end="")
         return rc
 
-    lifecycle.cmd_next_step = cmd_next_step
+    conditional_next_step = cmd_next_step
+    lifecycle.research_seed = research_seed
+
+    def native_l05_next_step(args):
+        route = _native_l05_route(lifecycle, args)
+        if route is None:
+            return conditional_next_step(args)
+        if route.get("error"):
+            print(json.dumps({"error": route["error"]}))
+            return 3
+        run_id = route["run_id"]
+        if not run_id:
+            print(json.dumps(_l05_packet(lifecycle, route), indent=2))
+            return 0
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            rc = conditional_next_step(args)
+        raw = buffer.getvalue()
+        if rc != 0:
+            print(raw, end="")
+            return rc
+        try:
+            packet = json.loads(raw)
+        except json.JSONDecodeError:
+            print(raw, end="")
+            return rc
+        if packet.get("node") == "L1":
+            packet["l0_5_evidence_run_id"] = run_id
+            packet["evidence_run_id"] = run_id
+        print(json.dumps(packet, indent=2))
+        return rc
+
+    lifecycle.cmd_next_step = native_l05_next_step
     context.cmd_assemble_context = cmd_assemble_context
     lifecycle._CONDITIONAL_L2_ROUTING_INSTALLED = True
