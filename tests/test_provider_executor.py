@@ -1,3 +1,5 @@
+"""Acceptance contract for the single ProviderExecutor process boundary."""
+
 import importlib
 import sys
 from pathlib import Path
