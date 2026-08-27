@@ -1,3 +1,6 @@
+import hashlib
+import json
+
 import pytest
 
 from research_loop import research_seed
@@ -72,6 +75,67 @@ def _gap(tmp_path, seed, manifest, gap_id):
     )
 
 
+def _initialized_retry_fixture(tmp_path):
+    seed = _seed()
+    first = _freeze(tmp_path, version=1, run_id="CURIE001")
+    bind_initial_curie_pack(tmp_path, seed, first, "CURIE001")
+    request = _gap(tmp_path, seed, first, "G1")
+    authorization = curie.authorize_gap_retry(
+        tmp_path, seed, first, request["request_id"]
+    )
+    return seed, first, request, authorization
+
+
+def _retry_acquire(tmp_path):
+    def acquire(auth):
+        try:
+            return _freeze(
+                tmp_path,
+                version=auth["next_version"],
+                run_id="CURIE002",
+                parent=auth["parent_pack_sha256"],
+                gap_id=auth["source_gap_request_id"],
+            )
+        except curie.CurieContractError as exc:
+            if "already exists" not in str(exc):
+                raise
+            path = (
+                tmp_path / "09_Literature_Database" / "evidence_packs" / "l05"
+                / "C001" / f"EP_C001_R1_v{auth['next_version']}.json"
+            )
+            raw = path.read_bytes()
+            pack = json.loads(raw.decode("utf-8"))
+            return {
+                "schema_version": curie.EVIDENCE_PACK_MANIFEST_SCHEMA_VERSION,
+                "candidate_id": pack["candidate_id"],
+                "round_id": pack["round_id"],
+                "seed_sha256": pack["seed_sha256"],
+                "pack_id": pack["pack_id"],
+                "version": pack["version"],
+                "artifact_path": "09_Literature_Database/evidence_packs/l05/C001/"
+                f"EP_C001_R1_v{auth['next_version']}.json",
+                "artifact_sha256": hashlib.sha256(raw).hexdigest(),
+                "content_sha256": pack["content_sha256"],
+                "status": "FROZEN",
+            }
+
+    return acquire
+
+
+def _transaction_root(tmp_path):
+    return (
+        tmp_path / "08_Audit" / "research_seed_bindings" / "native"
+        / "C001" / "1" / "retry_transactions"
+    )
+
+
+def _committed_transactions(tmp_path):
+    return [
+        path for path in _transaction_root(tmp_path).glob("*/commit.json")
+        if not path.parent.name.startswith(".")
+    ]
+
+
 def test_bind_initial_pack_establishes_native_active_v1(tmp_path):
     seed = _seed()
     first = _freeze(tmp_path, version=1, run_id="CURIE001")
@@ -144,4 +208,86 @@ def test_v3_is_last_authorized_native_pack(tmp_path):
         run_authorized_retry(
             tmp_path, seed, third, r3["request_id"], "CURIE004",
             lambda _auth: None,
+        )
+
+
+@pytest.mark.parametrize(
+    "failure_step",
+    [
+        "before_stage",
+        "after_binding",
+        "after_consumption",
+        "during_activation",
+        "before_rename",
+    ],
+)
+def test_interrupted_retry_has_no_committed_intermediate_state(tmp_path, failure_step):
+    seed, first, request, authorization = _initialized_retry_fixture(tmp_path)
+    first_bytes = (tmp_path / first["artifact_path"]).read_bytes()
+
+    with pytest.raises(curie.CurieContractError, match="injected"):
+        run_authorized_retry(
+            tmp_path,
+            seed,
+            first,
+            request["request_id"],
+            "CURIE002",
+            _retry_acquire(tmp_path),
+            failure_step=failure_step,
+        )
+
+    assert research_seed.active_l1_native_evidence_run_id(tmp_path, seed) == "CURIE001"
+    assert not _committed_transactions(tmp_path)
+    with pytest.raises(curie.CurieContractError, match="missing|invalid"):
+        curie.load_gap_retry_consumption(
+            tmp_path, seed, authorization, "CURIE002"
+        )
+    assert (tmp_path / first["artifact_path"]).read_bytes() == first_bytes
+
+
+def test_interrupted_retry_replays_to_one_committed_transaction(tmp_path):
+    seed, first, request, _authorization = _initialized_retry_fixture(tmp_path)
+    with pytest.raises(curie.CurieContractError, match="injected"):
+        run_authorized_retry(
+            tmp_path,
+            seed,
+            first,
+            request["request_id"],
+            "CURIE002",
+            _retry_acquire(tmp_path),
+            failure_step="after_consumption",
+        )
+
+    result = run_authorized_retry(
+        tmp_path,
+        seed,
+        first,
+        request["request_id"],
+        "CURIE002",
+        _retry_acquire(tmp_path),
+    )
+    assert research_seed.active_l1_native_evidence_run_id(tmp_path, seed) == "CURIE002"
+    assert len(_committed_transactions(tmp_path)) == 1
+    assert result["activation"]["evidence_pack_version"] == 2
+
+
+def test_committed_retry_replay_is_idempotent_and_rejects_different_run(tmp_path):
+    seed, first, request, _authorization = _initialized_retry_fixture(tmp_path)
+    acquire = _retry_acquire(tmp_path)
+    first_result = run_authorized_retry(
+        tmp_path, seed, first, request["request_id"], "CURIE002", acquire
+    )
+    replay = run_authorized_retry(
+        tmp_path, seed, first, request["request_id"], "CURIE002", acquire
+    )
+    assert replay == first_result
+    assert len(_committed_transactions(tmp_path)) == 1
+    with pytest.raises(curie.CurieContractError, match="run|provenance|replay"):
+        run_authorized_retry(
+            tmp_path,
+            seed,
+            first,
+            request["request_id"],
+            "CURIE_OTHER",
+            acquire,
         )
