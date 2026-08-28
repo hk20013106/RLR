@@ -14,6 +14,8 @@ Fake-engine tests keep the parsing/normalization logic hermetic; the real
 subprocess-vs-run_cli parity test proves the transport equivalence end-to-end on
 actual engine commands (`--version`, `check-deps`).
 """
+import hashlib
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -91,14 +93,26 @@ def test_assemble_context_raises_on_gate_failure():
         api.assemble_context("P", "C", "L1")
 
 
-def test_assemble_context_extracts_manifest_from_stderr():
+def test_assemble_context_reads_manifest_owned_rendered_context(tmp_path):
+    rendered = tmp_path / "rendered_context.txt"
+    rendered.write_bytes(b"<<context body>>\r\n")
+
     def fake_main(argv):
         print("<<context body>>")
-        print("context manifest: {\"injected\": [\"L0\"]}", file=sys.stderr)
+        manifest = tmp_path / "context_manifest.json"
+        manifest.write_text(json.dumps({
+            "rendered_context_path": str(rendered),
+            "rendered_context_sha256": hashlib.sha256(
+                rendered.read_bytes()
+            ).hexdigest(),
+        }), encoding="utf-8")
+        print(f"context manifest: {manifest}", file=sys.stderr)
         return 0
-    ctx, manifest = EngineAPI(engine_main=fake_main).assemble_context("P", "C", "L2")
-    assert ctx == "<<context body>>\n"
-    assert manifest == '{"injected": ["L0"]}'
+    ctx, manifest = EngineAPI(engine_main=fake_main).assemble_context(
+        "P", "C", "L2"
+    )
+    assert ctx.encode("utf-8") == rendered.read_bytes()
+    assert manifest == str(tmp_path / "context_manifest.json")
 
 
 def test_emit_delta_builds_argv_and_returns_result():

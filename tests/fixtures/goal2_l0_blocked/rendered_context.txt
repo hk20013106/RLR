@@ -1,0 +1,52 @@
+ISOLATION DIRECTIVE: Your entire input is below. Work only with the information provided; do not access the filesystem, EXCEPT the external knowledge base 09_Literature_Database/, which you MAY READ to cite existing papers (Obsidian wikilinks) -- you may NOT add to it.
+
+=== AUTHORIZED HYPOTHESIS SNAPSHOT ===
+{"allowed_source_nodes":[],"artifact_hash":"2bd58605769f58f5b1d08a9d643882eaddbcbc7378860f524a26299402e177c2","as_of_commit_seq":0,"authorization_id":"AUTH:f9d284ce-62b4-5e01-9382-aaeff7d78a9d","candidate_id":"C20260828143553520526","current_state":[],"event_ids":[],"events":[],"node":"L0","persona_catalog_version":"persona-catalog-1","profile_id":"v2.1-catalog-1","project_id":"PROJECT:bc70de0f-74c2-5b77-9a3f-646340a0762d","projection_hash":"63e465bd76e62148a98a83aa20f30539f0121edc585fa5b6e5b0d034fabe7a99","round_id":"1","schema_version":"2.1","store_id":"STORE:7338f0aa-d3fe-5cfc-acfe-23e26fa09451","topology_version":"2.1"}
+
+=== CANDIDATE FRONTMATTER ===
+  candidate_id: C20260828143553520526
+  title: Four-species cardiac RNA-seq high-heart-rate validation
+  question: 高心率物种如何在长期维持极高心率的同时避免出现与持续高频心脏活动相关的病理性重塑或功能损伤？这一生理特征是否伴随能量与营养供给、肾上腺素能调控—Ca2+ 调控—心肌收缩轴，以及心脏结构与力学性质的协同重塑？
+  claim: Sk 和 Sm 对极高心率的耐受与多个相互关联的生理系统重塑有关：（1）能量与营养供给机制发生调整，以满足长期高频心脏活动的代谢需求；（2）肾上腺素能调控、Ca2+ handling、兴奋—收缩耦联及肌丝对 Ca2+ 信号的响应发生协同改变，但不预设这些变化表现为增强、减弱、加速或减速；其中 TNNT3 的可变剪切和/或 exon 3 缺失是需要重点检验的候选机制，提示改变可能延伸至 Ca2+ 信号向肌丝收缩输出的转换环节；（3）心脏结构与力学性质发生调整，以在长期高频机械负荷下维持组织完整性与适当的顺应性。本轮转录组分析用于检验这些机制轴是否具有跨高心率物种共享的分子关联证据，不据此直接作因果或适应性推断。
+  current_status: NEW
+  current_owner: Linnaeus
+  source_input: Four-species cardiac RNA-seq gene-level expression matrices, sample metadata, gene lengths, and Chinese data handoff documentation; 107 total samples.
+  input_alias: Four-species cardiac RNA-seq gene-level expression matrices, sample metadata, gene lengths, and Chinese data handoff documentation; 107 total samples.
+
+=== L0 INPUT CONTRACT ===
+schema_version: 1.0
+round_type: initial
+round_id: 1
+scientific_question: 高心率物种如何在长期维持极高心率的同时避免出现与持续高频心脏活动相关的病理性重塑或功能损伤？这一生理特征是否伴随能量与营养供给、肾上腺素能调控—Ca2+ 调控—心肌收缩轴，以及心脏结构与力学性质的协同重塑？
+source_input:
+  input_type: directory
+  files: ['D:\\R-HK\\yigene\\newdata_260727\\FOUR_SPECIES_107SAMPLE_DATA_HANDOFF_CN.md', 'D:\\R-HK\\yigene\\newdata_260727\\four_species_gene_ids_lengths.tsv', 'D:\\R-HK\\yigene\\newdata_260727\\four_species_length_scaled_counts.tsv', 'D:\\R-HK\\yigene\\newdata_260727\\four_species_raw_counts.tsv', 'D:\\R-HK\\yigene\\newdata_260727\\sample107_260716_with_AV_group.csv']
+  location: D:\R-HK\yigene\newdata_260727
+  description: Four-species cardiac RNA-seq gene-level expression matrices, sample metadata, gene lengths, and Chinese data handoff documentation; 107 total samples.
+  format: csv, md, tsv
+inherited_inputs: []
+previous_round: null
+current_round:
+  hypothesis: Sk 和 Sm 对极高心率的耐受与多个相互关联的生理系统重塑有关：（1）能量与营养供给机制发生调整，以满足长期高频心脏活动的代谢需求；（2）肾上腺素能调控、Ca2+ handling、兴奋—收缩耦联及肌丝对 Ca2+ 信号的响应发生协同改变，但不预设这些变化表现为增强、减弱、加速或减速；其中 TNNT3 的可变剪切和/或 exon 3 缺失是需要重点检验的候选机制，提示改变可能延伸至 Ca2+ 信号向肌丝收缩输出的转换环节；（3）心脏结构与力学性质发生调整，以在长期高频机械负荷下维持组织完整性与适当的顺应性。本轮转录组分析用于检验这些机制轴是否具有跨高心率物种共享的分子关联证据，不据此直接作因果或适应性推断。
+
+=== CONTRACT: L0 | Linnaeus | Catalog Master ===
+AUTHORITY: No status changes, no code execution.
+INPUT SCOPE: candidate_frontmatter
+KB: read-only
+MUST:
+  - Validate the authoritative l0_input declaration and verify current-round inputs
+  - For continuation rounds, restore the exact prior round manifest and verify selected inherited path/SHA references
+  - Freeze one CurrentRoundDataBinding before downstream consumers use scientific data
+  - Fill skill_use_plan with real skills, not template placeholders
+MUST NOT:
+  - Execute code
+  - Interpret data
+  - Change candidate status
+  - Treat input_manifest.md or input_alias as scientific-data authority
+  - Leave template placeholders in preflight files
+STOP IF:
+  - Any required dependency missing
+  - Current input declaration invalid or current file hash mismatch
+  - Continuation restore or inherited selector verification fails
+OUTPUT: L0_linnaeus delta v2 -- fields=['schema_version', 'candidate_id']; required=['schema_version']
+ACTION: Verify runtime + l0_input, restore prior evidence when needed, freeze current-round data binding

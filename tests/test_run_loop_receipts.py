@@ -1,15 +1,85 @@
 import hashlib
 import json
+import sys
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
 import run_loop
+from research_loop.api import EngineAPI
 from research_loop.commands import ledger as ledger_commands
 from research_loop import research_seed
 from research_loop import l4_evidence_bundle as l4_bundle
 from research_loop.providers.base import RunReceipt
 from research_loop.providers.command import CommandProvider
+
+
+GOAL2_L0_FIXTURE = Path(__file__).parent / "fixtures" / "goal2_l0_blocked"
+
+
+def test_engine_api_binds_receipt_to_goal2_persisted_context_bytes(tmp_path):
+    """Replay Goal 2's context boundary without invoking a real provider.
+
+    The controller writes the rendered context artifact and reports it through
+    stderr, while its legacy stdout presentation adds a line terminator.  The
+    receipt must consume the persisted bytes identified by the manifest.
+    """
+    fixture_context = (GOAL2_L0_FIXTURE / "rendered_context.txt").read_bytes()
+    assert hashlib.sha256(fixture_context).hexdigest() == (
+        "a42bf53714531498af7bd71955b39d5e8e941bb542ab77286926722786a6d725"
+    )
+    rendered = tmp_path / "rendered_context.txt"
+    rendered.write_bytes(fixture_context)
+    manifest = tmp_path / "context_manifest.json"
+    prompt = tmp_path / "provider_prompt.txt"
+    prompt.write_bytes(b"Goal 2 captured provider prompt replay\n")
+
+    def fake_engine(argv):
+        assert argv == ["assemble-context", "P", "C1", "--node", "L0"]
+        manifest.write_text(json.dumps({
+            "project_id": "PROJECT:1",
+            "rendered_context_path": str(rendered),
+            "rendered_context_sha256": hashlib.sha256(
+                rendered.read_bytes()
+            ).hexdigest(),
+        }), encoding="utf-8")
+        # Mirror the controller's stdout presentation, including its extra
+        # print terminator, without making stdout a second artifact owner.
+        print(fixture_context.decode("utf-8").replace("\r\n", "\n"))
+        print(f"context manifest: {manifest}", file=sys.stderr)
+        return 0
+
+    context, manifest_path = EngineAPI(engine_main=fake_engine).assemble_context(
+        "P", "C1", "L0"
+    )
+    provider = SimpleNamespace(
+        name="command",
+        type="command",
+        last_prompt_file=str(prompt),
+        last_delta_file=str(GOAL2_L0_FIXTURE / "provider_delta.json"),
+        last_fresh_session=True,
+    )
+
+    receipt_path = run_loop.write_receipt(
+        tmp_path / "run",
+        "L0",
+        "Linnaeus",
+        provider,
+        context,
+        {"tools_policy": "no-fs", "everos_read_scopes": [],
+         "profile_id": "v2.1-catalog-1"},
+        "C1",
+        "1",
+        manifest=manifest_path,
+        provider_delta_file=provider.last_delta_file,
+    )
+
+    receipt = json.loads(Path(receipt_path).read_text(encoding="utf-8"))
+    assert context.encode("utf-8") == fixture_context
+    assert receipt["context_hash"] == (
+        "a42bf53714531498af7bd71955b39d5e8e941bb542ab77286926722786a6d725"
+    )
 
 
 def test_write_receipt_rejects_context_text_that_does_not_match_manifest_bytes(tmp_path):

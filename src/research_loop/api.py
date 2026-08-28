@@ -24,9 +24,11 @@ resolved lazily (or injected), keeping the dependency pointing inward and lettin
 Phase 6 repoint it to `research_loop.engine`/`research_loop.cli` with no churn.
 """
 import contextlib
+import hashlib
 import io
 import json
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,36 @@ def _norm_exit(code) -> int:
     if isinstance(code, int):
         return code
     return 1
+
+
+def load_rendered_context_artifact(manifest_path):
+    """Load the manifest-owned context bytes without using stdout as an artifact.
+
+    Returns ``(manifest, rendered_path, rendered_bytes, rendered_text)``.  The
+    caller receives the exact persisted bytes after the manifest hash is
+    verified, preserving the context artifact's single canonical identity.
+    """
+    try:
+        manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"context manifest is unreadable: {manifest_path}") from exc
+    if not isinstance(manifest, dict):
+        raise ValueError("context manifest must be a JSON object")
+    rendered_path = Path(str(manifest.get("rendered_context_path") or ""))
+    if not rendered_path.is_file():
+        raise ValueError("context manifest rendered context is missing")
+    try:
+        rendered_bytes = rendered_path.read_bytes()
+    except OSError as exc:
+        raise ValueError("context manifest rendered context is unreadable") from exc
+    rendered_hash = hashlib.sha256(rendered_bytes).hexdigest()
+    if rendered_hash != manifest.get("rendered_context_sha256"):
+        raise ValueError("context manifest rendered context hash is invalid")
+    try:
+        rendered_text = rendered_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("context manifest rendered context is not valid UTF-8") from exc
+    return manifest, rendered_path, rendered_bytes, rendered_text
 
 
 class EngineAPI:
@@ -96,9 +128,12 @@ class EngineAPI:
 
     def assemble_context(self, project, cand, node, authorization_id=None,
                          evidence_run_id=None, context_token_budget=None):
-        """cmd_assemble_context: return (context_text, manifest_or_None). Raises
-        RuntimeError (same message) on the fail-closed gate (rc != 0), preserving
-        the hard-stop semantics — the runner never continues without context."""
+        """Return the manifest-owned rendered context and its manifest path.
+
+        Successful context assembly must identify a persisted artifact.  stdout
+        remains a diagnostic/CLI view and is never used as the context artifact
+        when the manifest is present.
+        """
         args = ["assemble-context", project, cand, "--node", node]
         if authorization_id:
             args.extend(["--authorization-id", authorization_id])
@@ -114,7 +149,17 @@ class EngineAPI:
         for line in r.stderr.splitlines():
             if "context manifest:" in line:
                 manifest = line.split("context manifest:", 1)[1].strip()
-        return r.stdout, manifest
+        if not manifest:
+            raise RuntimeError(
+                f"assemble-context {node} did not report a rendered context manifest"
+            )
+        try:
+            _, _, _, context = load_rendered_context_artifact(manifest)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"assemble-context {node} rendered artifact invalid: {exc}"
+            ) from exc
+        return context, manifest
 
     def emit_delta(self, project, cand, node, persona, file, receipt=None,
                    context_manifest=None, provider_receipt=None) -> CtlResult:

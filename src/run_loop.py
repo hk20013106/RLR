@@ -36,7 +36,10 @@ sys.path.insert(0, str(HERE))
 
 import research_loop_v04 as rl       # noqa: E402
 import orchestrator as orch          # noqa: E402
-from research_loop.api import EngineAPI  # noqa: E402
+from research_loop.api import (  # noqa: E402
+    EngineAPI,
+    load_rendered_context_artifact,
+)
 from research_loop.compatibility import PROFILE_V20, get_profile
 from research_loop.code_state import capture_code_state
 from research_loop import deep_research
@@ -363,8 +366,10 @@ def write_receipt(run_dir, node, persona, prov, context, step, cand, round_id,
                   config_path=None, raw_provider_delta_file=None,
                   transformation_receipt_file=None):
     manifest_data = {}
+    rendered_bytes = None
     if manifest:
-        manifest_data = json.loads(Path(manifest).read_text(encoding="utf-8"))
+        (manifest_data, rendered_path, rendered_bytes,
+         _rendered_text) = load_rendered_context_artifact(manifest)
     prompt_file = getattr(prov, "last_prompt_file", None)
     delta_file = getattr(prov, "last_delta_file", None)
     provider_delta_file = Path(provider_delta_file) if provider_delta_file else None
@@ -374,12 +379,6 @@ def write_receipt(run_dir, node, persona, prov, context, step, cand, round_id,
     transformation_receipt_file = Path(transformation_receipt_file) if transformation_receipt_file else None
     rendered_context_hash = manifest_data.get("rendered_context_sha256")
     if manifest:
-        rendered_path = Path(str(manifest_data.get("rendered_context_path") or ""))
-        if not rendered_path.is_file():
-            raise ValueError("context manifest rendered context is missing")
-        rendered_bytes = rendered_path.read_bytes()
-        if hashlib.sha256(rendered_bytes).hexdigest() != rendered_context_hash:
-            raise ValueError("context manifest rendered context hash is invalid")
         if context.encode("utf-8") != rendered_bytes:
             raise ValueError("context bytes do not match manifest rendered context bytes")
     code_state = capture_code_state(HERE, config_path) if config_path else None
