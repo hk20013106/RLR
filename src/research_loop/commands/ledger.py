@@ -29,7 +29,11 @@ from research_loop.gates import (
     _audit_l6_traceability,
     _audit_l7_manifest,
 )
-from research_loop.hypothesis_contracts import DELTA_SCHEMA_VERSION, SUPPORTED_DELTA_SCHEMA_VERSIONS
+from research_loop.hypothesis_contracts import (
+    DELTA_SCHEMA_VERSION,
+    SUPPORTED_DELTA_SCHEMA_VERSIONS,
+    validate_provider_submission,
+)
 from research_loop.hypothesis_ledger import (
     HypothesisLedger,
     LedgerError,
@@ -423,6 +427,7 @@ def _emit_delta_v2(args, data):
         ledger = _ledger_for(project_dir, getattr(args, "knowledge_store", None))
         project_id = str(ledger.require_binding(project_dir)["project_id"])
         profile_id = ledger.project_profile(project_dir)
+        profile = get_profile(profile_id)
         if profile_id == PROFILE_V20:
             raise LedgerError(
                 "v2.0-legacy projects are read-only; public emit-delta is disabled"
@@ -441,6 +446,15 @@ def _emit_delta_v2(args, data):
             project_id=project_id, round_id=round_id, ledger=ledger,
         )
         if args.node == "L4":
+            provider_errors = validate_provider_submission(
+                "L4", data,
+                schema_version=profile.delta_schema_version,
+                profile_id=profile_id,
+            )
+            if provider_errors:
+                raise LedgerError(
+                    "L4 provider contract rejected: " + "; ".join(provider_errors)
+                )
             data, l4_binding = _bind_l4_delta_for_commit(
                 args, data, Path(args.file)
             )

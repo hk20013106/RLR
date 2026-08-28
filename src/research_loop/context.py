@@ -24,7 +24,7 @@ from research_loop.common import (
 from research_loop.delta import _delta_for_candidate, artifact_for_node
 from research_loop.compatibility import PROFILE_V20, get_profile
 from research_loop.persona_catalog import resolve_persona_template, PersonaCatalogError
-from research_loop.hypothesis_contracts import SCHEMA_REGISTRY
+from research_loop.hypothesis_contracts import provider_schema_for_profile
 from research_loop.hypothesis_ledger import (
     HypothesisLedger, LedgerError, binding_path, canonical_json,
 )
@@ -131,13 +131,13 @@ def _condense_delta(delta_key, data):
 
     return d
 
-def _generate_contract(node_info, project_dir, schema_version):
+def _generate_contract(node_info, project_dir, schema_version, profile_id=""):
     """Generate compact template contract for cognitive nodes."""
     node_id = node_info["node"]
     persona = node_info["persona"]
     title = node_info.get("title", PERSONA_TITLE.get(persona, ""))
     schema_key = f"{node_id}_{persona.lower()}"
-    schema = SCHEMA_REGISTRY[schema_version].get(node_id, {})
+    schema = provider_schema_for_profile(profile_id, node_id, schema_version) or {}
     kb = node_info.get("knowledge_base", "none")
     lines = []
     lines.append(f"=== CONTRACT: {node_id} | {persona} | {title} ===")
@@ -580,7 +580,7 @@ def cmd_assemble_context(args):
         return 2
 
     contract_text = "\n".join(_generate_contract(
-        node_info, project_dir, profile.delta_schema_version
+        node_info, project_dir, profile.delta_schema_version, profile.profile_id
     ))
     contract_hash = hashlib.sha256(contract_text.encode("utf-8")).hexdigest()
     sections.append(contract_text)

@@ -46,7 +46,7 @@ from research_loop import deep_research
 from research_loop.loopx_policy import LoopXRetryPolicy
 from research_loop.deep_research import SUPPORTED_BACKENDS
 from research_loop.delta import artifact_for_node
-from research_loop.hypothesis_contracts import SCHEMA_REGISTRY
+from research_loop.hypothesis_contracts import provider_schema_for_profile
 from research_loop.l0_state import L0StateError, restore_previous_round
 from research_loop import research_seed
 from research_loop.topology import topology_for_profile
@@ -324,13 +324,14 @@ def _provider_output_schema(project, node, step):
         persona = step.get("persona", "").lower()
         return rl.DELTA_SCHEMAS.get(f"{node}_{persona}")
     schema_version = str(step.get("schema_version") or "")
-    schemas = SCHEMA_REGISTRY.get(schema_version)
-    if schemas is None or node not in schemas:
+    profile_id = str(step.get("profile_id") or "")
+    schema = provider_schema_for_profile(profile_id, node, schema_version)
+    if schema is None:
         raise RuntimeError(
             f"provider schema is unavailable for bound schema {schema_version!r} "
-            f"and node {node!r}"
+            f"profile {profile_id!r} and node {node!r}"
         )
-    return schemas[node]
+    return schema
 
 
 def preflight_providers(cfg, args):

@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from native_v2_helpers import seed_selected_hypothesis
+import run_loop
 from research_loop import deep_research as dr
 from research_loop import l4_evidence_bundle as bundle
 from research_loop import l4_inventory
@@ -12,6 +13,7 @@ from research_loop.compatibility import PROFILE_V21_CATALOG_1
 from research_loop.context import cmd_assemble_context
 from research_loop.engine import main as engine_main
 from research_loop.hypothesis_ledger import HypothesisLedger
+from research_loop.hypothesis_contracts import validate_provider_submission
 from research_loop.preresearch import PRE_RESEARCH_MAP, _validate_pre_research_content
 from research_loop.providers.base import RunReceipt
 
@@ -296,6 +298,28 @@ def test_emit_delta_is_the_l4_handle_binding_boundary(tmp_path, monkeypatch):
             "execution_required": True,
         }],
     }
+    provider_schema = run_loop._provider_output_schema(
+        project,
+        "L4",
+        {"schema_version": "2.1", "profile_id": PROFILE_V21_CATALOG_1},
+    )
+    provider_candidate = provider_schema["properties"]["method_candidates"]["items"]
+    assert {
+        "evidence_card_handles",
+        "evidence_gap_handles",
+        "method_anchor_handles",
+    } <= set(provider_candidate["properties"])
+    assert not {
+        "evidence_card_ids",
+        "evidence_gap_ids",
+        "method_anchor_ids",
+    } & set(provider_candidate["properties"])
+    assert validate_provider_submission(
+        "L4",
+        raw_data,
+        schema_version="2.1",
+        profile_id=PROFILE_V21_CATALOG_1,
+    ) == []
     raw_path = tmp_path / "L4_Fisher_provider.json"
     raw_path.write_text(json.dumps(raw_data), encoding="utf-8")
     rendered_hash = hashlib.sha256(rendered_path.read_bytes()).hexdigest()

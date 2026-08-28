@@ -258,6 +258,49 @@ _V21_NODE_SCHEMAS["L6"]["properties"]["analysis_plan"]["items"]["properties"].up
 })
 _V21_NODE_SCHEMAS["L6"]["properties"]["analysis_plan"]["items"]["required"].append("feasibility_assessment")
 SCHEMA_REGISTRY = {"2.0": NODE_SCHEMAS, "2.1": _V21_NODE_SCHEMAS}
+# Provider-facing contracts may be profile-specific when a native profile has
+# a different wire representation from the canonical persisted artifact.  The
+# registry is populated by the focused contract extension after import.
+PROVIDER_SCHEMA_REGISTRY: dict[str, dict[str, dict[str, Any]]] = {}
+
+
+def provider_schema_for_profile(
+    profile_id: str, node: str, schema_version: str
+) -> dict[str, Any] | None:
+    """Return the one provider wire schema selected by a profile.
+
+    Profiles without an explicit provider projection retain the historical
+    schema registry.  This keeps legacy v2.1 strategy payloads isolated from
+    the native catalog profile's handle-based L4C wire contract.
+    """
+    profile_schemas = PROVIDER_SCHEMA_REGISTRY.get(str(profile_id), {})
+    profile_version = profile_schemas.get(str(schema_version), {})
+    return profile_version.get(node) or SCHEMA_REGISTRY.get(schema_version, {}).get(node)
+
+
+def validate_provider_submission(
+    node: str,
+    delta: dict[str, Any],
+    *,
+    schema_version: str,
+    profile_id: str,
+) -> list[str]:
+    """Validate an unbound provider payload against its profile wire schema."""
+    schema = provider_schema_for_profile(profile_id, node, schema_version)
+    if schema is None:
+        return [
+            f"provider schema is unavailable for profile {profile_id!r}, "
+            f"schema {schema_version!r}, node {node!r}"
+        ]
+    errors = sorted(
+        jsonschema.Draft202012Validator(schema).iter_errors(delta),
+        key=lambda error: list(error.absolute_path),
+    )
+    rendered = []
+    for error in errors:
+        where = "/".join(str(part) for part in error.absolute_path) or "<root>"
+        rendered.append(f"{where}: {error.message}")
+    return rendered
 
 
 def _persisted_schema(node: str, schema_version: str) -> dict[str, Any]:

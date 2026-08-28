@@ -432,6 +432,56 @@ def test_native_provider_schema_uses_bound_profile_schema(tmp_path):
     assert schema["properties"]["schema_version"]["const"] == "2.1"
 
 
+def test_native_l4c_provider_schema_uses_local_handles_not_canonical_ids(tmp_path):
+    binding = tmp_path / "00_Preflight" / "hypothesis_store_binding.json"
+    binding.parent.mkdir(parents=True)
+    binding.write_text("{}", encoding="utf-8")
+
+    schema = run_loop._provider_output_schema(
+        tmp_path,
+        "L4",
+        {"schema_version": "2.1", "profile_id": "v2.1-catalog-1"},
+    )
+    candidate = schema["properties"]["method_candidates"]["items"]
+    properties = set(candidate["properties"])
+
+    assert {
+        "evidence_card_handles",
+        "evidence_gap_handles",
+        "method_anchor_handles",
+    } <= properties
+    assert not {
+        "evidence_card_ids",
+        "evidence_gap_ids",
+        "method_anchor_ids",
+    } & properties
+    assert "method_anchor_handles" in candidate["required"]
+
+
+def test_legacy_v21_l4c_provider_schema_is_profile_isolated(tmp_path):
+    binding = tmp_path / "00_Preflight" / "hypothesis_store_binding.json"
+    binding.parent.mkdir(parents=True)
+    binding.write_text("{}", encoding="utf-8")
+
+    schema = run_loop._provider_output_schema(
+        tmp_path,
+        "L4",
+        {"schema_version": "2.1", "profile_id": "v2.1"},
+    )
+    properties = set(schema["properties"]["method_candidates"]["items"]["properties"])
+
+    assert {
+        "evidence_card_ids",
+        "evidence_gap_ids",
+        "method_anchor_ids",
+    } <= properties
+    assert not {
+        "evidence_card_handles",
+        "evidence_gap_handles",
+        "method_anchor_handles",
+    } & properties
+
+
 def test_l05_runner_binds_and_activates_frozen_curie_result(tmp_path, monkeypatch):
     project = tmp_path / "project"
     project.mkdir()

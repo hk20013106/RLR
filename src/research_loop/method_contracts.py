@@ -1,6 +1,39 @@
 """Native v2.1 contracts for evidence-backed method selection."""
 from __future__ import annotations
 
+import copy
+
+
+_L4C_REFERENCE_FIELDS = {
+    "evidence_card_ids": "evidence_card_handles",
+    "evidence_gap_ids": "evidence_gap_handles",
+    "method_anchor_ids": "method_anchor_handles",
+}
+
+
+def _rename_schema_fields(value, mapping):
+    """Rename contract field references in properties and conditional rules."""
+    if isinstance(value, dict):
+        properties = value.get("properties")
+        if isinstance(properties, dict):
+            for old, new in mapping.items():
+                if old in properties:
+                    properties[new] = properties.pop(old)
+        required = value.get("required")
+        if isinstance(required, list):
+            value["required"] = [mapping.get(item, item) for item in required]
+        dependent = value.get("dependentRequired")
+        if isinstance(dependent, dict):
+            value["dependentRequired"] = {
+                mapping.get(key, key): [mapping.get(item, item) for item in values]
+                for key, values in dependent.items()
+            }
+        for child in value.values():
+            _rename_schema_fields(child, mapping)
+    elif isinstance(value, list):
+        for child in value:
+            _rename_schema_fields(child, mapping)
+
 
 def _string_array(*, min_items=0):
     return {
@@ -159,5 +192,15 @@ def install(contracts_module) -> None:
     # Rebuild the persisted v2.1 contracts from the extended submission schemas.
     hc.PERSISTED_SCHEMA_REGISTRY["2.1"] = {
         node: hc._persisted_schema(node, "2.1") for node in schemas
+    }
+
+    # Native catalog providers receive local handles.  The historical v2.1
+    # registry remains the canonical-ID wire contract for the legacy profile;
+    # the profile-specific projection prevents those two paths from sharing a
+    # semantically ambiguous schema.
+    provider_l4 = copy.deepcopy(l4)
+    _rename_schema_fields(provider_l4, _L4C_REFERENCE_FIELDS)
+    hc.PROVIDER_SCHEMA_REGISTRY["v2.1-catalog-1"] = {
+        "2.1": {"L4": provider_l4}
     }
     hc._METHOD_CONTRACTS_INSTALLED = True
