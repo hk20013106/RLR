@@ -59,6 +59,8 @@ def install(topology_module) -> None:
         "Describe every serious method candidate by stable method_id, applicable "
         "input, steps, assumptions, outputs, strengths, limitations, alternatives, "
         "and method-anchor IDs",
+        "Separate required_inputs from optional_diagnostics; reserve missing_source "
+        "for exact method evidence and use needs_user_data for unavailable inputs",
         "Identify source-blocked candidates and provide the exact user-PDF import command",
     ])
     nodes["L5"]["action_hint"] = (

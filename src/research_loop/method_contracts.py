@@ -42,6 +42,35 @@ def _string_array(*, min_items=0):
     }
 
 
+def validate_input_requirements(candidate: dict) -> None:
+    """Keep executable inputs, optional diagnostics, and source gaps separate."""
+    required = {
+        str(value).strip().casefold()
+        for value in candidate.get("required_inputs", [])
+        if str(value).strip()
+    }
+    optional = {
+        str(value).strip().casefold()
+        for value in candidate.get("optional_diagnostics", [])
+        if str(value).strip()
+    }
+    overlap = sorted(required & optional)
+    if overlap:
+        raise ValueError(
+            "L4C required_inputs and optional_diagnostics overlap: "
+            + ", ".join(overlap)
+        )
+    status = str(candidate.get("status") or "")
+    if status == "needs_user_source" and candidate.get("missing_inputs"):
+        raise ValueError(
+            "L4C needs_user_source cannot carry missing_inputs; use needs_user_data"
+        )
+    if status == "needs_user_data" and str(candidate.get("missing_source") or "").strip():
+        raise ValueError(
+            "L4C needs_user_data cannot carry missing_source; reserve it for evidence"
+        )
+
+
 def install(contracts_module) -> None:
     """Add an atomic optional extension to v2.1; legacy deltas remain readable."""
     hc = contracts_module
@@ -61,7 +90,9 @@ def install(contracts_module) -> None:
         "component_id": hc._ID,
         "hypothesis_ids": hc._target_ids(),
         "name": hc._STR,
-        "status": {"enum": ["eligible", "ineligible", "needs_user_source"]},
+        "status": {"enum": [
+            "eligible", "ineligible", "needs_user_source", "needs_user_data",
+        ]},
         "purpose": hc._STR,
         "applicable_to": _string_array(min_items=1),
         "implementation_steps": _string_array(min_items=1),
@@ -73,6 +104,9 @@ def install(contracts_module) -> None:
         "method_anchor_ids": _string_array(),
         "rejection_reasons": _string_array(),
         "missing_source": {"type": "string"},
+        "required_inputs": _string_array(min_items=1),
+        "optional_diagnostics": _string_array(),
+        "missing_inputs": _string_array(),
         # Staged L4 v2 fields. They are additive so historical native-v2.1
         # deltas remain readable. Once one appears, all three are required.
         "execution_required": {"type": "boolean"},
@@ -127,6 +161,11 @@ def install(contracts_module) -> None:
             "if": {"properties": {"status": {"const": "needs_user_source"}},
                    "required": ["status"]},
             "then": {"properties": {"missing_source": {"minLength": 1}}},
+        },
+        {
+            "if": {"properties": {"status": {"const": "needs_user_data"}},
+                   "required": ["status"]},
+            "then": {"properties": {"missing_inputs": {"minItems": 1}}},
         },
     ]
 
@@ -200,6 +239,10 @@ def install(contracts_module) -> None:
     # semantically ambiguous schema.
     provider_l4 = copy.deepcopy(l4)
     _rename_schema_fields(provider_l4, _L4C_REFERENCE_FIELDS)
+    provider_candidate = provider_l4["properties"]["method_candidates"]["items"]
+    provider_candidate["required"].extend([
+        "required_inputs", "optional_diagnostics", "missing_inputs",
+    ])
     hc.PROVIDER_SCHEMA_REGISTRY["v2.1-catalog-1"] = {
         "2.1": {"L4": provider_l4}
     }

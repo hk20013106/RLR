@@ -84,6 +84,15 @@ New staged candidates add:
   to cover a required component;
 - `evidence_card_ids`: accepted L4B cards supporting the candidate;
 - `evidence_gap_ids`: unresolved source gaps relevant to the candidate.
+- `required_inputs`: data or artifacts needed to execute the candidate;
+- `optional_diagnostics`: useful QC or sensitivity inputs whose absence does not
+  make the candidate source-blocked;
+- `missing_inputs`: unavailable required data, used with `status: needs_user_data`.
+
+`missing_source` is reserved for an exact method-evidence source. A candidate
+must not use `needs_user_source` to represent missing sample metadata. This
+keeps an evidence gap distinct from a data gap while preserving the same
+fail-closed required-path gate.
 
 Only an `eligible` candidate with `execution_required: true` must reference an
 accepted evidence card. Optional alternatives may remain visible without a

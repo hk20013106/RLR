@@ -56,6 +56,13 @@ def _compose_auto_prompt(node, persona, context, output_schema=None,
         lines.append(f"# WORKSPACE (Path A; read/write ONLY inside): {workspace}")
     if tools:
         lines.append(f"# tools / policy: {tools}")
+    if node == "L4":
+        lines.extend([
+            "# L4 method-input contract:",
+            "# For every method candidate, separate required_inputs from optional_diagnostics.",
+            "# Missing source means exact method evidence only; never put missing user data there.",
+            "# If an executable candidate lacks required user data, use needs_user_data and list missing_inputs.",
+        ])
     if output_schema:
         lines += ["# JSON delta schema:",
                   json.dumps(_schema_repr(output_schema), indent=2,

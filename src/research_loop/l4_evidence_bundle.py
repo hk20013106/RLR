@@ -125,6 +125,16 @@ def resolve_l4c_reference_handles(evidence_artifact: dict, delta: dict) -> tuple
     for index, candidate in enumerate(candidates):
         if not isinstance(candidate, dict):
             raise deep_research.DeepResearchError("L4C method candidate must be an object")
+        if any(
+            field in candidate
+            for field in ("required_inputs", "optional_diagnostics", "missing_inputs")
+        ):
+            from research_loop.method_contracts import validate_input_requirements
+
+            try:
+                validate_input_requirements(candidate)
+            except ValueError as exc:
+                raise deep_research.DeepResearchError(str(exc)) from exc
         row = {"candidate_index": index}
         for kind, handle_field, canonical_field in fields:
             handles = candidate.get(handle_field)
@@ -951,6 +961,16 @@ def _validate_required_paths(dr, evidence_artifact: dict, delta: dict) -> tuple[
             )
 
     for candidate in candidates:
+        if any(
+            field in candidate
+            for field in ("required_inputs", "optional_diagnostics", "missing_inputs")
+        ):
+            from research_loop.method_contracts import validate_input_requirements
+
+            try:
+                validate_input_requirements(candidate)
+            except ValueError as exc:
+                raise dr.DeepResearchError(str(exc)) from exc
         card_refs = set(candidate.get("evidence_card_ids") or [])
         anchor_refs = set(candidate.get("method_anchor_ids") or [])
         gap_refs = set(candidate.get("evidence_gap_ids") or [])
