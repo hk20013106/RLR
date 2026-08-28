@@ -282,6 +282,7 @@ def extract_is_contiguous(payload, extract):
 
 def _score(title):
     title = re.sub(r"[^a-z0-9]+", " ", title.casefold()).strip()
+    title = re.sub(r"^\d+(?:\.\d+)*\s+", "", title)
     if title in {
         "methods", "method", "materials and methods", "methods and materials",
         "experimental methods", "statistical methods", "methodology",
@@ -289,6 +290,22 @@ def _score(title):
         return 100
     if any(word in title for word in ("result", "discussion", "abstract", "reference")):
         return 0
+
+    # Some exact, authoritative method sources are published as protocols,
+    # software papers, or package documentation. Their execution details are
+    # headed ``Procedure``, ``Implementation``, ``Model``, or ``Details``
+    # rather than ``Methods``. These headings remain source-local and are
+    # still subject to the same contiguous-text and minimum-size checks.
+    if title in {
+        "procedure", "implementation", "algorithm", "model",
+    }:
+        return 90
+    if title == "details":
+        return 95
+    if title in {
+        "materials", "equipment setup", "experimental procedure", "usage",
+    }:
+        return 80
     return 50 if re.search(r"\bmethods?\b|\bmethodology\b", title) else 0
 
 
@@ -332,9 +349,11 @@ def _strip(value):
 
 def _methods_html(payload):
     headings = list(re.finditer(r"<h([1-6])\b[^>]*>(.*?)</h\1>", payload, re.I | re.S))
+    best = None
     for index, heading in enumerate(headings):
         title = _strip(heading.group(2))
-        if not _score(title):
+        score = _score(title)
+        if not score:
             continue
         level, end = int(heading.group(1)), len(payload)
         for later in headings[index + 1:]:
@@ -342,13 +361,17 @@ def _methods_html(payload):
                 end = later.start()
                 break
         text = f"{title} {_strip(payload[heading.end():end])}".strip()
-        return {
-            "section": title,
-            "text": text,
-            "locator": f"HTML h{level} title={title}",
-            "parser": "html-heading",
-        }
-    return None
+        if best is None or score > best[0]:
+            best = (
+                score,
+                {
+                    "section": title,
+                    "text": text,
+                    "locator": f"HTML h{level} title={title}",
+                    "parser": "html-heading",
+                },
+            )
+    return best[1] if best else None
 
 
 def extract_methods_section(payload, content_type=""):
@@ -377,7 +400,20 @@ def _identity_ok(contract, requested, response, payload):
         str(contract.get(key) or "").casefold()
         for key in ("doi", "pmcid", "pmid")
     ]
-    return any(token and token in haystack for token in tokens)
+    if any(tokens):
+        return any(token and token in haystack for token in tokens)
+
+    # A stable URL is an allowed exact identifier in the L4A registry. When
+    # no DOI/PMID/PMCID exists, bind identity to that registered URL rather
+    # than rejecting an otherwise exact official-documentation source.
+    registered_urls = {
+        _url(item) for item in contract.get("registered_locations") or []
+    }
+    return any(
+        _url(item) in registered_urls
+        for item in list(response.get("redirect_chain") or [])
+        + [str(response.get("resolved_url") or requested), str(requested)]
+    )
 
 
 def _attempt(contract, location, method):

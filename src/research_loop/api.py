@@ -95,7 +95,7 @@ class EngineAPI:
                                f"{r.stdout!r} {r.stderr!r}")
 
     def assemble_context(self, project, cand, node, authorization_id=None,
-                         evidence_run_id=None):
+                         evidence_run_id=None, context_token_budget=None):
         """cmd_assemble_context: return (context_text, manifest_or_None). Raises
         RuntimeError (same message) on the fail-closed gate (rc != 0), preserving
         the hard-stop semantics — the runner never continues without context."""
@@ -104,6 +104,8 @@ class EngineAPI:
             args.extend(["--authorization-id", authorization_id])
         if evidence_run_id:
             args.extend(["--evidence-run-id", evidence_run_id])
+        if context_token_budget is not None:
+            args.extend(["--context-token-budget", str(context_token_budget)])
         r = self.run_cli(*args)
         if r.returncode != 0:
             raise RuntimeError(f"assemble-context {node} failed: "

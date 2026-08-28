@@ -51,6 +51,13 @@ receipt, source metadata, permitted OA payload, and located extracts below
 
 ## Step-by-step protocol
 
+For native v2.1 emissions, `RECEIPT` must bind the exact raw file passed as
+`--file`; do not reserialize or copy that provider artifact before emission.
+At L4, Fisher uses only the E/G/A handles in assembled context. The
+`emit-delta` commit boundary resolves those handles to the frozen L4B registry,
+persists the canonical delta once, and records the raw-to-canonical provenance
+edge.
+
 ```
 while not terminal:
     1. step = python research_loop_v04.py next-step PROJECT CAND

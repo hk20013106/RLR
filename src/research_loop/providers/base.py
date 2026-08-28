@@ -126,11 +126,20 @@ class RunReceipt:
     rendered_context_hash: str | None = None
     provider_delta_path: str | None = None
     provider_delta_hash: str | None = None
+    raw_provider_delta_path: str | None = None
+    raw_provider_delta_hash: str | None = None
+    transformation_receipt_path: str | None = None
+    transformation_receipt_hash: str | None = None
+    git_head: str | None = None
+    git_dirty: bool | None = None
+    working_tree_diff_sha256: str | None = None
+    config_sha256: str | None = None
+    code_state_id: str | None = None
     schema_version: str = "RunReceipt/v1"
 
     def validate(self):
-        if self.schema_version != "RunReceipt/v1":
-            raise ValueError("RunReceipt schema_version must be 'RunReceipt/v1'")
+        if self.schema_version not in {"RunReceipt/v1", "RunReceipt/v2"}:
+            raise ValueError("RunReceipt schema_version must be 'RunReceipt/v1' or 'RunReceipt/v2'")
         for name in (
             "node", "persona", "provider", "timestamp", "context_hash",
             "project_id", "candidate_id", "round_id", "profile_id",
@@ -144,6 +153,7 @@ class RunReceipt:
         for name in (
             "context_hash", "context_manifest_hash", "rendered_context_hash",
             "prompt_hash", "delta_hash", "provider_delta_hash",
+            "raw_provider_delta_hash", "transformation_receipt_hash",
         ):
             value = getattr(self, name, None)
             if value is not None and (
@@ -153,6 +163,27 @@ class RunReceipt:
                 raise ValueError(f"RunReceipt {name} must be a SHA-256 hex digest")
         if self.rendered_context_hash and self.rendered_context_hash != self.context_hash:
             raise ValueError("RunReceipt rendered_context_hash must equal context_hash")
+        if self.schema_version == "RunReceipt/v2":
+            for name in (
+                "git_head", "working_tree_diff_sha256", "config_sha256",
+                "code_state_id", "raw_provider_delta_path",
+                "raw_provider_delta_hash",
+            ):
+                if not str(getattr(self, name, "") or "").strip():
+                    raise ValueError(f"RunReceipt {name} is required for v2")
+            if not isinstance(self.git_dirty, bool):
+                raise ValueError("RunReceipt git_dirty must be a bool for v2")
+            if re.fullmatch(r"[0-9a-f]{40,64}", str(self.git_head)) is None:
+                raise ValueError("RunReceipt git_head must be a Git object ID for v2")
+            for name in ("working_tree_diff_sha256", "config_sha256", "code_state_id"):
+                if re.fullmatch(r"[0-9a-f]{64}", str(getattr(self, name))) is None:
+                    raise ValueError(f"RunReceipt {name} must be a SHA-256 hex digest for v2")
+            if self.raw_provider_delta_path != self.provider_delta_path:
+                for name in ("transformation_receipt_path", "transformation_receipt_hash"):
+                    if not str(getattr(self, name, "") or "").strip():
+                        raise ValueError(
+                            f"RunReceipt {name} is required when provider delta is transformed"
+                        )
         return self
 
     def write(self, path):

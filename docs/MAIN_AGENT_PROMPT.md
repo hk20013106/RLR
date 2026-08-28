@@ -34,6 +34,11 @@ Loop:
 
 Key rules:
 - ONLY use assemble-context output as your input. Do NOT read other delta files.
+- The provider receipt must bind the exact raw file passed to `emit-delta`; do not
+  reserialize or copy a provider delta before emission.
+- L4 Fisher must use the E/G/A handles shown in its assembled context. The
+  `emit-delta` commit boundary performs deterministic binding to canonical IDs and
+  records the raw-to-canonical provenance edge; do not create a second bound copy.
 - Deep Research runs BEFORE L1/L4/L8.5 and is embedded via assemble-context;
   it does NOT change the 15-node DAG topology.
 - L7 Turing: use prepare-turing-workspace. Run scripts only in that workspace.

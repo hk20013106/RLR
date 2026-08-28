@@ -38,9 +38,14 @@ import research_loop_v04 as rl       # noqa: E402
 import orchestrator as orch          # noqa: E402
 from research_loop.api import EngineAPI  # noqa: E402
 from research_loop.compatibility import PROFILE_V20, get_profile
+from research_loop.code_state import capture_code_state
+from research_loop import deep_research
+from research_loop.loopx_policy import LoopXRetryPolicy
 from research_loop.deep_research import SUPPORTED_BACKENDS
 from research_loop.delta import artifact_for_node
+from research_loop.hypothesis_contracts import SCHEMA_REGISTRY
 from research_loop.l0_state import L0StateError, restore_previous_round
+from research_loop import research_seed
 from research_loop.topology import topology_for_profile
 
 ENGINE = EngineAPI()
@@ -133,6 +138,27 @@ def auto_pitfall(project, cand, node, category, symptom, provider="unknown",
         log(f"auto-pitfall error (non-fatal): {e}")
 
 
+def record_loopx_failure(failure_state, node, failure_class, failure_code, *, run_dir=None):
+    """Record a classified failure and persist the Loop X retry decision."""
+    policy = failure_state.setdefault("loopx_policy", LoopXRetryPolicy())
+    event = policy.record(node, failure_class, failure_code)
+    failure_state["last_loopx_failure"] = event
+    if run_dir:
+        path = Path(run_dir) / "loopx_failures.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+    return event
+
+
+def _record_runtime_failure(failure_state, node, failure_class, failure_code, run_dir):
+    if failure_state is not None:
+        return record_loopx_failure(
+            failure_state, node, failure_class, failure_code, run_dir=run_dir
+        )
+    return None
+
+
 def next_step(project, cand):
     return ENGINE.next_step(project, cand)
 
@@ -156,9 +182,34 @@ def load_delta(project, cand, delta_key):
     return None
 
 
-def assemble_context(project, cand, node, authorization_id=None, evidence_run_id=None):
+def _recover_committed_advance(project, cand, step):
+    """Resume a committed native delta whose state transition was interrupted."""
+    if step.get("schema_version") != "2.1":
+        return None
+    try:
+        profile = get_profile(step["profile_id"])
+        delta_key = artifact_for_node(profile, step["node"]).storage_key
+    except (KeyError, ValueError):
+        return None
+    delta = load_delta(project, cand, delta_key)
+    if not delta or delta.get("schema_version") != "2.1":
+        return None
+    log(f"{step['node']}: committed v2.1 delta found; recovering advance only")
+    try:
+        advance(project, cand, step)
+    except RuntimeError as exc:
+        auto_pitfall(project, cand, step["node"], "advance_failure", str(exc),
+                     provider="controller", evidence=str(project))
+        log(f"{step['node']} recovery advance failed closed: {exc}")
+        return False
+    return True
+
+
+def assemble_context(project, cand, node, authorization_id=None, evidence_run_id=None,
+                     context_token_budget=None):
     return ENGINE.assemble_context(project, cand, node, authorization_id,
-                                   evidence_run_id)
+                                   evidence_run_id,
+                                   context_token_budget=context_token_budget)
 
 
 def _write_provider_delta(run_dir, node, persona, delta):
@@ -168,6 +219,31 @@ def _write_provider_delta(run_dir, node, persona, delta):
     tmp.write_text(json.dumps(delta, indent=2, ensure_ascii=False),
                    encoding="utf-8")
     return tmp
+
+
+def canonical_provider_emission(prov, run_dir, node, persona, delta):
+    """Return the provider's original canonical file when it owns one.
+
+    Command, headless, and manual providers already persist their JSON output.
+    Re-serializing their parsed return value would create a competing identity.
+    A provider without a persisted output delegates canonical production to the
+    runner, which writes exactly one artifact.
+    """
+    raw_path = getattr(prov, "last_delta_file", None)
+    if raw_path:
+        path = Path(raw_path)
+        if not path.is_file():
+            raise ValueError(f"provider canonical delta is missing: {path}")
+        try:
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"provider canonical delta is unreadable: {path}") from exc
+        if persisted != delta:
+            raise ValueError(
+                "provider returned data that differs from its persisted canonical delta"
+            )
+        return path, None
+    return _write_provider_delta(run_dir, node, persona, delta), None
 
 
 def emit_delta(project, cand, node, persona, delta, run_dir, receipt=None,
@@ -184,37 +260,74 @@ def emit_delta(project, cand, node, persona, delta, run_dir, receipt=None,
     return r.returncode == 0
 
 
+def _run_advance_command(*argv):
+    """Run a state transition and fail closed when the controller rejects it."""
+    result = _ctl(*argv)
+    if result.returncode != 0:
+        detail = (result.stderr.strip() or result.stdout.strip() or
+                  f"controller exited with {result.returncode}")
+        raise RuntimeError(f"{argv[0]} failed: {detail}")
+    return result
+
+
 def advance(project, cand, step):
     ac = step.get("advance_command")
     if step.get("node") == "L10b":
-        _ctl("finalize-candidate", project, cand)
+        _run_advance_command("finalize-candidate", project, cand)
     elif ac == "decision":
-        _ctl("decision", project, cand, "--status", step.get("advance_status"),
-             "--reason", step.get("advance_reason") or "auto")
+        _run_advance_command(
+            "decision", project, cand, "--status", step.get("advance_status"),
+            "--reason", step.get("advance_reason") or "auto")
     elif ac == "triage-idea":
         d = load_delta(project, cand, "L3_oppenheimer") or {}
-        if d.get("schema_version") == "2.0":
-            _ctl("triage-idea", project, cand)
+        if d.get("schema_version") in ("2.0", "2.1"):
+            _run_advance_command("triage-idea", project, cand)
         else:
             dec = "select" if d.get("selected") else "reject"
-            _ctl("triage-idea", project, cand, "--decision", dec,
-                 "--reason", d.get("reason") or "auto")
+            _run_advance_command("triage-idea", project, cand,
+                                 "--decision", dec,
+                                 "--reason", d.get("reason") or "auto")
     elif ac == "triage-method":
         d = load_delta(project, cand, "L6_oppenheimer") or {}
-        if d.get("schema_version") == "2.0":
-            _ctl("triage-method", project, cand)
+        if d.get("schema_version") in ("2.0", "2.1"):
+            _run_advance_command("triage-method", project, cand)
         else:
             dec = "approve" if d.get("approved_strategy") else "reject"
-            _ctl("triage-method", project, cand, "--decision", dec,
-                 "--reason", d.get("reason") or "auto")
+            _run_advance_command("triage-method", project, cand,
+                                 "--decision", dec,
+                                 "--reason", d.get("reason") or "auto")
     elif ac == "execution-gate":
-        _ctl("execution-gate", project, cand)
+        _run_advance_command("execution-gate", project, cand)
     elif ac == "aggregate-report":
-        _ctl("aggregate-report", project, cand)
+        _run_advance_command("aggregate-report", project, cand)
 
 
 def provider_for(node, cfg, args):
     return orch.make_provider(cfg.for_node(node), override_type=args.provider)
+
+
+def _context_token_budget(cfg):
+    value = (getattr(cfg, "data", {}) or {}).get("context_token_budget", 8000)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError("context_token_budget must be a non-negative integer")
+    return value
+
+
+def _provider_output_schema(project, node, step):
+    """Resolve the provider submission schema from the bound project profile."""
+    native_binding = (Path(project) / "00_Preflight" /
+                      "hypothesis_store_binding.json").exists()
+    if not native_binding:
+        persona = step.get("persona", "").lower()
+        return rl.DELTA_SCHEMAS.get(f"{node}_{persona}")
+    schema_version = str(step.get("schema_version") or "")
+    schemas = SCHEMA_REGISTRY.get(schema_version)
+    if schemas is None or node not in schemas:
+        raise RuntimeError(
+            f"provider schema is unavailable for bound schema {schema_version!r} "
+            f"and node {node!r}"
+        )
+    return schemas[node]
 
 
 def preflight_providers(cfg, args):
@@ -246,18 +359,36 @@ def preflight_providers(cfg, args):
 
 
 def write_receipt(run_dir, node, persona, prov, context, step, cand, round_id,
-                  *, manifest=None, provider_delta_file=None, workspace=None):
+                  *, manifest=None, provider_delta_file=None, workspace=None,
+                  config_path=None, raw_provider_delta_file=None,
+                  transformation_receipt_file=None):
     manifest_data = {}
     if manifest:
         manifest_data = json.loads(Path(manifest).read_text(encoding="utf-8"))
     prompt_file = getattr(prov, "last_prompt_file", None)
     delta_file = getattr(prov, "last_delta_file", None)
     provider_delta_file = Path(provider_delta_file) if provider_delta_file else None
+    raw_provider_delta_file = Path(
+        raw_provider_delta_file or provider_delta_file
+    ) if (raw_provider_delta_file or provider_delta_file) else None
+    transformation_receipt_file = Path(transformation_receipt_file) if transformation_receipt_file else None
+    rendered_context_hash = manifest_data.get("rendered_context_sha256")
+    if manifest:
+        rendered_path = Path(str(manifest_data.get("rendered_context_path") or ""))
+        if not rendered_path.is_file():
+            raise ValueError("context manifest rendered context is missing")
+        rendered_bytes = rendered_path.read_bytes()
+        if hashlib.sha256(rendered_bytes).hexdigest() != rendered_context_hash:
+            raise ValueError("context manifest rendered context hash is invalid")
+        if context.encode("utf-8") != rendered_bytes:
+            raise ValueError("context bytes do not match manifest rendered context bytes")
+    code_state = capture_code_state(HERE, config_path) if config_path else None
     rec = orch.RunReceipt(
         node=node, persona=persona,
         provider=getattr(prov, "name", getattr(prov, "type", "?")),
         timestamp=orch.now(),
-        context_hash=hashlib.sha256(context.encode("utf-8")).hexdigest(),
+        context_hash=(rendered_context_hash
+                      or hashlib.sha256(context.encode("utf-8")).hexdigest()),
         prompt_file=prompt_file,
         prompt_hash=(hashlib.sha256(Path(prompt_file).read_bytes()).hexdigest()
                      if prompt_file and Path(prompt_file).is_file() else None),
@@ -276,10 +407,24 @@ def write_receipt(run_dir, node, persona, prov, context, step, cand, round_id,
         context_manifest_hash=(hashlib.sha256(Path(manifest).read_bytes()).hexdigest()
                                if manifest else None),
         rendered_context_path=manifest_data.get("rendered_context_path"),
-        rendered_context_hash=manifest_data.get("rendered_context_sha256"),
+        rendered_context_hash=rendered_context_hash,
         provider_delta_path=str(provider_delta_file or ""),
         provider_delta_hash=(hashlib.sha256(provider_delta_file.read_bytes()).hexdigest()
                              if provider_delta_file else None),
+        raw_provider_delta_path=str(raw_provider_delta_file or ""),
+        raw_provider_delta_hash=(hashlib.sha256(raw_provider_delta_file.read_bytes()).hexdigest()
+                                 if raw_provider_delta_file else None),
+        transformation_receipt_path=str(transformation_receipt_file or ""),
+        transformation_receipt_hash=(
+            hashlib.sha256(transformation_receipt_file.read_bytes()).hexdigest()
+            if transformation_receipt_file else None
+        ),
+        git_head=(code_state or {}).get("git_head"),
+        git_dirty=(code_state or {}).get("git_dirty"),
+        working_tree_diff_sha256=(code_state or {}).get("working_tree_diff_sha256"),
+        config_sha256=(code_state or {}).get("config_sha256"),
+        code_state_id=(code_state or {}).get("code_state_id"),
+        schema_version="RunReceipt/v2" if code_state else "RunReceipt/v1",
     )
     path = Path(run_dir) / f"{node}_{persona}_receipt.json"
     rec.write(path)
@@ -457,20 +602,18 @@ def run_shadow_ranking(project, cand, node, args, round_id):
 
 
 def exec_cognitive(project, cand, step, cfg, args, run_dir, round_id,
-                   do_advance=True, authorization_id=None):
+                   do_advance=True, authorization_id=None, failure_state=None):
     node, persona = step["node"], step["persona"]
     evidence_run_id = getattr(args, "evidence_run_ids", {}).get(node)
     ctx, manifest = assemble_context(project, cand, node, authorization_id,
-                                     evidence_run_id)
+                                     evidence_run_id, _context_token_budget(cfg))
     if node == "L0":
         ok_c, c_reason = rl._audit_l0_contract(Path(project), cand)
         if not ok_c:
             raise RuntimeError(f"L0 input-contract gate (pre-dispatch): {c_reason}")
     prov = provider_for(node, cfg, args)
     pname = getattr(prov, "name", getattr(prov, "type", "unknown"))
-    schema = (rl.NODE_SCHEMAS.get(node) if
-              (Path(project) / "00_Preflight" / "hypothesis_store_binding.json").exists()
-              else rl.DELTA_SCHEMAS.get(f"{node}_{persona.lower()}"))
+    schema = _provider_output_schema(project, node, step)
     try:
         delta = prov.run_agent(node, persona, ctx, output_schema=schema,
                                tools=step.get("tools_policy"),
@@ -479,21 +622,47 @@ def exec_cognitive(project, cand, step, cfg, args, run_dir, round_id,
         auto_pitfall(project, cand, node, "provider_failure",
                      f"{persona} provider raised: {e}", provider=pname,
                      evidence=str(run_dir))
-        raise
-    emitted = _write_provider_delta(run_dir, node, persona, delta)
-    provider_receipt = write_receipt(
-        run_dir, node, persona, prov, ctx, step, cand, round_id,
-        manifest=manifest, provider_delta_file=emitted,
-    )
-    ok = emit_delta(project, cand, node, persona, emitted, run_dir,
+        _record_runtime_failure(
+            failure_state, node, "EXTERNAL", "provider_invocation_error", run_dir
+        )
+        return False
+    try:
+        raw_emitted, _ = canonical_provider_emission(
+            prov, run_dir, node, persona, delta
+        )
+        provider_receipt = write_receipt(
+            run_dir, node, persona, prov, ctx, step, cand, round_id,
+            manifest=manifest, provider_delta_file=raw_emitted,
+            config_path=getattr(cfg, "source_path", None),
+        )
+    except (ValueError, deep_research.DeepResearchError) as exc:
+        auto_pitfall(project, cand, node, "provider_contract_failure", str(exc),
+                     provider=pname, evidence=str(run_dir))
+        _record_runtime_failure(
+            failure_state, node, "CONTRACT", "provider_artifact_contract", run_dir
+        )
+        return False
+    ok = emit_delta(project, cand, node, persona, raw_emitted, run_dir,
                     receipt=manifest, provider_receipt=provider_receipt)
     if not ok:
         auto_pitfall(project, cand, node, "emit_delta_failure",
                      f"{persona} delta rejected by emit-delta (schema/validation)",
                      provider=pname, evidence=str(run_dir))
+        _record_runtime_failure(
+            failure_state, node, "CONTRACT", "emit_delta_rejected", run_dir
+        )
     if ok and do_advance:
         run_shadow_ranking(project, cand, node, args, round_id)
-        advance(project, cand, step)
+        try:
+            advance(project, cand, step)
+        except RuntimeError as exc:
+            auto_pitfall(project, cand, node, "advance_failure", str(exc),
+                         provider="controller", evidence=str(run_dir))
+            _record_runtime_failure(
+                failure_state, node, "IMPLEMENTATION", "state_transition_rejected", run_dir
+            )
+            log(f"{node} advance failed closed: {exc}")
+            return False
     return ok
 
 
@@ -502,6 +671,9 @@ def exec_turing(project, cand, step, cfg, args, run_dir, round_id, exec_state):
         r = _ctl("execution-gate", project, cand)
         if r.returncode != 0:
             log(f"execution-gate rejected: {r.stdout.strip()}")
+            _record_runtime_failure(
+                exec_state, "L7", "CONTRACT", "execution_gate_rejected", run_dir
+            )
             return False
     r = _ctl("prepare-turing-workspace", project, cand, "--clean")
     if r.returncode != 0:
@@ -511,17 +683,20 @@ def exec_turing(project, cand, step, cfg, args, run_dir, round_id, exec_state):
         auto_pitfall(project, cand, "L7", "execution_failure",
                      "Turing workspace preparation failed",
                      provider="controller", evidence=str(run_dir))
+        _record_runtime_failure(
+            exec_state, "L7", "IMPLEMENTATION", "workspace_preparation_failed", run_dir
+        )
         return False
     workspace = None
     for line in r.stdout.splitlines():
         if "Turing workspace ready:" in line:
             workspace = line.split("ready:", 1)[1].strip()
-    ctx, manifest = assemble_context(project, cand, "L7")
+    ctx, manifest = assemble_context(
+        project, cand, "L7", context_token_budget=_context_token_budget(cfg)
+    )
     prov = provider_for("L7", cfg, args)
     pname = getattr(prov, "name", getattr(prov, "type", "unknown"))
-    schema = (rl.NODE_SCHEMAS.get("L7") if
-              (Path(project) / "00_Preflight" / "hypothesis_store_binding.json").exists()
-              else rl.DELTA_SCHEMAS.get("L7_turing"))
+    schema = _provider_output_schema(project, "L7", step)
     try:
         delta = prov.run_agent("L7", "Turing", ctx, output_schema=schema,
                                workspace=workspace,
@@ -533,12 +708,24 @@ def exec_turing(project, cand, step, cfg, args, run_dir, round_id, exec_state):
         auto_pitfall(project, cand, "L7", "execution_failure",
                      f"Turing execution provider failed: {e}", provider=pname,
                      evidence=workspace or str(run_dir))
+        _record_runtime_failure(
+            exec_state, "L7", "EXTERNAL", "provider_invocation_error", run_dir
+        )
         return False
-    emitted = _write_provider_delta(run_dir, "L7", "Turing", delta)
-    provider_receipt = write_receipt(
-        run_dir, "L7", "Turing", prov, ctx, step, cand, round_id,
-        manifest=manifest, provider_delta_file=emitted, workspace=workspace,
-    )
+    try:
+        emitted, _ = canonical_provider_emission(prov, run_dir, "L7", "Turing", delta)
+        provider_receipt = write_receipt(
+            run_dir, "L7", "Turing", prov, ctx, step, cand, round_id,
+            manifest=manifest, provider_delta_file=emitted, workspace=workspace,
+            config_path=getattr(cfg, "source_path", None),
+        )
+    except ValueError as exc:
+        auto_pitfall(project, cand, "L7", "provider_contract_failure", str(exc),
+                     provider=pname, evidence=workspace or str(run_dir))
+        _record_runtime_failure(
+            exec_state, "L7", "CONTRACT", "provider_artifact_contract", run_dir
+        )
+        return False
     ok = emit_delta(project, cand, "L7", "Turing", emitted, run_dir,
                     receipt=manifest, provider_receipt=provider_receipt)
     if not ok:
@@ -547,9 +734,114 @@ def exec_turing(project, cand, step, cfg, args, run_dir, round_id, exec_state):
         auto_pitfall(project, cand, "L7", "emit_delta_failure",
                      "Turing L7 delta rejected by emit-delta (schema/validation)",
                      provider=pname, evidence=workspace or str(run_dir))
+        _record_runtime_failure(
+            exec_state, "L7", "CONTRACT", "emit_delta_rejected", run_dir
+        )
         return False
-    _ctl("decision", project, cand, "--status", "EXECUTED",
-         "--reason", "Turing execution complete")
+    try:
+        _run_advance_command(
+            "decision", project, cand, "--status", "EXECUTED",
+            "--reason", "Turing execution complete",
+        )
+    except RuntimeError as exc:
+        auto_pitfall(project, cand, "L7", "advance_failure", str(exc),
+                     provider="controller", evidence=workspace or str(run_dir))
+        _record_runtime_failure(
+            exec_state, "L7", "IMPLEMENTATION", "state_transition_rejected", run_dir
+        )
+        return False
+    return True
+
+
+def _l05_command(project, cand, cfg):
+    """Build the bounded, reproducible command for the native L0.5 adapter."""
+    data = getattr(cfg, "data", {}) or {}
+    settings = data.get("l05_acquisition", {}) if isinstance(data, dict) else {}
+    if not isinstance(settings, dict):
+        raise ValueError("l05_acquisition configuration must be a mapping")
+
+    command = ["l05-acquire-europepmc", str(project), str(cand)]
+    queries = settings.get("queries", settings.get("explicit_queries"))
+    if queries is not None:
+        if (not isinstance(queries, list) or not queries or
+                not all(isinstance(query, str) and query.strip() for query in queries)):
+            raise ValueError("l05_acquisition.queries must be a non-empty list of strings")
+        for query in queries:
+            command.extend(["--query", query.strip()])
+
+    bounds = {
+        "max_papers": (1, 1000),
+        "page_size": (1, 1000),
+        "timeout": (1, None),
+    }
+    for key, (minimum, maximum) in bounds.items():
+        if key not in settings:
+            continue
+        value = settings[key]
+        if (not isinstance(value, int) or isinstance(value, bool) or value < minimum or
+                (maximum is not None and value > maximum)):
+            limit = f"-{maximum}" if maximum is not None else ""
+            raise ValueError(
+                f"l05_acquisition.{key} must be an integer in [{minimum}{limit}]"
+            )
+        command.extend([f"--{key.replace('_', '-')}", str(value)])
+    return command
+
+
+def exec_l05(project, cand, step, cfg, args, run_dir, round_id):
+    """Run the native Curie acquisition boundary before dispatching L1.
+
+    L0.5 is a first-class research phase, not a delta-producing persona.  Its
+    command owns discovery, verification, and EvidencePack freeze; the runner
+    owns the final ResearchSeed -> native binding handoff so the next-step
+    router can authorize L1 from the exact frozen pack.
+    """
+    try:
+        command = _l05_command(project, cand, cfg)
+    except ValueError as exc:
+        detail = f"invalid L0.5 Curie configuration: {exc}"
+        log(detail)
+        auto_pitfall(project, cand, "L0.5", "evidence_acquisition_failure",
+                     detail, provider="curie-europe-pmc", evidence=str(run_dir))
+        return False
+    result = _ctl(*command)
+    if result.returncode != 0:
+        detail = (result.stderr.strip() or result.stdout.strip()
+                  or "L0.5 Curie acquisition failed")
+        log(f"L0.5 Curie acquisition failed closed: {detail}")
+        auto_pitfall(project, cand, "L0.5", "evidence_acquisition_failure",
+                     detail, provider="curie-europe-pmc", evidence=str(run_dir))
+        return False
+    try:
+        acquisition = json.loads(result.stdout)
+        if acquisition.get("status") != "FROZEN":
+            raise ValueError(
+                f"acquisition status is {acquisition.get('status')!r}, expected 'FROZEN'"
+            )
+        acquisition_run_id = str(acquisition.get("run_id") or "").strip()
+        evidence_pack = acquisition.get("evidence_pack")
+        if not acquisition_run_id or not isinstance(evidence_pack, dict):
+            raise ValueError("FROZEN acquisition result lacks run_id or evidence_pack")
+        seed = research_seed.load_l1_research_seed(project, cand)
+        research_seed.write_l1_native_evidence_binding(
+            project, seed, evidence_pack, acquisition_run_id
+        )
+        research_seed.activate_l1_native_evidence_binding(
+            project, seed, acquisition_run_id
+        )
+        active_run_id = research_seed.active_l1_native_evidence_run_id(project, seed)
+        if str(active_run_id or "") != acquisition_run_id:
+            raise ValueError(
+                "native L1 activation did not select the acquired run "
+                f"{acquisition_run_id!r}"
+            )
+    except (ValueError, json.JSONDecodeError, research_seed.ResearchSeedError) as exc:
+        detail = f"L0.5 Curie result/binding invalid: {exc}"
+        log(detail)
+        auto_pitfall(project, cand, "L0.5", "evidence_acquisition_failure",
+                     detail, provider="curie-europe-pmc", evidence=str(run_dir))
+        return False
+    log(f"L0.5 Curie: frozen EvidencePack bound and activated for {acquisition_run_id}")
     return True
 
 
@@ -559,8 +851,70 @@ def _deep_research_config(cfg):
     return value if isinstance(value, dict) else {}
 
 
+def _native_l1_binding_root(project, cand):
+    return (Path(project) / "08_Audit" / "research_seed_bindings" /
+            "native" / str(cand))
+
+
+def _native_l1_binding_ready(project, cand):
+    """Validate the active native binding without falling back to legacy DR."""
+    try:
+        seed = research_seed.load_l1_research_seed(project, cand)
+        run_id = research_seed.active_l1_native_evidence_run_id(project, seed)
+        if not run_id:
+            return False
+        binding = research_seed.load_l1_native_evidence_binding(
+            project, seed, run_id
+        )
+        return str(binding.get("acquisition_run_id") or "") == str(run_id)
+    except (research_seed.ResearchSeedError, OSError, ValueError):
+        return False
+
+
+def _ensure_native_l1_recall(project, cand):
+    """Create the fixed-cursor recall artifact required by native L1 once."""
+    project = Path(project)
+    try:
+        seed = research_seed.load_l1_research_seed(project, cand)
+    except research_seed.ResearchSeedError as exc:
+        log(f"ERROR: native L1 recall seed is invalid: {exc}")
+        return False
+    target = (project / "08_Audit" / "hypothesis_recall" /
+              f"{cand}_round_{seed['round_id']}.json")
+    if target.is_file():
+        return True
+    store = os.environ.get("RLR_HYPOTHESIS_STORE", "").strip()
+    if not store:
+        log("ERROR: native L1 recall requires RLR_HYPOTHESIS_STORE")
+        return False
+    query = " ".join((
+        str(seed["scientific_question"]),
+        str(seed["hypothesis_seed"]),
+    )).strip()
+    result = _ctl(
+        "hypothesis-recall", str(project), str(cand),
+        "--round-id", str(seed["round_id"]), "--query", query,
+        "--knowledge-store", store,
+    )
+    if result.returncode != 0 or not target.is_file():
+        detail = (result.stderr.strip() or result.stdout.strip() or
+                  "recall artifact was not created")
+        log(f"ERROR: native L1 recall failed closed: {detail}")
+        return False
+    log(f"native L1 recall: fixed-cursor artifact created at {target}")
+    return True
+
+
 def ensure_pre_research(project, cand, node, cfg, args, run_dir):
     if node not in rl.PRE_RESEARCH_MAP:
+        return True
+    if node == "L1" and _native_l1_binding_root(project, cand).is_dir():
+        if not _native_l1_binding_ready(project, cand):
+            log("ERROR: native L1 binding exists but is not valid/active")
+            return False
+        if not _ensure_native_l1_recall(project, cand):
+            return False
+        log("native L1 binding already active; legacy Deep Research is not applicable")
         return True
     target = (Path(project) / "02_Agent_Notes" / "_pre_research"
               / f"{node}_research.md")
@@ -631,6 +985,8 @@ def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
     run_dir = Path(project) / "08_Run_Receipts" / cand / f"round_{round_id:02d}"
     max_l7 = int(cfg.stop_policy.get("max_l7_failures", 2))
     max_node = int(cfg.stop_policy.get("max_node_failures", 2))
+    retry_threshold = int(cfg.stop_policy.get("loopx_retry_threshold", 2))
+    exec_state.setdefault("loopx_policy", LoopXRetryPolicy(retry_threshold))
     while True:
         step = next_step(project, cand)
         if step.get("terminal"):
@@ -656,9 +1012,16 @@ def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
                 }
             for sub in step["nodes"]:
                 log(f"node {sub['node']} ({sub['persona']}) [parallel]")
+                exec_state.pop("last_loopx_failure", None)
                 ok = exec_cognitive(project, cand, sub, cfg, args, run_dir,
                                     round_id, do_advance=False,
-                                    authorization_id=authorization_ids.get(sub["node"]))
+                                    authorization_id=authorization_ids.get(sub["node"]),
+                                    failure_state=exec_state)
+                event = exec_state.get("last_loopx_failure")
+                if not ok and event and event["recommended_action"] != "RETRY_SAME_NODE":
+                    log(f"Loop X {sub['node']}: {event['recommended_action']} "
+                        f"for {event['failure_fingerprint']}")
+                    return f"node_failed:{sub['node']}"
                 if not ok and _bump_node_failure(exec_state, sub["node"], max_node):
                     log(f"node {sub['node']} failed emit "
                         f"{exec_state['node_failures'][sub['node']]}x -- "
@@ -669,6 +1032,16 @@ def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
         if args.stop_after_node and node == args.stop_after_node:
             log(f"--stop-after-node {node}: halting round")
             return "stopped_after_node"
+        if node == "L0.5":
+            log("node L0.5 (Curie) [research acquisition / FREEZE]")
+            if not exec_l05(project, cand, step, cfg, args, run_dir, round_id):
+                return "node_failed:L0.5"
+            continue
+        recovered = _recover_committed_advance(project, cand, step)
+        if recovered is not None:
+            if not recovered:
+                return f"node_failed:{node}"
+            continue
         if not ensure_pre_research(project, cand, node, cfg, args, run_dir):
             return f"node_failed:{node}"
         if node == "L10c":
@@ -682,14 +1055,27 @@ def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
             return "completed"
         if node == "L7":
             log("node L7 (Turing) [execution / Path A]")
+            exec_state.pop("last_loopx_failure", None)
             if not exec_turing(project, cand, step, cfg, args, run_dir,
                                round_id, exec_state):
+                event = exec_state.get("last_loopx_failure")
+                if event and event["recommended_action"] != "RETRY_SAME_NODE":
+                    log(f"Loop X L7: {event['recommended_action']} "
+                        f"for {event['failure_fingerprint']}")
+                    return "node_failed:L7"
                 if exec_state["l7_failures"] >= max_l7:
                     log(f"L7 failed {exec_state['l7_failures']}x — aborting round")
                     return "l7_failed"
             continue
         log(f"node {node} ({step['persona']}) advance={step.get('advance_command')}")
-        ok = exec_cognitive(project, cand, step, cfg, args, run_dir, round_id)
+        exec_state.pop("last_loopx_failure", None)
+        ok = exec_cognitive(project, cand, step, cfg, args, run_dir, round_id,
+                            failure_state=exec_state)
+        event = exec_state.get("last_loopx_failure")
+        if not ok and event and event["recommended_action"] != "RETRY_SAME_NODE":
+            log(f"Loop X {node}: {event['recommended_action']} "
+                f"for {event['failure_fingerprint']}")
+            return f"node_failed:{node}"
         if not ok and _bump_node_failure(exec_state, node, max_node):
             log(f"node {node} failed emit {exec_state['node_failures'][node]}x -- "
                 f"aborting round (no further retries)")
@@ -1052,6 +1438,11 @@ Key rules:
 - Do NOT read DAG-disallowed delta files. Only use assemble-context output.
 - Deep Research runs BEFORE L1/L4/L8.5 and is embedded via assemble-context; it does NOT
   change the 15-node DAG topology.
+- The provider receipt must bind the exact raw file passed to `emit-delta`; do not
+  reserialize or copy a provider delta before emission.
+- L4 Fisher references the local E/G/A handles shown in context. The `emit-delta`
+  commit boundary performs the deterministic handle binding and records the raw-to-
+  canonical provenance edge; do not create a runner-side bound copy.
 - L7 Turing: use prepare-turing-workspace, run scripts only in that workspace.
 - {l9_rule}
 - If emit-delta fails validation, fix the JSON and retry. Do NOT skip.

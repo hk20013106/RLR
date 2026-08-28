@@ -8,6 +8,7 @@ from pathlib import Path
 import pitfall_ledger as pl
 
 from research_loop import deep_research, hypothesis_migration, research_seed
+from research_loop import l4_evidence_bundle
 from research_loop.common import _append_decision, _now, _set_status, _stamp
 from research_loop.delta import (
     DELTA_PERSONA,
@@ -291,6 +292,37 @@ def _validate_native_receipts(
         or _sha256(provider_delta_path) != provider.provider_delta_hash
     ):
         raise LedgerError("provider receipt delta hash does not match emitted source file")
+    raw_provider_delta_path = Path(str(provider.raw_provider_delta_path or ""))
+    if provider.schema_version == "RunReceipt/v2":
+        if (
+            not raw_provider_delta_path.is_file()
+            or _sha256(raw_provider_delta_path) != provider.raw_provider_delta_hash
+        ):
+            raise LedgerError("provider receipt raw delta is missing or changed")
+        if raw_provider_delta_path.resolve() != provider_delta_path.resolve():
+            transformation_path = Path(str(provider.transformation_receipt_path or ""))
+            if (
+                not transformation_path.is_file()
+                or _sha256(transformation_path) != provider.transformation_receipt_hash
+            ):
+                raise LedgerError("provider transformation receipt is missing or changed")
+            try:
+                transformation = json.loads(
+                    transformation_path.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError) as exc:
+                raise LedgerError(f"invalid provider transformation receipt: {exc}") from exc
+            expected_edge = {
+                "raw_provider_delta_path": str(raw_provider_delta_path),
+                "raw_provider_delta_sha256": provider.raw_provider_delta_hash,
+                "bound_delta_path": str(provider_delta_path),
+                "bound_delta_sha256": provider.provider_delta_hash,
+            }
+            for field, value in expected_edge.items():
+                if transformation.get(field) != value:
+                    raise LedgerError(
+                        f"provider transformation receipt {field} does not match emitted artifacts"
+                    )
     prompt_path = Path(str(provider.prompt_file or ""))
     if not prompt_path.is_file() or _sha256(prompt_path) != provider.prompt_hash:
         raise LedgerError("provider receipt prompt file is missing or changed")
@@ -302,11 +334,81 @@ def _validate_native_receipts(
         "rendered_context_sha256": rendered_hash,
         "provider_prompt_sha256": provider.prompt_hash,
         "provider_delta_sha256": provider.provider_delta_hash,
+        "raw_provider_delta_sha256": provider.raw_provider_delta_hash,
+        "transformation_receipt_sha256": provider.transformation_receipt_hash,
+        "code_state": ({
+            "git_head": provider.git_head,
+            "git_dirty": provider.git_dirty,
+            "working_tree_diff_sha256": provider.working_tree_diff_sha256,
+            "config_sha256": provider.config_sha256,
+            "code_state_id": provider.code_state_id,
+        } if provider.schema_version == "RunReceipt/v2" else None),
         "evidence_artifacts": recorded_evidence,
         "native_evidence_binding": native_binding,
         "authorization_id": snapshot["authorization_id"],
         "authorization_artifact_sha256": snapshot["artifact_hash"],
     }
+
+
+def _bind_l4_delta_for_commit(args, data, source_file):
+    """Resolve L4C model handles at the single canonical commit boundary.
+
+    The provider-owned file remains the raw source artifact.  This function
+    only performs the deterministic semantic-to-canonical binding in memory;
+    the caller persists the resulting delta once, at the ledger artifact
+    boundary, and records the raw-to-bound edge there.
+    """
+    manifest_arg = (getattr(args, "context_manifest", None)
+                    or getattr(args, "receipt", None))
+    if not manifest_arg:
+        raise LedgerError("L4 handle binding requires a context manifest")
+    try:
+        manifest = json.loads(Path(manifest_arg).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LedgerError(f"invalid L4 context manifest for handle binding: {exc}") from exc
+    pre_research = manifest.get("pre_research") or {}
+    evidence_ref = pre_research.get("evidence_artifacts") or {}
+    run_id = str(evidence_ref.get("run_id") or "")
+    if not run_id:
+        raise LedgerError("L4 context manifest lacks the frozen evidence run ID")
+    evidence = deep_research._artifact(
+        args.project_dir, args.cand_id, "L4", run_id=run_id
+    )
+    if not evidence or evidence.get("evidence_bundle_schema") != l4_evidence_bundle.EVIDENCE_BUNDLE_SCHEMA:
+        candidates = data.get("method_candidates") or []
+        uses_handles = any(
+            isinstance(candidate, dict)
+            and any(
+                candidate.get(field)
+                for field in (
+                    "evidence_card_handles",
+                    "evidence_gap_handles",
+                    "method_anchor_handles",
+                )
+            )
+            for candidate in candidates
+        )
+        if uses_handles:
+            raise LedgerError("L4 handle binding requires a staged L4B evidence bundle")
+        # Historical v2.1 L4 deltas with no L4C method-candidate handles do
+        # not participate in the staged bundle contract.  They retain their
+        # existing strategy-only validation path.
+        return data, None
+    try:
+        resolved, binding = l4_evidence_bundle.resolve_l4c_reference_handles(
+            evidence, data
+        )
+    except (deep_research.DeepResearchError, TypeError, ValueError) as exc:
+        raise LedgerError(f"L4 reference binding rejected: {exc}") from exc
+    raw_path = Path(source_file)
+    if not raw_path.is_file():
+        raise LedgerError(f"raw L4 provider delta is missing: {raw_path}")
+    binding = {
+        **binding,
+        "raw_provider_delta_path": str(raw_path),
+        "raw_provider_delta_sha256": _sha256(raw_path),
+    }
+    return resolved, binding
 
 
 def _emit_delta_v2(args, data):
@@ -316,6 +418,7 @@ def _emit_delta_v2(args, data):
     if not cf.exists():
         print(f"ERROR: no candidate {args.cand_id}", file=sys.stderr)
         return 2
+    l4_binding = None
     try:
         ledger = _ledger_for(project_dir, getattr(args, "knowledge_store", None))
         project_id = str(ledger.require_binding(project_dir)["project_id"])
@@ -337,6 +440,10 @@ def _emit_delta_v2(args, data):
             args, get_profile(profile_id), source_file=Path(args.file),
             project_id=project_id, round_id=round_id, ledger=ledger,
         )
+        if args.node == "L4":
+            data, l4_binding = _bind_l4_delta_for_commit(
+                args, data, Path(args.file)
+            )
     except LedgerError as exc:
         print(f"DELTA V2 VALIDATION: REJECT\n  {exc}", file=sys.stderr)
         return 1
@@ -365,6 +472,7 @@ def _emit_delta_v2(args, data):
         nonlocal receipt_path
         created = []
         temporary = out_file.with_suffix(out_file.suffix + ".tmp")
+        transformation_path = None
 
         def cleanup():
             for path in reversed(created):
@@ -392,6 +500,34 @@ def _emit_delta_v2(args, data):
             if actual != result.delta_hash:
                 raise LedgerError(
                     "persisted v2 delta hash differs from ledger emission hash"
+                )
+            if l4_binding is not None:
+                edge = {
+                    **l4_binding,
+                    "bound_delta_path": str(out_file),
+                    "bound_delta_sha256": actual,
+                }
+                transformation_path = (
+                    project_dir / "08_Audit" / "artifact_transformations"
+                    / f"{args.cand_id}_{args.node}_{actual}.json"
+                )
+                edge_raw = canonical_json(edge)
+                if transformation_path.exists():
+                    if transformation_path.read_text(encoding="utf-8") != edge_raw:
+                        raise LedgerError(
+                            "L4 transformation receipt collision: "
+                            f"{transformation_path}"
+                        )
+                else:
+                    transformation_path.parent.mkdir(parents=True, exist_ok=True)
+                    transformation_path.write_text(edge_raw, encoding="utf-8")
+                    created.append(transformation_path)
+                provenance["native_artifact_binding"] = edge
+                provenance["transformation_receipt_path"] = str(
+                    transformation_path
+                )
+                provenance["transformation_receipt_sha256"] = _sha256(
+                    transformation_path
                 )
             expected_receipt = (
                 project_dir / "08_Audit" / "hypothesis_commits"

@@ -349,6 +349,76 @@ def test_jats_methods_extract_remains_contiguous_with_entities_and_inequalities(
     assert cc.extract_is_contiguous(payload, methods["text"])
 
 
+def test_protocol_and_implementation_sections_are_execution_evidence():
+    procedure = "The protocol specifies reproducible setup and execution steps. " * 20
+    implementation = "The implementation defines the executable quality metrics. " * 20
+    payload = (
+        "<html><body>"
+        "<h2>MATERIALS</h2><p>Required materials.</p>"
+        f"<h2>PROCEDURE</h2><p>{procedure}</p>"
+        f"<h2>IMPLEMENTATION</h2><p>{implementation}</p>"
+        "<h2>RESULTS</h2><p>Results.</p>"
+        "</body></html>"
+    )
+
+    methods = cc.extract_methods_section(payload, "text/html")
+
+    assert methods is not None
+    assert methods["section"] == "PROCEDURE"
+    assert len(methods["text"].encode("utf-8")) >= 500
+    assert cc.extract_is_contiguous(payload, methods["text"])
+
+
+def test_numbered_implementation_heading_is_execution_evidence():
+    implementation = "The implementation defines reproducible quality metrics. " * 20
+    payload = (
+        "<article><body><sec><title>3 IMPLEMENTATION</title><p>"
+        + implementation
+        + "</p></sec></body></article>"
+    )
+
+    methods = cc.extract_methods_section(payload, "application/xml")
+
+    assert methods is not None
+    assert methods["section"] == "3 IMPLEMENTATION"
+
+
+def test_url_only_registered_source_is_identity_bound(tmp_path):
+    url = "https://stat.ethz.ch/R-manual/R-devel/library/stats/html/p.adjust.html"
+    payload = (
+        "<html><body>"
+        f"<link rel='canonical' href='{url}'>"
+        "<h1>Adjust P-values for Multiple Comparisons</h1>"
+        "<h2>Usage</h2><p>p.adjust(p, method = \"BH\")</p>"
+        "<h2>Details</h2><p>"
+        + "The BH method controls the false discovery rate in executable p-value adjustment. " * 20
+        + "</p><h2>References</h2><p>Reference.</p>"
+        "</body></html>"
+    )
+    asset = _asset(
+        doi="",
+        pmid="",
+        url=url,
+        source_metadata_response={},
+        full_text_locations=[url],
+    )
+    contract = cc.build_retrieval_contract(asset)
+
+    result = cc.resolve_contract(
+        tmp_path,
+        contract,
+        fetcher=lambda requested: _response(
+            requested,
+            payload=payload,
+            content_type="text/html",
+        ),
+    )
+
+    assert result["status"] == "resolved"
+    assert result["methods_section"]["section"] == "Details"
+    assert result["receipt"]["parser"] == "html-heading"
+
+
 def test_resolver_preserves_exact_source_bytes_and_hash_on_persistence(tmp_path):
     contract = cc.build_retrieval_contract(_asset())
     raw_payload = A1_XML.replace("><", ">\r\n<").encode("utf-8")

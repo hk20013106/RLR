@@ -69,6 +69,32 @@
           ]
         }
       ]
+    },
+    {
+      "canonical_method_id": "multiple_testing_fdr",
+      "aliases": [
+        "multiple testing fdr",
+        "benjamini-hochberg",
+        "false discovery rate control",
+        "p.adjust"
+      ],
+      "source_hints": [
+        {
+          "source_ref_id": "r-stats-p-adjust",
+          "title": "Adjust P-values for Multiple Comparisons",
+          "year": 0,
+          "doi": "",
+          "pmid": "",
+          "pmcid": "",
+          "url": "https://stat.ethz.ch/R-manual/R-devel/library/stats/html/p.adjust.html",
+          "source_kind": "official_documentation",
+          "rationale": "Authoritative R stats documentation describing the executable BH/FDR adjustment.",
+          "full_text_locations": [
+            "https://search.r-project.org/R/refmans/stats/html/p.adjust.html",
+            "https://stat.ethz.ch/R-manual/R-devel/library/stats/html/p.adjust.html"
+          ]
+        }
+      ]
     }
   ]
 }

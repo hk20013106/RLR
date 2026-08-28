@@ -29,6 +29,30 @@ def test_builtin_registry_adds_deseq2_canonical_source(tmp_path):
     }]
 
 
+def test_builtin_registry_adds_url_bound_bh_fdr_implementation_source(tmp_path):
+    inventory, receipt = registry.apply_registry(
+        tmp_path,
+        [_method(
+            method_id="multiple_testing_fdr",
+            name="Benjamini-Hochberg false-discovery-rate control",
+        )],
+    )
+
+    hint = inventory[0]["source_hints"][0]
+    assert hint["source_ref_id"] == "r-stats-p-adjust"
+    assert hint["doi"] == ""
+    assert hint["pmid"] == ""
+    assert hint["pmcid"] == ""
+    assert hint["url"] == (
+        "https://stat.ethz.ch/R-manual/R-devel/library/stats/html/p.adjust.html"
+    )
+    assert hint["source_kind"] == "official_documentation"
+    assert receipt["matches"] == [{
+        "method_id": "multiple_testing_fdr",
+        "canonical_method_ids": ["multiple_testing_fdr"],
+    }]
+
+
 def test_registry_does_not_add_unmentioned_methods(tmp_path):
     inventory, receipt = registry.apply_registry(
         tmp_path, [_method(method_id="wgcna", name="WGCNA")]

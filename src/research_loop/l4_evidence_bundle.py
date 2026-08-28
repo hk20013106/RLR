@@ -38,6 +38,125 @@ def _sha(value: str | bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def l4c_reference_catalog(evidence_artifact: dict) -> dict:
+    """Assign stable local handles to the L4B canonical reference registry."""
+    accepted_cards = sorted(
+        (
+            card for card in evidence_artifact.get("evidence_cards") or []
+            if card.get("status") == "accepted"
+        ),
+        key=lambda card: (
+            str(card.get("method_id") or ""),
+            str(card.get("evidence_card_id") or ""),
+        ),
+    )
+    gaps = sorted(
+        evidence_artifact.get("evidence_gaps") or [],
+        key=lambda gap: (
+            str(gap.get("method_id") or ""),
+            str(gap.get("evidence_gap_id") or ""),
+        ),
+    )
+    cards = []
+    anchors = []
+    for index, card in enumerate(accepted_cards, start=1):
+        card_id = str(card.get("evidence_card_id") or "")
+        if not card_id:
+            continue
+        cards.append({
+            "handle": f"E{index}", "evidence_card_id": card_id,
+            "method_id": str(card.get("method_id") or ""),
+            "source_ref_id": str(card.get("source_ref_id") or ""),
+            "locator": str(card.get("locator") or ""),
+        })
+        anchor_id = str(card.get("anchor_id") or "")
+        if anchor_id:
+            anchors.append({
+                "handle": f"A{len(anchors) + 1}", "anchor_id": anchor_id,
+                "method_id": str(card.get("method_id") or ""),
+            })
+    return {
+        "schema_version": "L4CReferenceCatalog/v1",
+        "evidence_cards": cards,
+        "evidence_gaps": [
+            {
+                "handle": f"G{index}",
+                "evidence_gap_id": str(gap.get("evidence_gap_id") or ""),
+                "method_id": str(gap.get("method_id") or ""),
+                "status": str(gap.get("status") or ""),
+                "failure_reason": str(gap.get("failure_reason") or ""),
+            }
+            for index, gap in enumerate(gaps, start=1)
+            if str(gap.get("evidence_gap_id") or "")
+        ],
+        "method_anchors": anchors,
+    }
+
+
+def resolve_l4c_reference_handles(evidence_artifact: dict, delta: dict) -> tuple[dict, dict]:
+    """Bind exact model-facing handles to L4B canonical IDs without repair."""
+    from research_loop import deep_research
+
+    catalog = l4c_reference_catalog(evidence_artifact)
+    maps = {
+        "evidence_card": {
+            item["handle"]: item["evidence_card_id"]
+            for item in catalog["evidence_cards"]
+        },
+        "evidence_gap": {
+            item["handle"]: item["evidence_gap_id"]
+            for item in catalog["evidence_gaps"]
+        },
+        "method_anchor": {
+            item["handle"]: item["anchor_id"]
+            for item in catalog["method_anchors"]
+        },
+    }
+    resolved = copy.deepcopy(delta)
+    candidates = resolved.get("method_candidates")
+    if not isinstance(candidates, list):
+        raise deep_research.DeepResearchError("L4C requires method_candidates for reference binding")
+    binding_rows = []
+    fields = (
+        ("evidence_card", "evidence_card_handles", "evidence_card_ids"),
+        ("evidence_gap", "evidence_gap_handles", "evidence_gap_ids"),
+        ("method_anchor", "method_anchor_handles", "method_anchor_ids"),
+    )
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict):
+            raise deep_research.DeepResearchError("L4C method candidate must be an object")
+        row = {"candidate_index": index}
+        for kind, handle_field, canonical_field in fields:
+            handles = candidate.get(handle_field)
+            if not isinstance(handles, list) or not all(
+                isinstance(handle, str) and handle for handle in handles
+            ):
+                raise deep_research.DeepResearchError(
+                    f"L4C {handle_field} must be an array of exact local handles"
+                )
+            if candidate.get(canonical_field):
+                raise deep_research.DeepResearchError(
+                    f"L4C provider must use {handle_field}, not canonical {canonical_field}"
+                )
+            bound = {}
+            for handle in handles:
+                if handle not in maps[kind]:
+                    raise deep_research.DeepResearchError(
+                        f"L4C references an unknown {kind.replace('_', '-')} handle: {handle}"
+                    )
+                bound[handle] = maps[kind][handle]
+            candidate[canonical_field] = list(bound.values())
+            candidate.pop(handle_field, None)
+            row[handle_field] = bound
+        binding_rows.append(row)
+    return resolved, {
+        "schema_version": "L4CReferenceBinding/v1",
+        "evidence_run_id": str(evidence_artifact.get("run_id") or ""),
+        "catalog_sha256": _sha(_canonical_json(catalog)),
+        "resolved_handles": binding_rows,
+    }
+
+
 def _safe(dr, value: Any) -> str:
     return dr._safe_id(str(value or ""))
 
@@ -122,15 +241,21 @@ def _render_summary(artifact: dict) -> str:
             identifier = paper_id
         identifiers.append(f"{paper_id} ({identifier})")
 
-    card_digest = ", ".join(
-        f"{card['evidence_card_id']}(method={card['method_id']})"
-        for card in cards
-    ) or "none"
-    gap_digest = ", ".join(
-        f"{gap['evidence_gap_id']}(method={gap['method_id']})"
-        for gap in gaps
-    ) or "none"
+    catalog = l4c_reference_catalog(artifact)
     source_digest = ", ".join(identifiers) or "none"
+    handle_lines = ["### L4C reference handles"]
+    handle_lines.extend(
+        f"- {card['handle']} method={card['method_id']} evidence card"
+        for card in catalog["evidence_cards"]
+    )
+    handle_lines.extend(
+        f"- {gap['handle']} method={gap['method_id']} evidence gap"
+        for gap in catalog["evidence_gaps"]
+    )
+    handle_lines.extend(
+        f"- {anchor['handle']} method={anchor['method_id']} method anchor"
+        for anchor in catalog["method_anchors"]
+    )
 
     lines = [
         "# Pre-Research: L4",
@@ -139,8 +264,9 @@ def _render_summary(artifact: dict) -> str:
         f"Deterministic L4B evidence bundle `{artifact['run_id']}`.",
         f"Sources: {source_digest}.",
         "L4B retrieves exact registered sources and extracts evidence; L4C defines method components, candidates, eligibility, execution requirements, and the final plan.",
-        f"Accepted evidence cards: {card_digest}.",
-        f"Evidence gaps: {gap_digest}.",
+        f"Accepted evidence cards: {len(catalog['evidence_cards'])}.",
+        f"Evidence gaps: {len(catalog['evidence_gaps'])}.",
+        *handle_lines,
         "",
         "## Evidence pack",
         f"- {artifact['path']}",
@@ -177,9 +303,9 @@ def _render_summary(artifact: dict) -> str:
         "## Accepted evidence cards",
     ])
     if cards:
-        for card in cards:
+        for card in catalog["evidence_cards"]:
             lines.append(
-                f"- `{card['evidence_card_id']}` method=`{card['method_id']}` "
+                f"- `{card['handle']}` method=`{card['method_id']}` "
                 f"source=`{card['source_ref_id']}` @ {card['locator']}"
             )
     else:
@@ -187,13 +313,14 @@ def _render_summary(artifact: dict) -> str:
 
     lines.extend(["", "## Evidence gaps"])
     if gaps:
-        for gap in gaps:
+        for gap in catalog["evidence_gaps"]:
             lines.append(
-                f"- `{gap['evidence_gap_id']}` method=`{gap['method_id']}`: "
-                f"{gap['failure_reason']}"
+                f"- `{gap['handle']}` method=`{gap['method_id']}`: "
+                f"{gap['failure_reason'] or gap['status'] + ' evidence gap'}"
             )
     else:
         lines.append("- none")
+
     lines.append("")
     return "\n".join(lines)
 
@@ -791,6 +918,10 @@ def _validate_required_paths(dr, evidence_artifact: dict, delta: dict) -> tuple[
         for card in evidence_artifact.get("evidence_cards") or []
         if card.get("status") == "accepted"
     }
+    # Native v2 providers may use the evidence-card ID in the legacy
+    # method_anchor_ids slot. The card is the canonical L4B reference and its
+    # materialized anchor_id remains the compatibility projection target.
+    accepted_anchor_refs = accepted_anchors | accepted_cards
     gap_ids = {
         str(gap.get("evidence_gap_id") or "")
         for gap in evidence_artifact.get("evidence_gaps") or []
@@ -827,7 +958,7 @@ def _validate_required_paths(dr, evidence_artifact: dict, delta: dict) -> tuple[
             raise dr.DeepResearchError(
                 f"L4C method {candidate.get('method_id')} references an unknown evidence card"
             )
-        if anchor_refs and anchor_refs - accepted_anchors:
+        if anchor_refs and anchor_refs - accepted_anchor_refs:
             raise dr.DeepResearchError(
                 f"L4C method {candidate.get('method_id')} references an unknown method anchor"
             )
