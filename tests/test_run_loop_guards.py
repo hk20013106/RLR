@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parent))
 import run_loop
+from research_loop.compatibility import PROFILE_V21_CATALOG_1
+from research_loop.hypothesis_ledger import HypothesisLedger
 
 
 class _Result:
@@ -27,15 +29,20 @@ def test_main_agent_run_emits_handoff_without_python_provider():
             AssertionError("main-agent mode must not enter python run_round"))
         with tempfile.TemporaryDirectory() as d:
             project = Path(d)
+            store = project / "hypotheses.sqlite"
+            HypothesisLedger(store).bind_project(
+                project, profile_id=PROFILE_V21_CATALOG_1
+            )
             candidates = project / "01_Candidates"
-            candidates.mkdir()
+            candidates.mkdir(exist_ok=True)
             (candidates / "C1.md").write_text(
                 "---\ncandidate_id: C1\ncurrent_status: NEW\n---\n",
                 encoding="utf-8")
             args = SimpleNamespace(
                 project_dir=str(project), cand_id="C1", config=None,
-                max_rounds=None, dry_run=False, no_review=False,
-                provider=None, resume=False, stop_after_node="L1")
+                knowledge_store=str(store), max_rounds=None, dry_run=False,
+                no_review=False, provider=None, resume=False,
+                stop_after_node="L1")
             output = StringIO()
             with redirect_stdout(output):
                 rc = run_loop.cmd_run(args)

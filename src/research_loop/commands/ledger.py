@@ -60,14 +60,19 @@ from research_loop.yamlio import _load_yaml_front, _replace_field
 
 FINAL_STATUSES = {"KEEP", "REVISE", "DOWNGRADE", "DROP", "ARCHIVED"}
 
-def _ledger_for(project_dir, configured_path=None, *, require_binding=True):
+def _ledger_for(
+    project_dir, configured_path=None, *, require_binding=True, readonly=False
+):
     """Construct the configured ledger without permitting a silent fallback."""
     store_path = configured_path or os.environ.get("RLR_HYPOTHESIS_STORE")
     if not store_path:
         raise LedgerError("hypothesis ledger requires --knowledge-store or RLR_HYPOTHESIS_STORE")
     if require_binding and not Path(store_path).is_file():
         raise LedgerError(f"configured hypothesis ledger does not exist: {store_path}")
-    ledger = HypothesisLedger(store_path)
+    ledger = (
+        HypothesisLedger.open_readonly(store_path)
+        if readonly else HypothesisLedger(store_path)
+    )
     if require_binding:
         ledger.require_activated_project(project_dir)
     return ledger

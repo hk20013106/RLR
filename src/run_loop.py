@@ -1381,7 +1381,12 @@ def cmd_run(args):
             "prior artifacts verified")
 
     try:
-        profile_id = next_step(project, cand).get("profile_id", PROFILE_V20)
+        if rl.binding_path(project).exists():
+            profile_id = rl._ledger_for(
+                project, getattr(args, "knowledge_store", None), readonly=True
+            ).project_profile(project)
+        else:
+            profile_id = PROFILE_V20
         from research_loop import pre_e2e_closure
         closure = pre_e2e_closure.audit_static_closure(profile_id)
     except Exception as exc:
