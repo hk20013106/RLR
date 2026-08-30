@@ -365,7 +365,7 @@ def preflight_providers(cfg, args):
 def write_receipt(run_dir, node, persona, prov, context, step, cand, round_id,
                   *, manifest=None, provider_delta_file=None, workspace=None,
                   config_path=None, raw_provider_delta_file=None,
-                  transformation_receipt_file=None):
+                  transformation_receipt_file=None, execution_status=None):
     manifest_data = {}
     rendered_bytes = None
     if manifest:
@@ -383,6 +383,9 @@ def write_receipt(run_dir, node, persona, prov, context, step, cand, round_id,
         if context.encode("utf-8") != rendered_bytes:
             raise ValueError("context bytes do not match manifest rendered context bytes")
     code_state = capture_code_state(HERE, config_path) if config_path else None
+    execution_status = execution_status or getattr(
+        prov, "last_execution_status", None
+    )
     rec = orch.RunReceipt(
         node=node, persona=persona,
         provider=getattr(prov, "name", getattr(prov, "type", "?")),
@@ -425,10 +428,36 @@ def write_receipt(run_dir, node, persona, prov, context, step, cand, round_id,
         config_sha256=(code_state or {}).get("config_sha256"),
         code_state_id=(code_state or {}).get("code_state_id"),
         schema_version="RunReceipt/v2" if code_state else "RunReceipt/v1",
+        exit_code=getattr(prov, "last_exit_code", None),
+        timed_out=getattr(prov, "last_timed_out", None),
+        terminal_state=getattr(prov, "last_terminal_state", None),
+        execution_status=execution_status,
     )
     path = Path(run_dir) / f"{node}_{persona}_receipt.json"
     rec.write(path)
     return str(path)
+
+
+def _write_provider_failure_receipt(run_dir, node, persona, prov, context,
+                                    step, cand, round_id, manifest=None,
+                                    workspace=None, config_path=None):
+    """Persist a failed command invocation when its prompt was created.
+
+    A failed provider has no canonical delta, so the receipt records the
+    execution outcome while keeping delta provenance absent rather than
+    inventing an artifact or hash.
+    """
+    if not getattr(prov, "last_prompt_file", None):
+        return None
+    try:
+        return write_receipt(
+            run_dir, node, persona, prov, context, step, cand, round_id,
+            manifest=manifest, workspace=workspace, config_path=config_path,
+            execution_status="failed",
+        )
+    except (OSError, ValueError) as exc:
+        log(f"{node} provider failure receipt could not be persisted: {exc}")
+        return None
 
 
 def _shadow_run_id(node, cand, round_id, candidates, seed, match_budget):
@@ -619,9 +648,13 @@ def exec_cognitive(project, cand, step, cfg, args, run_dir, round_id,
                                tools=step.get("tools_policy"),
                                run_dir=str(run_dir))
     except Exception as e:
+        failure_receipt = _write_provider_failure_receipt(
+            run_dir, node, persona, prov, ctx, step, cand, round_id,
+            manifest=manifest, config_path=getattr(cfg, "source_path", None),
+        )
         auto_pitfall(project, cand, node, "provider_failure",
                      f"{persona} provider raised: {e}", provider=pname,
-                     evidence=str(run_dir))
+                     evidence=str(failure_receipt or run_dir))
         _record_runtime_failure(
             failure_state, node, "EXTERNAL", "provider_invocation_error", run_dir
         )
@@ -704,10 +737,15 @@ def exec_turing(project, cand, step, cfg, args, run_dir, round_id, exec_state):
                                run_dir=str(run_dir))
     except Exception as e:
         exec_state["l7_failures"] += 1
+        failure_receipt = _write_provider_failure_receipt(
+            run_dir, "L7", "Turing", prov, ctx, step, cand, round_id,
+            manifest=manifest, workspace=workspace,
+            config_path=getattr(cfg, "source_path", None),
+        )
         log(f"L7 provider failed ({e}); failures={exec_state['l7_failures']}")
         auto_pitfall(project, cand, "L7", "execution_failure",
                      f"Turing execution provider failed: {e}", provider=pname,
-                     evidence=workspace or str(run_dir))
+                     evidence=str(failure_receipt or workspace or run_dir))
         _record_runtime_failure(
             exec_state, "L7", "EXTERNAL", "provider_invocation_error", run_dir
         )
