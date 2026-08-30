@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from native_v2_helpers import seed_selected_hypothesis
 from test_l4b_to_l4c_context import _fetcher, _manifest
 
@@ -201,8 +203,9 @@ def test_native_contract_and_execution_closure_are_systematic():
     assert report["state_recovery"]["overall"] == "CLOSED"
 
 
+@pytest.mark.parametrize("provider_override", [None, "manual"])
 def test_runner_blocks_before_provider_when_static_closure_is_open(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, provider_override
 ):
     import run_loop
     from research_loop import pre_e2e_closure
@@ -257,7 +260,7 @@ def test_runner_blocks_before_provider_when_static_closure_is_open(
         max_rounds=None,
         dry_run=False,
         no_review=True,
-        provider=None,
+        provider=provider_override,
     )
 
     assert run_loop.cmd_run(args) == 3
