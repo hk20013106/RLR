@@ -1,0 +1,22 @@
+name: Temporary L4A local-first check
+
+on:
+  push:
+    branches:
+      - codex/l4a-local-literature-first
+
+jobs:
+  targeted:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: L4A local-first regression
+        shell: bash
+        run: >-
+          python -m pytest -q --no-header -p no:cacheprovider
+          tests/test_l4a_local_literature_first.py
+          tests/test_l4_inventory_schema.py
