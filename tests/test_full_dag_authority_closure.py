@@ -265,3 +265,61 @@ def test_runner_blocks_before_provider_when_static_closure_is_open(
 
     assert run_loop.cmd_run(args) == 3
     assert provider_started == []
+
+
+def test_runner_blocks_before_provider_when_static_closure_audit_errors(
+    tmp_path, monkeypatch
+):
+    import run_loop
+    from research_loop import pre_e2e_closure
+
+    project = tmp_path / "project"
+    candidate = project / "01_Candidates" / "C1.md"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text(
+        "---\ncandidate_id: C1\ncurrent_status: NEW\nround_id: 1\n---\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "rlr_runner.yaml"
+    config.write_text(run_loop.DEFAULT_CONFIG, encoding="utf-8")
+
+    monkeypatch.setattr(
+        run_loop,
+        "_ctl",
+        lambda *args: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(
+        run_loop,
+        "restore_previous_round",
+        lambda *_args, **_kwargs: {"binding_status": "NONE"},
+    )
+    monkeypatch.setattr(
+        run_loop,
+        "next_step",
+        lambda *_args, **_kwargs: {"profile_id": PROFILE_V21_CATALOG_1},
+    )
+
+    def broken_audit(_profile_id):
+        raise RuntimeError("synthetic closure audit failure")
+
+    monkeypatch.setattr(pre_e2e_closure, "audit_static_closure", broken_audit)
+    provider_started = []
+
+    def forbidden_provider_preflight(*_args, **_kwargs):
+        provider_started.append(True)
+        return True
+
+    monkeypatch.setattr(run_loop, "preflight_providers", forbidden_provider_preflight)
+    args = SimpleNamespace(
+        project_dir=str(project),
+        cand_id="C1",
+        knowledge_store=None,
+        config=str(config),
+        max_rounds=None,
+        dry_run=False,
+        no_review=True,
+        provider=None,
+    )
+
+    assert run_loop.cmd_run(args) == 3
+    assert provider_started == []
