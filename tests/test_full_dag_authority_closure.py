@@ -143,6 +143,46 @@ def test_native_l4_and_l7_share_one_current_round_authority_owner():
     assert spec.execution_consumers == frozenset({"L7"})
 
 
+def test_native_next_step_surfaces_required_authorities(
+    tmp_path, monkeypatch, capsys
+):
+    from research_loop.commands import lifecycle
+
+    project, store, _evidence = _goal10_regression_project(tmp_path, monkeypatch)
+    args = SimpleNamespace(
+        project_dir=str(project), cand_id="C1", knowledge_store=str(store)
+    )
+
+    assert lifecycle.cmd_next_step(args) == 0
+    packet = json.loads(capsys.readouterr().out)
+    assert packet["node"] == "L4"
+    assert packet["required_authorities"] == ["current_round_data_binding"]
+
+
+def test_l7_execution_consumes_current_round_binding_through_authority_resolver(
+    tmp_path, monkeypatch
+):
+    from research_loop import authority
+    from research_loop.commands import execution
+
+    project, _store, _evidence = _goal10_regression_project(tmp_path, monkeypatch)
+    calls = []
+    original = authority.resolve_authority
+
+    def tracked(project_dir, cand_id, authority_name, *, consumer, mode):
+        calls.append((authority_name, consumer, mode))
+        return original(
+            project_dir, cand_id, authority_name, consumer=consumer, mode=mode
+        )
+
+    monkeypatch.setattr(authority, "resolve_authority", tracked)
+    binding, local_inputs = execution._bound_local_inputs(project, "C1")
+
+    assert binding["schema_version"] == "CurrentRoundDataBinding/v1"
+    assert len(local_inputs) == 1
+    assert calls == [("current_round_data_binding", "L7", "execution")]
+
+
 def test_native_full_dag_static_closure_is_closed():
     from research_loop.pre_e2e_closure import audit_static_closure
 
