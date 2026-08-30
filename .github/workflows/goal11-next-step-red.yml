@@ -24,3 +24,5 @@ jobs:
         env:
           PYTHONPATH: src
         run: python -m pytest -q --no-header -p no:cacheprovider tests/test_next_step_authority_packet.py
+
+# one-shot rerun after fixing the Windows Path fixture
