@@ -73,8 +73,10 @@ jobs:
           from pathlib import Path
           runner = Path("src/run_loop.py").read_text(encoding="utf-8")
           ledger = Path("src/research_loop/commands/ledger.py").read_text(encoding="utf-8")
-          assert "profile_id = next_step(project, cand).get(" not in runner
-          assert "readonly=True" in runner
+          old_closure = '''    try:\n        profile_id = next_step(project, cand).get(\"profile_id\", PROFILE_V20)\n        from research_loop import pre_e2e_closure\n        closure = pre_e2e_closure.audit_static_closure(profile_id)\n'''
+          new_closure = '''    try:\n        if rl.binding_path(project).exists():\n            profile_id = rl._ledger_for(\n                project, getattr(args, \"knowledge_store\", None), readonly=True\n            ).project_profile(project)\n        else:\n            profile_id = PROFILE_V20\n        from research_loop import pre_e2e_closure\n        closure = pre_e2e_closure.audit_static_closure(profile_id)\n'''
+          assert old_closure not in runner
+          assert runner.count(new_closure) == 1
           assert "HypothesisLedger.open_readonly(store_path)" in ledger
       - name: Diff check and commit
         run: |
