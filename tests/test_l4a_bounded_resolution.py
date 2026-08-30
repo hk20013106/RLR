@@ -5,6 +5,7 @@ import pytest
 
 from research_loop import deep_research as dr
 from research_loop import l05_curie
+from research_loop.l05_curie import europepmc
 from research_loop import l4_inventory
 from research_loop import l4_method_registry
 from research_loop import l4_pipeline as l4p
@@ -231,7 +232,7 @@ def test_local_identifier_reuse_never_calls_metadata_resolver(monkeypatch, tmp_p
         def __init__(self, *args, **kwargs):
             raise AssertionError("metadata resolver must not start for a local exact source")
 
-    monkeypatch.setattr(l05_curie, "EuropePmcTransport", NoNetwork)
+    monkeypatch.setattr(europepmc, "EuropePmcTransport", NoNetwork)
 
     manifest = l4_inventory.run_discovery(
         l4p, dr, tmp_path, "C1", "Q", "H",
@@ -265,7 +266,7 @@ def test_registry_resolution_happens_after_cognition_without_network(monkeypatch
         def __init__(self, *args, **kwargs):
             raise AssertionError("metadata resolver must not start when registry resolves the gap")
 
-    monkeypatch.setattr(l05_curie, "EuropePmcTransport", NoNetwork)
+    monkeypatch.setattr(europepmc, "EuropePmcTransport", NoNetwork)
 
     manifest = l4_inventory.run_discovery(
         l4p, dr, tmp_path, "C1", "Q", "H",
@@ -334,7 +335,7 @@ def test_duplicate_unresolved_method_names_resolve_once(monkeypatch, tmp_path):
                 "hit_count": 1,
             }
 
-    monkeypatch.setattr(l05_curie, "EuropePmcTransport", FakeEuropePmcTransport)
+    monkeypatch.setattr(europepmc, "EuropePmcTransport", FakeEuropePmcTransport)
 
     manifest = l4_inventory.run_discovery(
         l4p, dr, tmp_path, "C1", "Q", "H",
@@ -388,7 +389,7 @@ def test_metadata_miss_becomes_explicit_gap_without_query_expansion(monkeypatch,
                 "hit_count": 0,
             }
 
-    monkeypatch.setattr(l05_curie, "EuropePmcTransport", EmptyEuropePmcTransport)
+    monkeypatch.setattr(europepmc, "EuropePmcTransport", EmptyEuropePmcTransport)
 
     manifest = l4_inventory.run_discovery(
         l4p, dr, tmp_path, "C1", "Q", "H",
