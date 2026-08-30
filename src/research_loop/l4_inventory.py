@@ -642,11 +642,11 @@ def _resolve_missing_inventory_sources(
                 "query": method_name,
                 "page_size": 5,
             })
-            selected = _select_unambiguous_method_record(
-                method_name, list(batch.get("records") or [])
-            )
-        except Exception:
-            selected = None
+        except l05_multisource.CurieContractError:
+            batch = {"records": []}
+        selected = _select_unambiguous_method_record(
+            method_name, list(batch.get("records") or [])
+        )
 
         if selected is None:
             receipt["queries"].append({
@@ -676,6 +676,18 @@ def _resolve_missing_inventory_sources(
         })
 
     return result, list(resolved_assets.values()), receipt
+
+
+def _offline_provider_command(command: list[str], spec) -> list[str]:
+    """Enforce Codex L4A no-network/no-web policy at invocation time."""
+    result = list(command)
+    if str(getattr(spec, "backend", "")) == "codex":
+        result.extend([
+            "--sandbox", "workspace-write",
+            "-c", "sandbox_workspace_write.network_access=false",
+            "-c", 'web_search="disabled"',
+        ])
+    return result
 
 
 def _manifest_base(
@@ -877,6 +889,7 @@ def run_discovery(
         str(inventory_schema_path) if value == str(legacy_schema_path) else value
         for value in command
     ]
+    command = _offline_provider_command(command, spec)
     prompt = build_prompt(question, claim, known_sources)
     command[0] = dr.resolve_subprocess_executable(command[0])
     execution_command, invocation_kwargs = dr.subprocess_invocation(command, prompt)
