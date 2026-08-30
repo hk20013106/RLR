@@ -29,20 +29,22 @@ jobs:
           text = path.read_text(encoding="utf-8")
 
           old_prompt = '            prompt=str(context["prompt"]),\n'
-          new_prompt = '''            prompt=(
-              str(kwargs["input_text"])
-              if kwargs.get("input_text") is not None
-              else str(command[-1])
-          ),
-          '''
+          new_prompt = (
+              '            prompt=(\n'
+              '                str(kwargs["input_text"])\n'
+              '                if kwargs.get("input_text") is not None\n'
+              '                else str(command[-1])\n'
+              '            ),\n'
+          )
           if text.count(old_prompt) != 1:
               raise SystemExit(f"expected exactly one observed prompt source, found {text.count(old_prompt)}")
           text = text.replace(old_prompt, new_prompt)
 
-          old_rebuild = '''        _command, prompt = build_invocation(
-              spec, node, question, claim, work_dir, result_context
+          old_rebuild = (
+              '        _command, prompt = build_invocation(\n'
+              '            spec, node, question, claim, work_dir, result_context\n'
+              '        )\n'
           )
-          '''
           if text.count(old_rebuild) != 1:
               raise SystemExit(f"expected exactly one redundant prompt rebuild, found {text.count(old_rebuild)}")
           text = text.replace(old_rebuild, "")
