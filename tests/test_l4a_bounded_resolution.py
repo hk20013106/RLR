@@ -1,3 +1,7 @@
+from types import SimpleNamespace
+
+import pytest
+
 from research_loop import l4_inventory
 from research_loop.l05_curie import multisource as l05_multisource
 
@@ -61,6 +65,47 @@ def test_l4a_prompt_is_offline_and_registry_blind():
     assert "method_source_registry" not in prompt
     assert "source_payload" not in prompt
     assert "extracts" not in prompt
+
+
+def test_codex_l4a_command_physically_disables_network_and_web_search():
+    command = l4_inventory._offline_provider_command(
+        ["codex", "exec", "--ephemeral"],
+        SimpleNamespace(backend="codex"),
+    )
+
+    assert command == [
+        "codex",
+        "exec",
+        "--ephemeral",
+        "--sandbox",
+        "workspace-write",
+        "-c",
+        "sandbox_workspace_write.network_access=false",
+        "-c",
+        'web_search="disabled"',
+    ]
+
+
+def test_bounded_resolver_skips_network_when_method_already_has_source(monkeypatch, tmp_path):
+    method = _method("deseq2", "DESeq2")
+    method["source_asset_ids"] = ["A1"]
+
+    class ForbiddenTransport:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("resolver must not start for an already-sourced method")
+
+    monkeypatch.setattr(l05_multisource, "PubMedTransport", ForbiddenTransport)
+
+    inventory, assets, receipt = l4_inventory._resolve_missing_inventory_sources(
+        tmp_path,
+        "C1",
+        [method],
+    )
+
+    assert inventory[0]["source_asset_ids"] == ["A1"]
+    assert assets == []
+    assert receipt["queries"] == []
+    assert receipt["gaps"] == []
 
 
 def test_bounded_resolver_queries_same_method_name_once(monkeypatch, tmp_path):
@@ -152,3 +197,33 @@ def test_bounded_resolver_miss_becomes_gap_without_query_expansion(monkeypatch, 
         "method_name": "UnknownMethodXYZ",
         "reason": "NO_UNAMBIGUOUS_METADATA_MATCH",
     }]
+
+
+def test_bounded_resolver_does_not_hide_programming_errors(monkeypatch, tmp_path):
+    class FakePubMedTransport:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def search(self, request):
+            return {
+                "schema_version": "L05DiscoveryBatch/v1",
+                "provider": "pubmed",
+                "query_id": request["query_id"],
+                "receipt": {},
+                "records": [_record()],
+                "hit_count": 1,
+            }
+
+    monkeypatch.setattr(l05_multisource, "PubMedTransport", FakePubMedTransport)
+    monkeypatch.setattr(
+        l4_inventory,
+        "_select_unambiguous_method_record",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("programming bug")),
+    )
+
+    with pytest.raises(RuntimeError, match="programming bug"):
+        l4_inventory._resolve_missing_inventory_sources(
+            tmp_path,
+            "C1",
+            [_method("deseq2", "DESeq2")],
+        )
