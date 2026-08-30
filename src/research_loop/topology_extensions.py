@@ -1,6 +1,9 @@
 """Runtime topology annotations for conditional routing and method selection."""
 from __future__ import annotations
 
+from research_loop.authority import node_authority_declarations
+from research_loop.compatibility import DEFAULT_NATIVE_PROFILE, get_profile
+
 
 def install(topology_module) -> None:
     topology = topology_module
@@ -77,4 +80,16 @@ def install(topology_module) -> None:
         "scripts, anchor IDs, and L5 QC obligations"
     )
 
+    original_topology_for_profile = topology.topology_for_profile
+
+    def topology_for_profile_with_authorities(profile_id: str):
+        profile = get_profile(profile_id)
+        profile_nodes, _profile_map, sequence = original_topology_for_profile(profile_id)
+        native = profile.profile_id == DEFAULT_NATIVE_PROFILE
+        for item in profile_nodes:
+            declarations = node_authority_declarations(item["node"], native=native)
+            item.update(declarations)
+        return profile_nodes, {item["node"]: item for item in profile_nodes}, sequence
+
+    topology.topology_for_profile = topology_for_profile_with_authorities
     topology._METHOD_AND_SKIP_TOPOLOGY_INSTALLED = True
