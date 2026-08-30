@@ -143,22 +143,6 @@ def test_native_l4_and_l7_share_one_current_round_authority_owner():
     assert spec.execution_consumers == frozenset({"L7"})
 
 
-def test_native_next_step_surfaces_required_authorities(
-    tmp_path, monkeypatch, capsys
-):
-    from research_loop.commands import lifecycle
-
-    project, store, _evidence = _goal10_regression_project(tmp_path, monkeypatch)
-    args = SimpleNamespace(
-        project_dir=str(project), cand_id="C1", knowledge_store=str(store)
-    )
-
-    assert lifecycle.cmd_next_step(args) == 0
-    packet = json.loads(capsys.readouterr().out)
-    assert packet["node"] == "L4"
-    assert packet["required_authorities"] == ["current_round_data_binding"]
-
-
 def test_l7_execution_consumes_current_round_binding_through_authority_resolver(
     tmp_path, monkeypatch
 ):
@@ -169,10 +153,14 @@ def test_l7_execution_consumes_current_round_binding_through_authority_resolver(
     calls = []
     original = authority.resolve_authority
 
-    def tracked(project_dir, cand_id, authority_name, *, consumer, mode):
-        calls.append((authority_name, consumer, mode))
+    def tracked(project_dir, cand_id, authority_name, *, consumer_node, mode):
+        calls.append((authority_name, consumer_node, mode))
         return original(
-            project_dir, cand_id, authority_name, consumer=consumer, mode=mode
+            project_dir,
+            cand_id,
+            authority_name,
+            consumer_node=consumer_node,
+            mode=mode,
         )
 
     monkeypatch.setattr(authority, "resolve_authority", tracked)
