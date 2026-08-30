@@ -1380,6 +1380,19 @@ def cmd_run(args):
         log(f"L0 state restore PASS: {len(binding.get('verified_artifacts', []))} "
             "prior artifacts verified")
 
+    try:
+        profile_id = next_step(project, cand).get("profile_id", PROFILE_V20)
+        from research_loop import pre_e2e_closure
+        closure = pre_e2e_closure.audit_static_closure(profile_id)
+    except Exception as exc:
+        log(f"STATIC CLOSURE AUDIT FAILED -- halting before provider startup: {exc}")
+        return 3
+    if not closure.get("e2e_start_allowed", False):
+        log("STATIC CLOSURE OPEN -- halting before provider startup:")
+        for item in closure.get("unresolved_required_paths") or []:
+            log(f"  {json.dumps(item, ensure_ascii=False, sort_keys=True)}")
+        return 3
+
     if not preflight_providers(cfg, args):
         log("aborting: no automatic provider configured (see RUNNER.md).")
         return 2
