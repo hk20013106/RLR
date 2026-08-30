@@ -99,6 +99,16 @@ def _pitfall_warnings_for_node(project_dir, node_id):
         })
     return warnings
 
+
+def _authority_packet_fields(node_info):
+    """Project topology-owned authority declarations into scheduling metadata."""
+    return {
+        "required_authorities": list(node_info.get("requires_authorities") or []),
+        "optional_authorities": list(node_info.get("optional_authorities") or []),
+        "produces_authorities": list(node_info.get("produces_authorities") or []),
+    }
+
+
 def cmd_next_step(args):
     """Output JSON scheduling packet for the next DAG node."""
     project_dir = Path(args.project_dir)
@@ -150,6 +160,7 @@ def cmd_next_step(args):
                     "everos_read_scopes": _everos_scopes_for(node_info, project_dir.name),
                     "knowledge_base": node_info.get("knowledge_base"),
                 }
+                result.update(_authority_packet_fields(node_info))
                 _warnings = pl.scan_pitfalls(project_dir, node="L10c")
                 if _warnings:
                     result["pitfall_warnings"] = _warnings
@@ -215,6 +226,7 @@ def cmd_next_step(args):
                 "everos_read_scopes": _everos_scopes_for(ni, project_dir.name),
                 "knowledge_base": ni.get("knowledge_base"),
             })
+            nodes[-1].update(_authority_packet_fields(ni))
         result = {
             "is_parallel": True,
             "nodes": nodes,
@@ -245,6 +257,7 @@ def cmd_next_step(args):
         "knowledge_base": node_info.get("knowledge_base"),
     }
     result.update(profile_metadata)
+    result.update(_authority_packet_fields(node_info))
     if status == "NEEDS_EXECUTION" and node_id == "L7":
         delta_done = _delta_belongs_to_candidate(
             project_dir, "L7_turing", args.cand_id)

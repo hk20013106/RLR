@@ -132,6 +132,7 @@ def _l05_packet(lifecycle, route: dict) -> dict:
         "persona_catalog_version": profile.persona_catalog_version,
         "pitfall_warnings": lifecycle._pitfall_warnings_for_node(project, "L0.5"),
     }
+    packet.update(lifecycle._authority_packet_fields(node_info))
     return packet
 
 
