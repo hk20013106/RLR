@@ -18,6 +18,8 @@ import json
 from pathlib import Path
 import pytest
 
+from research_loop import l0_data
+
 HERE = Path(__file__).resolve().parent.parent
 
 
@@ -36,6 +38,7 @@ def gate_project(tmp_path):
     )
     assert candidate[0] == 0, candidate[2]
     cand_id = candidate[1].splitlines()[0]
+    l0_data.write_current_round_data_binding(project, cand_id)
     notes = project / "02_Agent_Notes"
     for persona, key, delta in (
         ("Fisher", "L4_fisher", {
