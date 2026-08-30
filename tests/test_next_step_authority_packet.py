@@ -23,7 +23,7 @@ def test_next_step_surfaces_native_authority_declarations(tmp_path, monkeypatch)
         encoding="utf-8",
     )
 
-    packet = EngineAPI().next_step(project, "C1")
+    packet = EngineAPI().next_step(str(project), "C1")
 
     assert packet["node"] == "L4"
     assert packet["required_authorities"] == ["current_round_data_binding"]
