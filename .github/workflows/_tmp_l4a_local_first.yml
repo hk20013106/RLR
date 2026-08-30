@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   targeted:
-    if: github.event.head_commit.message == 'ci: activate L4A local-first patch'
+    if: github.event.head_commit.message == 'activate-l4a-local-first-patch'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
