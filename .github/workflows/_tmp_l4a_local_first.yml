@@ -5,14 +5,22 @@ on:
     branches:
       - codex/l4a-local-literature-first
 
+permissions:
+  contents: write
+
 jobs:
   targeted:
+    if: github.event.head_commit.message == 'ci: activate L4A local-first patch'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - name: Apply minimal production patch
+        run: python .github/_tmp_apply_l4a_patch.py
       - run: pip install -r requirements.txt -r requirements-dev.txt
       - name: L4A local-first regression
         shell: bash
@@ -20,3 +28,26 @@ jobs:
           python -m pytest -q --no-header -p no:cacheprovider
           tests/test_l4a_local_literature_first.py
           tests/test_l4_inventory_schema.py
+          tests/test_l4_method_registry.py
+      - name: Structural checks
+        shell: bash
+        run: |
+          git diff --check
+          python - <<'PY'
+          from pathlib import Path
+          inv = Path('src/research_loop/l4_inventory.py').read_text(encoding='utf-8')
+          reg = Path('src/research_loop/l4_method_registry.py').read_text(encoding='utf-8')
+          assert inv.count('def _native_known_source_catalog(') == 1
+          assert inv.count('def build_prompt(') == 1
+          assert reg.count('def load_registry(') == 1
+          assert reg.count('def apply_registry(') == 1
+          assert 'loaded_registry=registry_snapshot' in inv
+          PY
+      - name: Commit and push verified patch
+        shell: bash
+        run: |
+          git config user.name "Kai He"
+          git config user.email "hk200131060071@163.com"
+          git add src/research_loop/l4_inventory.py src/research_loop/l4_method_registry.py tests/test_l4_inventory_schema.py tests/test_l4a_local_literature_first.py
+          git commit -m "fix: make L4A reuse frozen local literature first"
+          git push origin HEAD:codex/l4a-local-literature-first
