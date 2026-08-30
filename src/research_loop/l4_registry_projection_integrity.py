@@ -108,8 +108,15 @@ def _merge_hint(target: dict, canonical: dict) -> None:
     target["full_text_locations"] = locations
 
 
-def _apply_registry(registry_module, project_dir, inventory, assets=None):
-    entries, receipt = registry_module.load_registry(project_dir)
+def _apply_registry(
+    registry_module, project_dir, inventory, assets=None, *, loaded_registry=None
+):
+    if loaded_registry is None:
+        entries, receipt = registry_module.load_registry(project_dir)
+    else:
+        entries, receipt = loaded_registry
+        entries = copy.deepcopy(list(entries))
+        receipt = copy.deepcopy(dict(receipt))
     result = copy.deepcopy(inventory)
     assets_by_id = {
         str(asset.get("asset_id") or ""): copy.deepcopy(asset)
@@ -288,9 +295,15 @@ def install(registry_module, inventory_module) -> None:
         except ValueError as exc:
             raise dr.DeepResearchError(str(exc)) from exc
 
-    def apply_registry(project_dir, inventory, assets=None):
+    def apply_registry(
+        project_dir, inventory, assets=None, *, loaded_registry=None
+    ):
         return _apply_registry(
-            registry_module, project_dir, inventory, assets=assets
+            registry_module,
+            project_dir,
+            inventory,
+            assets=assets,
+            loaded_registry=loaded_registry,
         )
 
     def augment_assets(l4p, dr, assets, inventory):

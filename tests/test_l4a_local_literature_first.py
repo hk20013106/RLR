@@ -214,7 +214,13 @@ def test_native_l4a_reuses_frozen_l05_and_registry_before_provider(monkeypatch, 
     assert known["evidence_pack_id"] == "EP_C1_R1_v1"
     assert known["evidence_pack_content_sha256"] == "a" * 64
     assert len(known["catalog_sha256"]) == 64
-    assert manifest["runtime_receipt"]["method_source_registry"] == registry_receipt
+    registry_used = manifest["runtime_receipt"]["method_source_registry"]
+    assert registry_used["builtin_sha256"] == registry_receipt["builtin_sha256"]
+    assert registry_used["project_sha256"] == registry_receipt["project_sha256"]
+    assert registry_used["matches"] == [{
+        "method_id": "deseq2",
+        "canonical_method_ids": ["deseq2"],
+    }]
 
 
 def test_native_l4a_fails_closed_without_active_frozen_l05(monkeypatch, tmp_path):
