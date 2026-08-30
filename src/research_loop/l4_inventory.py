@@ -18,6 +18,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 
 from research_loop import compatibility, l4_method_registry
+from research_loop.l05_curie import multisource as l05_multisource
 
 
 INVENTORY_SCHEMA_VERSION = "L4MethodInventory/v2"
@@ -49,14 +50,6 @@ def _sha(value: str | bytes) -> str:
 
 def _safe(value: Any) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "")).strip("_.") or "source"
-
-
-def _normalized_doi(value: Any) -> str:
-    return re.sub(
-        r"^https?://(?:dx\.)?doi\.org/",
-        "",
-        str(value or "").strip().casefold(),
-    ).rstrip("/")
 
 
 def _normalized_url(value: Any) -> str:
@@ -122,13 +115,26 @@ def discovery_schema(l4p) -> dict:
     return schema
 
 
+def _catalog_source_url(identifiers: dict) -> str:
+    pmcid = l05_multisource.normalize_pmcid(identifiers.get("pmcid"))
+    if pmcid:
+        return f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/"
+    doi = l05_multisource.normalize_doi(identifiers.get("doi"))
+    if doi:
+        return f"https://doi.org/{doi}"
+    pmid = l05_multisource.normalize_pmid(identifiers.get("pmid"))
+    if pmid:
+        return f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+    return ""
+
+
 def _native_known_source_catalog(
     project_dir: str | Path,
     candidate_id: str,
     profile_id: str,
     dr,
 ) -> tuple[dict | None, tuple[list[dict], dict] | None]:
-    """Project the active frozen L0.5 sources and registry into L4A once."""
+    """Project frozen L0.5 metadata for L4A and load registry separately."""
     if not str(profile_id or "").strip():
         return None, None
     try:
@@ -178,7 +184,7 @@ def _native_known_source_catalog(
             f"native L4A local-literature gate failed: {exc}"
         ) from exc
 
-    snapshots_by_paper: dict[str, list[dict]] = {}
+    snapshot_by_paper: dict[str, dict] = {}
     for evidence in frozen.get("evidence") or []:
         if not isinstance(evidence, dict):
             continue
@@ -186,71 +192,38 @@ def _native_known_source_catalog(
         retrieval = evidence.get("retrieval")
         if not paper_id or not isinstance(retrieval, dict):
             continue
-        snapshot = {
-            key: copy.deepcopy(retrieval[key])
-            for key in (
-                "engine", "source_sha256", "snapshot_path", "pmcid", "verifier"
-            )
-            if retrieval.get(key) not in (None, "", [], {})
+        if paper_id in snapshot_by_paper:
+            continue
+        snapshot_by_paper[paper_id] = {
+            "source_path": str(retrieval.get("snapshot_path") or "").strip(),
+            "source_sha256": str(retrieval.get("source_sha256") or "").strip(),
         }
-        if snapshot and snapshot not in snapshots_by_paper.setdefault(paper_id, []):
-            snapshots_by_paper[paper_id].append(snapshot)
 
-    selected_papers = []
+    sources = []
     for paper in frozen.get("selected_papers") or []:
         if not isinstance(paper, dict):
             continue
         paper_id = str(paper.get("paper_id") or "").strip()
-        provenance = paper.get("provenance")
-        provenance = provenance if isinstance(provenance, dict) else {}
-        compact_provenance = {
-            key: copy.deepcopy(provenance[key])
-            for key in (
-                "provider", "raw_record_sha256", "source", "ext_id",
-                "originating_query_ids", "source_records",
-            )
-            if provenance.get(key) not in (None, "", [], {})
-        }
+        identifiers = paper.get("identifiers")
+        identifiers = identifiers if isinstance(identifiers, dict) else {}
         metadata = paper.get("metadata")
         metadata = metadata if isinstance(metadata, dict) else {}
-        compact_metadata = {
-            key: copy.deepcopy(metadata[key])
-            for key in (
-                "authors", "year", "journal", "publication_types",
-                "is_open_access", "in_europe_pmc",
-            )
-            if key in metadata
-        }
-        selected_papers.append({
+        snapshot = snapshot_by_paper.get(paper_id, {})
+        source_sha256 = str(snapshot.get("source_sha256") or "")
+        sources.append({
             "paper_id": paper_id,
+            "doi": l05_multisource.normalize_doi(identifiers.get("doi")),
+            "pmid": l05_multisource.normalize_pmid(identifiers.get("pmid")),
+            "pmcid": l05_multisource.normalize_pmcid(identifiers.get("pmcid")),
+            "url": _catalog_source_url(identifiers),
             "title": str(paper.get("title") or "").strip(),
-            "identifiers": copy.deepcopy(paper.get("identifiers") or {}),
-            "metadata": compact_metadata,
-            "provenance": compact_provenance,
-            "source_snapshots": copy.deepcopy(snapshots_by_paper.get(paper_id, [])),
-        })
-
-    discovery_receipts = []
-    for batch in frozen.get("discovery_receipts") or []:
-        if not isinstance(batch, dict):
-            continue
-        raw_receipt = batch.get("receipt")
-        raw_receipt = raw_receipt if isinstance(raw_receipt, dict) else {}
-        receipt = {
-            key: copy.deepcopy(raw_receipt[key])
-            for key in (
-                "request_sha256", "response_sha256", "response_path", "endpoint"
-            )
-            if raw_receipt.get(key) not in (None, "", [], {})
-        }
-        discovery_receipts.append({
-            "provider": str(batch.get("provider") or ""),
-            "query_id": str(batch.get("query_id") or ""),
-            "receipt": receipt,
+            "year": int(metadata.get("year") or 0) if str(metadata.get("year") or "").isdigit() else 0,
+            "source_path": str(snapshot.get("source_path") or ""),
+            "source_sha256": source_sha256,
+            "evidence_status": "frozen" if source_sha256 else "metadata_only",
         })
 
     catalog = {
-        "local_project_root": str(project.resolve()),
         "evidence_pack": {
             "pack_id": str(frozen.get("pack_id") or pack_manifest.get("pack_id") or ""),
             "content_sha256": str(
@@ -262,12 +235,7 @@ def _native_known_source_catalog(
             "artifact_sha256": str(pack_manifest.get("artifact_sha256") or ""),
             "source_run_id": str(run_id),
         },
-        "selected_papers": selected_papers,
-        "discovery_receipts": discovery_receipts,
-        "method_source_registry": {
-            "receipt": copy.deepcopy(registry_receipt),
-            "methods": copy.deepcopy(registry_entries),
-        },
+        "sources": sources,
     }
     return catalog, (registry_entries, registry_receipt)
 
@@ -279,24 +247,19 @@ def build_prompt(
     if known_sources is not None:
         known_block = f"""
 
-Frozen known-source catalog (read-only retrieval hints; NOT method-selection authority):
+Frozen local-source catalog (metadata only; read-only):
 {_canonical_json(known_sources)}
 
-Local-first rules:
-1. Decide the method inventory from the scientific question and selected claim first.
-   A method appearing in this catalog does not authorize or require that method.
-2. After a method is identified, reuse matching selected-paper identifiers and
-   method-registry source_hints before doing any external lookup.
-3. Do not run an external search for a DOI, PMID, PMCID, stable URL, or exact
-   source already present in this catalog. Do not re-query a known identifier.
-4. When metadata needs verification, use the frozen response_path or
-   source_snapshots under local_project_root before any network request.
-5. External metadata search is permitted only for a source/identifier gap that
-   remains after local EvidencePack and method-registry matching.
+Local-source rules:
+1. Decide the method inventory from the scientific question and selected claim.
+2. The catalog may be used only to map an already identified method to a local
+   paper. A paper appearing in the catalog does not authorize or require a method.
+3. Reuse an exact local DOI, PMID, PMCID, URL, or paper_id when it matches an
+   identified method. Do not invent or rewrite an identifier.
+4. The catalog is the complete literature input visible to this cognitive step.
+   Do not open source_path, do not read project files, and do not request full text.
 """
-    return f"""Use the installed Academic Research Skills literature-search capability.
-
-RLR stage: L4A Method Inventory and Source Metadata
+    return f"""RLR stage: L4A Offline Method Inventory
 Scientific question: {question}
 Selected hypothesis/claim: {claim}{known_block}
 
@@ -306,22 +269,24 @@ methods implied by the authorized project context. Return those methods in
 create method components, eligibility decisions, required execution flags,
 evidence anchors, or an analysis plan.
 
-For every method, carry forward any DOI, PMID, PMCID, stable URL, or exact asset
-identifier already present in authorized context. A known identifier must not
-be dropped merely because the corresponding paper is not selected as a general
-literature asset. Search metadata only to fill missing identifiers. Never
-invent an identifier. Use year 0 only when an exact source identifier is known
-but its publication year is unavailable. When no exact source is found, retain
-the method with empty source arrays; a versioned deterministic registry may
-supply a canonical source, otherwise L4B records an explicit evidence gap.
+This cognitive step is OFFLINE. Do not use network access. Do not search the web.
+Do not invoke browser, literature-search, PubMed, Crossref, OpenAlex, Semantic
+Scholar, Europe PMC, or any external metadata/retrieval tool. External metadata
+resolution, if needed, is performed deterministically after this response.
 
-Return metadata only. Do not retrieve full text or emit source payloads or
-verbatim extracts. Keep the ordinary `assets` catalog and selection receipts.
+Only sources already present in the frozen local-source catalog may be emitted
+as `assets` or referenced in `source_asset_ids`. For methods without a matching
+local source, keep `source_asset_ids` and `source_hints` empty. Do not guess a
+paper title, DOI, PMID, PMCID, URL, or source identifier from model memory.
+
+Return metadata only. Do not retrieve full text or emit source payloads,
+abstract-derived claims, or verbatim extracts. The `queries` array records this
+offline inventory operation; it must not represent an external search receipt.
 Your final response MUST contain JSON only and MUST conform exactly to the
 supplied output schema. Do not include prose, Markdown, code fences,
 commentary, or any text before or after the JSON object.
-For `source_metadata_response`, return the complete database metadata object as
-one canonical JSON string: UTF-8, sorted keys, compact separators, finite JSON
+For `source_metadata_response`, return the local catalog metadata object as one
+canonical JSON string: UTF-8, sorted keys, compact separators, finite JSON
 numbers, and no Markdown fences or explanatory text.
 """
 
@@ -370,10 +335,10 @@ def _validate_inventory_payload(l4p, dr, payload: dict) -> dict:
 
 
 def _asset_identity(asset: dict) -> tuple[str, str]:
-    doi = _normalized_doi(asset.get("doi"))
+    doi = l05_multisource.normalize_doi(asset.get("doi"))
     if doi:
         return "doi", doi
-    pmid = str(asset.get("pmid") or "").strip()
+    pmid = l05_multisource.normalize_pmid(asset.get("pmid"))
     if pmid:
         return "pmid", pmid
     metadata = asset.get("source_metadata_response")
@@ -386,7 +351,9 @@ def _asset_identity(asset: dict) -> tuple[str, str]:
         r"\bPMC\d+\b", _canonical_json(metadata or {}), flags=re.IGNORECASE
     )
     if match:
-        return "pmcid", match.group(0).upper()
+        pmcid = l05_multisource.normalize_pmcid(match.group(0))
+        if pmcid:
+            return "pmcid", pmcid
     url = _normalized_url(asset.get("url"))
     if url:
         return "url", url
@@ -394,13 +361,13 @@ def _asset_identity(asset: dict) -> tuple[str, str]:
 
 
 def _hint_identity(hint: dict) -> tuple[str, str]:
-    doi = _normalized_doi(hint.get("doi"))
+    doi = l05_multisource.normalize_doi(hint.get("doi"))
     if doi:
         return "doi", doi
-    pmid = str(hint.get("pmid") or "").strip()
+    pmid = l05_multisource.normalize_pmid(hint.get("pmid"))
     if pmid:
         return "pmid", pmid
-    pmcid = str(hint.get("pmcid") or "").strip().upper()
+    pmcid = l05_multisource.normalize_pmcid(hint.get("pmcid"))
     if pmcid:
         return "pmcid", pmcid
     url = _normalized_url(hint.get("url"))
@@ -412,12 +379,15 @@ def _hint_identity(hint: dict) -> tuple[str, str]:
 def _hint_url(hint: dict) -> str:
     if str(hint.get("url") or "").strip():
         return str(hint["url"]).strip()
-    if str(hint.get("pmcid") or "").strip():
-        return f"https://pmc.ncbi.nlm.nih.gov/articles/{str(hint['pmcid']).strip().upper()}/"
-    if str(hint.get("doi") or "").strip():
-        return f"https://doi.org/{_normalized_doi(hint['doi'])}"
-    if str(hint.get("pmid") or "").strip():
-        return f"https://pubmed.ncbi.nlm.nih.gov/{str(hint['pmid']).strip()}/"
+    pmcid = l05_multisource.normalize_pmcid(hint.get("pmcid"))
+    if pmcid:
+        return f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/"
+    doi = l05_multisource.normalize_doi(hint.get("doi"))
+    if doi:
+        return f"https://doi.org/{doi}"
+    pmid = l05_multisource.normalize_pmid(hint.get("pmid"))
+    if pmid:
+        return f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
     return ""
 
 
@@ -447,17 +417,17 @@ def _pseudo_asset(method: dict, hint: dict) -> dict:
     for value in explicit_locations + ([url] if url else []):
         if value not in locations:
             locations.append(value)
-    open_access = bool(str(hint.get("pmcid") or "").strip() or explicit_locations)
+    open_access = bool(l05_multisource.normalize_pmcid(hint.get("pmcid")) or explicit_locations)
     metadata = {
         "inventory_schema": INVENTORY_SCHEMA_VERSION,
         "method_id": method_id,
         "source_ref_id": source_ref_id,
-        "pmcid": str(hint.get("pmcid") or "").strip().upper(),
+        "pmcid": l05_multisource.normalize_pmcid(hint.get("pmcid")),
     }
     return {
         "asset_id": asset_id,
-        "doi": _normalized_doi(hint.get("doi")),
-        "pmid": str(hint.get("pmid") or "").strip(),
+        "doi": l05_multisource.normalize_doi(hint.get("doi")),
+        "pmid": l05_multisource.normalize_pmid(hint.get("pmid")),
         "url": url,
         "title": str(hint.get("title") or "").strip() or f"{method['name']} canonical source",
         "year": int(hint.get("year") or 0),
@@ -550,6 +520,176 @@ def _augment_assets(l4p, dr, assets: list[dict], inventory: list[dict]) -> tuple
     return final_assets, duplicates + later_duplicates, inventory
 
 
+def _normalized_method_name(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+
+def _select_unambiguous_method_record(method_name: str, records: list[dict]) -> dict | None:
+    needle = _normalized_method_name(method_name)
+    if not needle:
+        return None
+    matches = []
+    seen = set()
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        if needle not in _normalized_method_name(record.get("title")):
+            continue
+        paper_id = str(record.get("paper_id") or "").strip()
+        if not paper_id or paper_id in seen:
+            continue
+        seen.add(paper_id)
+        matches.append(record)
+    return copy.deepcopy(matches[0]) if len(matches) == 1 else None
+
+
+def _resolved_record_asset(record: dict, method_name: str) -> dict:
+    identifiers = record.get("identifiers")
+    identifiers = identifiers if isinstance(identifiers, dict) else {}
+    metadata = record.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    provenance = record.get("provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    paper_id = str(record.get("paper_id") or "").strip()
+    doi = l05_multisource.normalize_doi(identifiers.get("doi"))
+    pmid = l05_multisource.normalize_pmid(identifiers.get("pmid"))
+    pmcid = l05_multisource.normalize_pmcid(identifiers.get("pmcid"))
+    url = _catalog_source_url({"doi": doi, "pmid": pmid, "pmcid": pmcid})
+    year_text = str(metadata.get("year") or "").strip()
+    year = int(year_text) if year_text.isdigit() else 0
+    open_access = bool(pmcid or metadata.get("is_open_access"))
+    asset_id = f"MR_{_safe(paper_id)}_{_sha(_canonical_json(identifiers or {'paper_id': paper_id}))[:8]}"
+    return {
+        "asset_id": asset_id,
+        "doi": doi,
+        "pmid": pmid,
+        "url": url,
+        "title": str(record.get("title") or "").strip(),
+        "year": year,
+        "role": "method",
+        "journal": str(metadata.get("journal") or "").strip(),
+        "abstract": "",
+        "source_database": str(provenance.get("provider") or "pubmed"),
+        "source_metadata_response": {
+            "paper_id": paper_id,
+            "identifiers": copy.deepcopy(identifiers),
+            "provenance": copy.deepcopy(provenance),
+        },
+        "open_access_status": "open" if open_access else "unknown",
+        "full_text_status": "available_oa" if open_access else "metadata_only",
+        "full_text_locations": [url] if url else [],
+        "relevance_score": 10.0,
+        "selection_status": "selected",
+        "selection_reason": (
+            f"Deterministic bounded metadata match for method {method_name}."
+        ),
+        "hypothesis_ids": [],
+        "method_component_hints": [method_name],
+        "diagnostic_requirements": [],
+    }
+
+
+def _resolve_missing_inventory_sources(
+    project_dir: str | Path,
+    candidate_id: str,
+    inventory: list[dict],
+) -> tuple[list[dict], list[dict], dict]:
+    """Resolve each unique unresolved method name once, then stop on misses."""
+    result = copy.deepcopy(inventory)
+    unresolved_by_name: dict[str, list[dict]] = {}
+    order = []
+    for method in result:
+        if method.get("source_asset_ids") or method.get("source_hints"):
+            continue
+        name = str(method.get("name") or "").strip()
+        key = _normalized_method_name(name)
+        if not key:
+            continue
+        if key not in unresolved_by_name:
+            unresolved_by_name[key] = []
+            order.append(key)
+        unresolved_by_name[key].append(method)
+
+    receipt = {
+        "resolver": "l05_curie.multisource.PubMedTransport/v1",
+        "queries": [],
+        "gaps": [],
+    }
+    if not order:
+        return result, [], receipt
+
+    run_id = "L4A_META_" + _sha(_canonical_json({
+        "candidate_id": candidate_id,
+        "methods": [
+            str(unresolved_by_name[key][0].get("name") or "") for key in order
+        ],
+    }))[:16]
+    transport = l05_multisource.PubMedTransport(
+        project_dir,
+        candidate_id=candidate_id,
+        run_id=run_id,
+    )
+    resolved_assets: dict[str, dict] = {}
+
+    for index, key in enumerate(order, 1):
+        methods = unresolved_by_name[key]
+        method_name = str(methods[0].get("name") or "").strip()
+        query_id = f"Q{index:03d}"
+        selected = None
+        try:
+            batch = transport.search({
+                "query_id": query_id,
+                "query": method_name,
+                "page_size": 5,
+            })
+        except l05_multisource.CurieContractError:
+            batch = {"records": []}
+        selected = _select_unambiguous_method_record(
+            method_name, list(batch.get("records") or [])
+        )
+
+        if selected is None:
+            receipt["queries"].append({
+                "method_name": method_name,
+                "status": "gap",
+                "attempt_count": 1,
+                "paper_id": "",
+            })
+            receipt["gaps"].append({
+                "method_ids": [str(method.get("method_id") or "") for method in methods],
+                "method_name": method_name,
+                "reason": "NO_UNAMBIGUOUS_METADATA_MATCH",
+            })
+            continue
+
+        paper_id = str(selected.get("paper_id") or "").strip()
+        if paper_id not in resolved_assets:
+            resolved_assets[paper_id] = _resolved_record_asset(selected, method_name)
+        asset_id = str(resolved_assets[paper_id]["asset_id"])
+        for method in methods:
+            method["source_asset_ids"] = [asset_id]
+        receipt["queries"].append({
+            "method_name": method_name,
+            "status": "resolved",
+            "attempt_count": 1,
+            "paper_id": paper_id,
+        })
+
+    return result, list(resolved_assets.values()), receipt
+
+
+def _offline_provider_command(command: list[str], spec) -> list[str]:
+    """Enforce Codex L4A no-network/no-web policy at invocation time."""
+    result = list(command)
+    if str(getattr(spec, "backend", "")) == "codex":
+        result.extend([
+            "--sandbox", "workspace-write",
+            "-c", "sandbox_workspace_write.network_access=false",
+            "-c", 'web_search="disabled"',
+        ])
+    return result
+
+
 def _manifest_base(
     l4p,
     dr,
@@ -627,8 +767,20 @@ def persist_discovery(
         canonical["assets"],
         registry_inventory,
     )
+    inventory, resolved_assets, resolution_receipt = _resolve_missing_inventory_sources(
+        project_dir,
+        candidate_id,
+        inventory,
+    )
+    if resolved_assets:
+        assets, resolution_duplicates, aliases = _deduplicate_assets(
+            l4p, assets + resolved_assets
+        )
+        duplicates.extend(resolution_duplicates)
+        inventory = _remap_inventory(inventory, aliases)
     receipt = dict(runtime_receipt)
     receipt["method_source_registry"] = registry_receipt
+    receipt["metadata_resolution"] = resolution_receipt
     receipt["method_inventory_sha256"] = _sha(_canonical_json(inventory))
     base = _manifest_base(
         l4p,
@@ -737,6 +889,7 @@ def run_discovery(
         str(inventory_schema_path) if value == str(legacy_schema_path) else value
         for value in command
     ]
+    command = _offline_provider_command(command, spec)
     prompt = build_prompt(question, claim, known_sources)
     command[0] = dr.resolve_subprocess_executable(command[0])
     execution_command, invocation_kwargs = dr.subprocess_invocation(command, prompt)
@@ -764,7 +917,7 @@ def run_discovery(
             "evidence_pack_artifact_sha256": str(
                 pack.get("artifact_sha256") or ""
             ),
-            "selected_paper_count": len(known_sources["selected_papers"]),
+            "selected_paper_count": len(known_sources["sources"]),
         }
     if completed.returncode != 0:
         raise dr.DeepResearchError(

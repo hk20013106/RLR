@@ -101,7 +101,7 @@ def _frozen_pack():
     }
 
 
-def test_native_l4a_reuses_frozen_l05_and_registry_before_provider(monkeypatch, tmp_path):
+def test_native_l4a_reuses_frozen_l05_but_keeps_registry_out_of_provider(monkeypatch, tmp_path):
     seed = {
         "schema_version": "L1ResearchSeed/v1",
         "candidate_id": "C1",
@@ -202,12 +202,12 @@ def test_native_l4a_reuses_frozen_l05_and_registry_before_provider(monkeypatch, 
 
     prompt = captured["prompt"]
     assert "10.1073/pnas.0506580102" in prompt
-    assert "10.1186/s13059-014-0550-8" in prompt
     assert "PMC1239896" in prompt
-    assert "PMC4302049" in prompt
-    assert "known" in prompt.casefold()
-    assert "do not" in prompt.casefold()
-    assert "method" in prompt.casefold()
+    assert "10.1186/s13059-014-0550-8" not in prompt
+    assert "PMC4302049" not in prompt
+    assert "method_source_registry" not in prompt
+    assert "do not use network" in prompt.casefold()
+    assert "do not search the web" in prompt.casefold()
     assert len(registry_reads) == 1
 
     known = manifest["runtime_receipt"]["known_source_catalog"]
