@@ -1,0 +1,87 @@
+name: Prompt provenance fix
+
+on:
+  push:
+    branches:
+      - codex/fix-l4a-prompt-provenance
+    paths:
+      - .github/workflows/prompt-provenance-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Apply minimal provider-boundary fix
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("src/research_loop/provider_runtime_observability.py")
+          text = path.read_text(encoding="utf-8")
+
+          old_prompt = '            prompt=str(context["prompt"]),\n'
+          new_prompt = '''            prompt=(
+              str(kwargs["input_text"])
+              if kwargs.get("input_text") is not None
+              else str(command[-1])
+          ),
+          '''
+          if text.count(old_prompt) != 1:
+              raise SystemExit(f"expected exactly one observed prompt source, found {text.count(old_prompt)}")
+          text = text.replace(old_prompt, new_prompt)
+
+          old_rebuild = '''        _command, prompt = build_invocation(
+              spec, node, question, claim, work_dir, result_context
+          )
+          '''
+          if text.count(old_rebuild) != 1:
+              raise SystemExit(f"expected exactly one redundant prompt rebuild, found {text.count(old_rebuild)}")
+          text = text.replace(old_rebuild, "")
+
+          old_context = '            "prompt": prompt,\n'
+          if text.count(old_context) != 1:
+              raise SystemExit(f"expected exactly one stale prompt context field, found {text.count(old_context)}")
+          text = text.replace(old_context, "")
+
+          path.write_text(text, encoding="utf-8")
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Targeted provider and L4 tests
+        env:
+          PYTHONPATH: src
+        run: >-
+          python -m pytest
+          tests/test_provider_runtime_integration.py
+          tests/test_provider_runtime_observability.py
+          tests/test_deep_research.py
+          tests/test_l4_inventory_schema.py
+          tests/test_l4_evidence_bundle.py
+          -q --no-header -p no:cacheprovider
+      - name: Structural assertions
+        shell: python
+        run: |
+          from pathlib import Path
+          text = Path("src/research_loop/provider_runtime_observability.py").read_text(encoding="utf-8")
+          assert 'prompt=str(context["prompt"])' not in text
+          assert '"prompt": prompt' not in text
+          assert 'if kwargs.get("input_text") is not None' in text
+          assert 'else str(command[-1])' in text
+      - name: Diff check
+        run: git diff --check
+      - name: Commit production fix
+        shell: bash
+        run: |
+          git config user.name "Kai He"
+          git config user.email "hk200131060071@163.com"
+          git add src/research_loop/provider_runtime_observability.py
+          git commit -m "fix: bind runtime receipt to executed prompt"
+          git push origin HEAD:codex/fix-l4a-prompt-provenance
