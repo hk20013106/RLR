@@ -211,6 +211,11 @@ def test_runner_blocks_before_provider_when_static_closure_is_open(
     from research_loop import pre_e2e_closure
 
     project = tmp_path / "project"
+    project.mkdir()
+    store = tmp_path / "hypotheses.sqlite"
+    HypothesisLedger(store).bind_project(
+        project, profile_id=PROFILE_V21_CATALOG_1
+    )
     candidate = project / "01_Candidates" / "C1.md"
     candidate.parent.mkdir(parents=True)
     candidate.write_text(
@@ -230,21 +235,25 @@ def test_runner_blocks_before_provider_when_static_closure_is_open(
         "restore_previous_round",
         lambda *_args, **_kwargs: {"binding_status": "NONE"},
     )
-    monkeypatch.setattr(
-        run_loop,
-        "next_step",
-        lambda *_args, **_kwargs: {"profile_id": PROFILE_V21_CATALOG_1},
-    )
-    monkeypatch.setattr(
-        pre_e2e_closure,
-        "audit_static_closure",
-        lambda _profile_id: {
+    next_step_calls = []
+
+    def forbidden_next_step(*_args, **_kwargs):
+        next_step_calls.append(True)
+        return {"profile_id": PROFILE_V21_CATALOG_1}
+
+    monkeypatch.setattr(run_loop, "next_step", forbidden_next_step)
+    audit_calls = []
+
+    def open_closure(profile_id):
+        audit_calls.append(profile_id)
+        return {
             "e2e_start_allowed": False,
             "unresolved_required_paths": [
                 {"node": "L4", "status": "UNREACHABLE"}
             ],
-        },
-    )
+        }
+
+    monkeypatch.setattr(pre_e2e_closure, "audit_static_closure", open_closure)
     provider_started = []
 
     def forbidden_provider_preflight(*_args, **_kwargs):
@@ -255,7 +264,7 @@ def test_runner_blocks_before_provider_when_static_closure_is_open(
     args = SimpleNamespace(
         project_dir=str(project),
         cand_id="C1",
-        knowledge_store=None,
+        knowledge_store=str(store),
         config=str(config),
         max_rounds=None,
         dry_run=False,
@@ -264,6 +273,8 @@ def test_runner_blocks_before_provider_when_static_closure_is_open(
     )
 
     assert run_loop.cmd_run(args) == 3
+    assert next_step_calls == []
+    assert audit_calls == [PROFILE_V21_CATALOG_1]
     assert provider_started == []
 
 
