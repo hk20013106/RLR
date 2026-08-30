@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from research_loop import deep_research, l0_contract, research_seed
+from research_loop import deep_research, l0_contract, l0_data, research_seed
 import research_loop.l05_curie as curie
 from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
 from research_loop.hypothesis_ledger import HypothesisLedger
@@ -74,6 +74,7 @@ def _mkproj():
     HypothesisLedger(os.environ["RLR_HYPOTHESIS_STORE"]).bind_project(
         project, profile_id=DEFAULT_NATIVE_PROFILE
     )
+    l0_data.write_current_round_data_binding(project, "C1")
     return d
 
 
