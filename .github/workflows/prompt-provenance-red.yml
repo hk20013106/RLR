@@ -1,0 +1,27 @@
+name: Prompt provenance RED
+
+on:
+  push:
+    branches:
+      - codex/fix-l4a-prompt-provenance
+    paths:
+      - tests/test_provider_runtime_integration.py
+      - .github/workflows/prompt-provenance-red.yml
+
+permissions:
+  contents: read
+
+jobs:
+  red:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run prompt provenance regression
+        env:
+          PYTHONPATH: src
+        run: python -m pytest tests/test_provider_runtime_integration.py::test_runtime_receipt_hashes_actual_provider_prompt -q --no-header -p no:cacheprovider
