@@ -1,4 +1,4 @@
-name: Goal11 next-step RED
+name: Goal11 next-step GREEN patch
 
 on:
   push:
@@ -7,22 +7,79 @@ on:
     paths:
       - .github/workflows/goal11-next-step-red.yml
 
+permissions:
+  contents: write
+
 jobs:
-  red:
+  patch-and-green:
     runs-on: windows-latest
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: codex/full-dag-authority-closure
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
       - name: Install test dependencies
         run: pip install -r requirements.txt -r requirements-dev.txt
-      - name: Run next-step authority packet RED
+      - name: Project existing authority declarations into next-step packets
+        shell: python
+        run: |
+          from pathlib import Path
+
+          lifecycle = Path("src/research_loop/commands/lifecycle.py")
+          text = lifecycle.read_text(encoding="utf-8")
+
+          helper_anchor = "    return warnings\n\ndef cmd_next_step(args):\n"
+          assert text.count(helper_anchor) == 1
+          helper = '''    return warnings\n\n\ndef _authority_packet_fields(node_info):\n    \"\"\"Project topology-owned authority declarations into scheduling metadata.\"\"\"\n    return {\n        \"required_authorities\": list(node_info.get(\"requires_authorities\") or []),\n        \"optional_authorities\": list(node_info.get(\"optional_authorities\") or []),\n        \"produces_authorities\": list(node_info.get(\"produces_authorities\") or []),\n    }\n\n\ndef cmd_next_step(args):\n'''
+          text = text.replace(helper_anchor, helper)
+
+          final_anchor = '''                _warnings = pl.scan_pitfalls(project_dir, node=\"L10c\")\n'''
+          assert text.count(final_anchor) == 1
+          text = text.replace(
+              final_anchor,
+              '''                result.update(_authority_packet_fields(node_info))\n''' + final_anchor,
+          )
+
+          parallel_anchor = '''            nodes.append({\n                \"node\": nid,\n                \"persona\": ni[\"persona\"],\n                \"context_files\": ni[\"context_inputs\"],\n                \"action_hint\": ni[\"action_hint\"],\n                \"advance_command\": ni.get(\"advance_command\"),\n                \"template_path\": _layer_template_path(nid),\n                \"persona_template_path\": _persona_template_path(ni[\"persona\"]),\n                \"tools_policy\": ni.get(\"tools_policy\"),\n                \"everos_read_scopes\": _everos_scopes_for(ni, project_dir.name),\n                \"knowledge_base\": ni.get(\"knowledge_base\"),\n            })\n'''
+          assert text.count(parallel_anchor) == 1
+          text = text.replace(
+              parallel_anchor,
+              parallel_anchor + '''            nodes[-1].update(_authority_packet_fields(ni))\n''',
+          )
+
+          standard_anchor = '''    result.update(profile_metadata)\n    if status == \"NEEDS_EXECUTION\" and node_id == \"L7\":\n'''
+          assert text.count(standard_anchor) == 1
+          text = text.replace(
+              standard_anchor,
+              '''    result.update(profile_metadata)\n    result.update(_authority_packet_fields(node_info))\n    if status == \"NEEDS_EXECUTION\" and node_id == \"L7\":\n''',
+          )
+          lifecycle.write_text(text, encoding="utf-8")
+
+          routing = Path("src/research_loop/conditional_routing.py")
+          rtext = routing.read_text(encoding="utf-8")
+          route_anchor = '''    }\n    return packet\n\n\ndef install(lifecycle_module, context_module) -> None:\n'''
+          assert rtext.count(route_anchor) == 1
+          rtext = rtext.replace(
+              route_anchor,
+              '''    }\n    packet.update(lifecycle._authority_packet_fields(node_info))\n    return packet\n\n\ndef install(lifecycle_module, context_module) -> None:\n''',
+          )
+          routing.write_text(rtext, encoding="utf-8")
+      - name: Run targeted GREEN tests
         env:
           PYTHONPATH: src
-        run: python -m pytest -q --no-header -p no:cacheprovider tests/test_next_step_authority_packet.py
-
-# one-shot rerun after fixing the Windows Path fixture
+        run: |
+          python -m pytest -q --no-header -p no:cacheprovider tests/test_next_step_authority_packet.py tests/test_full_dag_authority_closure.py
+      - name: Verify and commit bounded patch
+        run: |
+          git diff --check
+          git diff -- src/research_loop/commands/lifecycle.py src/research_loop/conditional_routing.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/research_loop/commands/lifecycle.py src/research_loop/conditional_routing.py
+          git commit -m "fix: expose typed authorities in next-step packets"
+          git push origin HEAD:codex/full-dag-authority-closure
