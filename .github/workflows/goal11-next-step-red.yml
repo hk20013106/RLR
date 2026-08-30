@@ -1,0 +1,26 @@
+name: Goal11 next-step RED
+
+on:
+  push:
+    branches:
+      - codex/full-dag-authority-closure
+    paths:
+      - .github/workflows/goal11-next-step-red.yml
+
+jobs:
+  red:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install test dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run next-step authority packet RED
+        env:
+          PYTHONPATH: src
+        run: python -m pytest -q --no-header -p no:cacheprovider tests/test_next_step_authority_packet.py
