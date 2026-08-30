@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from native_v2_helpers import seed_selected_hypothesis
 import run_loop
 from research_loop import deep_research as dr
+from research_loop import l0_contract, l0_data
 from research_loop import l4_evidence_bundle as bundle
 from research_loop import l4_inventory
 from research_loop import l4_pipeline as l4p
@@ -122,6 +123,26 @@ def _fetcher(url):
     raise OSError("fixture source unavailable")
 
 
+def _bind_round_data(project):
+    """Give L4 fixtures the same canonical L0 data authority as a real round."""
+    source_input = l0_contract.build_source_input(
+        input_type="inline",
+        description="synthetic L4 context fixture input",
+        fmt="text",
+    )
+    contract = l0_contract.promote_to_current_schema(
+        l0_contract.build_initial_contract(
+            "C1",
+            "1",
+            "Which method should test H1?",
+            source_input,
+            "H1 predicts differential expression.",
+        )
+    )
+    l0_contract.write_contract(project, "C1", contract)
+    l0_data.write_current_round_data_binding(project, "C1")
+
+
 def test_staged_l4b_passes_real_l4_context_boundary(
     tmp_path, monkeypatch, capsys
 ):
@@ -144,6 +165,7 @@ def test_staged_l4b_passes_real_l4_context_boundary(
         "---\n",
         encoding="utf-8",
     )
+    _bind_round_data(project)
     seed_selected_hypothesis(project, "C1")
 
     manifest = _manifest(project, str(binding["project_id"]))
@@ -231,6 +253,7 @@ def test_emit_delta_is_the_l4_handle_binding_boundary(tmp_path, monkeypatch):
         "---\n",
         encoding="utf-8",
     )
+    _bind_round_data(project)
     hypothesis_id = seed_selected_hypothesis(project, "C1")
     l4a = _manifest(project, str(binding["project_id"]))
     artifact = bundle.run_l4b_evidence(
