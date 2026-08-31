@@ -5,7 +5,6 @@ import pytest
 
 from research_loop import deep_research as dr
 from research_loop import l05_curie
-from research_loop.l05_curie import europepmc
 from research_loop import l4_inventory
 from research_loop import l4_method_registry
 from research_loop import l4_pipeline as l4p
@@ -69,6 +68,12 @@ def _local_catalog():
     }
 
 
+def _empty_catalog():
+    catalog = _local_catalog()
+    catalog["sources"] = []
+    return catalog
+
+
 def _provider_payload(methods):
     return {
         "schema_version": l4p.L4A_DISCOVERY_SCHEMA_VERSION,
@@ -95,28 +100,78 @@ def _method(method_id, name, *, source_asset_ids=None):
     }
 
 
-def _install_provider(monkeypatch, payload, captured):
+def _search_asset(asset_id, title, *, method_ids, doi="10.1000/contextual"):
+    return {
+        "asset_id": asset_id,
+        "doi": doi,
+        "pmid": "12345678",
+        "url": f"https://doi.org/{doi}",
+        "title": title,
+        "year": 2024,
+        "journal": "Methods",
+        "role": "method",
+        "abstract": "",
+        "source_database": "academic-research-suite",
+        "source_metadata_response": json.dumps(
+            {"id": asset_id, "title": title},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "open_access_status": "open",
+        "full_text_status": "available_oa",
+        "full_text_locations": [f"https://doi.org/{doi}"],
+        "relevance_score": 9.0,
+        "selection_status": "selected",
+        "selection_reason": "Method precedent for the supplied scientific context.",
+        "hypothesis_ids": [],
+        "method_component_hints": list(method_ids),
+        "diagnostic_requirements": [],
+    }
+
+
+def _search_payload(assets, *, query="cross-species transcriptomics similar-study methods"):
+    return {
+        "schema_version": l4p.L4A_DISCOVERY_SCHEMA_VERSION,
+        "queries": [{
+            "query_id": "CTX001",
+            "query": query,
+            "purpose": "Find methods actually used in similar studies.",
+            "status": "completed",
+            "receipt": "academic-research-suite contextual literature search",
+        }],
+        "assets": list(assets),
+    }
+
+
+def _install_provider_sequence(monkeypatch, payloads, captured):
     monkeypatch.setattr(
         dr,
         "build_invocation",
         lambda *args, **kwargs: (["codex"], "unused generic prompt"),
     )
     monkeypatch.setattr(dr, "resolve_subprocess_executable", lambda value: value)
+    captured["prompts"] = []
+    captured["commands"] = []
 
     def subprocess_invocation(command, prompt):
-        captured["prompt"] = prompt
+        captured["prompts"].append(prompt)
+        captured["commands"].append(list(command))
         return command, {}
 
-    monkeypatch.setattr(dr, "subprocess_invocation", subprocess_invocation)
-    monkeypatch.setattr(
-        dr,
-        "execute_provider_invocation",
-        lambda *args, **kwargs: SimpleNamespace(
+    queue = list(payloads)
+
+    def execute_provider_invocation(*args, **kwargs):
+        if not queue:
+            raise AssertionError("unexpected extra provider invocation")
+        payload = queue.pop(0)
+        return SimpleNamespace(
             returncode=0,
             stdout=json.dumps(payload),
             stderr="",
-        ),
-    )
+        )
+
+    monkeypatch.setattr(dr, "subprocess_invocation", subprocess_invocation)
+    monkeypatch.setattr(dr, "execute_provider_invocation", execute_provider_invocation)
 
 
 def test_native_catalog_keeps_registry_out_of_cognitive_context(monkeypatch, tmp_path):
@@ -214,25 +269,19 @@ def test_l4a_prompt_is_offline_inventory_only():
     assert "extract" not in prompt
 
 
-def test_local_identifier_reuse_never_calls_metadata_resolver(monkeypatch, tmp_path):
+def test_local_identifier_reuse_skips_contextual_search(monkeypatch, tmp_path):
     catalog = _local_catalog()
     registry_snapshot = ([], _registry_receipt())
     payload = _provider_payload([
         _method("gsea", "Gene set enrichment analysis", source_asset_ids=["L05_P_GSEA"]),
     ])
     captured = {}
-    _install_provider(monkeypatch, payload, captured)
+    _install_provider_sequence(monkeypatch, [payload], captured)
     monkeypatch.setattr(
         l4_inventory,
         "_native_known_source_catalog",
         lambda *args: (catalog, registry_snapshot),
     )
-
-    class NoNetwork:
-        def __init__(self, *args, **kwargs):
-            raise AssertionError("metadata resolver must not start for a local exact source")
-
-    monkeypatch.setattr(europepmc, "EuropePmcTransport", NoNetwork)
 
     manifest = l4_inventory.run_discovery(
         l4p, dr, tmp_path, "C1", "Q", "H",
@@ -240,12 +289,12 @@ def test_local_identifier_reuse_never_calls_metadata_resolver(monkeypatch, tmp_p
         project_id="P1", round_id="1", profile_id="v2.1-catalog-1",
     )
 
+    assert len(captured["prompts"]) == 1
     assert manifest["method_inventory"][0]["source_asset_ids"] == ["L05_P_GSEA"]
     assert manifest["assets"][0]["doi"] == "10.1073/pnas.0506580102"
-    assert "10.1186/s13059-014-0550-8" not in captured["prompt"]
 
 
-def test_registry_resolution_happens_after_cognition_without_network(monkeypatch, tmp_path):
+def test_registry_resolution_happens_after_cognition_without_contextual_search(monkeypatch, tmp_path):
     catalog = _local_catalog()
     receipt = _registry_receipt()
     receipt["canonical_method_ids"] = ["deseq2"]
@@ -255,18 +304,12 @@ def test_registry_resolution_happens_after_cognition_without_network(monkeypatch
         _method("gsea", "Gene set enrichment analysis", source_asset_ids=["L05_P_GSEA"]),
     ])
     captured = {}
-    _install_provider(monkeypatch, payload, captured)
+    _install_provider_sequence(monkeypatch, [payload], captured)
     monkeypatch.setattr(
         l4_inventory,
         "_native_known_source_catalog",
         lambda *args: (catalog, registry_snapshot),
     )
-
-    class NoNetwork:
-        def __init__(self, *args, **kwargs):
-            raise AssertionError("metadata resolver must not start when registry resolves the gap")
-
-    monkeypatch.setattr(europepmc, "EuropePmcTransport", NoNetwork)
 
     manifest = l4_inventory.run_discovery(
         l4p, dr, tmp_path, "C1", "Q", "H",
@@ -274,122 +317,79 @@ def test_registry_resolution_happens_after_cognition_without_network(monkeypatch
         project_id="P1", round_id="1", profile_id="v2.1-catalog-1",
     )
 
+    assert len(captured["prompts"]) == 1
     deseq2 = next(item for item in manifest["method_inventory"] if item["method_id"] == "deseq2")
     assert deseq2["source_asset_ids"]
-    assert "10.1186/s13059-014-0550-8" not in captured["prompt"]
     assert manifest["runtime_receipt"]["method_source_registry"]["matches"] == [{
         "method_id": "deseq2",
         "canonical_method_ids": ["deseq2"],
     }]
 
 
-def test_duplicate_unresolved_method_names_resolve_once(monkeypatch, tmp_path):
+def test_unresolved_methods_use_one_contextual_similar_study_search(monkeypatch, tmp_path):
     catalog = _local_catalog()
     registry_snapshot = ([], _registry_receipt())
-    payload = _provider_payload([
-        _method("novel_a", "NovelMethod"),
-        _method("novel_b", "NovelMethod"),
+    offline = _provider_payload([
+        _method("novel_a", "Cross-species expression normalization"),
+        _method("novel_b", "Phylogenetic comparative model"),
         _method("gsea", "Gene set enrichment analysis", source_asset_ids=["L05_P_GSEA"]),
     ])
+    contextual = _search_payload([
+        _search_asset(
+            "CTX_P1",
+            "A comparative transcriptomics framework across mammalian species",
+            method_ids=["novel_a", "novel_b"],
+        ),
+    ])
     captured = {}
-    _install_provider(monkeypatch, payload, captured)
+    _install_provider_sequence(monkeypatch, [offline, contextual], captured)
     monkeypatch.setattr(
         l4_inventory,
         "_native_known_source_catalog",
         lambda *args: (catalog, registry_snapshot),
     )
 
-    calls = []
-
-    class FakeEuropePmcTransport:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def search(self, request):
-            calls.append(dict(request))
-            return {
-                "provider": "europe-pmc",
-                "query_id": request["query_id"],
-                "receipt": {
-                    "request_sha256": "3" * 64,
-                    "response_sha256": "4" * 64,
-                    "response_path": "08_Audit/l4/C1/metadata_novel.json",
-                    "endpoint": "search",
-                },
-                "records": [{
-                    "paper_id": "P_NOVEL",
-                    "title": "NovelMethod: a reproducible analysis framework",
-                    "identifiers": {
-                        "doi": "10.1000/novelmethod",
-                        "pmid": "12345678",
-                    },
-                    "metadata": {
-                        "year": "2024",
-                        "journal": "Methods",
-                        "authors": "A. Author",
-                        "publication_types": [],
-                        "is_open_access": False,
-                    },
-                    "provenance": {"provider": "europe-pmc"},
-                }],
-                "hit_count": 1,
-            }
-
-    monkeypatch.setattr(europepmc, "EuropePmcTransport", FakeEuropePmcTransport)
-
     manifest = l4_inventory.run_discovery(
-        l4p, dr, tmp_path, "C1", "Q", "H",
+        l4p, dr, tmp_path, "C1", "Cross-species transcriptome question", "H",
         dr.RuntimeSpec("codex", "codex", timeout=3), tmp_path / "work",
         project_id="P1", round_id="1", profile_id="v2.1-catalog-1",
     )
 
-    assert len(calls) == 1
-    assert calls[0]["query"] == 'TITLE:"NovelMethod"'
-    novel = [
-        item for item in manifest["method_inventory"]
-        if item["method_id"].startswith("novel_")
-    ]
-    assert all(item["source_asset_ids"] for item in novel)
-    assert novel[0]["source_asset_ids"] == novel[1]["source_asset_ids"]
+    assert len(captured["prompts"]) == 2
+    search_prompt = captured["prompts"][1]
+    assert "Cross-species transcriptome question" in search_prompt
+    assert "novel_a" in search_prompt
+    assert "Cross-species expression normalization" in search_prompt
+    assert "novel_b" in search_prompt
+    assert "Phylogenetic comparative model" in search_prompt
+    assert "similar studies" in search_prompt.casefold()
+    assert 'TITLE:"' not in search_prompt
+
+    methods = {item["method_id"]: item for item in manifest["method_inventory"]}
+    assert methods["novel_a"]["source_asset_ids"] == ["CTX_P1"]
+    assert methods["novel_b"]["source_asset_ids"] == ["CTX_P1"]
+    assert methods["gsea"]["source_asset_ids"] == ["L05_P_GSEA"]
+    assert "metadata_resolution" not in manifest["runtime_receipt"]
+    contextual_receipt = manifest["runtime_receipt"]["contextual_literature_search"]
+    assert contextual_receipt["method_ids"] == ["novel_a", "novel_b"]
+    assert contextual_receipt["query_ids"] == ["CTX001"]
 
 
-def test_metadata_miss_becomes_explicit_gap_without_query_expansion(monkeypatch, tmp_path):
+def test_contextual_search_miss_is_persisted_as_unresolved_inventory(monkeypatch, tmp_path):
     catalog = _local_catalog()
     registry_snapshot = ([], _registry_receipt())
-    payload = _provider_payload([
+    offline = _provider_payload([
         _method("unfindable", "UnfindableMethod"),
         _method("gsea", "Gene set enrichment analysis", source_asset_ids=["L05_P_GSEA"]),
     ])
+    contextual = _search_payload([], query="contextual search with no retained source")
     captured = {}
-    _install_provider(monkeypatch, payload, captured)
+    _install_provider_sequence(monkeypatch, [offline, contextual], captured)
     monkeypatch.setattr(
         l4_inventory,
         "_native_known_source_catalog",
         lambda *args: (catalog, registry_snapshot),
     )
-
-    calls = []
-
-    class EmptyEuropePmcTransport:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def search(self, request):
-            calls.append(dict(request))
-            return {
-                "provider": "europe-pmc",
-                "query_id": request["query_id"],
-                "receipt": {
-                    "request_sha256": "5" * 64,
-                    "response_sha256": "6" * 64,
-                    "response_path": "08_Audit/l4/C1/metadata_missing.json",
-                    "endpoint": "search",
-                },
-                "records": [],
-                "hit_count": 0,
-            }
-
-    monkeypatch.setattr(europepmc, "EuropePmcTransport", EmptyEuropePmcTransport)
 
     manifest = l4_inventory.run_discovery(
         l4p, dr, tmp_path, "C1", "Q", "H",
@@ -397,18 +397,39 @@ def test_metadata_miss_becomes_explicit_gap_without_query_expansion(monkeypatch,
         project_id="P1", round_id="1", profile_id="v2.1-catalog-1",
     )
 
-    assert [item["query"] for item in calls] == ['TITLE:"UnfindableMethod"']
     unresolved = next(
         item for item in manifest["method_inventory"]
         if item["method_id"] == "unfindable"
     )
     assert unresolved["source_asset_ids"] == []
     assert unresolved["source_hints"] == []
-    resolver = manifest["runtime_receipt"]["metadata_resolution"]
-    assert resolver["gaps"] == [{
-        "method_ids": ["unfindable"],
-        "method_name": "UnfindableMethod",
-        "query": 'TITLE:"UnfindableMethod"',
-        "reason": "no exact metadata match",
-    }]
-    assert len(resolver["attempts"]) == 1
+    assert manifest["runtime_receipt"]["contextual_literature_search"]["method_ids"] == [
+        "unfindable"
+    ]
+    assert "metadata_resolution" not in manifest["runtime_receipt"]
+
+
+def test_all_contextual_misses_still_persist_l4a_manifest(monkeypatch, tmp_path):
+    catalog = _empty_catalog()
+    registry_snapshot = ([], _registry_receipt())
+    offline = _provider_payload([
+        _method("unfindable", "UnfindableMethod"),
+    ])
+    contextual = _search_payload([], query="contextual search with no retained source")
+    captured = {}
+    _install_provider_sequence(monkeypatch, [offline, contextual], captured)
+    monkeypatch.setattr(
+        l4_inventory,
+        "_native_known_source_catalog",
+        lambda *args: (catalog, registry_snapshot),
+    )
+
+    manifest = l4_inventory.run_discovery(
+        l4p, dr, tmp_path, "C1", "Q", "H",
+        dr.RuntimeSpec("codex", "codex", timeout=3), tmp_path / "work",
+        project_id="P1", round_id="1", profile_id="v2.1-catalog-1",
+    )
+
+    assert manifest["selected_asset_ids"] == []
+    assert manifest["method_inventory"][0]["source_asset_ids"] == []
+    assert (tmp_path / manifest["path"]).is_file()
