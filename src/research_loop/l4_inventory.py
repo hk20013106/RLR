@@ -762,7 +762,9 @@ def _resolve_missing_inventory_sources(
     return result, list(resolved_assets.values()), receipt
 
 
-def _offline_provider_command(command: list[str], spec) -> list[str]:
+def _offline_provider_command(
+    command: list[str], spec, work_dir: str | Path | None = None
+) -> list[str]:
     """Enforce Codex L4A no-network/no-web and no-write policy at invocation time."""
     result = list(command)
     if str(getattr(spec, "backend", "")) == "codex":
@@ -770,6 +772,11 @@ def _offline_provider_command(command: list[str], spec) -> list[str]:
             "--sandbox", "read-only",
             "-c", 'web_search="disabled"',
         ])
+        if work_dir is not None:
+            result.extend([
+                "-C", str(Path(work_dir).resolve()),
+                "--skip-git-repo-check",
+            ])
     return result
 
 
@@ -1007,7 +1014,7 @@ def run_discovery(
         str(inventory_schema_path) if value == str(legacy_schema_path) else value
         for value in command
     ]
-    command = _offline_provider_command(command, spec)
+    command = _offline_provider_command(command, spec, work)
     prompt = build_prompt(question, claim, known_sources)
     command[0] = dr.resolve_subprocess_executable(command[0])
     execution_command, invocation_kwargs = dr.subprocess_invocation(command, prompt)
@@ -1016,7 +1023,6 @@ def run_discovery(
         invocation_kwargs,
         timeout=spec.timeout,
         label="L4A method-inventory CLI",
-        cwd=work,
     )
     receipt = dr.skill_receipt(
         spec.backend,
