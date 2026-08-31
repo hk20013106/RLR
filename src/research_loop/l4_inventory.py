@@ -296,7 +296,7 @@ Scholar, Europe PMC, or any external metadata/retrieval tool.
 Do not access the filesystem. The controller performs deterministic source mapping after this
 response.
 
-`assets` MUST be an empty array. Every method's `source_hints` MUST be empty.
+assets MUST be an empty array. Every method's `source_hints` MUST be empty.
 For methods without a matching local `asset_id`, keep `source_asset_ids` empty.
 Do not guess a paper title, DOI, PMID, PMCID, URL, or source identifier from
 model memory.
