@@ -47,6 +47,9 @@ from research_loop.l4_registry_projection_integrity import (
 from research_loop.l4_inventory_projection import (
     install as _install_l4_inventory_projection,
 )
+from research_loop.l4_contextual_literature import (
+    install as _install_l4_contextual_literature,
+)
 from research_loop import l4_evidence_bundle as _l4_evidence_bundle_module
 from research_loop.l4_evidence_bundle import install as _install_l4_evidence_bundle
 from research_loop.l4_runtime_compat import install as _install_l4_runtime_compat
@@ -69,6 +72,7 @@ _install_l4_registry_projection_integrity(
     _l4_inventory_module,
 )
 _install_l4_inventory_projection(_l4_inventory_module, deep_research)
+_install_l4_contextual_literature(_l4_inventory_module, deep_research)
 _install_l4_evidence_bundle(_l4_pipeline_module, deep_research)
 _install_l4_runtime_compat(deep_research, _l4_evidence_bundle_module)
 _install_l4_lineage(deep_research)
@@ -171,7 +175,8 @@ del _install_l4_pipeline, _install_l4_pipeline_compat
 del _install_l4_provenance, _install_l4_provenance_compat
 del _install_l4_path_safety, _install_l4_lineage
 del _install_l4_registry_projection_integrity
-del _install_l4_inventory_projection, _install_l4_evidence_bundle
+del _install_l4_inventory_projection, _install_l4_contextual_literature
+del _install_l4_evidence_bundle
 del _install_l4_runtime_compat, _install_l45_context_binding
 del _install_provider_runtime_observability
 del _deep_research_task_module
