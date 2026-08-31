@@ -46,10 +46,16 @@ def _contextual_query_plan_schema() -> dict:
                 "items": {"type": "string", "minLength": 1},
             },
         },
-        # Only query_id/query/method_ids are semantically required.  The other
-        # fields are accepted as optional audit annotations so a planner cannot
-        # be forced to imitate the old paper-discovery wire schema.
-        "required": ["query_id", "query", "method_ids"],
+        # Codex structured outputs require every declared property to appear
+        # in required, including these audit annotations.
+        "required": [
+            "query_id",
+            "query",
+            "purpose",
+            "status",
+            "receipt",
+            "method_ids",
+        ],
     }
     return {
         "type": "object",
