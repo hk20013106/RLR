@@ -38,7 +38,7 @@ def _contextual_query_plan_schema() -> dict:
             "query_id": {"type": "string", "minLength": 1},
             "query": {"type": "string", "minLength": 1},
             "purpose": {"type": "string", "minLength": 1},
-            "status": {"const": "planned"},
+            "status": {"type": "string", "const": "planned"},
             "receipt": {"type": "string", "minLength": 1},
             "method_ids": {
                 "type": "array",

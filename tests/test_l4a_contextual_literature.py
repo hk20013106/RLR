@@ -6,6 +6,7 @@ from research_loop import l4_pipeline as l4p
 from research_loop.l4_contextual_literature import (
     _contextual_command,
     _contextual_prompt,
+    _contextual_query_plan_schema,
     _validate_contextual_payload,
 )
 
@@ -42,6 +43,11 @@ def test_contextual_provider_wire_contract_contains_queries_not_papers():
     payload["assets"] = []
     with pytest.raises(dr.DeepResearchError, match="assets"):
         _validate_contextual_payload(l4p, dr, payload, ["M07"])
+
+
+def test_contextual_query_plan_schema_types_const_constrained_status():
+    status_schema = _contextual_query_plan_schema()["properties"]["queries"]["items"]["properties"]["status"]
+    assert status_schema == {"type": "string", "const": "planned"}
 
 
 def test_contextual_prompt_is_planning_only_and_command_is_offline(tmp_path):
