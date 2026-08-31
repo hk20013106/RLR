@@ -292,8 +292,8 @@ evidence anchors, or an analysis plan.
 
 This cognitive step is OFFLINE. Do not use network access. Do not search the web.
 Do not invoke browser, literature-search, PubMed, Crossref, OpenAlex, Semantic
-Scholar, Europe PMC, or any external metadata/retrieval tool. Do not access the
-filesystem. The controller performs deterministic source mapping after this
+Scholar, Europe PMC, or any external metadata/retrieval tool.
+Do not access the filesystem. The controller performs deterministic source mapping after this
 response.
 
 `assets` MUST be an empty array. Every method's `source_hints` MUST be empty.
@@ -304,8 +304,8 @@ model memory.
 Return metadata only. Do not retrieve or quote full text. The `queries` array
 records this offline inventory operation; it must not represent an external
 search receipt. Your final response MUST contain JSON only and MUST conform
-exactly to the supplied output schema. Do not include prose, Markdown, code
-fences, commentary, or any text before or after the JSON object.
+exactly to the supplied output schema. Do not include prose, Markdown, code fences,
+commentary, or any text before or after the JSON object.
 """
 
 
@@ -892,20 +892,23 @@ def persist_discovery(
         initial_assets,
         registry_inventory,
     )
-    inventory, resolved_assets, resolution_receipt = _resolve_missing_inventory_sources(
-        project_dir,
-        candidate_id,
-        inventory,
-    )
-    if resolved_assets:
-        assets, resolution_duplicates, aliases = _deduplicate_assets(
-            l4p, assets + resolved_assets
+    resolution_receipt = None
+    if known_sources is not None:
+        inventory, resolved_assets, resolution_receipt = _resolve_missing_inventory_sources(
+            project_dir,
+            candidate_id,
+            inventory,
         )
-        duplicates.extend(resolution_duplicates)
-        inventory = _remap_inventory(inventory, aliases)
+        if resolved_assets:
+            assets, resolution_duplicates, aliases = _deduplicate_assets(
+                l4p, assets + resolved_assets
+            )
+            duplicates.extend(resolution_duplicates)
+            inventory = _remap_inventory(inventory, aliases)
     receipt = dict(runtime_receipt)
     receipt["method_source_registry"] = registry_receipt
-    receipt["metadata_resolution"] = resolution_receipt
+    if resolution_receipt is not None:
+        receipt["metadata_resolution"] = resolution_receipt
     receipt["method_inventory_sha256"] = _sha(_canonical_json(inventory))
     base = _manifest_base(
         l4p,
