@@ -211,6 +211,7 @@ def _native_known_source_catalog(
         snapshot = snapshot_by_paper.get(paper_id, {})
         source_sha256 = str(snapshot.get("source_sha256") or "")
         sources.append({
+            "asset_id": f"L05_{_safe(paper_id)}",
             "paper_id": paper_id,
             "doi": l05_multisource.normalize_doi(identifiers.get("doi")),
             "pmid": l05_multisource.normalize_pmid(identifiers.get("pmid")),
@@ -240,6 +241,27 @@ def _native_known_source_catalog(
     return catalog, (registry_entries, registry_receipt)
 
 
+def _cognitive_source_catalog(known_sources: dict) -> dict:
+    """Project controller state to the metadata-only L4A cognitive boundary."""
+    pack = known_sources.get("evidence_pack")
+    pack = pack if isinstance(pack, dict) else {}
+    allowed_source_fields = (
+        "asset_id", "paper_id", "doi", "pmid", "pmcid", "url",
+        "title", "year", "evidence_status",
+    )
+    return {
+        "evidence_pack": {
+            "pack_id": str(pack.get("pack_id") or ""),
+            "content_sha256": str(pack.get("content_sha256") or ""),
+        },
+        "sources": [
+            {key: source.get(key) for key in allowed_source_fields}
+            for source in known_sources.get("sources") or []
+            if isinstance(source, dict)
+        ],
+    }
+
+
 def build_prompt(
     question: str, claim: str, known_sources: dict | None = None
 ) -> str:
@@ -248,16 +270,15 @@ def build_prompt(
         known_block = f"""
 
 Frozen local-source catalog (metadata only; read-only):
-{_canonical_json(known_sources)}
+{_canonical_json(_cognitive_source_catalog(known_sources))}
 
 Local-source rules:
 1. Decide the method inventory from the scientific question and selected claim.
 2. The catalog may be used only to map an already identified method to a local
    paper. A paper appearing in the catalog does not authorize or require a method.
-3. Reuse an exact local DOI, PMID, PMCID, URL, or paper_id when it matches an
-   identified method. Do not invent or rewrite an identifier.
-4. The catalog is the complete literature input visible to this cognitive step.
-   Do not open source_path, do not read project files, and do not request full text.
+3. `source_asset_ids` may contain only exact `asset_id` values listed in this
+   catalog. If no local source matches, leave `source_asset_ids` empty.
+4. Do not invent or rewrite a paper identifier.
 """
     return f"""RLR stage: L4A Offline Method Inventory
 Scientific question: {question}
@@ -271,23 +292,20 @@ evidence anchors, or an analysis plan.
 
 This cognitive step is OFFLINE. Do not use network access. Do not search the web.
 Do not invoke browser, literature-search, PubMed, Crossref, OpenAlex, Semantic
-Scholar, Europe PMC, or any external metadata/retrieval tool. External metadata
-resolution, if needed, is performed deterministically after this response.
+Scholar, Europe PMC, or any external metadata/retrieval tool. Do not access the
+filesystem. The controller performs deterministic source mapping after this
+response.
 
-Only sources already present in the frozen local-source catalog may be emitted
-as `assets` or referenced in `source_asset_ids`. For methods without a matching
-local source, keep `source_asset_ids` and `source_hints` empty. Do not guess a
-paper title, DOI, PMID, PMCID, URL, or source identifier from model memory.
+`assets` MUST be an empty array. Every method's `source_hints` MUST be empty.
+For methods without a matching local `asset_id`, keep `source_asset_ids` empty.
+Do not guess a paper title, DOI, PMID, PMCID, URL, or source identifier from
+model memory.
 
-Return metadata only. Do not retrieve full text or emit source payloads,
-abstract-derived claims, or verbatim extracts. The `queries` array records this
-offline inventory operation; it must not represent an external search receipt.
-Your final response MUST contain JSON only and MUST conform exactly to the
-supplied output schema. Do not include prose, Markdown, code fences,
-commentary, or any text before or after the JSON object.
-For `source_metadata_response`, return the local catalog metadata object as one
-canonical JSON string: UTF-8, sorted keys, compact separators, finite JSON
-numbers, and no Markdown fences or explanatory text.
+Return metadata only. Do not retrieve or quote full text. The `queries` array
+records this offline inventory operation; it must not represent an external
+search receipt. Your final response MUST contain JSON only and MUST conform
+exactly to the supplied output schema. Do not include prose, Markdown, code
+fences, commentary, or any text before or after the JSON object.
 """
 
 
@@ -451,6 +469,61 @@ def _pseudo_asset(method: dict, hint: dict) -> dict:
     }
 
 
+def _catalog_asset(source: dict, pack: dict) -> dict:
+    """Materialize one frozen L0.5 source into the existing L4A asset contract."""
+    source_path = str(source.get("source_path") or "").strip()
+    url = str(source.get("url") or "").strip()
+    locations = []
+    for value in (source_path, url):
+        if value and value not in locations:
+            locations.append(value)
+    pmcid = l05_multisource.normalize_pmcid(source.get("pmcid"))
+    return {
+        "asset_id": str(source.get("asset_id") or ""),
+        "doi": l05_multisource.normalize_doi(source.get("doi")),
+        "pmid": l05_multisource.normalize_pmid(source.get("pmid")),
+        "url": url,
+        "title": str(source.get("title") or "").strip(),
+        "year": int(source.get("year") or 0),
+        "role": "unspecified",
+        "journal": "",
+        "abstract": "",
+        "source_database": "frozen_l05_evidence_pack",
+        "source_metadata_response": {
+            "paper_id": str(source.get("paper_id") or ""),
+            "pmcid": pmcid,
+            "evidence_pack_id": str(pack.get("pack_id") or ""),
+            "evidence_pack_content_sha256": str(pack.get("content_sha256") or ""),
+            "source_path": source_path,
+            "source_sha256": str(source.get("source_sha256") or ""),
+            "evidence_status": str(source.get("evidence_status") or ""),
+        },
+        "open_access_status": "open" if pmcid else "unknown",
+        "full_text_status": (
+            "available_local" if source_path else
+            "available_oa" if pmcid else
+            "metadata_only"
+        ),
+        "full_text_locations": locations,
+        "relevance_score": 0.0,
+        "selection_status": "reserve",
+        "selection_reason": "Frozen L0.5 source available for exact L4A method binding.",
+        "hypothesis_ids": [],
+        "method_component_hints": [],
+        "diagnostic_requirements": [],
+    }
+
+
+def _catalog_assets(known_sources: dict) -> list[dict]:
+    pack = known_sources.get("evidence_pack")
+    pack = pack if isinstance(pack, dict) else {}
+    return [
+        _catalog_asset(source, pack)
+        for source in known_sources.get("sources") or []
+        if isinstance(source, dict)
+    ]
+
+
 def _deduplicate_assets(l4p, assets: list[dict]) -> tuple[list[dict], list[dict], dict[str, str]]:
     deduplicated, duplicates = l4p.deduplicate_l4a_assets(
         l4p._normalize_l4a_assets(list(assets))
@@ -520,12 +593,8 @@ def _augment_assets(l4p, dr, assets: list[dict], inventory: list[dict]) -> tuple
     return final_assets, duplicates + later_duplicates, inventory
 
 
-def _normalized_method_name(value: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
-
-
 def _select_unambiguous_method_record(method_name: str, records: list[dict]) -> dict | None:
-    needle = _normalized_method_name(method_name)
+    needle = l4_method_registry._normalized_text(method_name)
     if not needle:
         return None
     matches = []
@@ -533,7 +602,8 @@ def _select_unambiguous_method_record(method_name: str, records: list[dict]) -> 
     for record in records:
         if not isinstance(record, dict):
             continue
-        if needle not in _normalized_method_name(record.get("title")):
+        title = l4_method_registry._normalized_text(record.get("title"))
+        if not title.startswith(needle):
             continue
         paper_id = str(record.get("paper_id") or "").strip()
         if not paper_id or paper_id in seen:
@@ -569,7 +639,7 @@ def _resolved_record_asset(record: dict, method_name: str) -> dict:
         "role": "method",
         "journal": str(metadata.get("journal") or "").strip(),
         "abstract": "",
-        "source_database": str(provenance.get("provider") or "pubmed"),
+        "source_database": str(provenance.get("provider") or "europe-pmc"),
         "source_metadata_response": {
             "paper_id": paper_id,
             "identifiers": copy.deepcopy(identifiers),
@@ -589,6 +659,11 @@ def _resolved_record_asset(record: dict, method_name: str) -> dict:
     }
 
 
+def _fixed_title_query(method_name: str) -> str:
+    clean = " ".join(str(method_name or "").replace('"', " ").split())
+    return f'TITLE:"{clean}"'
+
+
 def _resolve_missing_inventory_sources(
     project_dir: str | Path,
     candidate_id: str,
@@ -602,7 +677,7 @@ def _resolve_missing_inventory_sources(
         if method.get("source_asset_ids") or method.get("source_hints"):
             continue
         name = str(method.get("name") or "").strip()
-        key = _normalized_method_name(name)
+        key = l4_method_registry._normalized_text(name)
         if not key:
             continue
         if key not in unresolved_by_name:
@@ -611,12 +686,15 @@ def _resolve_missing_inventory_sources(
         unresolved_by_name[key].append(method)
 
     receipt = {
-        "resolver": "l05_curie.multisource.PubMedTransport/v1",
-        "queries": [],
+        "resolver": "europe-pmc",
+        "policy": "fixed-title-no-expansion",
+        "attempts": [],
         "gaps": [],
     }
     if not order:
         return result, [], receipt
+
+    from research_loop.l05_curie import europepmc
 
     run_id = "L4A_META_" + _sha(_canonical_json({
         "candidate_id": candidate_id,
@@ -624,41 +702,53 @@ def _resolve_missing_inventory_sources(
             str(unresolved_by_name[key][0].get("name") or "") for key in order
         ],
     }))[:16]
-    transport = l05_multisource.PubMedTransport(
+    transport = europepmc.EuropePmcTransport(
         project_dir,
         candidate_id=candidate_id,
         run_id=run_id,
+        timeout=20,
     )
     resolved_assets: dict[str, dict] = {}
 
     for index, key in enumerate(order, 1):
         methods = unresolved_by_name[key]
         method_name = str(methods[0].get("name") or "").strip()
+        method_ids = [str(method.get("method_id") or "") for method in methods]
         query_id = f"Q{index:03d}"
-        selected = None
+        query = _fixed_title_query(method_name)
         try:
             batch = transport.search({
                 "query_id": query_id,
-                "query": method_name,
+                "query": query,
                 "page_size": 5,
             })
-        except l05_multisource.CurieContractError:
+        except l05_multisource.CurieContractError as exc:
             batch = {"records": []}
+            transport_error = str(exc)
+        else:
+            transport_error = ""
         selected = _select_unambiguous_method_record(
             method_name, list(batch.get("records") or [])
         )
 
+        attempt = {
+            "method_ids": method_ids,
+            "method_name": method_name,
+            "query": query,
+            "status": "resolved" if selected is not None else "gap",
+        }
+        if isinstance(batch.get("receipt"), dict):
+            attempt["receipt"] = copy.deepcopy(batch["receipt"])
+        if transport_error:
+            attempt["error"] = transport_error
+        receipt["attempts"].append(attempt)
+
         if selected is None:
-            receipt["queries"].append({
-                "method_name": method_name,
-                "status": "gap",
-                "attempt_count": 1,
-                "paper_id": "",
-            })
             receipt["gaps"].append({
-                "method_ids": [str(method.get("method_id") or "") for method in methods],
+                "method_ids": method_ids,
                 "method_name": method_name,
-                "reason": "NO_UNAMBIGUOUS_METADATA_MATCH",
+                "query": query,
+                "reason": "no exact metadata match",
             })
             continue
 
@@ -668,26 +758,47 @@ def _resolve_missing_inventory_sources(
         asset_id = str(resolved_assets[paper_id]["asset_id"])
         for method in methods:
             method["source_asset_ids"] = [asset_id]
-        receipt["queries"].append({
-            "method_name": method_name,
-            "status": "resolved",
-            "attempt_count": 1,
-            "paper_id": paper_id,
-        })
 
     return result, list(resolved_assets.values()), receipt
 
 
 def _offline_provider_command(command: list[str], spec) -> list[str]:
-    """Enforce Codex L4A no-network/no-web policy at invocation time."""
+    """Enforce Codex L4A no-network/no-web and no-write policy at invocation time."""
     result = list(command)
     if str(getattr(spec, "backend", "")) == "codex":
         result.extend([
-            "--sandbox", "workspace-write",
-            "-c", "sandbox_workspace_write.network_access=false",
+            "--sandbox", "read-only",
             "-c", 'web_search="disabled"',
         ])
     return result
+
+
+def _validate_controller_boundary(canonical: dict, known_sources: dict, dr) -> list[dict]:
+    if canonical.get("assets"):
+        raise dr.DeepResearchError(
+            "native L4A cognition must return assets as an empty array"
+        )
+    allowed = {
+        str(source.get("asset_id") or "")
+        for source in known_sources.get("sources") or []
+        if isinstance(source, dict) and str(source.get("asset_id") or "")
+    }
+    inventory = copy.deepcopy(canonical["method_inventory"])
+    for method in inventory:
+        if method.get("source_hints"):
+            raise dr.DeepResearchError(
+                f"native L4A method {method['method_id']} must not emit source_hints"
+            )
+        unknown = [
+            str(asset_id)
+            for asset_id in method.get("source_asset_ids") or []
+            if str(asset_id) not in allowed
+        ]
+        if unknown:
+            raise dr.DeepResearchError(
+                f"native L4A method {method['method_id']} references unauthorized local asset {unknown[0]}"
+            )
+    return inventory
 
 
 def _manifest_base(
@@ -751,12 +862,19 @@ def persist_discovery(
     round_id: str = "",
     profile_id: str = "",
     registry_snapshot: tuple[list[dict], dict] | None = None,
+    known_sources: dict | None = None,
 ) -> dict:
     canonical = _validate_inventory_payload(l4p, dr, payload)
+    if known_sources is None:
+        cognitive_inventory = canonical["method_inventory"]
+        initial_assets = canonical["assets"]
+    else:
+        cognitive_inventory = _validate_controller_boundary(canonical, known_sources, dr)
+        initial_assets = _catalog_assets(known_sources)
     try:
         registry_inventory, registry_receipt = l4_method_registry.apply_registry(
             project_dir,
-            canonical["method_inventory"],
+            cognitive_inventory,
             loaded_registry=registry_snapshot,
         )
     except l4_method_registry.MethodRegistryError as exc:
@@ -764,7 +882,7 @@ def persist_discovery(
     assets, duplicates, inventory = _augment_assets(
         l4p,
         dr,
-        canonical["assets"],
+        initial_assets,
         registry_inventory,
     )
     inventory, resolved_assets, resolution_receipt = _resolve_missing_inventory_sources(
@@ -894,8 +1012,11 @@ def run_discovery(
     command[0] = dr.resolve_subprocess_executable(command[0])
     execution_command, invocation_kwargs = dr.subprocess_invocation(command, prompt)
     completed = dr.execute_provider_invocation(
-        execution_command, invocation_kwargs, timeout=spec.timeout,
-        label='L4A method-inventory CLI',
+        execution_command,
+        invocation_kwargs,
+        timeout=spec.timeout,
+        label="L4A method-inventory CLI",
+        cwd=work,
     )
     receipt = dr.skill_receipt(
         spec.backend,
@@ -936,6 +1057,7 @@ def run_discovery(
         round_id=round_id,
         profile_id=profile_id,
         registry_snapshot=registry_snapshot,
+        known_sources=known_sources,
     )
 
 
