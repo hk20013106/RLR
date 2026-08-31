@@ -547,8 +547,23 @@ def _remap_inventory(inventory: list[dict], aliases: dict[str, str]) -> list[dic
     return result
 
 
-def _augment_assets(l4p, dr, assets: list[dict], inventory: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
-    assets, duplicates, aliases = _deduplicate_assets(l4p, assets)
+def _augment_assets(
+    l4p,
+    dr,
+    assets: list[dict],
+    inventory: list[dict],
+    *,
+    deduplicate: bool = True,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    if deduplicate:
+        assets, duplicates, aliases = _deduplicate_assets(l4p, assets)
+    else:
+        # Canonical multisource records already carry the sole paper identity
+        # and cross-provider deduplication result.  Normalize the provider wire
+        # form for persistence, but do not ask L4A to create a second identity
+        # graph or duplicate receipt.
+        assets = l4p._normalize_l4a_assets(list(assets))
+        duplicates, aliases = [], {}
     inventory = _remap_inventory(inventory, aliases)
     by_id = {str(asset["asset_id"]): asset for asset in assets}
     identities = {_asset_identity(asset): str(asset["asset_id"]) for asset in assets}
@@ -588,9 +603,11 @@ def _augment_assets(l4p, dr, assets: list[dict], inventory: list[dict]) -> tuple
                 linked_ids.append(asset_id)
         method["source_asset_ids"] = linked_ids
 
-    final_assets, later_duplicates, later_aliases = _deduplicate_assets(l4p, assets)
-    inventory = _remap_inventory(inventory, later_aliases)
-    return final_assets, duplicates + later_duplicates, inventory
+    if deduplicate:
+        final_assets, later_duplicates, later_aliases = _deduplicate_assets(l4p, assets)
+        inventory = _remap_inventory(inventory, later_aliases)
+        return final_assets, duplicates + later_duplicates, inventory
+    return l4p._normalize_l4a_assets(list(assets)), duplicates, inventory
 
 
 def _select_unambiguous_method_record(method_name: str, records: list[dict]) -> dict | None:
@@ -870,6 +887,7 @@ def persist_discovery(
     profile_id: str = "",
     registry_snapshot: tuple[list[dict], dict] | None = None,
     known_sources: dict | None = None,
+    deduplicate_assets: bool = True,
 ) -> dict:
     canonical = _validate_inventory_payload(l4p, dr, payload)
     if known_sources is None:
@@ -891,6 +909,7 @@ def persist_discovery(
         dr,
         initial_assets,
         registry_inventory,
+        deduplicate=deduplicate_assets,
     )
     resolution_receipt = None
     if known_sources is not None:

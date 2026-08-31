@@ -9,6 +9,8 @@ from research_loop import l4_inventory
 from research_loop import l4_method_registry
 from research_loop import l4_pipeline as l4p
 from research_loop import research_seed
+import research_loop.l4_contextual_literature as contextual
+from research_loop.l05_curie import multisource
 
 
 def _registry_receipt():
@@ -74,6 +76,31 @@ def _empty_catalog():
     return catalog
 
 
+def _seed():
+    return {
+        "schema_version": "L1ResearchSeed/v1",
+        "candidate_id": "C1",
+        "round_id": "1",
+        "round_type": "initial",
+        "scientific_question": "How do mammals use cross-species transcriptomics to adapt cardiac expression?",
+        "hypothesis_seed": "Ortholog-aware normalization reveals convergent cardiac transcriptional adaptations.",
+        "l0_contract_schema_version": "L0InputContract/v1.1",
+        "l0_contract_path": "00_Preflight/C1.json",
+        "l0_contract_sha256": "f" * 64,
+    }
+
+
+def _method(method_id, name, *, source_asset_ids=None):
+    return {
+        "method_id": method_id,
+        "name": name,
+        "purpose": f"Use {name} for the selected hypothesis.",
+        "inventory_reason": f"{name} is required by the selected hypothesis.",
+        "source_asset_ids": list(source_asset_ids or []),
+        "source_hints": [],
+    }
+
+
 def _provider_payload(methods):
     return {
         "schema_version": l4p.L4A_DISCOVERY_SCHEMA_VERSION,
@@ -89,14 +116,21 @@ def _provider_payload(methods):
     }
 
 
-def _method(method_id, name, *, source_asset_ids=None):
+def _planner_query(query_id, query, method_ids):
     return {
-        "method_id": method_id,
-        "name": name,
-        "purpose": f"Use {name} for the selected hypothesis.",
-        "inventory_reason": f"{name} is required by the selected hypothesis.",
-        "source_asset_ids": list(source_asset_ids or []),
-        "source_hints": [],
+        "query_id": query_id,
+        "query": query,
+        "purpose": "Find comparable studies that used the unresolved analysis action.",
+        "status": "planned",
+        "receipt": "contextual query planner",
+        "method_ids": list(method_ids),
+    }
+
+
+def _planner_payload(queries):
+    return {
+        "schema_version": "L4AContextualQueryPlan/v1",
+        "queries": list(queries),
     }
 
 
@@ -110,7 +144,7 @@ def _search_asset(asset_id, title, *, method_ids, doi="10.1000/contextual"):
         "year": 2024,
         "journal": "Methods",
         "role": "method",
-        "abstract": "",
+        "abstract": "A contextual method paper.",
         "source_database": "academic-research-suite",
         "source_metadata_response": json.dumps(
             {"id": asset_id, "title": title},
@@ -129,18 +163,20 @@ def _search_asset(asset_id, title, *, method_ids, doi="10.1000/contextual"):
     }
 
 
-def _search_payload(assets, *, query="cross-species transcriptomics similar-study methods"):
-    return {
-        "schema_version": l4p.L4A_DISCOVERY_SCHEMA_VERSION,
-        "queries": [{
-            "query_id": "CTX001",
-            "query": query,
-            "purpose": "Find methods actually used in similar studies.",
-            "status": "completed",
-            "receipt": "academic-research-suite contextual literature search",
-        }],
-        "assets": list(assets),
-    }
+def _canonical_record(
+    *,
+    doi="10.5555/contextual",
+    title="Cross-species transcriptomics in comparable mammalian studies",
+):
+    record = multisource.canonicalize_crossref_record({
+        "DOI": doi,
+        "title": [title],
+        "author": [{"family": "Researcher"}],
+        "published": {"date-parts": [[2024]]},
+        "abstract": "Comparable mammalian studies use ortholog-aware transcriptomics normalization.",
+    })
+    record["provenance"]["originating_query_ids"] = ["Q001"]
+    return record
 
 
 def _install_provider_sequence(monkeypatch, payloads, captured):
@@ -172,6 +208,83 @@ def _install_provider_sequence(monkeypatch, payloads, captured):
 
     monkeypatch.setattr(dr, "subprocess_invocation", subprocess_invocation)
     monkeypatch.setattr(dr, "execute_provider_invocation", execute_provider_invocation)
+
+
+def _install_native_seed(monkeypatch):
+    seed = _seed()
+    monkeypatch.setattr(research_seed, "load_l1_research_seed", lambda *args: seed)
+    return seed
+
+
+def _install_multisource(monkeypatch, records, *, failures=None):
+    observed = {}
+    original_build = multisource.build_multisource_query_plan
+
+    def build_plan(seed, *, seed_sha256, round_index=1, explicit_queries=None, providers=None):
+        observed["seed"] = seed
+        observed["seed_sha256"] = seed_sha256
+        observed["explicit_queries"] = list(explicit_queries or [])
+        observed["providers"] = list(providers or [])
+        return original_build(
+            seed,
+            seed_sha256=seed_sha256,
+            round_index=round_index,
+            explicit_queries=explicit_queries,
+            providers=providers,
+        )
+
+    def run_discovery(plan, transports, *, seed_sha256, page_size=25, allow_partial=False):
+        observed["plan"] = plan
+        observed["transports"] = dict(transports)
+        observed["allow_partial"] = allow_partial
+        return {
+            "schema_version": "L05MultiSourceDiscovery/v1",
+            "query_plan_id": plan["plan_id"],
+            "batches": [],
+            "records": [json.loads(json.dumps(item)) for item in records],
+            "duplicate_paper_ids": [],
+            "failures": list(failures or []),
+        }
+
+    monkeypatch.setattr(multisource, "build_multisource_query_plan", build_plan)
+    monkeypatch.setattr(multisource, "run_multisource_discovery_strict", run_discovery)
+    return observed
+
+
+def _run_native(
+    monkeypatch,
+    tmp_path,
+    payloads,
+    *,
+    catalog=None,
+    registry_snapshot=None,
+    question=None,
+):
+    _install_native_seed(monkeypatch)
+    captured = {}
+    _install_provider_sequence(monkeypatch, payloads, captured)
+    monkeypatch.setattr(
+        l4_inventory,
+        "_native_known_source_catalog",
+        lambda *args: (
+            catalog or _empty_catalog(),
+            registry_snapshot or ([], _registry_receipt()),
+        ),
+    )
+    manifest = l4_inventory.run_discovery(
+        l4p,
+        dr,
+        tmp_path,
+        "C1",
+        question or _seed()["scientific_question"],
+        _seed()["hypothesis_seed"],
+        dr.RuntimeSpec("codex", "codex", timeout=3),
+        tmp_path / "work",
+        project_id="P1",
+        round_id="1",
+        profile_id="v2.1-catalog-1",
+    )
+    return manifest, captured
 
 
 def test_native_catalog_keeps_registry_out_of_cognitive_context(monkeypatch, tmp_path):
@@ -269,24 +382,54 @@ def test_l4a_prompt_is_offline_inventory_only():
     assert "extract" not in prompt
 
 
-def test_local_identifier_reuse_skips_contextual_search(monkeypatch, tmp_path):
-    catalog = _local_catalog()
-    registry_snapshot = ([], _registry_receipt())
+def test_contextual_provider_is_a_query_planner_and_cannot_return_assets():
+    payload = _planner_payload([
+        _planner_query("Q001", "cross species transcriptomics normalization", ["novel_a"]),
+    ])
+    payload["assets"] = [
+        _search_asset(
+            "PROVIDER_PAPER",
+            "Provider-created paper must be rejected",
+            method_ids=["novel_a"],
+        )
+    ]
+
+    with pytest.raises(dr.DeepResearchError, match="assets"):
+        contextual._validate_contextual_payload(l4p, dr, payload, ["novel_a"])
+
+
+def test_contextual_prompt_forbids_provider_literature_retrieval():
+    prompt = contextual._contextual_prompt(
+        "Q",
+        "H",
+        [_method("novel_a", "Cross-species expression normalization")],
+        "codex",
+    )
+    lowered = prompt.casefold()
+
+    assert "query planning" in lowered
+    assert "$academic-research-suite" not in lowered
+    assert "return only contextual queries" in lowered
+    assert "do not return" in lowered
+    assert "doi" in lowered
+    assert "paper title" in lowered
+
+
+def test_local_identifier_reuse_skips_contextual_query_planning(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        multisource,
+        "build_multisource_query_plan",
+        lambda *args, **kwargs: pytest.fail("local literature must not create a query plan"),
+    )
     payload = _provider_payload([
         _method("gsea", "Gene set enrichment analysis", source_asset_ids=["L05_P_GSEA"]),
     ])
-    captured = {}
-    _install_provider_sequence(monkeypatch, [payload], captured)
-    monkeypatch.setattr(
-        l4_inventory,
-        "_native_known_source_catalog",
-        lambda *args: (catalog, registry_snapshot),
-    )
-
-    manifest = l4_inventory.run_discovery(
-        l4p, dr, tmp_path, "C1", "Q", "H",
-        dr.RuntimeSpec("codex", "codex", timeout=3), tmp_path / "work",
-        project_id="P1", round_id="1", profile_id="v2.1-catalog-1",
+    manifest, captured = _run_native(
+        monkeypatch,
+        tmp_path,
+        [payload],
+        catalog=_local_catalog(),
+        registry_snapshot=([], _registry_receipt()),
     )
 
     assert len(captured["prompts"]) == 1
@@ -294,27 +437,24 @@ def test_local_identifier_reuse_skips_contextual_search(monkeypatch, tmp_path):
     assert manifest["assets"][0]["doi"] == "10.1073/pnas.0506580102"
 
 
-def test_registry_resolution_happens_after_cognition_without_contextual_search(monkeypatch, tmp_path):
-    catalog = _local_catalog()
+def test_registry_resolution_happens_without_contextual_query_planning(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        multisource,
+        "run_multisource_discovery_strict",
+        lambda *args, **kwargs: pytest.fail("registry-resolved methods must not search"),
+    )
     receipt = _registry_receipt()
     receipt["canonical_method_ids"] = ["deseq2"]
-    registry_snapshot = ([_registry_entry()], receipt)
     payload = _provider_payload([
         _method("deseq2", "DESeq2"),
         _method("gsea", "Gene set enrichment analysis", source_asset_ids=["L05_P_GSEA"]),
     ])
-    captured = {}
-    _install_provider_sequence(monkeypatch, [payload], captured)
-    monkeypatch.setattr(
-        l4_inventory,
-        "_native_known_source_catalog",
-        lambda *args: (catalog, registry_snapshot),
-    )
-
-    manifest = l4_inventory.run_discovery(
-        l4p, dr, tmp_path, "C1", "Q", "H",
-        dr.RuntimeSpec("codex", "codex", timeout=3), tmp_path / "work",
-        project_id="P1", round_id="1", profile_id="v2.1-catalog-1",
+    manifest, captured = _run_native(
+        monkeypatch,
+        tmp_path,
+        [payload],
+        catalog=_local_catalog(),
+        registry_snapshot=([_registry_entry()], receipt),
     )
 
     assert len(captured["prompts"]) == 1
@@ -326,110 +466,170 @@ def test_registry_resolution_happens_after_cognition_without_contextual_search(m
     }]
 
 
-def test_unresolved_methods_use_one_contextual_similar_study_search(monkeypatch, tmp_path):
-    catalog = _local_catalog()
-    registry_snapshot = ([], _registry_receipt())
+def test_unresolved_methods_use_explicit_queries_in_canonical_multisource(monkeypatch, tmp_path):
     offline = _provider_payload([
         _method("novel_a", "Cross-species expression normalization"),
         _method("novel_b", "Phylogenetic comparative model"),
         _method("gsea", "Gene set enrichment analysis", source_asset_ids=["L05_P_GSEA"]),
     ])
-    contextual = _search_payload([
-        _search_asset(
-            "CTX_P1",
-            "A comparative transcriptomics framework across mammalian species",
-            method_ids=["novel_a", "novel_b"],
+    planner = _planner_payload([
+        _planner_query(
+            "PLAN_A",
+            "cross species transcriptomics ortholog normalization mammals",
+            ["novel_a", "novel_b"],
         ),
     ])
-    captured = {}
-    _install_provider_sequence(monkeypatch, [offline, contextual], captured)
-    monkeypatch.setattr(
-        l4_inventory,
-        "_native_known_source_catalog",
-        lambda *args: (catalog, registry_snapshot),
-    )
-
-    manifest = l4_inventory.run_discovery(
-        l4p, dr, tmp_path, "C1", "Cross-species transcriptome question", "H",
-        dr.RuntimeSpec("codex", "codex", timeout=3), tmp_path / "work",
-        project_id="P1", round_id="1", profile_id="v2.1-catalog-1",
+    record = _canonical_record()
+    observed = _install_multisource(monkeypatch, [record])
+    manifest, captured = _run_native(
+        monkeypatch,
+        tmp_path,
+        [offline, planner],
+        catalog=_local_catalog(),
+        registry_snapshot=([], _registry_receipt()),
+        question="Cross-species transcriptome question",
     )
 
     assert len(captured["prompts"]) == 2
-    search_prompt = captured["prompts"][1]
-    assert "Cross-species transcriptome question" in search_prompt
-    assert "novel_a" in search_prompt
-    assert "Cross-species expression normalization" in search_prompt
-    assert "novel_b" in search_prompt
-    assert "Phylogenetic comparative model" in search_prompt
-    assert "similar studies" in search_prompt.casefold()
-    assert 'TITLE:"' not in search_prompt
+    planner_prompt = captured["prompts"][1].casefold()
+    assert "query planning" in planner_prompt
+    assert "$academic-research-suite" not in planner_prompt
+    assert "novel_a" in planner_prompt
+    assert "novel_b" in planner_prompt
+    assert "assets" in planner_prompt
+    assert 'TITLE:"' not in planner_prompt
+
+    assert observed["explicit_queries"] == [
+        "cross species transcriptomics ortholog normalization mammals"
+    ]
+    assert set(observed["providers"]) == {
+        "europe-pmc", "pubmed", "openalex", "crossref", "semantic-scholar",
+    }
+    assert set(observed["transports"]) == set(observed["providers"])
+    assert observed["allow_partial"] is True
 
     methods = {item["method_id"]: item for item in manifest["method_inventory"]}
-    assert methods["novel_a"]["source_asset_ids"] == ["CTX_P1"]
-    assert methods["novel_b"]["source_asset_ids"] == ["CTX_P1"]
+    assert methods["novel_a"]["source_asset_ids"] == [record["paper_id"]]
+    assert methods["novel_b"]["source_asset_ids"] == [record["paper_id"]]
     assert methods["gsea"]["source_asset_ids"] == ["L05_P_GSEA"]
-    assert "metadata_resolution" not in manifest["runtime_receipt"]
-    contextual_receipt = manifest["runtime_receipt"]["contextual_literature_search"]
-    assert contextual_receipt["method_ids"] == ["novel_a", "novel_b"]
-    assert contextual_receipt["query_ids"] == ["CTX001"]
+    contextual_asset = next(
+        asset for asset in manifest["assets"]
+        if asset["asset_id"] == record["paper_id"]
+    )
+    assert contextual_asset["asset_id"] == record["paper_id"]
+    receipt = manifest["runtime_receipt"]["contextual_literature_search"]
+    assert receipt["planner_query_ids"] == ["PLAN_A"]
+    assert receipt["query_plan"]["queries"][0]["query"] == observed["plan"]["queries"][0]["query"]
+    assert receipt["discovery"]["query_plan_id"] == observed["plan"]["plan_id"]
 
 
-def test_contextual_search_miss_is_persisted_as_unresolved_inventory(monkeypatch, tmp_path):
-    catalog = _local_catalog()
-    registry_snapshot = ([], _registry_receipt())
-    offline = _provider_payload([
-        _method("unfindable", "UnfindableMethod"),
-        _method("gsea", "Gene set enrichment analysis", source_asset_ids=["L05_P_GSEA"]),
+def test_contextual_discovery_uses_multisource_deduped_identity_without_l4a_dedup(monkeypatch, tmp_path):
+    offline = _provider_payload([_method("novel_a", "Cross-species expression normalization")])
+    planner = _planner_payload([
+        _planner_query("PLAN_A", "cross species expression normalization mammals", ["novel_a"]),
     ])
-    contextual = _search_payload([], query="contextual search with no retained source")
-    captured = {}
-    _install_provider_sequence(monkeypatch, [offline, contextual], captured)
-    monkeypatch.setattr(
-        l4_inventory,
-        "_native_known_source_catalog",
-        lambda *args: (catalog, registry_snapshot),
-    )
-
-    manifest = l4_inventory.run_discovery(
-        l4p, dr, tmp_path, "C1", "Q", "H",
-        dr.RuntimeSpec("codex", "codex", timeout=3), tmp_path / "work",
-        project_id="P1", round_id="1", profile_id="v2.1-catalog-1",
-    )
-
-    unresolved = next(
-        item for item in manifest["method_inventory"]
-        if item["method_id"] == "unfindable"
-    )
-    assert unresolved["source_asset_ids"] == []
-    assert unresolved["source_hints"] == []
-    assert manifest["runtime_receipt"]["contextual_literature_search"]["method_ids"] == [
-        "unfindable"
+    record = _canonical_record()
+    record["provenance"]["source_records"] = [
+        {"provider": "crossref", "raw_record_sha256": "a" * 64},
+        {"provider": "pubmed", "raw_record_sha256": "b" * 64},
+        {"provider": "openalex", "raw_record_sha256": "c" * 64},
     ]
-    assert "metadata_resolution" not in manifest["runtime_receipt"]
-
-
-def test_all_contextual_misses_still_persist_l4a_manifest(monkeypatch, tmp_path):
-    catalog = _empty_catalog()
-    registry_snapshot = ([], _registry_receipt())
-    offline = _provider_payload([
-        _method("unfindable", "UnfindableMethod"),
-    ])
-    contextual = _search_payload([], query="contextual search with no retained source")
-    captured = {}
-    _install_provider_sequence(monkeypatch, [offline, contextual], captured)
+    _install_multisource(monkeypatch, [record])
     monkeypatch.setattr(
-        l4_inventory,
-        "_native_known_source_catalog",
-        lambda *args: (catalog, registry_snapshot),
+        l4p,
+        "deduplicate_l4a_assets",
+        lambda *args, **kwargs: pytest.fail("L4A must not deduplicate canonical multisource records"),
     )
 
-    manifest = l4_inventory.run_discovery(
-        l4p, dr, tmp_path, "C1", "Q", "H",
-        dr.RuntimeSpec("codex", "codex", timeout=3), tmp_path / "work",
-        project_id="P1", round_id="1", profile_id="v2.1-catalog-1",
+    manifest, _captured = _run_native(
+        monkeypatch,
+        tmp_path,
+        [offline, planner],
+        catalog=_empty_catalog(),
+        registry_snapshot=([], _registry_receipt()),
+    )
+
+    assert manifest["assets"][0]["asset_id"] == record["paper_id"]
+    assert manifest["assets"][0]["source_metadata_response"]["provenance"]["source_records"] == record["provenance"]["source_records"]
+
+
+def test_one_multisource_record_can_be_candidate_support_for_multiple_methods(monkeypatch, tmp_path):
+    offline = _provider_payload([
+        _method("novel_a", "Cross-species expression normalization"),
+        _method("novel_b", "Phylogenetic comparative model"),
+    ])
+    planner = _planner_payload([
+        _planner_query("PLAN_A", "comparative transcriptomics phylogenetic mammals", ["novel_a", "novel_b"]),
+    ])
+    record = _canonical_record(title="Comparative transcriptomics and phylogenetic analysis in mammals")
+    _install_multisource(monkeypatch, [record])
+
+    manifest, _captured = _run_native(
+        monkeypatch,
+        tmp_path,
+        [offline, planner],
+        catalog=_empty_catalog(),
+        registry_snapshot=([], _registry_receipt()),
+    )
+
+    methods = {item["method_id"]: item for item in manifest["method_inventory"]}
+    assert methods["novel_a"]["source_asset_ids"] == [record["paper_id"]]
+    assert methods["novel_b"]["source_asset_ids"] == [record["paper_id"]]
+    assert manifest["assets"][0]["method_component_hints"] == ["novel_a", "novel_b"]
+
+
+def test_zero_multisource_results_keep_methods_unresolved_and_persist_manifest(monkeypatch, tmp_path):
+    offline = _provider_payload([_method("unfindable", "Unfindable analysis action")])
+    planner = _planner_payload([
+        _planner_query("PLAN_A", "similar study unfindable analysis action", ["unfindable"]),
+    ])
+    _install_multisource(
+        monkeypatch,
+        [],
+        failures=[{
+            "provider": "semantic-scholar",
+            "query_id": "Q001",
+            "error": "transport unavailable",
+        }],
+    )
+
+    manifest, _captured = _run_native(
+        monkeypatch,
+        tmp_path,
+        [offline, planner],
+        catalog=_empty_catalog(),
+        registry_snapshot=([], _registry_receipt()),
     )
 
     assert manifest["selected_asset_ids"] == []
     assert manifest["method_inventory"][0]["source_asset_ids"] == []
     assert (tmp_path / manifest["path"]).is_file()
+    receipt = manifest["runtime_receipt"]["contextual_literature_search"]
+    assert receipt["discovery"]["records"] == []
+    assert receipt["discovery"]["failures"][0]["provider"] == "semantic-scholar"
+
+
+def test_contextual_path_never_uses_exact_title_method_resolver(monkeypatch, tmp_path):
+    offline = _provider_payload([_method("novel_a", "Abstract cross-species method")])
+    planner = _planner_payload([
+        _planner_query("PLAN_A", "cross species study method normalization", ["novel_a"]),
+    ])
+    _install_multisource(monkeypatch, [_canonical_record()])
+    monkeypatch.setattr(
+        l4_inventory,
+        "_fixed_title_query",
+        lambda *args, **kwargs: pytest.fail('TITLE:"MethodName" resolver must be retired'),
+    )
+
+    manifest, _captured = _run_native(
+        monkeypatch,
+        tmp_path,
+        [offline, planner],
+        catalog=_empty_catalog(),
+        registry_snapshot=([], _registry_receipt()),
+    )
+
+    assert all(
+        'TITLE:"' not in str(item.get("query") or "")
+        for item in manifest["runtime_receipt"]["contextual_literature_search"]["query_plan"]["queries"]
+    )

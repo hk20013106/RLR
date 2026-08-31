@@ -306,9 +306,9 @@ def install(registry_module, inventory_module) -> None:
             loaded_registry=loaded_registry,
         )
 
-    def augment_assets(l4p, dr, assets, inventory):
+    def augment_assets(l4p, dr, assets, inventory, *, deduplicate=True):
         final_assets, duplicates, final_inventory = original_augment(
-            l4p, dr, assets, inventory
+            l4p, dr, assets, inventory, deduplicate=deduplicate
         )
         by_id = {
             str(asset.get("asset_id") or ""): asset
