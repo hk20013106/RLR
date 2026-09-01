@@ -275,6 +275,25 @@ def _build_selector_scorer(methods: list[dict], planner_queries: list[dict]):
     return score
 
 
+def _l4b_retrievable(record: dict) -> tuple[bool, str]:
+    """Require a locator that the native L4B source contract can consume."""
+
+    identifiers = record.get("identifiers")
+    if not isinstance(identifiers, dict):
+        identifiers = {}
+
+    if any(
+        (
+            multisource.normalize_doi(identifiers.get("doi")),
+            multisource.normalize_pmid(identifiers.get("pmid")),
+            multisource.normalize_pmcid(identifiers.get("pmcid")),
+        )
+    ):
+        return True, "L4A_RETRIEVABLE_SOURCE"
+
+    return False, "NO_L4B_RETRIEVAL_LOCATOR"
+
+
 def _record_asset(l4_inventory_module, record: dict, method_ids: list[str]) -> dict:
     identifiers = record.get("identifiers")
     identifiers = identifiers if isinstance(identifiers, dict) else {}
@@ -679,7 +698,7 @@ def install(l4_inventory_module, deep_research_module) -> None:
                     list(discovery.get("records") or []),
                     seed=seed,
                     scorer=_build_selector_scorer(unresolved, planner_queries),
-                    eligibility=lambda record: (True, "L4A_CONTEXTUAL_METADATA"),
+                    eligibility=_l4b_retrievable,
                     max_papers=_CONTEXTUAL_MAX_PAPERS,
                     project_dir=project_dir,
                     candidate_id=candidate_id,

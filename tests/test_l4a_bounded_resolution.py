@@ -179,6 +179,27 @@ def _canonical_record(
     return record
 
 
+def _canonical_record_with_identifiers(paper_id, identifiers):
+    return {
+        "paper_id": paper_id,
+        "title": f"Contextual method paper {paper_id}",
+        "identifiers": dict(identifiers),
+        "metadata": {
+            "abstract": "Comparable mammalian studies use this method.",
+            "authors": "Researcher",
+            "year": "2024",
+            "journal": "Methods",
+            "is_open_access": bool(identifiers.get("pmcid")),
+            "publication_types": ["journal article"],
+        },
+        "provenance": {
+            "provider": "test-provider",
+            "originating_query_ids": ["Q001"],
+            "source_records": [{"provider": "test-provider"}],
+        },
+    }
+
+
 def _install_provider_sequence(monkeypatch, payloads, captured):
     monkeypatch.setattr(
         dr,
@@ -633,3 +654,129 @@ def test_contextual_path_never_uses_exact_title_method_resolver(monkeypatch, tmp
         'TITLE:"' not in str(item.get("query") or "")
         for item in manifest["runtime_receipt"]["contextual_literature_search"]["query_plan"]["queries"]
     )
+
+
+@pytest.mark.parametrize(
+    ("label", "identifiers", "expected_decision", "expected_reason"),
+    [
+        (
+            "openalex-only",
+            {"openalex_id": "W3114257308"},
+            "EXCLUDE",
+            "NO_L4B_RETRIEVAL_LOCATOR",
+        ),
+        (
+            "doi",
+            {"doi": "10.1000/retrievable-doi"},
+            "INCLUDE",
+            None,
+        ),
+        (
+            "pmcid",
+            {"pmcid": "PMC1234567"},
+            "INCLUDE",
+            None,
+        ),
+        (
+            "semantic-scholar-only",
+            {"semantic_scholar_paper_id": "S2PAPER"},
+            "EXCLUDE",
+            "NO_L4B_RETRIEVAL_LOCATOR",
+        ),
+    ],
+)
+def test_contextual_selector_requires_l4b_retrieval_locator(
+    monkeypatch,
+    tmp_path,
+    label,
+    identifiers,
+    expected_decision,
+    expected_reason,
+):
+    offline = _provider_payload([_method("novel_a", "Contextual method")])
+    planner = _planner_payload([
+        _planner_query("PLAN_A", "contextual method paper", ["novel_a"]),
+    ])
+    record = _canonical_record_with_identifiers(f"P_{label}", identifiers)
+    _install_multisource(monkeypatch, [record])
+    manifest, _captured = _run_native(
+        monkeypatch,
+        tmp_path,
+        [offline, planner],
+        catalog=_empty_catalog(),
+        registry_snapshot=([], _registry_receipt()),
+    )
+
+    selection = manifest["runtime_receipt"]["contextual_literature_search"]["selection"]
+    decision = selection["decisions"][0]
+    assert decision["paper_id"] == record["paper_id"]
+    assert decision["decision"] == expected_decision
+    if expected_reason:
+        assert decision["reason_code"] == expected_reason
+        assert record["paper_id"] not in selection["included_paper_ids"]
+        assert record["paper_id"] not in {
+            asset["asset_id"] for asset in manifest["assets"]
+        }
+    else:
+        assert record["paper_id"] in selection["included_paper_ids"]
+
+
+def test_contextual_selector_closes_native_l4b_manifest_after_filtering(
+    monkeypatch, tmp_path
+):
+    offline = _provider_payload([_method("novel_a", "Contextual method")])
+    planner = _planner_payload([
+        _planner_query("PLAN_A", "contextual method paper", ["novel_a"]),
+    ])
+    invalid = _canonical_record_with_identifiers(
+        "P_OPENALEX_ONLY", {"openalex_id": "W3114257308"}
+    )
+    valid_records = [
+        _canonical_record_with_identifiers(
+            f"P_VALID_{index}", {"doi": f"10.1000/contextual-{index}"}
+        )
+        for index in range(285)
+    ]
+    records = [invalid, *valid_records]
+    _install_multisource(monkeypatch, records)
+
+    def scorer(record, _seed):
+        return {
+            "relevance": 1.0 if record["paper_id"] == invalid["paper_id"] else 0.5,
+            "directness": 1.0,
+            "methodological_value": 1.0,
+            "contradiction_value": 0.0,
+            "evidence_diversity": 1.0,
+            "reason": "Deterministic integration-test score.",
+        }
+
+    monkeypatch.setattr(contextual, "_build_selector_scorer", lambda *_: scorer)
+    manifest, _captured = _run_native(
+        monkeypatch,
+        tmp_path,
+        [offline, planner],
+        catalog=_empty_catalog(),
+        registry_snapshot=([], _registry_receipt()),
+    )
+
+    contextual_receipt = manifest["runtime_receipt"]["contextual_literature_search"]
+    selection = contextual_receipt["selection"]
+    assert len(contextual_receipt["discovery"]["records"]) == 286
+    assert len(selection["decisions"]) == 286
+    invalid_decision = next(
+        item for item in selection["decisions"]
+        if item["paper_id"] == invalid["paper_id"]
+    )
+    assert invalid_decision["decision"] == "EXCLUDE"
+    assert invalid_decision["reason_code"] == "NO_L4B_RETRIEVAL_LOCATOR"
+    assert invalid["paper_id"] not in selection["included_paper_ids"]
+    assert len(selection["included_paper_ids"]) == 5
+
+    selected = [
+        asset for asset in manifest["assets"]
+        if asset["asset_id"] in manifest["selected_asset_ids"]
+    ]
+    assert len(selected) == 5
+    assert all(asset.get("doi") or asset.get("pmid") or asset.get("pmcid") or asset.get("url") for asset in selected)
+    ok, reason = l4p.validate_native_l4a_manifest(tmp_path, manifest)
+    assert (ok, reason) == (True, "")
