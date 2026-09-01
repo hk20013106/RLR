@@ -60,6 +60,7 @@ jobs:
           tests/test_l05_curie_gap_loop.py
           tests/test_l05_curie_native_runtime.py
           tests/test_l05_curie_multisource_discovery.py
+          tests/test_l05_curie_provider_alias_identity.py
           tests/test_l05_curie_canonical_identity_integration.py
           tests/test_l05_curie_provenance_hardening.py
           tests/test_l05_curie_selector.py
