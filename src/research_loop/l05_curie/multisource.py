@@ -29,14 +29,13 @@ from .contracts import (
 )
 HttpGet = Callable[[str, int], bytes]
 _PROVIDERS = ("europe-pmc", "pubmed", "openalex", "crossref", "semantic-scholar")
-_STABLE_NAMESPACES = (
-    "doi",
-    "pmid",
-    "pmcid",
+_CANONICAL_ID_NAMESPACES = ("doi", "pmid", "pmcid")
+_PROVIDER_ALIAS_NAMESPACES = (
     "openalex_id",
     "semantic_scholar_paper_id",
     "semantic_scholar_corpus_id",
 )
+_STABLE_NAMESPACES = _CANONICAL_ID_NAMESPACES + _PROVIDER_ALIAS_NAMESPACES
 _AUDIT_ROOT = Path("08_Audit") / "l05_acquisition"
 _SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
 _YEAR = re.compile(r"(?:19|20)\d{2}")
@@ -96,9 +95,13 @@ def normalize_pmcid(value: object) -> str:
     return text if re.fullmatch(r"PMC\d+", text) else ""
 
 
+def _normalized_title(value: object) -> str:
+    return " ".join(str(value or "").casefold().split())
+
+
 def _metadata_fingerprint(title: str, year: str = "", authors: str = "") -> str:
     return _sha({
-        "title": " ".join(title.casefold().split()),
+        "title": _normalized_title(title),
         "year": year,
         "first_author": authors.split(",", 1)[0].casefold().strip(),
     })
@@ -364,25 +367,78 @@ def _copy_record(record: dict) -> dict:
         },
         "provenance": dict(record.get("provenance") or {}),
     }
+    aliases = copied["provenance"].get("identifier_aliases")
+    if isinstance(aliases, dict):
+        copied["provenance"]["identifier_aliases"] = {
+            str(key): sorted({str(value) for value in values if str(value).strip()})
+            for key, values in aliases.items()
+            if isinstance(values, list)
+        }
     copied["provenance"]["source_records"] = list(
         copied["provenance"].get("source_records") or [_source_record(record)]
     )
     return copied
 
 
+def _shared_canonical_identity(left_ids: dict, right_ids: dict) -> bool:
+    return any(
+        str(left_ids.get(key) or "").strip()
+        and str(left_ids.get(key) or "").strip() == str(right_ids.get(key) or "").strip()
+        for key in _CANONICAL_ID_NAMESPACES
+    )
+
+
 def _merge(primary: dict, duplicate: dict) -> None:
     left_ids = primary["identifiers"]
     right_ids = duplicate.get("identifiers") or {}
-    for key in _STABLE_NAMESPACES:
+
+    for key in _CANONICAL_ID_NAMESPACES:
         left = str(left_ids.get(key) or "")
         right = str(right_ids.get(key) or "")
         if left and right and left != right:
             raise CurieContractError(
                 f"cross-provider identity conflict on {key}: {left} != {right}"
             )
+
+    shared_canonical = _shared_canonical_identity(left_ids, right_ids)
+    same_title = _normalized_title(primary.get("title")) == _normalized_title(duplicate.get("title"))
+    provenance = primary["provenance"]
+    alias_map = provenance.setdefault("identifier_aliases", {})
+    incoming_provenance = duplicate.get("provenance") if isinstance(duplicate.get("provenance"), dict) else {}
+    incoming_aliases = incoming_provenance.get("identifier_aliases")
+    if not isinstance(incoming_aliases, dict):
+        incoming_aliases = {}
+
+    for key in _PROVIDER_ALIAS_NAMESPACES:
+        values = {
+            str(value).strip()
+            for value in (
+                [left_ids.get(key), right_ids.get(key)]
+                + list(alias_map.get(key) or [])
+                + list(incoming_aliases.get(key) or [])
+            )
+            if str(value or "").strip()
+        }
+        if len(values) <= 1:
+            continue
+        if not shared_canonical or not same_title:
+            ordered = sorted(values)
+            raise CurieContractError(
+                f"cross-provider identity conflict on {key}: {ordered[0]} != {ordered[-1]}"
+            )
+        alias_map[key] = sorted(values)
+        left_ids.pop(key, None)
+
+    if not alias_map:
+        provenance.pop("identifier_aliases", None)
+
     for key, value in right_ids.items():
-        if value and not left_ids.get(key):
-            left_ids[key] = value
+        if not value or left_ids.get(key):
+            continue
+        if key in _PROVIDER_ALIAS_NAMESPACES and len(alias_map.get(key) or []) > 1:
+            continue
+        left_ids[key] = value
+
     left_meta = primary["metadata"]
     right_meta = duplicate.get("metadata") if isinstance(duplicate.get("metadata"), dict) else {}
     for key in ("authors", "year", "journal", "abstract"):
