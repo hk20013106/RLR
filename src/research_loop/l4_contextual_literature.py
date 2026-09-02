@@ -21,13 +21,22 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator
 
+from research_loop import l4a_specter2
 from research_loop import research_seed
 from research_loop.l05_curie.contracts import MAX_ACQUISITION_ROUNDS
 from research_loop.l05_curie import europepmc, multisource, selector
 
 
 CONTEXTUAL_QUERY_PLAN_SCHEMA_VERSION = "L4AContextualQueryPlan/v1"
-_CONTEXTUAL_MAX_PAPERS = 5
+METHOD_SUPPORT_SCHEMA_VERSION = "L4AMethodSupportAdjudication/v1"
+METHOD_SUPPORT_CLASSIFICATIONS = (
+    "DIRECT_METHOD_SUPPORT",
+    "RELATED_BUT_NOT_METHOD_SUPPORT",
+    "IRRELEVANT",
+    "INSUFFICIENT_METADATA",
+)
+DEFAULT_TOP_K_PER_METHOD = 5
+CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 
 def _contextual_query_plan_schema() -> dict:
@@ -88,6 +97,7 @@ def _contextual_prompt(
     return f"""RLR stage: L4A Contextual Literature Query Planning
 Scientific question: {question}
 Selected hypothesis/claim: {claim}
+All contextual literature search queries MUST be written in English using standard scientific terminology.
 Unresolved candidate analysis actions:
 {json.dumps(compact, ensure_ascii=False, sort_keys=True, separators=(",", ":"))}
 
@@ -174,6 +184,12 @@ def _validate_contextual_payload(
                 "L4A contextual literature query references a method outside the "
                 f"unresolved inventory: {unknown[0]}"
             )
+        query_text = str(query["query"]).strip()
+        if CJK_RE.search(query_text) or not re.search(r"[A-Za-z]", query_text):
+            raise dr.DeepResearchError(
+                f"L4A contextual literature query {query_id} must be an English "
+                "scientific query"
+            )
     normalized = copy.deepcopy(payload)
     for query in normalized["queries"]:
         query.setdefault(
@@ -218,61 +234,521 @@ def _round_index(round_id: str) -> int:
     return value if 1 <= value <= MAX_ACQUISITION_ROUNDS else 1
 
 
-def _method_context(methods: list[dict], planner_queries: list[dict]) -> str:
-    fields = []
-    for method in methods:
-        fields.extend([
-            str(method.get("name") or ""),
-            str(method.get("purpose") or ""),
-            str(method.get("inventory_reason") or ""),
-        ])
-    fields.extend(str(item.get("query") or "") for item in planner_queries)
-    return " ".join(fields)
+def _english_contextual_eligibility(record: dict) -> tuple[bool, str]:
+    """Apply the L4A-only English contextual policy without mutating Curie data."""
+
+    metadata = record.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    language = str(metadata.get("language") or "").strip().casefold()
+    if language:
+        english_values = {"en", "eng", "english"}
+        if language not in english_values and not language.startswith("en-"):
+            return False, "NON_ENGLISH_CONTEXTUAL_SOURCE"
+        return True, "ENGLISH_CONTEXTUAL_SOURCE"
+
+    title = str(record.get("title") or "")
+    abstract = str(metadata.get("abstract") or "")
+    if CJK_RE.search(title) or CJK_RE.search(abstract):
+        return False, "NON_ENGLISH_CONTEXTUAL_SOURCE"
+    return True, "ENGLISH_CONTEXTUAL_SOURCE"
 
 
-def _tokens(value: object) -> set[str]:
-    return {
-        token.casefold()
-        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{2,}", str(value or ""))
+def _contextual_candidate_eligibility(record: dict) -> tuple[bool, str]:
+    english_allowed, english_reason = _english_contextual_eligibility(record)
+    if not english_allowed:
+        return False, english_reason
+    return _l4b_retrievable(record)
+
+
+def _method_query(method: dict, planner_queries: list[dict]) -> str:
+    values = [
+        str(method.get("name") or "").strip(),
+        str(method.get("purpose") or "").strip(),
+        str(method.get("inventory_reason") or "").strip(),
+    ]
+    method_id = str(method.get("method_id") or "").strip()
+    values.extend(
+        str(query.get("query") or "").strip()
+        for query in planner_queries
+        if method_id in [str(value).strip() for value in query.get("method_ids") or []]
+    )
+    return ". ".join(value for value in values if value)
+
+
+def _record_query_ids(record: dict) -> list[str]:
+    provenance = record.get("provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    values = provenance.get("originating_query_ids") or []
+    return [str(value).strip() for value in values if str(value).strip()]
+
+
+def _safe_method_run_id(method_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(method_id or "")).strip("_.") or "method"
+
+
+def _top_k_per_method(spec_or_value: object) -> int:
+    value = (
+        getattr(spec_or_value, "top_k_per_method")
+        if hasattr(spec_or_value, "top_k_per_method")
+        else spec_or_value
+    )
+    if value is None:
+        return DEFAULT_TOP_K_PER_METHOD
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("top_k_per_method must be a positive integer")
+    return value
+
+
+def _selection_score(semantic_score: float) -> float:
+    # Selector contracts use [0, 1], while cosine similarity is [-1, 1].
+    # This is a monotonic representation for deterministic selector ordering,
+    # not a support threshold and never promotes a paper to method support.
+    return min(1.0, max(0.0, (float(semantic_score) + 1.0) / 2.0))
+
+
+def _ranker_scores(
+    method_id: str,
+    candidate_records: list[dict],
+    method_query: str,
+    *,
+    seed: dict,
+    ranker: object | None,
+) -> tuple[dict[str, dict], list[dict]]:
+    ranked = l4a_specter2.rank_method_papers(
+        method_query, candidate_records, ranker=ranker
+    )
+    candidate_ids = {
+        str(record.get("paper_id") or "").strip() for record in candidate_records
     }
+    if {str(item["paper_id"]) for item in ranked} != candidate_ids:
+        missing = sorted(candidate_ids - {str(item["paper_id"]) for item in ranked})
+        extra = sorted({str(item["paper_id"]) for item in ranked} - candidate_ids)
+        raise ValueError(
+            f"SPECTER2 ranker did not return the complete {method_id} candidate set; "
+            f"missing={missing[:1]} extra={extra[:1]}"
+        )
+    by_paper = {str(item["paper_id"]): item for item in ranked}
 
-
-def _build_selector_scorer(methods: list[dict], planner_queries: list[dict]):
-    context = _tokens(_method_context(methods, planner_queries))
-    method_tokens = _tokens(_method_context(methods, []))
-
-    def score(record: dict, seed: dict) -> dict:
-        metadata = record.get("metadata")
-        metadata = metadata if isinstance(metadata, dict) else {}
-        text = " ".join([
-            str(record.get("title") or ""),
-            str(metadata.get("abstract") or ""),
-            str(metadata.get("authors") or ""),
-            str(metadata.get("journal") or ""),
-            str(seed.get("scientific_question") or ""),
-            str(seed.get("hypothesis_seed") or ""),
-        ])
-        record_tokens = _tokens(text)
-        overlap = len(context & record_tokens) / max(1, len(context))
-        method_overlap = len(method_tokens & record_tokens) / max(1, len(method_tokens))
-        provenance = record.get("provenance")
-        provenance = provenance if isinstance(provenance, dict) else {}
-        source_records = provenance.get("source_records") or []
-        diversity = min(1.0, len(source_records) / 2.0) if source_records else 0.5
-        relevance = min(1.0, 0.5 * overlap + 0.5 * method_overlap)
+    def score(record: dict, _seed: dict) -> dict:
+        item = by_paper[str(record.get("paper_id") or "")]
+        relevance = _selection_score(item["semantic_score"])
         return {
             "relevance": relevance,
-            "directness": 1.0 if provenance.get("originating_query_ids") else 0.0,
-            "methodological_value": method_overlap,
+            "directness": 0.0,
+            "methodological_value": relevance,
             "contradiction_value": 0.0,
-            "evidence_diversity": diversity,
+            "evidence_diversity": 0.0,
             "reason": (
-                "Canonical multisource metadata candidate selected as bounded "
-                "contextual method support; this is candidate support only."
+                "SPECTER2 semantic pre-ranking for one L4A method; final method "
+                "support requires metadata-only cognitive adjudication."
             ),
         }
 
-    return score
+    del seed  # scorer receives it through selector for the shared contract
+    return by_paper, score
+
+
+def _select_contextual_candidates(
+    records: list[dict],
+    methods: list[dict],
+    planner_queries: list[dict],
+    query_plan: dict,
+    *,
+    seed: dict,
+    ranker: object | None = None,
+    top_k_per_method: int = DEFAULT_TOP_K_PER_METHOD,
+    project_dir: str | Path | None = None,
+    candidate_id: str | None = None,
+    discovery_run_id: str | None = None,
+) -> tuple[dict, list[dict]]:
+    """Run the existing selector once per method over SPECTER2-ranked pairs."""
+
+    if not isinstance(records, list) or not isinstance(methods, list):
+        raise ValueError("contextual records and methods must be lists")
+    if len(query_plan.get("queries") or []) != len(planner_queries):
+        raise ValueError("contextual planner and canonical QueryPlan lengths differ")
+    top_k = _top_k_per_method(top_k_per_method)
+    plan_queries = list(query_plan.get("queries") or [])
+    if ranker is None and any(
+        _contextual_candidate_eligibility(record)[0] for record in records
+    ):
+        # Load once for the whole contextual pass; the adapter itself batches
+        # each method's paper set and remains process-scoped.
+        ranker = l4a_specter2.get_specter2_ranker()
+    method_selections: list[dict] = []
+    pair_rows: list[dict] = []
+    all_decisions: list[dict] = []
+    selected_records: list[dict] = []
+    selected_ids: set[str] = set()
+    record_by_id = {
+        str(record.get("paper_id") or "").strip(): record for record in records
+    }
+
+    for method in methods:
+        method_id = str(method.get("method_id") or "").strip()
+        if not method_id:
+            raise ValueError("contextual method has no method_id")
+        method_plan_queries = [
+            plan_query
+            for plan_query, planner_query in zip(plan_queries, planner_queries)
+            if method_id in {
+                str(value).strip() for value in planner_query.get("method_ids") or []
+            }
+        ]
+        method_query_ids = {
+            str(item.get("query_id") or "").strip()
+            for item in method_plan_queries
+            if str(item.get("query_id") or "").strip()
+        }
+        method_records = [
+            record for record in records
+            if set(_record_query_ids(record)) & method_query_ids
+        ]
+        if not method_query_ids:
+            method_selector = {
+                "schema_version": "L05SelectorRun/v1",
+                "decisions": [],
+                "included_paper_ids": [],
+            }
+            method_selections.append({
+                "method_id": method_id,
+                "query_ids": [],
+                "query": _method_query(method, planner_queries),
+                "selector": method_selector,
+                "decisions": [],
+            })
+            continue
+        eligible_records = [
+            record for record in method_records
+            if _contextual_candidate_eligibility(record)[0]
+        ]
+        semantic_by_paper, scorer = _ranker_scores(
+            method_id,
+            eligible_records,
+            _method_query(method, planner_queries),
+            seed=seed,
+            ranker=ranker,
+        ) if eligible_records else ({}, lambda _record, _seed: {
+            "relevance": 0.0,
+            "directness": 0.0,
+            "methodological_value": 0.0,
+            "contradiction_value": 0.0,
+            "evidence_diversity": 0.0,
+            "reason": "No eligible canonical contextual records.",
+        })
+
+        selector_run_id = (
+            f"{discovery_run_id}_{_safe_method_run_id(method_id)}"
+            if discovery_run_id else None
+        )
+        method_selector = selector.select_candidates_strict(
+            method_records,
+            seed=seed,
+            scorer=scorer,
+            eligibility=_contextual_candidate_eligibility,
+            max_papers=top_k,
+            project_dir=project_dir,
+            candidate_id=candidate_id,
+            run_id=selector_run_id,
+            query_ids=method_query_ids,
+        )
+        method_rows = []
+        for decision in method_selector.get("decisions") or []:
+            row = copy.deepcopy(decision)
+            paper_id = str(row.get("paper_id") or "")
+            row["method_id"] = method_id
+            semantic = semantic_by_paper.get(paper_id)
+            if semantic is not None:
+                row["semantic_score"] = float(semantic["semantic_score"])
+                row["semantic_rank"] = int(semantic["semantic_rank"])
+            method_rows.append(row)
+            all_decisions.append(row)
+        for paper_id in method_selector.get("included_paper_ids") or []:
+            paper_id = str(paper_id)
+            semantic = semantic_by_paper.get(paper_id)
+            if semantic is None:
+                raise ValueError(
+                    f"selector included paper without SPECTER2 score: {paper_id}"
+                )
+            pair_rows.append({
+                "paper_id": paper_id,
+                "method_id": method_id,
+                "semantic_score": float(semantic["semantic_score"]),
+                "semantic_rank": int(semantic["semantic_rank"]),
+                "selector_decision": "INCLUDE",
+            })
+            if paper_id not in selected_ids:
+                selected_ids.add(paper_id)
+                selected_records.append(record_by_id[paper_id])
+        method_selections.append({
+            "method_id": method_id,
+            "query_ids": sorted(method_query_ids),
+            "query": _method_query(method, planner_queries),
+            "selector": method_selector,
+            "decisions": method_rows,
+        })
+
+    result = {
+        # Preserve the existing selector run marker for receipt consumers;
+        # per-method selector artifacts remain owned by l05_curie.selector.
+        "schema_version": "L05SelectorRun/v1",
+        "top_k_per_method": top_k,
+        "method_selections": method_selections,
+        "decisions": all_decisions,
+        "pairs": pair_rows,
+        "included_paper_ids": [str(item["paper_id"]) for item in pair_rows
+                               if str(item["paper_id"]) in selected_ids],
+        "semantic_ranker": (
+            l4a_specter2.ranker_receipt(ranker)
+            if ranker is not None
+            else {
+                "implementation": "research_loop.l4a_specter2",
+                "status": "not_loaded_no_eligible_records",
+            }
+        ),
+    }
+    # The list expression above can repeat a paper selected for multiple
+    # methods; retain first-seen paper order for the existing asset projection.
+    result["included_paper_ids"] = list(dict.fromkeys(result["included_paper_ids"]))
+    return result, selected_records
+
+
+def _method_support_schema() -> dict:
+    decision = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "paper_id": {"type": "string", "minLength": 1},
+            "method_id": {"type": "string", "minLength": 1},
+            "classification": {
+                "type": "string",
+                "enum": list(METHOD_SUPPORT_CLASSIFICATIONS),
+            },
+            "rationale": {"type": "string", "minLength": 1},
+        },
+        "required": ["paper_id", "method_id", "classification", "rationale"],
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "schema_version": {
+                "type": "string", "const": METHOD_SUPPORT_SCHEMA_VERSION
+            },
+            "decisions": {"type": "array", "items": decision},
+        },
+        "required": ["schema_version", "decisions"],
+    }
+
+
+def _validate_method_support_payload(
+    dr, payload: dict, expected_pairs: set[tuple[str, str]]
+) -> dict:
+    if not isinstance(payload, dict):
+        raise dr.DeepResearchError(
+            "L4A method-support adjudication must be a JSON object"
+        )
+    errors = sorted(
+        Draft202012Validator(_method_support_schema()).iter_errors(payload),
+        key=lambda error: (list(error.absolute_path), error.message),
+    )
+    if errors:
+        error = errors[0]
+        path = ".".join(str(part) for part in error.absolute_path) or "payload"
+        raise dr.DeepResearchError(
+            f"L4A method-support adjudication {path}: {error.message}"
+        )
+    actual_pairs = []
+    for decision in payload["decisions"]:
+        pair = (
+            str(decision["paper_id"]).strip(),
+            str(decision["method_id"]).strip(),
+        )
+        actual_pairs.append(pair)
+    if len(actual_pairs) != len(set(actual_pairs)):
+        raise dr.DeepResearchError(
+            "L4A method-support adjudication returned duplicate paper/method pairs"
+        )
+    actual_set = set(actual_pairs)
+    expected_set = {
+        (str(paper_id).strip(), str(method_id).strip())
+        for paper_id, method_id in expected_pairs
+    }
+    if actual_set != expected_set:
+        missing = sorted(expected_set - actual_set)
+        unknown = sorted(actual_set - expected_set)
+        raise dr.DeepResearchError(
+            "L4A method-support adjudication pair set mismatch; "
+            f"missing={missing[:1]} unknown={unknown[:1]}"
+        )
+    return copy.deepcopy(payload)
+
+
+def _method_support_prompt(payload: dict, backend: str) -> str:
+    del backend
+    return f"""RLR stage: L4A metadata-only method-support adjudication
+
+You are adjudicating only the supplied canonical paper metadata against the
+supplied L4A method inventory. Do not web search, browse, call a database, read
+the filesystem, retrieve full text, or invent bibliographic identity.
+
+Topic relevance is NOT method support.
+
+A paper must NOT be labeled DIRECT_METHOD_SUPPORT merely because it studies the
+same biological process, pathway, phenotype, organism, disease, or gene family.
+DIRECT_METHOD_SUPPORT requires title/abstract evidence that the target
+analytical, experimental, statistical, or computational method itself is used,
+developed, evaluated, benchmarked, or explicitly explained. Ask whether the
+exact paper's Methods section could reasonably be expected to contain
+implementation information for THIS exact method. Do not infer method use from
+topic overlap. When title/abstract metadata is insufficient, return
+INSUFFICIENT_METADATA.
+
+Return exactly one decision for every supplied paper_id/method_id pair. Use
+only these classifications: DIRECT_METHOD_SUPPORT,
+RELATED_BUT_NOT_METHOD_SUPPORT, IRRELEVANT, INSUFFICIENT_METADATA. Each
+decision may contain only paper_id, method_id, classification, and a short
+rationale. Do not return DOI, PMID, PMCID, title, URL, paper, identity, score,
+confidence, or any other field. The controller already owns those values.
+
+Supplied L4A metadata:
+{json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))}
+
+Return JSON only, conforming exactly to the supplied method-support schema.
+Do not include prose, Markdown, code fences, commentary, or text outside JSON.
+"""
+
+
+def _method_support_input(
+    methods: list[dict], selected_records: list[dict], pairs: list[dict]
+) -> dict:
+    method_ids = {str(pair.get("method_id") or "") for pair in pairs}
+    paper_ids = {str(pair.get("paper_id") or "") for pair in pairs}
+    method_rows = []
+    for method in methods:
+        method_id = str(method.get("method_id") or "")
+        if method_id in method_ids:
+            method_rows.append({
+                "method_id": method_id,
+                "name": str(method.get("name") or ""),
+                "purpose": str(method.get("purpose") or ""),
+                "inventory_reason": str(method.get("inventory_reason") or ""),
+            })
+    paper_rows = []
+    for record in selected_records:
+        paper_id = str(record.get("paper_id") or "")
+        if paper_id not in paper_ids:
+            continue
+        metadata = record.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        paper_rows.append({
+            "paper_id": paper_id,
+            "title": str(record.get("title") or ""),
+            "abstract": str(metadata.get("abstract") or ""),
+            "journal": str(metadata.get("journal") or ""),
+            "year": str(metadata.get("year") or ""),
+        })
+    return {
+        "methods": method_rows,
+        "papers": paper_rows,
+        "pairs": [
+            {
+                "paper_id": str(pair.get("paper_id") or ""),
+                "method_id": str(pair.get("method_id") or ""),
+            }
+            for pair in pairs
+        ],
+    }
+
+
+def _run_method_support_adjudication(
+    l4p,
+    dr,
+    project_dir: str | Path,
+    candidate_id: str,
+    question: str,
+    claim: str,
+    spec,
+    work_dir: str | Path,
+    skill_version: str,
+    methods: list[dict],
+    selected_records: list[dict],
+    selection: dict,
+    *,
+    inventory_module,
+) -> dict:
+    del project_dir, candidate_id, question, claim
+    pairs = list(selection.get("pairs") or [])
+    expected_pairs = {
+        (str(pair.get("paper_id") or ""), str(pair.get("method_id") or ""))
+        for pair in pairs
+    }
+    if not pairs:
+        return {
+            "schema_version": METHOD_SUPPORT_SCHEMA_VERSION,
+            "status": "not_run_no_shortlisted_pairs",
+            "decisions": [],
+            "direct_count": 0,
+            "shortlisted_pair_count": 0,
+            "skill_receipt": None,
+        }
+    work = Path(work_dir)
+    work.mkdir(parents=True, exist_ok=True)
+    schema_path = work / "l4a_method_support_output.schema.json"
+    schema_path.write_text(
+        json.dumps(_method_support_schema(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    command, _ = dr.build_invocation(
+        spec, "L4", "L4A metadata-only method-support adjudication", "", work
+    )
+    command = [
+        str(schema_path)
+        if value == str(work / "deep_research_output.schema.json")
+        else value
+        for value in command
+    ]
+    command = inventory_module._offline_provider_command(command, spec, work)
+    prompt = _method_support_prompt(
+        _method_support_input(methods, selected_records, pairs),
+        str(getattr(spec, "backend", "")),
+    )
+    command[0] = dr.resolve_subprocess_executable(command[0])
+    execution_command, invocation_kwargs = dr.subprocess_invocation(command, prompt)
+    completed = dr.execute_provider_invocation(
+        execution_command,
+        invocation_kwargs,
+        timeout=spec.timeout,
+        label="L4A method-support adjudication CLI",
+    )
+    receipt = dr.skill_receipt(
+        spec.backend,
+        command,
+        prompt,
+        skill_version,
+        exit_code=completed.returncode,
+        stdout_hash=inventory_module._sha(completed.stdout),
+        model=spec.model,
+    )
+    if completed.returncode != 0:
+        raise dr.DeepResearchError(
+            "L4A method-support adjudication CLI exited "
+            f"{completed.returncode}: {completed.stderr.strip()}"
+        )
+    validated = _validate_method_support_payload(
+        dr, dr._parse_cli_output(completed.stdout), expected_pairs
+    )
+    decisions = list(validated["decisions"])
+    return {
+        "schema_version": METHOD_SUPPORT_SCHEMA_VERSION,
+        "status": "completed",
+        "decisions": decisions,
+        "direct_count": sum(
+            item["classification"] == "DIRECT_METHOD_SUPPORT" for item in decisions
+        ),
+        "shortlisted_pair_count": len(pairs),
+        "skill_receipt": receipt,
+    }
 
 
 def _l4b_retrievable(record: dict) -> tuple[bool, str]:
@@ -409,41 +885,128 @@ def _bind_selected_records(
     controller_inventory: list[dict],
     selected_records: list[dict],
     selection: dict,
-    planner_to_methods: dict[str, list[str]],
+    adjudication: dict,
     known_sources: dict,
     l4_inventory_module,
 ) -> tuple[list[dict], list[dict], list[str]]:
+    """Project shortlisted metadata records using only DIRECT pair decisions."""
+
     inventory = copy.deepcopy(controller_inventory)
     by_method = {
         str(method.get("method_id") or ""): method for method in inventory
     }
-    assets = []
-    selected_asset_ids = []
-    decisions = {
-        str(item.get("paper_id") or ""): item
-        for item in selection.get("decisions") or []
+    pairs = list(selection.get("pairs") or [])
+    expected_pairs = {
+        (str(item.get("paper_id") or "").strip(),
+         str(item.get("method_id") or "").strip())
+        for item in pairs
         if isinstance(item, dict)
     }
-    for record in selected_records:
-        provenance = record.get("provenance")
-        provenance = provenance if isinstance(provenance, dict) else {}
-        method_ids = []
-        for query_id in provenance.get("originating_query_ids") or []:
-            for method_id in planner_to_methods.get(str(query_id), []):
-                if method_id in by_method and method_id not in method_ids:
-                    method_ids.append(method_id)
-        if not method_ids:
+    if len(expected_pairs) != len(pairs):
+        raise ValueError("selection contains duplicate or invalid paper/method pairs")
+    decisions = {}
+    for item in adjudication.get("decisions") or []:
+        if not isinstance(item, dict):
+            raise ValueError("method-support adjudication decision must be an object")
+        pair = (
+            str(item.get("paper_id") or "").strip(),
+            str(item.get("method_id") or "").strip(),
+        )
+        if pair in decisions:
+            raise ValueError(f"duplicate method-support decision for pair {pair}")
+        if str(item.get("classification") or "") not in METHOD_SUPPORT_CLASSIFICATIONS:
+            raise ValueError(
+                f"invalid method-support classification for pair {pair}"
+            )
+        if not str(item.get("rationale") or "").strip():
+            raise ValueError(f"method-support rationale is empty for pair {pair}")
+        decisions[pair] = item
+    if set(decisions) != expected_pairs:
+        missing = sorted(expected_pairs - set(decisions))
+        unknown = sorted(set(decisions) - expected_pairs)
+        raise ValueError(
+            "method-support decisions do not match shortlisted pairs; "
+            f"missing={missing[:1]} unknown={unknown[:1]}"
+        )
+    direct_by_paper: dict[str, list[str]] = {}
+    semantic_by_pair = {
+        (
+            str(item.get("paper_id") or "").strip(),
+            str(item.get("method_id") or "").strip(),
+        ): item
+        for item in pairs
+        if isinstance(item, dict)
+    }
+    for pair, decision in decisions.items():
+        if decision.get("classification") != "DIRECT_METHOD_SUPPORT":
             continue
+        paper_id, method_id = pair
+        if method_id not in by_method:
+            raise ValueError(f"method-support decision references unknown method {method_id}")
+        direct_by_paper.setdefault(paper_id, []).append(method_id)
+
+    assets: list[dict] = []
+    selected_asset_ids: list[str] = []
+    record_by_id = {
+        str(record.get("paper_id") or "").strip(): record
+        for record in selected_records
+    }
+    pair_paper_ids = {
+        str(item.get("paper_id") or "").strip()
+        for item in pairs
+        if isinstance(item, dict)
+    }
+    pair_method_ids = {
+        str(item.get("method_id") or "").strip()
+        for item in pairs
+        if isinstance(item, dict)
+    }
+    unknown_methods = sorted(pair_method_ids - set(by_method))
+    if unknown_methods:
+        raise ValueError(
+            f"selection contains unknown method {unknown_methods[0]}"
+        )
+    if set(record_by_id) != pair_paper_ids:
+        missing = sorted(
+            {
+                str(item.get("paper_id") or "").strip() for item in pairs
+                if isinstance(item, dict)
+            } - set(record_by_id)
+        )
+        if missing:
+            raise ValueError(f"shortlisted paper record is missing: {missing[0]}")
+
+    for record in selected_records:
+        paper_id = str(record.get("paper_id") or "").strip()
+        if paper_id not in record_by_id:
+            continue
+        method_ids = [
+            method_id for method_id in direct_by_paper.get(paper_id, [])
+            if method_id in by_method
+        ]
         local_asset_id = _local_asset_by_record(known_sources, record)
         asset_id = local_asset_id
         if not asset_id:
             asset = _record_asset(l4_inventory_module, record, method_ids)
-            decision = decisions.get(str(record.get("paper_id") or ""), {})
+            semantic_scores = [
+                float(semantic_by_pair[pair].get("semantic_score"))
+                for pair in semantic_by_pair
+                if pair[0] == paper_id
+            ]
             asset["relevance_score"] = min(
-                10.0, max(0.0, 10.0 * float(decision.get("relevance") or 0.0))
+                10.0,
+                max(0.0, 10.0 * _selection_score(max(semantic_scores, default=-1.0))),
             )
-            if decision.get("reason"):
-                asset["selection_reason"] = str(decision["reason"])
+            if method_ids:
+                asset["selection_reason"] = (
+                    "SPECTER2-shortlisted canonical metadata candidate with one or "
+                    "more DIRECT_METHOD_SUPPORT pair decisions."
+                )
+            else:
+                asset["selection_reason"] = (
+                    "SPECTER2-shortlisted canonical metadata candidate retained for "
+                    "audit; no DIRECT_METHOD_SUPPORT pair decision."
+                )
             assets.append(asset)
             asset_id = str(asset["asset_id"])
         if asset_id not in selected_asset_ids:
@@ -687,40 +1250,48 @@ def install(l4_inventory_module, deep_research_module) -> None:
                     f"L4A contextual multisource discovery failed: {exc}"
                 ) from exc
 
-            planner_to_methods = {
-                str(plan_query["query_id"]): list(planner_query["method_ids"])
-                for plan_query, planner_query in zip(
-                    query_plan["queries"], planner_queries
-                )
-            }
             try:
-                selection = selector.select_candidates_strict(
+                selection, selected_records = _select_contextual_candidates(
                     list(discovery.get("records") or []),
+                    unresolved,
+                    planner_queries,
+                    query_plan,
                     seed=seed,
-                    scorer=_build_selector_scorer(unresolved, planner_queries),
-                    eligibility=_l4b_retrievable,
-                    max_papers=_CONTEXTUAL_MAX_PAPERS,
+                    top_k_per_method=_top_k_per_method(spec),
                     project_dir=project_dir,
                     candidate_id=candidate_id,
-                    run_id=discovery_run_id,
-                    query_ids={
-                        str(item["query_id"]) for item in query_plan["queries"]
-                    },
+                    discovery_run_id=discovery_run_id,
                 )
-            except (multisource.CurieContractError, ValueError) as exc:
+            except (multisource.CurieContractError, ValueError, TypeError,
+                    l4a_specter2.Specter2Error) as exc:
                 raise dr.DeepResearchError(
-                    f"L4A contextual multisource candidate selection failed: {exc}"
+                    f"L4A contextual SPECTER2 candidate selection failed: {exc}"
                 ) from exc
-            included_ids = set(selection.get("included_paper_ids") or [])
-            selected_records = [
-                record for record in discovery.get("records") or []
-                if str(record.get("paper_id") or "") in included_ids
-            ]
+            try:
+                adjudication = _run_method_support_adjudication(
+                    l4p,
+                    dr,
+                    project_dir,
+                    candidate_id,
+                    question,
+                    claim,
+                    spec,
+                    work,
+                    skill_version,
+                    unresolved,
+                    selected_records,
+                    selection,
+                    inventory_module=l4_inventory_module,
+                )
+            except (ValueError, TypeError, OSError) as exc:
+                raise dr.DeepResearchError(
+                    f"L4A method-support adjudication failed closed: {exc}"
+                ) from exc
             enriched_inventory, contextual_assets, selected_asset_ids = _bind_selected_records(
                 registry_inventory,
                 selected_records,
                 selection,
-                planner_to_methods,
+                adjudication,
                 known_sources,
                 l4_inventory_module,
             )
@@ -739,6 +1310,7 @@ def install(l4_inventory_module, deep_research_module) -> None:
                 },
                 "discovery": discovery,
                 "selection": selection,
+                "method_support_adjudication": adjudication,
                 "selected_asset_ids": selected_asset_ids,
                 "planner_skill_receipt": search_receipt,
                 # Keep the historical key for receipt readers; its contents are

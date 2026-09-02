@@ -272,6 +272,51 @@ def _install_multisource(monkeypatch, records, *, failures=None):
     return observed
 
 
+class _FakeSemanticRanker:
+    def rank_method_papers(self, _method_query, canonical_records):
+        return [
+            {
+                "paper_id": str(record["paper_id"]),
+                "semantic_score": 0.5,
+                "semantic_rank": index,
+            }
+            for index, record in enumerate(canonical_records, 1)
+        ]
+
+
+def _fake_contextual_adjudication(*args, **kwargs):
+    selection = kwargs.get("selection") or args[-1]
+    decisions = [
+        {
+            "paper_id": str(pair["paper_id"]),
+            "method_id": str(pair["method_id"]),
+            "classification": "DIRECT_METHOD_SUPPORT",
+            "rationale": "Deterministic test adjudication.",
+        }
+        for pair in selection.get("pairs") or []
+    ]
+    return {
+        "schema_version": contextual.METHOD_SUPPORT_SCHEMA_VERSION,
+        "status": "completed" if decisions else "not_run_no_shortlisted_pairs",
+        "decisions": decisions,
+        "direct_count": len(decisions),
+        "shortlisted_pair_count": len(decisions),
+        "skill_receipt": {"provider": "fixture", "model": "fixture"},
+    }
+
+
+def _install_contextual_test_adapters(monkeypatch):
+    monkeypatch.setattr(
+        contextual.l4a_specter2,
+        "get_specter2_ranker",
+        lambda: _FakeSemanticRanker(),
+    )
+
+    monkeypatch.setattr(
+        contextual, "_run_method_support_adjudication", _fake_contextual_adjudication
+    )
+
+
 def _run_native(
     monkeypatch,
     tmp_path,
@@ -284,6 +329,7 @@ def _run_native(
     _install_native_seed(monkeypatch)
     captured = {}
     _install_provider_sequence(monkeypatch, payloads, captured)
+    _install_contextual_test_adapters(monkeypatch)
     monkeypatch.setattr(
         l4_inventory,
         "_native_known_source_catalog",
@@ -740,17 +786,6 @@ def test_contextual_selector_closes_native_l4b_manifest_after_filtering(
     records = [invalid, *valid_records]
     _install_multisource(monkeypatch, records)
 
-    def scorer(record, _seed):
-        return {
-            "relevance": 1.0 if record["paper_id"] == invalid["paper_id"] else 0.5,
-            "directness": 1.0,
-            "methodological_value": 1.0,
-            "contradiction_value": 0.0,
-            "evidence_diversity": 1.0,
-            "reason": "Deterministic integration-test score.",
-        }
-
-    monkeypatch.setattr(contextual, "_build_selector_scorer", lambda *_: scorer)
     manifest, _captured = _run_native(
         monkeypatch,
         tmp_path,

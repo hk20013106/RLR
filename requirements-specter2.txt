@@ -1,0 +1,6 @@
+# Optional runtime dependencies for the local SPECTER2 L4A pre-ranker.
+# The core RLR installation remains lightweight; this manifest matches the
+# already verified CPU environment used by the bounded SPECTER2 smoke test.
+torch==2.13.0
+transformers==4.35.2
+adapters==0.1.0

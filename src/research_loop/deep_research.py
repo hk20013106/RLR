@@ -49,6 +49,7 @@ class RuntimeSpec:
     model: str | None = None
     timeout: int | None = None
     skill_path: str | None = None
+    top_k_per_method: int | None = None
 
 
 def runtime_config_path(project_dir: str | Path) -> Path:
@@ -102,6 +103,7 @@ def default_runtime_config(backend: str | None = None,
         "plugin_dir": "",
         "skill_version": "unknown",
         "timeout": 900,
+        "top_k_per_method": 5,
     }
     if backend == "codex":
         codex_root = Path.home() / ".codex"
@@ -187,6 +189,7 @@ def load_runtime_spec(project_dir: str | Path, overrides: dict | None = None) ->
         backend=backend, executable=str(config.get("executable") or backend),
         plugin_dir=config.get("plugin_dir") or None, model=config.get("model") or None,
         timeout=config.get("timeout"), skill_path=config.get("skill_path") or None,
+        top_k_per_method=config.get("top_k_per_method"),
     ), str(config.get("skill_version") or "unknown")
 
 
