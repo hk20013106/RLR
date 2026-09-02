@@ -23,7 +23,10 @@ from jsonschema import Draft202012Validator
 
 from research_loop import l4a_specter2
 from research_loop import research_seed
-from research_loop.l05_curie.contracts import MAX_ACQUISITION_ROUNDS
+from research_loop.l05_curie.contracts import (
+    MAX_ACQUISITION_ROUNDS,
+    validate_record_query_provenance,
+)
 from research_loop.l05_curie import europepmc, multisource, selector
 
 
@@ -369,6 +372,17 @@ def _select_contextual_candidates(
         raise ValueError("contextual planner and canonical QueryPlan lengths differ")
     top_k = _top_k_per_method(top_k_per_method)
     plan_queries = list(query_plan.get("queries") or [])
+    full_query_ids = {
+        str(item.get("query_id") or "").strip()
+        for item in plan_queries
+        if isinstance(item, dict) and str(item.get("query_id") or "").strip()
+    }
+    for record in records:
+        # Validate against the complete canonical QueryPlan before any
+        # method-specific provenance intersection can filter a record out.
+        validate_record_query_provenance(
+            record, authorized_query_ids=full_query_ids
+        )
     if ranker is None and any(
         _contextual_candidate_eligibility(record)[0] for record in records
     ):
@@ -450,7 +464,7 @@ def _select_contextual_candidates(
             project_dir=project_dir,
             candidate_id=candidate_id,
             run_id=selector_run_id,
-            query_ids=method_query_ids,
+            query_ids=full_query_ids,
         )
         method_rows = []
         for decision in method_selector.get("decisions") or []:

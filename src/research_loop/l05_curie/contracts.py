@@ -103,6 +103,49 @@ def validate_query_plan(plan: dict, *, seed_sha256: str) -> dict:
     return copy.deepcopy(plan)
 
 
+def validate_record_query_provenance(
+    record: dict, *, authorized_query_ids: set[str] | None = None
+) -> list[str]:
+    """Validate and return a canonical record's QueryPlan lineage.
+
+    The full QueryPlan owns provenance authorization.  Callers may perform a
+    separate method-level intersection after this validation, but that subset
+    must never be used as the authorization set for the record itself.
+    """
+    record = _require_dict(record, "discovery record")
+    provenance = _require_dict(
+        record.get("provenance"), "discovery record provenance"
+    )
+    values = _require_string_list(
+        provenance.get("originating_query_ids"),
+        "discovery record provenance originating_query_ids",
+    )
+    if authorized_query_ids is not None and (
+        not isinstance(authorized_query_ids, set)
+        or not authorized_query_ids
+        or not all(
+            isinstance(item, str) and item.strip()
+            for item in authorized_query_ids
+        )
+    ):
+        raise CurieContractError(
+            "authorized_query_ids must be a non-empty set of strings"
+        )
+    normalized: list[str] = []
+    for value in values:
+        query_id = value.strip()
+        if query_id not in normalized:
+            normalized.append(query_id)
+        if (
+            authorized_query_ids is not None
+            and query_id not in authorized_query_ids
+        ):
+            raise CurieContractError(
+                f"record query provenance {query_id!r} is not authorized by the QueryPlan"
+            )
+    return normalized
+
+
 def validate_transport_handshake(handshake: dict) -> dict:
     """Validate the capability handshake for one deterministic discovery adapter."""
     handshake = _require_dict(handshake, "transport handshake")

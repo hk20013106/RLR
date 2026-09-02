@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import Callable
 
-from .contracts import CurieContractError
+from .contracts import CurieContractError, validate_record_query_provenance
 
 SELECTOR_DECISION_SCHEMA_VERSION = "L05SelectorDecision/v1"
 _SELECTOR_RUN_SCHEMA_VERSION = "L05SelectorRun/v1"
@@ -99,30 +99,9 @@ def validate_selector_decision(decision: dict) -> dict:
 def _query_ids(
     record: dict, authorized_query_ids: set[str] | None = None
 ) -> list[str]:
-    provenance = record.get("provenance")
-    if not isinstance(provenance, dict):
-        raise CurieContractError("selector record has no discovery provenance")
-    values = provenance.get("originating_query_ids") or []
-    if not isinstance(values, list) or not values:
-        raise CurieContractError("selector record has no originating query provenance")
-    query_ids: list[str] = []
-    for value in values:
-        if not isinstance(value, str):
-            raise CurieContractError(
-                "selector originating query provenance must contain only strings"
-            )
-        query_id = value.strip()
-        if not query_id:
-            raise CurieContractError(
-                "selector originating query provenance contains an empty query_id"
-            )
-        if query_id not in query_ids:
-            query_ids.append(query_id)
-        if authorized_query_ids is not None and query_id not in authorized_query_ids:
-            raise CurieContractError(
-                f"selector query provenance {query_id!r} is not authorized by the QueryPlan"
-            )
-    return query_ids
+    return validate_record_query_provenance(
+        record, authorized_query_ids=authorized_query_ids
+    )
 
 
 def _ranking(decision: dict) -> tuple[float, float, float, float, float]:

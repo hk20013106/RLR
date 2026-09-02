@@ -17,6 +17,7 @@ from .contracts import (
     validate_evidence_extract,
     validate_gap_request,
     validate_query_plan,
+    validate_record_query_provenance,
     validate_transport_handshake,
 )
 from .interfaces import DiscoveryTransport, EvidenceRetriever
@@ -77,5 +78,6 @@ __all__ = [
     "validate_gap_request",
     "validate_gap_retry_authorization",
     "validate_query_plan",
+    "validate_record_query_provenance",
     "validate_transport_handshake",
 ]

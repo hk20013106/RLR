@@ -16,6 +16,7 @@ from research_loop.l4a_specter2 import (
     build_paper_text,
     rank_method_papers,
 )
+from research_loop.l05_curie.contracts import CurieContractError
 
 
 def _method(method_id: str, name: str) -> dict:
@@ -104,6 +105,43 @@ def _inventory(*methods: dict) -> list[dict]:
         }
         for method in methods
     ]
+
+
+class _ContextualFixtureRanker:
+    def rank_method_papers(self, _method_query, canonical_records):
+        return [
+            {
+                "paper_id": record["paper_id"],
+                "semantic_score": 0.9,
+                "semantic_rank": rank,
+            }
+            for rank, record in enumerate(canonical_records, 1)
+        ]
+
+
+def _contextual_fixture_selection(method_id: str, records: list[dict]):
+    methods = [_method(method_id, f"Method {method_id}")]
+    planner_queries = [
+        {
+            "query_id": "Q001",
+            "query": "method one query",
+            "method_ids": ["M1"],
+        },
+        {
+            "query_id": "Q003",
+            "query": "method three query",
+            "method_ids": ["M2"],
+        },
+    ]
+    query_plan = {"queries": [{"query_id": "Q001"}, {"query_id": "Q003"}]}
+    return contextual._select_contextual_candidates(
+        records,
+        methods,
+        planner_queries,
+        query_plan,
+        seed={"scientific_question": "Q", "hypothesis_seed": "H"},
+        ranker=_ContextualFixtureRanker(),
+    )
 
 
 class _FakeTensor:
@@ -466,6 +504,54 @@ def test_contextual_ranking_is_per_method_and_top_k_is_not_global(tmp_path):
     assert {item["paper_id"] for item in selected_records} == {"P1", "P3"}
 
 
+@pytest.mark.parametrize("method_id", ["M1", "M2"])
+def test_cross_query_record_is_eligible_for_each_intersecting_method(method_id):
+    selection, selected_records = _contextual_fixture_selection(
+        method_id,
+        [_record("P_CROSS", query_ids=["Q001", "Q003"])],
+    )
+
+    method_selection = selection["method_selections"][0]
+    assert method_selection["selector"]["included_paper_ids"] == ["P_CROSS"]
+    assert selected_records[0]["paper_id"] == "P_CROSS"
+
+
+def test_cross_query_record_provenance_is_preserved_during_method_selection():
+    record = _record("P_CROSS", query_ids=["Q001", "Q003"])
+    before = copy.deepcopy(record)
+
+    selection, selected_records = _contextual_fixture_selection("M1", [record])
+
+    assert record == before
+    assert selected_records[0]["provenance"]["originating_query_ids"] == [
+        "Q001",
+        "Q003",
+    ]
+    assert selection["method_selections"][0]["decisions"][0][
+        "originating_query_ids"
+    ] == ["Q001", "Q003"]
+
+
+def test_valid_record_without_method_query_intersection_is_filtered_before_selector():
+    selection, selected_records = _contextual_fixture_selection(
+        "M1",
+        [_record("P_OTHER", query_ids=["Q003"])],
+    )
+
+    method_selection = selection["method_selections"][0]
+    assert method_selection["selector"]["decisions"] == []
+    assert method_selection["selector"]["included_paper_ids"] == []
+    assert selected_records == []
+
+
+def test_unknown_record_query_provenance_fails_before_method_intersection():
+    with pytest.raises(CurieContractError, match="Q999"):
+        _contextual_fixture_selection(
+            "M2",
+            [_record("P_FORGED", query_ids=["Q001", "Q999"])],
+        )
+
+
 def test_query_provenance_does_not_bind_all_methods():
     record = _record("P1", query_ids=["CQ1"])
     controller = _inventory(
@@ -490,6 +576,33 @@ def test_query_provenance_does_not_bind_all_methods():
     assert by_method["M15"]["source_asset_ids"] == []
     assert assets[0]["method_component_hints"] == ["M12"]
     assert selected_ids == ["P1"]
+
+
+def test_direct_binding_remains_method_specific_for_cross_query_record():
+    record = _record("P_CROSS", query_ids=["Q001", "Q003"])
+    controller = _inventory(
+        _method("M1", "Method one"),
+        _method("M2", "Method two"),
+    )
+
+    inventory, assets, selected_ids = contextual._bind_selected_records(
+        controller,
+        [record],
+        _pair_selection(("P_CROSS", "M1"), ("P_CROSS", "M2")),
+        _adjudication(
+            ("P_CROSS", "M1", "DIRECT_METHOD_SUPPORT"),
+            ("P_CROSS", "M2", "IRRELEVANT"),
+        ),
+        {"sources": []},
+        l4_inventory,
+    )
+    assets = l4p._normalize_l4a_assets(assets)
+
+    by_method = {item["method_id"]: item for item in inventory}
+    assert by_method["M1"]["source_asset_ids"] == ["P_CROSS"]
+    assert by_method["M2"]["source_asset_ids"] == []
+    assert assets[0]["method_component_hints"] == ["M1"]
+    assert selected_ids == ["P_CROSS"]
 
 
 @pytest.mark.parametrize(

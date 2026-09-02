@@ -25,6 +25,7 @@ from .contracts import (
     CurieContractError,
     validate_discovery_batch,
     validate_query_plan,
+    validate_record_query_provenance,
     validate_transport_handshake,
 )
 HttpGet = Callable[[str, int], bytes]
@@ -876,6 +877,10 @@ def _run_multisource_discovery(
                 provenance["originating_query_ids"] = [str(query["query_id"])]
                 records.append(canonical)
     canonical, duplicates = deduplicate_provider_records(records)
+    for record in canonical:
+        validate_record_query_provenance(
+            record, authorized_query_ids=query_ids
+        )
     return {
         "schema_version": "L05MultiSourceDiscovery/v1",
         "query_plan_id": str(plan["plan_id"]),
