@@ -31,7 +31,7 @@ from research_loop.l05_curie import europepmc, multisource, selector
 
 
 CONTEXTUAL_QUERY_PLAN_SCHEMA_VERSION = "L4AContextualQueryPlan/v1"
-METHOD_SUPPORT_SCHEMA_VERSION = "L4AMethodSupportAdjudication/v1"
+METHOD_SUPPORT_SCHEMA_VERSION = "L4AMethodSupportAdjudication/v2"
 METHOD_SUPPORT_CLASSIFICATIONS = (
     "DIRECT_METHOD_SUPPORT",
     "RELATED_BUT_NOT_METHOD_SUPPORT",
@@ -532,15 +532,13 @@ def _method_support_schema() -> dict:
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "paper_id": {"type": "string", "minLength": 1},
-            "method_id": {"type": "string", "minLength": 1},
             "classification": {
                 "type": "string",
                 "enum": list(METHOD_SUPPORT_CLASSIFICATIONS),
             },
             "rationale": {"type": "string", "minLength": 1},
         },
-        "required": ["paper_id", "method_id", "classification", "rationale"],
+        "required": ["classification", "rationale"],
     }
     return {
         "type": "object",
@@ -556,11 +554,20 @@ def _method_support_schema() -> dict:
 
 
 def _validate_method_support_payload(
-    dr, payload: dict, expected_pairs: set[tuple[str, str]]
+    dr, payload: dict, expected_count: int
 ) -> dict:
     if not isinstance(payload, dict):
         raise dr.DeepResearchError(
             "L4A method-support adjudication must be a JSON object"
+        )
+    if (
+        isinstance(expected_count, bool)
+        or not isinstance(expected_count, int)
+        or expected_count < 0
+    ):
+        raise dr.DeepResearchError(
+            "L4A method-support adjudication expected decision count must be a "
+            "non-negative integer"
         )
     errors = sorted(
         Draft202012Validator(_method_support_schema()).iter_errors(payload),
@@ -572,28 +579,11 @@ def _validate_method_support_payload(
         raise dr.DeepResearchError(
             f"L4A method-support adjudication {path}: {error.message}"
         )
-    actual_pairs = []
-    for decision in payload["decisions"]:
-        pair = (
-            str(decision["paper_id"]).strip(),
-            str(decision["method_id"]).strip(),
-        )
-        actual_pairs.append(pair)
-    if len(actual_pairs) != len(set(actual_pairs)):
+    actual_count = len(payload["decisions"])
+    if actual_count != expected_count:
         raise dr.DeepResearchError(
-            "L4A method-support adjudication returned duplicate paper/method pairs"
-        )
-    actual_set = set(actual_pairs)
-    expected_set = {
-        (str(paper_id).strip(), str(method_id).strip())
-        for paper_id, method_id in expected_pairs
-    }
-    if actual_set != expected_set:
-        missing = sorted(expected_set - actual_set)
-        unknown = sorted(actual_set - expected_set)
-        raise dr.DeepResearchError(
-            "L4A method-support adjudication pair set mismatch; "
-            f"missing={missing[:1]} unknown={unknown[:1]}"
+            "L4A method-support adjudication decision count mismatch; "
+            f"expected={expected_count} actual={actual_count}"
         )
     return copy.deepcopy(payload)
 
@@ -602,9 +592,9 @@ def _method_support_prompt(payload: dict, backend: str) -> str:
     del backend
     return f"""RLR stage: L4A metadata-only method-support adjudication
 
-You are adjudicating only the supplied canonical paper metadata against the
-supplied L4A method inventory. Do not web search, browse, call a database, read
-the filesystem, retrieve full text, or invent bibliographic identity.
+You are adjudicating only one supplied L4A method against its ordered canonical
+paper metadata candidates. Do not web search, browse, call a database, read the
+filesystem, retrieve full text, or invent bibliographic identity.
 
 Topic relevance is NOT method support.
 
@@ -618,14 +608,16 @@ implementation information for THIS exact method. Do not infer method use from
 topic overlap. When title/abstract metadata is insufficient, return
 INSUFFICIENT_METADATA.
 
-Return exactly one decision for every supplied paper_id/method_id pair. Use
-only these classifications: DIRECT_METHOD_SUPPORT,
+Candidates are supplied in a fixed order. Return exactly one decision for every
+candidate, in exactly the same order. Use only these classifications:
+DIRECT_METHOD_SUPPORT,
 RELATED_BUT_NOT_METHOD_SUPPORT, IRRELEVANT, INSUFFICIENT_METADATA. Each
-decision may contain only paper_id, method_id, classification, and a short
-rationale. Do not return DOI, PMID, PMCID, title, URL, paper, identity, score,
-confidence, or any other field. The controller already owns those values.
+decision may contain only classification and a short rationale. Do not return
+candidate number, paper_id, method_id, DOI, PMID, PMCID, title, URL, paper,
+identity, score, confidence, or any other field. The controller owns all
+candidate and method identity values and will restore them by ordered position.
 
-Supplied L4A metadata:
+Supplied one-method L4A metadata:
 {json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))}
 
 Return JSON only, conforming exactly to the supplied method-support schema.
@@ -634,45 +626,104 @@ Do not include prose, Markdown, code fences, commentary, or text outside JSON.
 
 
 def _method_support_input(
-    methods: list[dict], selected_records: list[dict], pairs: list[dict]
+    method: dict, candidate_records: list[dict]
 ) -> dict:
-    method_ids = {str(pair.get("method_id") or "") for pair in pairs}
-    paper_ids = {str(pair.get("paper_id") or "") for pair in pairs}
-    method_rows = []
-    for method in methods:
-        method_id = str(method.get("method_id") or "")
-        if method_id in method_ids:
-            method_rows.append({
-                "method_id": method_id,
-                "name": str(method.get("name") or ""),
-                "purpose": str(method.get("purpose") or ""),
-                "inventory_reason": str(method.get("inventory_reason") or ""),
-            })
-    paper_rows = []
-    for record in selected_records:
-        paper_id = str(record.get("paper_id") or "")
-        if paper_id not in paper_ids:
-            continue
+    if not isinstance(method, dict):
+        raise ValueError("method-support method must be an object")
+    if not isinstance(candidate_records, list):
+        raise ValueError("method-support candidates must be a list")
+    candidates = []
+    for index, record in enumerate(candidate_records, 1):
+        if not isinstance(record, dict):
+            raise ValueError("method-support candidate must be an object")
         metadata = record.get("metadata")
         metadata = metadata if isinstance(metadata, dict) else {}
-        paper_rows.append({
-            "paper_id": paper_id,
+        candidates.append({
+            "candidate_number": index,
             "title": str(record.get("title") or ""),
             "abstract": str(metadata.get("abstract") or ""),
             "journal": str(metadata.get("journal") or ""),
             "year": str(metadata.get("year") or ""),
         })
     return {
-        "methods": method_rows,
-        "papers": paper_rows,
-        "pairs": [
-            {
-                "paper_id": str(pair.get("paper_id") or ""),
-                "method_id": str(pair.get("method_id") or ""),
-            }
-            for pair in pairs
-        ],
+        # Method and paper identity stay in the deterministic caller. The
+        # provider receives only the scientific method description and ordered
+        # metadata, so it has no identity field to rewrite.
+        "method": {
+            "name": str(method.get("name") or ""),
+            "purpose": str(method.get("purpose") or ""),
+            "inventory_reason": str(method.get("inventory_reason") or ""),
+        },
+        "candidates": candidates,
     }
+
+
+def _method_support_batches(
+    methods: list[dict], selected_records: list[dict], pairs: list[dict]
+) -> list[tuple[dict, list[dict], list[dict]]]:
+    """Build ordered per-method inputs while retaining caller-owned identity."""
+
+    if not isinstance(methods, list) or not isinstance(selected_records, list):
+        raise ValueError("method-support methods and records must be lists")
+    if not isinstance(pairs, list):
+        raise ValueError("method-support selection pairs must be a list")
+
+    method_by_id: dict[str, dict] = {}
+    for method in methods:
+        if not isinstance(method, dict):
+            raise ValueError("method-support method must be an object")
+        method_id = str(method.get("method_id") or "").strip()
+        if not method_id:
+            raise ValueError("method-support method has no method_id")
+        if method_id in method_by_id:
+            raise ValueError(f"duplicate method-support method_id {method_id}")
+        method_by_id[method_id] = method
+
+    record_by_id: dict[str, dict] = {}
+    for record in selected_records:
+        if not isinstance(record, dict):
+            raise ValueError("shortlisted paper record must be an object")
+        paper_id = str(record.get("paper_id") or "").strip()
+        if not paper_id:
+            raise ValueError("shortlisted paper record has no paper_id")
+        if paper_id in record_by_id:
+            raise ValueError(f"duplicate shortlisted paper_id {paper_id}")
+        record_by_id[paper_id] = record
+
+    grouped: dict[str, list[dict]] = {}
+    seen_pairs: set[tuple[str, str]] = set()
+    for pair in pairs:
+        if not isinstance(pair, dict):
+            raise ValueError("method-support selection pair must be an object")
+        paper_id = str(pair.get("paper_id") or "").strip()
+        method_id = str(pair.get("method_id") or "").strip()
+        if not paper_id or not method_id:
+            raise ValueError("method-support selection pair has incomplete identity")
+        identity = (paper_id, method_id)
+        if identity in seen_pairs:
+            raise ValueError(f"duplicate method-support selection pair {identity}")
+        seen_pairs.add(identity)
+        if method_id not in method_by_id:
+            raise ValueError(f"selection contains unknown method {method_id}")
+        if paper_id not in record_by_id:
+            raise ValueError(f"shortlisted paper record is missing: {paper_id}")
+        grouped.setdefault(method_id, []).append(pair)
+
+    batches = []
+    for method in methods:
+        method_id = str(method["method_id"]).strip()
+        method_pairs = grouped.pop(method_id, [])
+        if not method_pairs:
+            continue
+        candidate_records = [
+            record_by_id[str(pair["paper_id"]).strip()]
+            for pair in method_pairs
+        ]
+        batches.append((method, method_pairs, candidate_records))
+    if grouped:
+        unknown = sorted(grouped)[0]
+        raise ValueError(f"selection contains unknown method {unknown}")
+    return batches
 
 
 def _run_method_support_adjudication(
@@ -693,75 +744,119 @@ def _run_method_support_adjudication(
 ) -> dict:
     del project_dir, candidate_id, question, claim
     pairs = list(selection.get("pairs") or [])
-    expected_pairs = {
-        (str(pair.get("paper_id") or ""), str(pair.get("method_id") or ""))
-        for pair in pairs
-    }
     if not pairs:
         return {
             "schema_version": METHOD_SUPPORT_SCHEMA_VERSION,
             "status": "not_run_no_shortlisted_pairs",
             "decisions": [],
+            "method_batches": [],
             "direct_count": 0,
             "shortlisted_pair_count": 0,
-            "skill_receipt": None,
+            "adjudication_call_count": 0,
+            "skill_receipts": [],
         }
+
+    batches = _method_support_batches(methods, selected_records, pairs)
     work = Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
-    schema_path = work / "l4a_method_support_output.schema.json"
-    schema_path.write_text(
-        json.dumps(_method_support_schema(), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    command, _ = dr.build_invocation(
-        spec, "L4", "L4A metadata-only method-support adjudication", "", work
-    )
-    command = [
-        str(schema_path)
-        if value == str(work / "deep_research_output.schema.json")
-        else value
-        for value in command
-    ]
-    command = inventory_module._offline_provider_command(command, spec, work)
-    prompt = _method_support_prompt(
-        _method_support_input(methods, selected_records, pairs),
-        str(getattr(spec, "backend", "")),
-    )
-    command[0] = dr.resolve_subprocess_executable(command[0])
-    execution_command, invocation_kwargs = dr.subprocess_invocation(command, prompt)
-    completed = dr.execute_provider_invocation(
-        execution_command,
-        invocation_kwargs,
-        timeout=spec.timeout,
-        label="L4A method-support adjudication CLI",
-    )
-    receipt = dr.skill_receipt(
-        spec.backend,
-        command,
-        prompt,
-        skill_version,
-        exit_code=completed.returncode,
-        stdout_hash=inventory_module._sha(completed.stdout),
-        model=spec.model,
-    )
-    if completed.returncode != 0:
-        raise dr.DeepResearchError(
-            "L4A method-support adjudication CLI exited "
-            f"{completed.returncode}: {completed.stderr.strip()}"
+
+    method_batches = []
+    decisions = []
+    receipts = []
+    for batch_index, (method, method_pairs, candidate_records) in enumerate(
+        batches, 1
+    ):
+        method_id = str(method["method_id"]).strip()
+        method_work = work / (
+            f"method_support_{batch_index:03d}_{_safe_method_run_id(method_id)}"
         )
-    validated = _validate_method_support_payload(
-        dr, dr._parse_cli_output(completed.stdout), expected_pairs
-    )
-    decisions = list(validated["decisions"])
+        method_work.mkdir(parents=True, exist_ok=True)
+        schema_path = method_work / "l4a_method_support_output.schema.json"
+        schema_path.write_text(
+            json.dumps(_method_support_schema(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        command, _ = dr.build_invocation(
+            spec,
+            "L4",
+            "L4A metadata-only method-support adjudication",
+            "",
+            method_work,
+        )
+        command = [
+            str(schema_path)
+            if value == str(method_work / "deep_research_output.schema.json")
+            else value
+            for value in command
+        ]
+        command = inventory_module._offline_provider_command(
+            command, spec, method_work
+        )
+        prompt = _method_support_prompt(
+            _method_support_input(method, candidate_records),
+            str(getattr(spec, "backend", "")),
+        )
+        command[0] = dr.resolve_subprocess_executable(command[0])
+        execution_command, invocation_kwargs = dr.subprocess_invocation(
+            command, prompt
+        )
+        completed = dr.execute_provider_invocation(
+            execution_command,
+            invocation_kwargs,
+            timeout=spec.timeout,
+            label=f"L4A method-support adjudication CLI ({method_id})",
+        )
+        receipt = dr.skill_receipt(
+            spec.backend,
+            command,
+            prompt,
+            skill_version,
+            exit_code=completed.returncode,
+            stdout_hash=inventory_module._sha(completed.stdout),
+            model=spec.model,
+        )
+        receipts.append(receipt)
+        if completed.returncode != 0:
+            raise dr.DeepResearchError(
+                "L4A method-support adjudication CLI exited "
+                f"{completed.returncode} for {method_id}: {completed.stderr.strip()}"
+            )
+        validated = _validate_method_support_payload(
+            dr,
+            dr._parse_cli_output(completed.stdout),
+            len(candidate_records),
+        )
+        wire_decisions = list(validated["decisions"])
+        bound_decisions = [
+            {
+                "paper_id": str(pair["paper_id"]).strip(),
+                "method_id": method_id,
+                "classification": decision["classification"],
+                "rationale": decision["rationale"],
+            }
+            for pair, decision in zip(method_pairs, wire_decisions)
+        ]
+        method_batches.append({
+            "method_id": method_id,
+            "candidate_paper_ids": [
+                str(pair["paper_id"]).strip() for pair in method_pairs
+            ],
+            "decisions": bound_decisions,
+            "skill_receipt": receipt,
+        })
+        decisions.extend(bound_decisions)
+
     return {
         "schema_version": METHOD_SUPPORT_SCHEMA_VERSION,
         "status": "completed",
         "decisions": decisions,
+        "method_batches": method_batches,
         "direct_count": sum(
             item["classification"] == "DIRECT_METHOD_SUPPORT" for item in decisions
         ),
         "shortlisted_pair_count": len(pairs),
-        "skill_receipt": receipt,
+        "adjudication_call_count": len(method_batches),
+        "skill_receipts": receipts,
     }
 
 

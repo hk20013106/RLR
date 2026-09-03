@@ -630,19 +630,16 @@ def test_non_direct_classifications_are_auditable_but_never_bound(classification
 
 
 def test_method_support_schema_accepts_exactly_four_classifications():
-    expected = {("P1", "M12")}
     for classification in contextual.METHOD_SUPPORT_CLASSIFICATIONS:
         payload = {
             "schema_version": contextual.METHOD_SUPPORT_SCHEMA_VERSION,
             "decisions": [{
-                "paper_id": "P1",
-                "method_id": "M12",
                 "classification": classification,
                 "rationale": "Short metadata-only fixture rationale.",
             }],
         }
         validated = contextual._validate_method_support_payload(
-            dr, payload, expected
+            dr, payload, 1
         )
         assert validated["decisions"][0]["classification"] == classification
 
@@ -652,7 +649,6 @@ def test_malformed_or_unknown_method_support_output_fails_closed():
         "schema_version": contextual.METHOD_SUPPORT_SCHEMA_VERSION,
         "decisions": [{
             "paper_id": "UNKNOWN",
-            "method_id": "M12",
             "classification": "DIRECT_METHOD_SUPPORT",
             "rationale": "Unknown pair.",
             "doi": "10.1000/forbidden",
@@ -660,21 +656,24 @@ def test_malformed_or_unknown_method_support_output_fails_closed():
     }
 
     with pytest.raises(dr.DeepResearchError):
-        contextual._validate_method_support_payload(dr, payload, {("P1", "M12")})
+        contextual._validate_method_support_payload(dr, payload, 1)
 
 
 def test_method_support_prompt_is_metadata_only_and_rejects_topic_shortcut():
     prompt = contextual._method_support_prompt(
         {
-            "methods": [_method("M12", "Gene set construction")],
-            "papers": [{
-                "paper_id": "P1",
+            "method": {
+                "name": "Gene set construction",
+                "purpose": "Use gene set construction for the study.",
+                "inventory_reason": "Required by the hypothesis.",
+            },
+            "candidates": [{
+                "candidate_number": 1,
                 "title": "Calcium biology",
                 "abstract": "Cardiac calcium handling was measured.",
                 "journal": "Biology Journal",
                 "year": "2024",
             }],
-            "pairs": [{"paper_id": "P1", "method_id": "M12"}],
         },
         "codex",
     ).casefold()
@@ -695,8 +694,6 @@ def test_method_support_uses_existing_runtime_provider_and_schema(tmp_path, monk
     wire_payload = {
         "schema_version": contextual.METHOD_SUPPORT_SCHEMA_VERSION,
         "decisions": [{
-            "paper_id": "P1",
-            "method_id": "M12",
             "classification": "DIRECT_METHOD_SUPPORT",
             "rationale": "The title and abstract explicitly describe the method.",
         }],
@@ -754,7 +751,10 @@ def test_method_support_uses_existing_runtime_provider_and_schema(tmp_path, monk
 
     assert result["status"] == "completed"
     assert result["decisions"][0]["classification"] == "DIRECT_METHOD_SUPPORT"
-    assert str(tmp_path / "work" / "l4a_method_support_output.schema.json") in calls["command"]
+    assert any(
+        str(value).endswith("l4a_method_support_output.schema.json")
+        for value in calls["command"]
+    )
     assert "configured-model" in calls["command"]
     assert "Q must not enter" not in calls["prompt"]
     assert "H must not enter" not in calls["prompt"]
