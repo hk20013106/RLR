@@ -10,8 +10,6 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from research_loop import deep_research as dr
 from research_loop import deep_research_task as dr_task
