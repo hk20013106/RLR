@@ -141,7 +141,7 @@ Use a legally obtained local PDF when an exact necessary source cannot be
 retrieved:
 
 ```powershell
-python scripts/import_literature_pdf.py <project_dir> <candidate_id> `
+micromamba run -n rlr python scripts/import_literature_pdf.py <project_dir> <candidate_id> `
   --file "D:\papers\paper.pdf" `
   [--doi "10.xxxx/xxxx" | --pmid "12345678" | --url "https://..."]
 ```

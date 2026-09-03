@@ -39,18 +39,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: mamba-org/setup-micromamba@v3
         with:
-          python-version: "3.13"
+          environment-file: environment.yml
+          environment-name: rlr
+          init-shell: bash
+          cache-environment: true
 
       - name: Install test dependencies
-        run: pip install -r requirements.txt -r requirements-dev.txt
+        run: micromamba run -n rlr python -m pip install -r requirements-specter2.txt -r requirements-dev.txt
 
       - name: L0.5 contract suite
         env:
           PYTHONPATH: src
         run: >-
-          python -m pytest
+          micromamba run -n rlr python -m pytest
           tests/test_l05_curie_contracts.py
           tests/test_l05_curie_store.py
           tests/test_l05_curie_l1_bridge.py

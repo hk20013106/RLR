@@ -20,7 +20,7 @@ it never edits the old workflow state or removes the old attack events.
 Create the cursor-bound recall artifact before assembling native L1 context:
 
 ```powershell
-python research_loop_v04.py hypothesis-recall PROJECT CANDIDATE_ID `
+micromamba run -n rlr python research_loop_v04.py hypothesis-recall PROJECT CANDIDATE_ID `
   --round-id 2 `
   --query "extracellular matrix heart rate" `
   --knowledge-store PATH_TO_SHARED_LEDGER
@@ -170,14 +170,14 @@ workflow and is not part of this implementation phase.
 ## Pool inspection
 
 ```powershell
-python research_loop_v04.py hypothesis-pool-list PROJECT `
+micromamba run -n rlr python research_loop_v04.py hypothesis-pool-list PROJECT `
   --knowledge-store PATH_TO_SHARED_LEDGER
 
-python research_loop_v04.py hypothesis-pool-search PROJECT `
+micromamba run -n rlr python research_loop_v04.py hypothesis-pool-search PROJECT `
   --text "matrix expression" `
   --knowledge-store PATH_TO_SHARED_LEDGER
 
-python research_loop_v04.py hypothesis-pool-show PROJECT HYPOTHESIS_ID `
+micromamba run -n rlr python research_loop_v04.py hypothesis-pool-show PROJECT HYPOTHESIS_ID `
   --knowledge-store PATH_TO_SHARED_LEDGER
 ```
 

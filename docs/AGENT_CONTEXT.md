@@ -38,6 +38,7 @@ src/research_loop/l4_inventory.py   L4A method inventory and exact identifiers
 src/research_loop/l4_closed_corpus.py exact-source resolver service
 src/research_loop/l4_evidence_bundle.py deterministic L4B bundle and L4.5 path gate
 src/research_loop/method_contracts.py Fisher/L5/L6 method contracts
+src/research_loop/runtime_preflight.py formal Micromamba/PaperQA2/SPECTER2 gate
 src/research_loop/providers/        optional non-main-agent providers
 src/research_loop/api.py            runner-to-engine facade
 ```
@@ -45,9 +46,9 @@ src/research_loop/api.py            runner-to-engine facade
 Run public commands from the repository root:
 
 ```powershell
-python research_loop_v04.py --help
-python run_loop.py --help
-python run_loop.py run PROJECT CANDIDATE
+micromamba run -n rlr python research_loop_v04.py --help
+micromamba run -n rlr python run_loop.py --help
+micromamba run -n rlr python run_loop.py run PROJECT CANDIDATE
 ```
 
 The historical `research_loop_v04.py` filename is an intentional compatibility
@@ -80,6 +81,14 @@ L0 → L1 → L2 → L3 → L4 → L5 → L6 → L7 → L8 → L8.5
 Only declared decision commands may change candidate status. The optional
 ranking system is advisory; it must never change a formal transition, candidate
 selection, or gate result.
+
+Before native contextual L4A/SPECTER2 execution, run the formal runtime gate
+from the `rlr` environment. It fails closed on interpreter, package, import, or
+minimal adapter-forward problems:
+
+```powershell
+micromamba run -n rlr python -m research_loop.runtime_preflight
+```
 
 ### Path B: cognitive context invisibility
 
@@ -142,16 +151,16 @@ real production failure.
 Before L1, L4, and L8.5, run:
 
 ```powershell
-python research_loop_v04.py deep-research-run PROJECT CANDIDATE --node NODE
+micromamba run -n rlr python research_loop_v04.py deep-research-run PROJECT CANDIDATE --node NODE
 ```
 
 When the caller cannot wait for a long nested provider run, use the detached
 wrapper around that same command:
 
 ```powershell
-python research_loop_v04.py deep-research-start PROJECT CANDIDATE --node NODE
-python research_loop_v04.py deep-research-status PROJECT TASK_ID
-python research_loop_v04.py deep-research-collect PROJECT TASK_ID
+micromamba run -n rlr python research_loop_v04.py deep-research-start PROJECT CANDIDATE --node NODE
+micromamba run -n rlr python research_loop_v04.py deep-research-status PROJECT TASK_ID
+micromamba run -n rlr python research_loop_v04.py deep-research-collect PROJECT TASK_ID
 ```
 
 The task logs are under

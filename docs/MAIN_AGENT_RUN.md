@@ -23,13 +23,21 @@ session, no copy-paste.
 
 ## L0 dependency gate (run FIRST, do not skip)
 
-Before the loop, run `python research_loop_v04.py preflight PROJECT` (or
+Before the loop, run `micromamba run -n rlr python research_loop_v04.py preflight PROJECT` (or
 `check-deps PROJECT`). This is the **L0 hard gate**: it verifies every required
 dependency listed in `00_Preflight/dependencies.md` (framework: PyYAML; plus any
 project deps you declare, e.g. `- command: Rscript`). If any required dependency
 is **MISSING, the command exits non-zero and you MUST HALT** — do not proceed to
 L1, do not skip. Install the missing dependency, re-run preflight, then continue.
 `run_loop.py` enforces this automatically before round 1.
+
+Before a native contextual L4A/SPECTER2 run, also run the heavy formal
+runtime gate. It verifies the `rlr` interpreter, the PaperQA2/SPECTER2 stack,
+and one real adapter forward; a non-zero result is a hard stop:
+
+```powershell
+micromamba run -n rlr python -m research_loop.runtime_preflight
+```
 
 ## Deep Research evidence (v0.9)
 
@@ -60,31 +68,31 @@ edge.
 
 ```
 while not terminal:
-    1. step = python research_loop_v04.py next-step PROJECT CAND
+    1. step = micromamba run -n rlr python research_loop_v04.py next-step PROJECT CAND
     1b. # v0.9 DEEP RESEARCH: before L1/L4/L8.5, acquire evidence FIRST
         if step.node in (L1, L4, L8.5):
-            python research_loop_v04.py deep-research-run PROJECT CAND --node step.node
+            micromamba run -n rlr python research_loop_v04.py deep-research-run PROJECT CAND --node step.node
     2. if step.is_parallel:  # historical v2.0 L9a + L9b only
          for sub in step.nodes:
-             ctx = python research_loop_v04.py assemble-context PROJECT CAND --node sub.node
+             ctx = micromamba run -n rlr python research_loop_v04.py assemble-context PROJECT CAND --node sub.node
              delta = act_as(sub.persona, ctx)
              write delta to temp file
-             python research_loop_v04.py emit-delta PROJECT CAND --node sub.node --persona sub.persona --file temp.json --context-manifest MANIFEST --provider-receipt RECEIPT
+             micromamba run -n rlr python research_loop_v04.py emit-delta PROJECT CAND --node sub.node --persona sub.persona --file temp.json --context-manifest MANIFEST --provider-receipt RECEIPT
     3. elif step.is_execution:  # L7 Turing
-         python research_loop_v04.py prepare-turing-workspace PROJECT CAND
+         micromamba run -n rlr python research_loop_v04.py prepare-turing-workspace PROJECT CAND
          run approved scripts in the workspace
          build L7 delta from results
-         python research_loop_v04.py emit-delta PROJECT CAND --node L7 --persona Turing --file delta.json --context-manifest MANIFEST --provider-receipt RECEIPT
+         micromamba run -n rlr python research_loop_v04.py emit-delta PROJECT CAND --node L7 --persona Turing --file delta.json --context-manifest MANIFEST --provider-receipt RECEIPT
     4. else:  # cognitive node
-         ctx = python research_loop_v04.py assemble-context PROJECT CAND --node step.node
+         ctx = micromamba run -n rlr python research_loop_v04.py assemble-context PROJECT CAND --node step.node
          delta = act_as(step.persona, ctx)
          write delta to temp file
-         python research_loop_v04.py emit-delta PROJECT CAND --node step.node --persona step.persona --file temp.json --context-manifest MANIFEST --provider-receipt RECEIPT
+         micromamba run -n rlr python research_loop_v04.py emit-delta PROJECT CAND --node step.node --persona step.persona --file temp.json --context-manifest MANIFEST --provider-receipt RECEIPT
     5. run step.advance_command (decision / triage-idea / triage-method / execution-gate)
     6. if step.node == L10c:
-         python research_loop_v04.py aggregate-report PROJECT CAND
+         micromamba run -n rlr python research_loop_v04.py aggregate-report PROJECT CAND
          # REQUIRED end-of-round step: sync human-readable output to Obsidian
-         python sync_to_obsidian.py PROJECT --cand CAND   # needs $OBSIDIAN_VAULT
+         micromamba run -n rlr python sync_to_obsidian.py PROJECT --cand CAND   # needs $OBSIDIAN_VAULT
          evaluate StopPolicy
          if stop: break
          else: create child candidate, continue
@@ -93,7 +101,7 @@ while not terminal:
 ## End-of-round Obsidian sync (REQUIRED)
 
 After `aggregate-report` at the end of **every round**, run
-`python sync_to_obsidian.py PROJECT --cand CAND`. It writes the human-readable
+`micromamba run -n rlr python sync_to_obsidian.py PROJECT --cand CAND`. It writes the human-readable
 view (per-node NOTE.md, ROUND_SUMMARY, figures, FINAL_REPORT, index) into the
 vault at `$OBSIDIAN_VAULT/ResearchLoop/<project>/`. Set `$OBSIDIAN_VAULT` (or
 pass `--vault`) first; if it is unset the script fails loud and writes nothing

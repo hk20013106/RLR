@@ -22,14 +22,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: mamba-org/setup-micromamba@v3
         with:
-          python-version: "3.13"
+          environment-file: environment.yml
+          environment-name: rlr
+          init-shell: bash
+          cache-environment: true
 
       - name: Install runtime dependencies
-        run: pip install -r requirements.txt
+        run: micromamba run -n rlr python -m pip install -r requirements.txt
 
       - name: Run bounded live Europe PMC smoke
         env:
           PYTHONPATH: src
-        run: python scripts/l05_europepmc_live_smoke.py
+        run: micromamba run -n rlr python scripts/l05_europepmc_live_smoke.py

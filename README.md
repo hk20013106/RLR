@@ -272,7 +272,7 @@ Common runtime commands:
 Canonical runner:
 
 ```bash
-python run_loop.py run PROJECT CAND
+micromamba run -n rlr python run_loop.py run PROJECT CAND
 ```
 
 The historical `research_loop_v04.py` filename remains as a compatibility CLI/import shim; new code should use `research_loop.cli`, `research_loop.engine`, or `research_loop.api` directly.
@@ -281,13 +281,16 @@ The historical `research_loop_v04.py` filename remains as a compatibility CLI/im
 
 ## Installation and quick check
 
-```bash
-python -m pip install -r requirements.txt
-python -m pip install -r requirements-dev.txt   # optional test dependencies
+```powershell
+micromamba create --channel-priority strict -n rlr -f environment.yml
+micromamba run -n rlr python -m pip install -r requirements-specter2.txt
+micromamba run -n rlr python -m pip install -e D:\research_loop\paper-qa
 
-python research_loop_v04.py demo
-python research_loop_v04.py --help
-python run_loop.py --help
+$env:PYTHONPATH = "src"
+micromamba run -n rlr python -m research_loop.runtime_preflight
+micromamba run -n rlr python research_loop_v04.py demo
+micromamba run -n rlr python research_loop_v04.py --help
+micromamba run -n rlr python run_loop.py --help
 ```
 
 A real research run must satisfy the current L0 blocking contracts and later stage-specific gates; readiness-only warnings are reported but are not silently promoted into blockers.

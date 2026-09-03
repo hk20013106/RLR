@@ -1,6 +1,20 @@
-# Optional runtime dependencies for the local SPECTER2 L4A pre-ranker.
-# The core RLR installation remains lightweight; this manifest matches the
-# already verified CPU environment used by the bounded SPECTER2 smoke test.
+# Unified RLR + SPECTER2 runtime manifest. The canonical core dependencies
+# remain owned by requirements.txt and are included here without duplication.
+-r requirements.txt
+
+# Runtime dependencies for the formal local SPECTER2 L4A pre-ranker.
+# These pins match the verified CPU adapter stack used by the production
+# SPECTER2 loader.
 torch==2.13.0
 transformers==4.35.2
 adapters==0.1.0
+
+# Cross-stack compatibility pins required when PaperQA2's LLM extra is
+# installed in the same interpreter.  transformers 4.35.2 requires
+# tokenizers <0.19; fhlmi 0.45.0 permits litellm >=1.81.10, whose unbounded
+# tokenizers dependency can therefore share the verified SPECTER2 tokenizer.
+fhaviary==0.36.0
+tokenizers==0.15.2
+huggingface-hub==0.20.3
+fhlmi==0.45.0
+litellm==1.81.10

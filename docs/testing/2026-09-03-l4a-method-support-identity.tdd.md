@@ -28,7 +28,7 @@ Before the production contract change, the eight new identity/per-method tests
 were run with:
 
 ```text
-python -m pytest -q tests/test_l4a_method_support_identity.py --no-header -p no:cacheprovider
+micromamba run -n rlr python -m pytest -q tests/test_l4a_method_support_identity.py --no-header -p no:cacheprovider
 ```
 
 Result: **8 failed**. Failures exposed the old provider-owned identity fields
@@ -45,10 +45,10 @@ valid.
 
 | Check | Command/result |
 | --- | --- |
-| Identity/per-method tests | `python -m pytest -q tests/test_l4a_method_support_identity.py --no-header -p no:cacheprovider` — **8 passed** |
-| L4A/contextual targeted tests | `python -m pytest -q tests/test_l4a_specter2_method_support.py tests/test_l4a_method_support_identity.py tests/test_l4a_bounded_resolution.py tests/test_l4a_contextual_literature.py --no-header -p no:cacheprovider` — **66 passed** |
-| Curie/inventory/L4B regression tests | `python -m pytest -q tests/test_l05_curie_multisource_discovery.py tests/test_l05_curie_selector.py tests/test_l4_inventory_schema.py tests/test_l4_inventory_projection.py tests/test_l4_pipeline.py tests/test_l4b_closed_corpus_fulltext.py tests/test_l4_evidence_bundle.py --no-header -p no:cacheprovider` — **97 passed** |
-| Canonical repository suite | `python -m pytest -q --no-header -p no:cacheprovider` — **1202 passed** |
+| Identity/per-method tests | `micromamba run -n rlr python -m pytest -q tests/test_l4a_method_support_identity.py --no-header -p no:cacheprovider` — **8 passed** |
+| L4A/contextual targeted tests | `micromamba run -n rlr python -m pytest -q tests/test_l4a_specter2_method_support.py tests/test_l4a_method_support_identity.py tests/test_l4a_bounded_resolution.py tests/test_l4a_contextual_literature.py --no-header -p no:cacheprovider` — **66 passed** |
+| Curie/inventory/L4B regression tests | `micromamba run -n rlr python -m pytest -q tests/test_l05_curie_multisource_discovery.py tests/test_l05_curie_selector.py tests/test_l4_inventory_schema.py tests/test_l4_inventory_projection.py tests/test_l4_pipeline.py tests/test_l4b_closed_corpus_fulltext.py tests/test_l4_evidence_bundle.py --no-header -p no:cacheprovider` — **97 passed** |
+| Canonical repository suite | `micromamba run -n rlr python -m pytest -q --no-header -p no:cacheprovider` — **1202 passed** |
 | Whitespace check | `git diff --check` — **passed** |
 
 The full count is the 1194-test baseline plus the eight new regression tests.

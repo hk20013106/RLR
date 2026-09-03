@@ -1,5 +1,9 @@
 # L4A SPECTER2 method-support integration TDD evidence
 
+> Historical implementation receipt only. The `poc_envs\specter2` runtime
+> mentioned below is not a production environment and is superseded by
+> [`2026-09-03-authoritative-rlr-specter2-runtime.md`](2026-09-03-authoritative-rlr-specter2-runtime.md).
+
 **Date:** 2026-09-02
 **Branch:** `codex/l4a-specter2-method-support`
 **Base/start SHA:** `e68a0ca77f65eb2e6dacdc86cb2c264211021a8b`
