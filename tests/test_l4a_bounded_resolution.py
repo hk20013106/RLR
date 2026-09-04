@@ -120,7 +120,6 @@ def _planner_query(query_id, query, method_ids):
     method_terms = str(query).split()
     return {
         "query_id": query_id,
-        "query": query,
         "purpose": "Find comparable studies that used the unresolved analysis action.",
         "status": "planned",
         "receipt": "contextual query planner",
@@ -132,7 +131,7 @@ def _planner_query(query_id, query, method_ids):
 
 def _planner_payload(queries):
     return {
-        "schema_version": "L4AContextualQueryPlan/v1",
+        "schema_version": contextual.CONTEXTUAL_QUERY_PLAN_SCHEMA_VERSION,
         "queries": list(queries),
     }
 

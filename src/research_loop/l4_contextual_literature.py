@@ -3,9 +3,11 @@
 The first L4A provider invocation is the existing offline method-inventory
 step.  Only methods that remain unresolved after frozen L0.5 matching and the
 method registry get a second invocation.  That invocation is deliberately a
-query planner: it returns query text and method IDs, never paper records.
+query planner: it returns method IDs and structured query terms, never paper
+records.
 
-The resulting explicit queries are handed to the canonical L0.5 multisource
+The resulting structured query terms are deterministically rendered into
+explicit queries and handed to the canonical L0.5 multisource
 planner and discovery runner.  That layer remains the sole owner of provider
 transports, canonical paper identity, cross-provider deduplication, and raw
 provider receipts.  L4A only selects bounded candidate support and projects
@@ -30,7 +32,7 @@ from research_loop.l05_curie.contracts import (
 from research_loop.l05_curie import europepmc, multisource, selector
 
 
-CONTEXTUAL_QUERY_PLAN_SCHEMA_VERSION = "L4AContextualQueryPlan/v1"
+CONTEXTUAL_QUERY_PLAN_SCHEMA_VERSION = "L4AContextualQueryPlan/v2"
 METHOD_SUPPORT_SCHEMA_VERSION = "L4AMethodSupportAdjudication/v2"
 METHOD_SUPPORT_CLASSIFICATIONS = (
     "DIRECT_METHOD_SUPPORT",
@@ -50,7 +52,6 @@ def _contextual_query_plan_schema() -> dict:
         "additionalProperties": False,
         "properties": {
             "query_id": {"type": "string", "minLength": 1},
-            "query": {"type": "string", "minLength": 1},
             "purpose": {"type": "string", "minLength": 1},
             "status": {"type": "string", "const": "planned"},
             "receipt": {"type": "string", "minLength": 1},
@@ -76,7 +77,6 @@ def _contextual_query_plan_schema() -> dict:
         # in required, including these audit annotations.
         "required": [
             "query_id",
-            "query",
             "purpose",
             "status",
             "receipt",
@@ -128,25 +128,28 @@ the canonical multisource discovery layer.
 
 Use a METHOD-FIRST query contract. Prefer one unresolved method per query; do
 not group different methods into one query. Each query must contain exactly
-one method_id, a method_terms array, a context_terms array, and a query. The
-method_terms array must contain the method name or canonical label plus useful
-English synonyms, abbreviations, common software/tool names, statistical or
-computational family terms, and implementation or benchmark terms when they
-exist. Keep method_terms focused on the method, not the scientific result.
+one method_id, a method_terms array, and a context_terms array. Do not return
+a query field: the controller deterministically renders the final query from
+the two term arrays. The method_terms array must contain the method name or
+canonical label plus useful English synonyms, abbreviations, common
+software/tool names, statistical or computational family terms, and
+implementation or benchmark terms when they exist. Keep method_terms focused
+on the method, not the scientific result.
 
 The context_terms array may contain at most two short English phrases and may
 only describe data modality or study design, such as RNA-seq,
 cross-species, comparative study, bulk, single-cell, or long-read. Do not copy the scientific question, claim, hypothesis, phenotype, organism,
 mechanism axis, pathway, gene, or disease into context_terms. Do not let
-scientific context dominate the query. The query field must be the exact
-whitespace-joined sequence of method_terms followed by context_terms, with no
-extra words before, between, or after those terms. This preserves method-first
-ordering for the canonical discovery layer.
+scientific context dominate the query. The controller will render the final
+query as the exact whitespace-joined sequence of method_terms followed by
+context_terms, with no extra words before, between, or after those terms. This
+preserves method-first ordering for the canonical discovery layer.
 
 Return only contextual queries. Each query must contain a unique query_id, the
-query text, a concise purpose, status=planned, a short planning receipt, one
-exact unresolved method_id, method_terms, and context_terms from the supplied
-list. Do not require a paper title to equal a method label.
+concise purpose, status=planned, a short planning receipt, one exact unresolved
+method_id, method_terms, and context_terms from the supplied list. Do not
+return a final query string. Do not require a paper title to equal a method
+label.
 
 Do not return assets, papers, paper titles, citations, DOI, PMID, PMCID, stable
 URLs, source databases, source metadata, abstracts, full-text extracts,
@@ -176,7 +179,7 @@ def _contextual_command(command: list[str], spec, work_dir: Path) -> list[str]:
 def _validate_contextual_payload(
     l4p, dr, payload: dict, unresolved_ids: list[str]
 ) -> dict:
-    """Validate the provider's planner-only wire payload."""
+    """Validate wire terms and add the controller-owned query to a copy."""
     if not isinstance(payload, dict):
         raise dr.DeepResearchError(
             "L4A contextual literature query plan must be a JSON object"
@@ -219,17 +222,11 @@ def _validate_contextual_payload(
             )
         method_terms = [str(value).strip() for value in query["method_terms"]]
         context_terms = [str(value).strip() for value in query["context_terms"]]
-        query_text = " ".join(str(query["query"]).split())
-        if CJK_RE.search(query_text) or not re.search(r"[A-Za-z]", query_text):
+        rendered_query = _method_first_query(method_terms, context_terms)
+        if CJK_RE.search(rendered_query) or not re.search(r"[A-Za-z]", rendered_query):
             raise dr.DeepResearchError(
                 f"L4A contextual literature query {query_id} must be an English "
                 "scientific query"
-            )
-        expected_query = _method_first_query(method_terms, context_terms)
-        if query_text != expected_query:
-            raise dr.DeepResearchError(
-                f"L4A contextual literature query {query_id} must be the exact "
-                "method_terms followed by context_terms"
             )
         method_word_count = len(_query_words(" ".join(method_terms)))
         context_word_count = len(_query_words(" ".join(context_terms)))
@@ -240,6 +237,10 @@ def _validate_contextual_payload(
             )
     normalized = copy.deepcopy(payload)
     for query in normalized["queries"]:
+        # The final query is an internal controller field, never provider input.
+        query["query"] = _method_first_query(
+            query["method_terms"], query["context_terms"]
+        )
         query.setdefault(
             "purpose", "Contextual literature query for an unresolved analysis action."
         )
@@ -253,10 +254,15 @@ def _query_words(value: str) -> list[str]:
 
 
 def _method_first_query(method_terms: list[str], context_terms: list[str]) -> str:
-    return " ".join(
-        str(value).strip()
+    """Render the sole canonical query from validated structured terms."""
+    terms = [
+        " ".join(str(value).split())
         for value in [*method_terms, *context_terms]
-        if str(value).strip()
+    ]
+    return " ".join(
+        term
+        for term in terms
+        if term
     )
 
 

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from research_loop import deep_research as dr
 from research_loop import l4_pipeline as l4p
 from research_loop.l4_contextual_literature import (
+    CONTEXTUAL_QUERY_PLAN_SCHEMA_VERSION,
     _contextual_command,
     _contextual_prompt,
     _contextual_query_plan_schema,
@@ -22,10 +23,9 @@ def _method(method_id="M07"):
 
 def _planner_payload():
     return {
-        "schema_version": "L4AContextualQueryPlan/v1",
+        "schema_version": CONTEXTUAL_QUERY_PLAN_SCHEMA_VERSION,
         "queries": [{
             "query_id": "Q001",
-            "query": "cross-species expression normalization RNA-seq comparative study",
             "purpose": "Find comparable studies for the unresolved analysis action.",
             "status": "planned",
             "receipt": "planner-only",
@@ -38,10 +38,24 @@ def _planner_payload():
 
 def _method_first_payload(method_id, method_terms, context_terms):
     return {
-        "schema_version": "L4AContextualQueryPlan/v1",
+        "schema_version": CONTEXTUAL_QUERY_PLAN_SCHEMA_VERSION,
         "queries": [{
             "query_id": "Q001",
-            "query": " ".join([*method_terms, *context_terms]),
+            "purpose": "Find the canonical method literature for one unresolved action.",
+            "status": "planned",
+            "receipt": "method-first planner",
+            "method_ids": [method_id],
+            "method_terms": list(method_terms),
+            "context_terms": list(context_terms),
+        }],
+    }
+
+
+def _structured_only_payload(method_id, method_terms, context_terms):
+    return {
+        "schema_version": CONTEXTUAL_QUERY_PLAN_SCHEMA_VERSION,
+        "queries": [{
+            "query_id": "Q001",
             "purpose": "Find the canonical method literature for one unresolved action.",
             "status": "planned",
             "receipt": "method-first planner",
@@ -55,12 +69,29 @@ def _method_first_payload(method_id, method_terms, context_terms):
 def test_contextual_provider_wire_contract_contains_queries_not_papers():
     payload = _planner_payload()
     validated = _validate_contextual_payload(l4p, dr, payload, ["M07"])
-    assert validated == payload
+    assert "query" not in payload["queries"][0]
+    assert validated["queries"][0]["query"] == (
+        "cross-species expression normalization RNA-seq comparative study"
+    )
     assert "assets" not in validated
 
     payload["assets"] = []
     with pytest.raises(dr.DeepResearchError, match="assets"):
         _validate_contextual_payload(l4p, dr, payload, ["M07"])
+
+
+def test_query_is_rendered_from_structured_terms_when_provider_terms_include_rseqc():
+    payload = _structured_only_payload(
+        "M15",
+        ["RNA-seq quality control", "RSeQC"],
+        ["cross-species RNA-seq"],
+    )
+
+    validated = _validate_contextual_payload(l4p, dr, payload, ["M15"])
+
+    assert validated["queries"][0]["query"] == (
+        "RNA-seq quality control RSeQC cross-species RNA-seq"
+    )
 
 
 def test_contextual_query_plan_schema_types_const_constrained_status():
@@ -73,6 +104,7 @@ def test_contextual_query_plan_schema_types_const_constrained_status():
 def test_contextual_query_plan_schema_requires_all_declared_query_fields():
     query_schema = _contextual_query_plan_schema()["properties"]["queries"]["items"]
     assert set(query_schema["required"]) == set(query_schema["properties"])
+    assert "query" not in query_schema["properties"]
 
 
 def test_contextual_prompt_is_planning_only_and_command_is_offline(tmp_path):
@@ -83,6 +115,9 @@ def test_contextual_prompt_is_planning_only_and_command_is_offline(tmp_path):
     assert "one unresolved method per query" in prompt
     assert "method_terms" in prompt
     assert "context_terms" in prompt
+    assert "do not return" in prompt
+    assert "query field" in prompt
+    assert "deterministically renders" in prompt
     assert "do not copy the scientific question" in prompt
     assert "$academic-research-suite" not in prompt
     assert "doi" in prompt
@@ -103,6 +138,12 @@ def test_contextual_prompt_is_planning_only_and_command_is_offline(tmp_path):
             ["gene set enrichment analysis", "GSEA", "pathway enrichment benchmark"],
             ["RNA-seq", "comparative study"],
             "gene set enrichment analysis GSEA pathway enrichment benchmark RNA-seq comparative study",
+        ),
+        (
+            "M07",
+            ["differential expression analysis", "DESeq2", "edgeR"],
+            ["RNA-seq"],
+            "differential expression analysis DESeq2 edgeR RNA-seq",
         ),
         (
             "M17",
@@ -164,13 +205,16 @@ def test_method_first_query_contract_keeps_method_terms_ahead_of_limited_context
     )
 
 
-def test_method_first_query_contract_rejects_extra_biological_context():
+def test_contextual_provider_cannot_supply_a_rendered_query_field():
     payload = _method_first_payload(
         "M15",
         ["gene set enrichment analysis", "GSEA", "pathway enrichment benchmark"],
         ["RNA-seq", "comparative study"],
     )
-    payload["queries"][0]["query"] += " cardiac calcium high heart rate ECM"
+    payload["queries"][0]["query"] = (
+        "gene set enrichment analysis GSEA pathway enrichment benchmark "
+        "RNA-seq comparative study cardiac calcium high heart rate ECM"
+    )
 
-    with pytest.raises(dr.DeepResearchError, match="method_terms.*context_terms"):
+    with pytest.raises(dr.DeepResearchError, match="Additional properties"):
         _validate_contextual_payload(l4p, dr, payload, ["M15"])

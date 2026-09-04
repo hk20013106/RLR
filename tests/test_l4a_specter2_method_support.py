@@ -289,13 +289,12 @@ def test_contextual_query_validation_rejects_non_english_text():
         "schema_version": contextual.CONTEXTUAL_QUERY_PLAN_SCHEMA_VERSION,
         "queries": [{
             "query_id": "Q1",
-            "query": "心脏转录组方法",
             "purpose": "fixture",
             "status": "planned",
             "receipt": "fixture",
             "method_ids": ["M12"],
             "method_terms": ["phylogenetic comparative method"],
-            "context_terms": [],
+            "context_terms": ["心脏"],
         }],
     }
 
