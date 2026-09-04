@@ -39,6 +39,8 @@ METHOD_SUPPORT_CLASSIFICATIONS = (
     "INSUFFICIENT_METADATA",
 )
 DEFAULT_TOP_K_PER_METHOD = 5
+MAX_METHOD_TERMS = 8
+MAX_CONTEXT_TERMS = 2
 CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 
@@ -55,6 +57,18 @@ def _contextual_query_plan_schema() -> dict:
             "method_ids": {
                 "type": "array",
                 "minItems": 1,
+                "maxItems": 1,
+                "items": {"type": "string", "minLength": 1},
+            },
+            "method_terms": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": MAX_METHOD_TERMS,
+                "items": {"type": "string", "minLength": 1},
+            },
+            "context_terms": {
+                "type": "array",
+                "maxItems": MAX_CONTEXT_TERMS,
                 "items": {"type": "string", "minLength": 1},
             },
         },
@@ -67,6 +81,8 @@ def _contextual_query_plan_schema() -> dict:
             "status",
             "receipt",
             "method_ids",
+            "method_terms",
+            "context_terms",
         ],
     }
     return {
@@ -110,13 +126,27 @@ database, invoke a literature-search skill, read the project filesystem, or
 retrieve any paper metadata. The controller will execute every query through
 the canonical multisource discovery layer.
 
+Use a METHOD-FIRST query contract. Prefer one unresolved method per query; do
+not group different methods into one query. Each query must contain exactly
+one method_id, a method_terms array, a context_terms array, and a query. The
+method_terms array must contain the method name or canonical label plus useful
+English synonyms, abbreviations, common software/tool names, statistical or
+computational family terms, and implementation or benchmark terms when they
+exist. Keep method_terms focused on the method, not the scientific result.
+
+The context_terms array may contain at most two short English phrases and may
+only describe data modality or study design, such as RNA-seq,
+cross-species, comparative study, bulk, single-cell, or long-read. Do not copy the scientific question, claim, hypothesis, phenotype, organism,
+mechanism axis, pathway, gene, or disease into context_terms. Do not let
+scientific context dominate the query. The query field must be the exact
+whitespace-joined sequence of method_terms followed by context_terms, with no
+extra words before, between, or after those terms. This preserves method-first
+ordering for the canonical discovery layer.
+
 Return only contextual queries. Each query must contain a unique query_id, the
-query text, a concise purpose, status=planned, a short planning receipt, and
-one or more exact unresolved method_id values from the supplied list. Build
-queries from the scientific question, study design, data type, biological
-context, and method purpose; do not require a paper title to equal a method
-label. A query may cover more than one method when the context genuinely
-supports that relationship.
+query text, a concise purpose, status=planned, a short planning receipt, one
+exact unresolved method_id, method_terms, and context_terms from the supplied
+list. Do not require a paper title to equal a method label.
 
 Do not return assets, papers, paper titles, citations, DOI, PMID, PMCID, stable
 URLs, source databases, source metadata, abstracts, full-text extracts,
@@ -187,11 +217,26 @@ def _validate_contextual_payload(
                 "L4A contextual literature query references a method outside the "
                 f"unresolved inventory: {unknown[0]}"
             )
-        query_text = str(query["query"]).strip()
+        method_terms = [str(value).strip() for value in query["method_terms"]]
+        context_terms = [str(value).strip() for value in query["context_terms"]]
+        query_text = " ".join(str(query["query"]).split())
         if CJK_RE.search(query_text) or not re.search(r"[A-Za-z]", query_text):
             raise dr.DeepResearchError(
                 f"L4A contextual literature query {query_id} must be an English "
                 "scientific query"
+            )
+        expected_query = _method_first_query(method_terms, context_terms)
+        if query_text != expected_query:
+            raise dr.DeepResearchError(
+                f"L4A contextual literature query {query_id} must be the exact "
+                "method_terms followed by context_terms"
+            )
+        method_word_count = len(_query_words(" ".join(method_terms)))
+        context_word_count = len(_query_words(" ".join(context_terms)))
+        if not method_word_count or context_word_count > method_word_count:
+            raise dr.DeepResearchError(
+                f"L4A contextual literature query {query_id} has context_terms "
+                "that outweigh method_terms"
             )
     normalized = copy.deepcopy(payload)
     for query in normalized["queries"]:
@@ -201,6 +246,18 @@ def _validate_contextual_payload(
         query.setdefault("status", "planned")
         query.setdefault("receipt", "contextual query planner")
     return normalized
+
+
+def _query_words(value: str) -> list[str]:
+    return re.findall(r"[A-Za-z0-9]+(?:[-/][A-Za-z0-9]+)*", str(value or ""))
+
+
+def _method_first_query(method_terms: list[str], context_terms: list[str]) -> str:
+    return " ".join(
+        str(value).strip()
+        for value in [*method_terms, *context_terms]
+        if str(value).strip()
+    )
 
 
 def _transport_timeout(spec) -> int:

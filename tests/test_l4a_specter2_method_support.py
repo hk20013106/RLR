@@ -294,6 +294,8 @@ def test_contextual_query_validation_rejects_non_english_text():
             "status": "planned",
             "receipt": "fixture",
             "method_ids": ["M12"],
+            "method_terms": ["phylogenetic comparative method"],
+            "context_terms": [],
         }],
     }
 

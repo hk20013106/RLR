@@ -117,6 +117,7 @@ def _provider_payload(methods):
 
 
 def _planner_query(query_id, query, method_ids):
+    method_terms = str(query).split()
     return {
         "query_id": query_id,
         "query": query,
@@ -124,6 +125,8 @@ def _planner_query(query_id, query, method_ids):
         "status": "planned",
         "receipt": "contextual query planner",
         "method_ids": list(method_ids),
+        "method_terms": method_terms,
+        "context_terms": [],
     }
 
 
@@ -543,10 +546,12 @@ def test_unresolved_methods_use_explicit_queries_in_canonical_multisource(monkey
         _planner_query(
             "PLAN_A",
             "cross species transcriptomics ortholog normalization mammals",
-            ["novel_a", "novel_b"],
+            ["novel_a"],
         ),
+        _planner_query("PLAN_B", "phylogenetic comparative method", ["novel_b"]),
     ])
     record = _canonical_record()
+    record["provenance"]["originating_query_ids"] = ["Q001", "Q002"]
     observed = _install_multisource(monkeypatch, [record])
     manifest, captured = _run_native(
         monkeypatch,
@@ -567,7 +572,8 @@ def test_unresolved_methods_use_explicit_queries_in_canonical_multisource(monkey
     assert 'TITLE:"' not in planner_prompt
 
     assert observed["explicit_queries"] == [
-        "cross species transcriptomics ortholog normalization mammals"
+        "cross species transcriptomics ortholog normalization mammals",
+        "phylogenetic comparative method",
     ]
     assert set(observed["providers"]) == {
         "europe-pmc", "pubmed", "openalex", "crossref", "semantic-scholar",
@@ -585,7 +591,7 @@ def test_unresolved_methods_use_explicit_queries_in_canonical_multisource(monkey
     )
     assert contextual_asset["asset_id"] == record["paper_id"]
     receipt = manifest["runtime_receipt"]["contextual_literature_search"]
-    assert receipt["planner_query_ids"] == ["PLAN_A"]
+    assert receipt["planner_query_ids"] == ["PLAN_A", "PLAN_B"]
     assert receipt["query_plan"]["queries"][0]["query"] == observed["plan"]["queries"][0]["query"]
     assert receipt["discovery"]["query_plan_id"] == observed["plan"]["plan_id"]
 
@@ -626,9 +632,11 @@ def test_one_multisource_record_can_be_candidate_support_for_multiple_methods(mo
         _method("novel_b", "Phylogenetic comparative model"),
     ])
     planner = _planner_payload([
-        _planner_query("PLAN_A", "comparative transcriptomics phylogenetic mammals", ["novel_a", "novel_b"]),
+        _planner_query("PLAN_A", "comparative transcriptomics normalization", ["novel_a"]),
+        _planner_query("PLAN_B", "phylogenetic comparative model", ["novel_b"]),
     ])
     record = _canonical_record(title="Comparative transcriptomics and phylogenetic analysis in mammals")
+    record["provenance"]["originating_query_ids"] = ["Q001", "Q002"]
     _install_multisource(monkeypatch, [record])
 
     manifest, _captured = _run_native(
