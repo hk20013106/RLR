@@ -198,6 +198,48 @@ def _local_path(project, value):
     return resolved
 
 
+def _frozen_source_location(project, contract):
+    """Return the earliest valid persisted source for this exact paper identity."""
+
+    papers_dir = (
+        Path(project)
+        / "09_Literature_Database"
+        / "evidence_packs"
+        / "papers"
+    )
+    if not papers_dir.is_dir():
+        return ""
+    candidates = []
+    for record_path in sorted(papers_dir.glob("*.json")):
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict) or not _match(record, contract):
+            continue
+        relative = str(record.get("source_payload_path") or "").strip()
+        expected_hash = str(record.get("content_hash") or "").strip().lower()
+        if not relative or not expected_hash:
+            continue
+        try:
+            source_path = _local_path(project, relative)
+            body = source_path.read_bytes()
+        except (OSError, ValueError):
+            continue
+        if not MIN_BYTES <= len(body) <= MAX_BYTES:
+            continue
+        if _sha(body) != expected_hash:
+            continue
+        candidates.append((
+            str(record.get("retrieved_at") or "9999"),
+            record_path.name,
+            relative,
+        ))
+    if not candidates:
+        return ""
+    return sorted(candidates)[0][2]
+
+
 def _plan(contract):
     plan = []
     for item in contract.get("registered_locations", []):
@@ -437,7 +479,13 @@ def _attempt(contract, location, method):
 def resolve_contract(project, contract, *, fetcher=None):
     fetcher = fetcher or _fetch
     attempts = []
-    for location, method in _plan(contract):
+    resolver_contract = copy.deepcopy(contract)
+    frozen_location = _frozen_source_location(project, contract)
+    if frozen_location:
+        resolver_contract["registered_locations"] = _unique(
+            [frozen_location] + list(resolver_contract.get("registered_locations") or [])
+        )
+    for location, method in _plan(resolver_contract):
         receipt = _attempt(contract, location, method)
         try:
             if _local(location):
@@ -456,7 +504,7 @@ def resolve_contract(project, contract, *, fetcher=None):
                     "body": body,
                 }
             else:
-                validate_request_url(contract, location)
+                validate_request_url(resolver_contract, location)
                 response = fetcher(location)
                 body = bytes(response.get("body") or b"")
             if len(body) > MAX_BYTES:
@@ -464,12 +512,12 @@ def resolve_contract(project, contract, *, fetcher=None):
             payload = body.decode("utf-8", errors="replace")
             if len(payload.encode("utf-8")) < MIN_BYTES:
                 raise ValueError("retrieved source payload must contain at least 500 bytes")
-            if not _identity_ok(contract, location, response, payload):
+            if not _identity_ok(resolver_contract, location, response, payload):
                 raise ValueError("redirected payload does not preserve selected asset identity")
             methods = extract_methods_section(
                 payload, str(response.get("content_type") or "")
             )
-            role = str((contract.get("_asset") or {}).get("role") or "method").lower()
+            role = str((resolver_contract.get("_asset") or {}).get("role") or "method").lower()
             if role not in {"review", "navigation"} and not methods:
                 raise ValueError("no explicit Methods section found")
             if methods and not extract_is_contiguous(payload, methods["text"]):
@@ -497,7 +545,7 @@ def resolve_contract(project, contract, *, fetcher=None):
                 "methods_section": methods,
                 "receipt": copy.deepcopy(receipt),
                 "attempts": attempts,
-                "local_path": "",
+                "local_path": str(_local_path(project, frozen_location)) if method == "registered_local_payload" and frozen_location else "",
             }
         except (OSError, ValueError) as exc:
             receipt["failure_reason"] = str(exc)
