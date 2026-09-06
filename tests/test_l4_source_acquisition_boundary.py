@@ -2,7 +2,7 @@ import hashlib
 import json
 
 from research_loop import l4_closed_corpus as cc
-from research_loop.l4_contextual_literature import _contextual_candidate_eligibility
+from research_loop.l05_curie import selector
 
 
 METHOD_XML = (
@@ -65,77 +65,105 @@ def _response(url):
     }
 
 
-def test_l4a_excludes_crossref_component_before_method_ranking():
-    allowed, reason = _contextual_candidate_eligibility(_component_record())
+def _score(_record, _seed):
+    return {
+        "relevance": 1.0,
+        "directness": 1.0,
+        "methodological_value": 1.0,
+        "contradiction_value": 0.0,
+        "evidence_diversity": 1.0,
+        "reason": "Would be highly ranked if it were a paper-level source.",
+    }
 
-    assert allowed is False
-    assert reason == "NON_PAPER_COMPONENT_SOURCE"
+
+def _seed_frozen_paper(project, *, valid_hash=True):
+    raw = METHOD_XML.encode("utf-8")
+    sources = project / "09_Literature_Database/evidence_packs/sources"
+    papers = project / "09_Literature_Database/evidence_packs/papers"
+    sources.mkdir(parents=True, exist_ok=True)
+    papers.mkdir(parents=True, exist_ok=True)
+    source_path = sources / "existing.xml"
+    source_path.write_bytes(raw)
+    relative = source_path.relative_to(project).as_posix()
+    record = {
+        "paper_id": "existing-paper",
+        "doi": "10.1234/example.method",
+        "pmid": "",
+        "url": "https://doi.org/10.1234/example.method",
+        "retrieved_at": "2026-09-01T00:00:00+00:00",
+        "content_hash": (
+            hashlib.sha256(raw).hexdigest()
+            if valid_hash
+            else hashlib.sha256(b"different bytes").hexdigest()
+        ),
+        "source_payload_path": relative,
+    }
+    (papers / "existing-paper.json").write_text(
+        json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return source_path
 
 
-def test_resolved_source_is_frozen_in_shared_evidence_source_store(tmp_path):
+def test_curie_selector_excludes_crossref_component_before_scoring():
+    calls = []
+
+    def scorer(record, seed):
+        calls.append((record, seed))
+        return _score(record, seed)
+
+    result = selector.select_candidates_strict(
+        [_component_record()],
+        seed={},
+        scorer=scorer,
+        eligibility=lambda _record: (True, "CALLER_ALLOWED"),
+        max_papers=1,
+        query_ids={"Q001"},
+    )
+
+    assert result["included_paper_ids"] == []
+    assert result["decisions"][0]["decision"] == "EXCLUDE"
+    assert result["decisions"][0]["reason_code"] == "NON_PAPER_COMPONENT_SOURCE"
+    assert calls == []
+
+
+def test_next_run_reuses_existing_frozen_source_without_network(tmp_path):
     project = tmp_path / "project"
-    work = tmp_path / "work"
-
-    state = cc.resolve_manifest(
-        project,
-        "C1",
-        {"path": "manifest.json", "manifest_sha256": "abc"},
-        work,
-        selected_assets=[_asset()],
-        fetcher=_response,
-    )
-
-    result = state["resolutions"][0]
-    local = result["local_path"]
-    assert result["status"] == "resolved"
-    assert local
-    local_path = project / result["persisted_source_path"]
-    assert local_path.resolve().as_posix() == local.replace("\\", "/")
-    assert "/09_Literature_Database/evidence_packs/sources/" in local_path.resolve().as_posix()
-    assert local_path.read_bytes() == METHOD_XML.encode("utf-8")
-    assert local_path.stem == hashlib.sha256(METHOD_XML.encode("utf-8")).hexdigest()
-    assert not (work / "l4b_resolved_sources").exists()
-
-
-def test_next_run_reuses_frozen_source_without_network(tmp_path):
-    project = tmp_path / "project"
-    first_state = cc.resolve_manifest(
-        project,
-        "C1",
-        {"path": "manifest.json", "manifest_sha256": "abc"},
-        tmp_path / "work-1",
-        selected_assets=[_asset()],
-        fetcher=_response,
-    )
-    first_result = first_state["resolutions"][0]
-
-    artifact = {"run_id": "R1", "papers": []}
-    cc.persist_debug_evidence(project, artifact, first_state)
-
-    receipt = json.loads(
-        next(
-            (project / "09_Literature_Database/evidence_packs/retrieval_receipts/R1").glob("*.json")
-        ).read_text(encoding="utf-8")
-    )
-    assert receipt["local_payload_path"] == first_result["persisted_source_path"]
-
+    source_path = _seed_frozen_paper(project)
     calls = []
 
     def no_network(url):
         calls.append(url)
         raise OSError("network should not be used when a frozen source exists")
 
-    second_state = cc.resolve_manifest(
+    result = cc.resolve_contract(
         project,
-        "C1",
-        {"path": "manifest.json", "manifest_sha256": "def"},
-        tmp_path / "work-2",
-        selected_assets=[_asset()],
+        cc._internal_contract(_asset()),
         fetcher=no_network,
     )
 
-    second_result = second_state["resolutions"][0]
-    assert second_result["status"] == "resolved"
-    assert second_result["receipt"]["retrieval_method"] == "registered_local_payload"
-    assert second_result["persisted_source_path"] == first_result["persisted_source_path"]
+    assert result["status"] == "resolved"
+    assert result["receipt"]["retrieval_method"] == "registered_local_payload"
+    assert result["source_bytes"] == METHOD_XML.encode("utf-8")
+    assert result["local_path"] == str(source_path.resolve())
     assert calls == []
+
+
+def test_corrupt_frozen_source_is_not_reused(tmp_path):
+    project = tmp_path / "project"
+    _seed_frozen_paper(project, valid_hash=False)
+    calls = []
+
+    def network(url):
+        calls.append(url)
+        return _response(url)
+
+    result = cc.resolve_contract(
+        project,
+        cc._internal_contract(_asset()),
+        fetcher=network,
+    )
+
+    assert result["status"] == "resolved"
+    assert result["receipt"]["retrieval_method"] != "registered_local_payload"
+    assert calls
