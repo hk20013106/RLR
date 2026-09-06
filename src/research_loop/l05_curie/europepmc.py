@@ -125,6 +125,36 @@ def _default_http_get(url: str, timeout: int) -> bytes:
         return response.read()
 
 
+def _core_search_url(query: str, *, page_size: int, cursor_mark: str = "") -> str:
+    params = {
+        "query": _require_text(query, "Europe PMC query"),
+        "resultType": "core",
+        "format": "json",
+        "pageSize": str(page_size),
+    }
+    if cursor_mark:
+        params["cursorMark"] = str(cursor_mark)
+    return BASE_URL + "/search?" + urlencode(params)
+
+
+def _decode_core_response(raw: bytes) -> tuple[dict, list[dict]]:
+    if not isinstance(raw, (bytes, bytearray)):
+        raise CurieContractError("Europe PMC http_get must return bytes")
+    raw = bytes(raw)
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CurieContractError(
+            f"Europe PMC search response is not valid UTF-8 JSON: {exc}"
+        ) from exc
+    results = payload.get("resultList", {}).get("result", []) if isinstance(payload, dict) else []
+    if not isinstance(results, list):
+        raise CurieContractError(
+            "Europe PMC search response resultList.result must be a list"
+        )
+    return payload, results
+
+
 class EuropePmcTransport:
     """Deterministic Europe PMC `search` adapter with persisted raw receipts."""
 
@@ -191,29 +221,17 @@ class EuropePmcTransport:
             "page_size": page_size,
             "cursor_mark": cursor_mark or None,
         }
-        params = {
-            "query": query,
-            "resultType": "core",
-            "format": "json",
-            "pageSize": str(page_size),
-        }
-        if cursor_mark:
-            params["cursorMark"] = cursor_mark
-        url = BASE_URL + "/search?" + urlencode(params)
+        url = _core_search_url(
+            query,
+            page_size=page_size,
+            cursor_mark=cursor_mark,
+        )
         try:
             raw = self.http_get(url, self.timeout)
         except Exception as exc:
             raise CurieContractError(f"Europe PMC search request failed: {exc}") from exc
-        if not isinstance(raw, (bytes, bytearray)):
-            raise CurieContractError("Europe PMC http_get must return bytes")
+        payload, results = _decode_core_response(raw)
         raw = bytes(raw)
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise CurieContractError(f"Europe PMC search response is not valid UTF-8 JSON: {exc}") from exc
-        results = payload.get("resultList", {}).get("result", []) if isinstance(payload, dict) else []
-        if not isinstance(results, list):
-            raise CurieContractError("Europe PMC search response resultList.result must be a list")
         records = [canonicalize_europepmc_record(item) for item in results]
         response_path = self._write_raw_response(query_id, raw)
         return {
@@ -230,6 +248,98 @@ class EuropePmcTransport:
             "hit_count": int(payload.get("hitCount") or 0) if isinstance(payload, dict) else 0,
             "next_cursor_mark": str(payload.get("nextCursorMark") or "") if isinstance(payload, dict) else "",
         }
+
+
+def lookup_exact_identifiers(
+    *,
+    doi: str = "",
+    pmid: str = "",
+    http_get: HttpGet | None = None,
+    timeout: int = 20,
+) -> dict:
+    """Resolve alternate identifiers/locations for one already-selected paper.
+
+    This is an exact identity lookup, not literature discovery: the query is
+    constrained to the supplied DOI or PMID, and only exact canonical matches
+    may contribute PMCID or full-text locations.
+    """
+
+    normalized_doi = normalize_doi(doi)
+    normalized_pmid = normalize_pmid(pmid)
+    if not normalized_doi and not normalized_pmid:
+        return {}
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+        raise CurieContractError("Europe PMC timeout must be a positive integer")
+    query = (
+        f'DOI:"{normalized_doi}"'
+        if normalized_doi
+        else f"EXT_ID:{normalized_pmid} AND SRC:MED"
+    )
+    getter = http_get or _default_http_get
+    try:
+        raw = getter(_core_search_url(query, page_size=10), timeout)
+    except Exception as exc:
+        raise CurieContractError(
+            f"Europe PMC exact identifier lookup failed: {exc}"
+        ) from exc
+    _payload, results = _decode_core_response(raw)
+
+    matched: list[tuple[dict, dict]] = []
+    locations: list[str] = []
+    for raw_record in results:
+        if not isinstance(raw_record, dict):
+            continue
+        try:
+            record = canonicalize_europepmc_record(raw_record)
+        except CurieContractError:
+            continue
+        identifiers = record.get("identifiers")
+        identifiers = identifiers if isinstance(identifiers, dict) else {}
+        record_doi = normalize_doi(identifiers.get("doi"))
+        record_pmid = normalize_pmid(identifiers.get("pmid"))
+        if normalized_doi and record_doi != normalized_doi:
+            continue
+        if normalized_pmid and record_pmid != normalized_pmid:
+            continue
+        matched.append((identifiers, raw_record))
+
+        full_text = raw_record.get("fullTextUrlList")
+        full_text = full_text if isinstance(full_text, dict) else {}
+        full_text_urls = full_text.get("fullTextUrl") or []
+        if isinstance(full_text_urls, dict):
+            full_text_urls = [full_text_urls]
+        if isinstance(full_text_urls, list):
+            for item in full_text_urls:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("url") or "").strip()
+                if url.startswith(("http://", "https://")) and url not in locations:
+                    locations.append(url)
+
+    if not matched:
+        return {}
+
+    resolved = {
+        "doi": normalized_doi,
+        "pmid": normalized_pmid,
+        "pmcid": "",
+        "registered_locations": locations,
+    }
+    for identifiers, _raw_record in matched:
+        values = {
+            "doi": normalize_doi(identifiers.get("doi")),
+            "pmid": normalize_pmid(identifiers.get("pmid")),
+            "pmcid": normalize_pmcid(identifiers.get("pmcid")),
+        }
+        for key, value in values.items():
+            if not value:
+                continue
+            if resolved[key] and resolved[key] != value:
+                raise CurieContractError(
+                    f"Europe PMC exact identifier lookup returned conflicting {key} values"
+                )
+            resolved[key] = value
+    return resolved
 
 
 def _parse_target_paragraphs(raw: bytes) -> list[dict]:
