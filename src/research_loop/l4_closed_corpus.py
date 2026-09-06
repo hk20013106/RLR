@@ -283,92 +283,17 @@ def _fetch(value):
 
 
 def _europe_pmc_exact_identifiers(*, doi="", pmid=""):
-    """Resolve alternate exact identifiers without expanding the selected corpus."""
+    """Delegate exact identity enrichment to the existing Europe PMC owner."""
 
-    expected_doi = _doi(doi)
-    expected_pmid = str(pmid or "").strip()
-    if not expected_doi and not expected_pmid:
-        return {}
-    query = (
-        f'DOI:"{expected_doi}"'
-        if expected_doi
-        else f"EXT_ID:{expected_pmid} AND SRC:MED"
+    def http_get(url, _timeout):
+        return bytes(_fetch(url).get("body") or b"")
+
+    return europepmc.lookup_exact_identifiers(
+        doi=doi,
+        pmid=pmid,
+        http_get=http_get,
+        timeout=30,
     )
-    params = {
-        "query": query,
-        "resultType": "core",
-        "format": "json",
-        "pageSize": "10",
-    }
-    lookup_url = europepmc.BASE_URL + "/search?" + urllib.parse.urlencode(params)
-    response = _fetch(lookup_url)
-    raw = bytes(response.get("body") or b"")
-    try:
-        payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"Europe PMC exact-identifier response is invalid JSON: {exc}") from exc
-    raw_results = (
-        payload.get("resultList", {}).get("result", [])
-        if isinstance(payload, dict)
-        else []
-    )
-    if not isinstance(raw_results, list):
-        raise ValueError("Europe PMC exact-identifier resultList.result must be a list")
-
-    matched = []
-    locations = []
-    for raw_record in raw_results:
-        if not isinstance(raw_record, dict):
-            continue
-        try:
-            record = europepmc.canonicalize_europepmc_record(raw_record)
-        except Exception:
-            continue
-        identifiers = record.get("identifiers")
-        identifiers = identifiers if isinstance(identifiers, dict) else {}
-        record_doi = _doi(identifiers.get("doi"))
-        record_pmid = str(identifiers.get("pmid") or "").strip()
-        if expected_doi and record_doi != expected_doi:
-            continue
-        if expected_pmid and record_pmid != expected_pmid:
-            continue
-        matched.append(identifiers)
-        full_text = raw_record.get("fullTextUrlList")
-        full_text = full_text if isinstance(full_text, dict) else {}
-        full_text_urls = full_text.get("fullTextUrl") or []
-        if isinstance(full_text_urls, dict):
-            full_text_urls = [full_text_urls]
-        if isinstance(full_text_urls, list):
-            for item in full_text_urls:
-                if not isinstance(item, dict):
-                    continue
-                url = str(item.get("url") or "").strip()
-                if url.startswith(("http://", "https://")) and url not in locations:
-                    locations.append(url)
-    if not matched:
-        return {}
-
-    resolved = {
-        "doi": expected_doi,
-        "pmid": expected_pmid,
-        "pmcid": "",
-        "registered_locations": locations,
-    }
-    for identifiers in matched:
-        for key, normalizer in (
-            ("doi", _doi),
-            ("pmid", lambda value: str(value or "").strip()),
-            ("pmcid", lambda value: str(value or "").strip().upper()),
-        ):
-            value = normalizer(identifiers.get(key))
-            if not value:
-                continue
-            if resolved[key] and resolved[key] != value:
-                raise ValueError(
-                    f"Europe PMC exact-identifier lookup returned conflicting {key} values"
-                )
-            resolved[key] = value
-    return resolved
 
 
 def _merge_exact_identifiers(contract, resolved):
@@ -637,7 +562,7 @@ def resolve_contract(project, contract, *, fetcher=None, identifier_resolver=Non
                 resolver_contract = _merge_exact_identifiers(
                     resolver_contract, resolved_identifiers
                 )
-            except (OSError, ValueError):
+            except (OSError, ValueError, europepmc.CurieContractError):
                 # Exact source-location enrichment is advisory to retrieval.
                 # Identity conflicts are never merged; the original frozen
                 # DOI/PMID contract remains the only allowed fallback corpus.
