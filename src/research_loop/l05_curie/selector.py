@@ -24,6 +24,7 @@ _SCORE_FIELDS = (
     "evidence_diversity",
 )
 _ROOT = Path("08_Audit") / "l05_selector"
+_NON_PAPER_PUBLICATION_TYPES = {"component"}
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -47,6 +48,24 @@ def _score(value: object, name: str) -> float:
     if not 0.0 <= number <= 1.0:
         raise CurieContractError(f"{name} must be between 0 and 1")
     return number
+
+
+def _source_type_eligibility(record: dict) -> tuple[bool, str]:
+    """Reject provider records that are not paper-level bibliographic sources."""
+
+    metadata = record.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    publication_types = metadata.get("publication_types") or []
+    if not isinstance(publication_types, list):
+        publication_types = []
+    normalized = {
+        str(value or "").strip().casefold().replace("_", "-")
+        for value in publication_types
+        if str(value or "").strip()
+    }
+    if normalized & _NON_PAPER_PUBLICATION_TYPES:
+        return False, "NON_PAPER_COMPONENT_SOURCE"
+    return True, "PAPER_LEVEL_SOURCE"
 
 
 def build_selector_decision(
@@ -148,10 +167,12 @@ def _select_candidates(
         if paper_id in seen:
             raise CurieContractError(f"selector received duplicate paper_id: {paper_id}")
         seen.add(paper_id)
-        gate = eligibility(record)
-        if not isinstance(gate, tuple) or len(gate) != 2 or not isinstance(gate[0], bool):
-            raise CurieContractError("selector eligibility must return (bool, reason_code)")
-        allowed, reason_code = gate
+        allowed, reason_code = _source_type_eligibility(record)
+        if allowed:
+            gate = eligibility(record)
+            if not isinstance(gate, tuple) or len(gate) != 2 or not isinstance(gate[0], bool):
+                raise CurieContractError("selector eligibility must return (bool, reason_code)")
+            allowed, reason_code = gate
         if not allowed:
             decision = build_selector_decision(
                 paper_id=paper_id,
