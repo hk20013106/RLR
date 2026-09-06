@@ -8,15 +8,21 @@ import html
 import json
 import ipaddress
 import re
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from research_loop.l05_curie import europepmc
+
 POLICY = "closed_corpus_exact_asset_only"
 RECEIPT_SCHEMA = "L4BFullTextRetrievalReceipt/v1"
 MIN_BYTES = 500
 MAX_BYTES = 5 * 1024 * 1024
+MAX_HTTP_RETRIES = 2
+MAX_RETRY_AFTER_SECONDS = 5.0
 _STATE = {}
 _SEARCH_HOSTS = {"google.com", "www.google.com", "bing.com", "www.bing.com", "duckduckgo.com"}
 _SECRET_KEYS = ("token", "secret", "password", "authorization", "cookie", "credential", "api_key")
@@ -240,6 +246,156 @@ def _frozen_source_location(project, contract):
     return sorted(candidates)[0][2]
 
 
+def _retry_after_seconds(error, retry_index):
+    value = str((getattr(error, "headers", None) or {}).get("Retry-After") or "").strip()
+    try:
+        delay = float(value)
+    except (TypeError, ValueError):
+        delay = float(2 ** retry_index)
+    return min(MAX_RETRY_AFTER_SECONDS, max(0.0, delay))
+
+
+def _fetch(value):
+    request = urllib.request.Request(value, headers={
+        "User-Agent": "RLR-L4B-Closed-Corpus/1.0",
+        "Accept": "application/json,application/xml,text/xml,text/html,text/plain",
+    })
+    redirects = _RedirectRecorder()
+    opener = urllib.request.build_opener(redirects)
+    for retry_index in range(MAX_HTTP_RETRIES + 1):
+        try:
+            with opener.open(request, timeout=30) as response:
+                body = response.read(MAX_BYTES + 1)
+                return {
+                    "resolved_url": response.geturl(),
+                    "redirect_chain": redirects.chain,
+                    "http_status": int(getattr(response, "status", 200)),
+                    "content_type": str(
+                        response.headers.get("Content-Type") or "application/octet-stream"
+                    ),
+                    "body": body,
+                }
+        except urllib.error.HTTPError as exc:
+            if exc.code != 429 or retry_index >= MAX_HTTP_RETRIES:
+                raise
+            time.sleep(_retry_after_seconds(exc, retry_index))
+    raise RuntimeError("unreachable HTTP retry state")
+
+
+def _europe_pmc_exact_identifiers(*, doi="", pmid=""):
+    """Resolve alternate exact identifiers without expanding the selected corpus."""
+
+    expected_doi = _doi(doi)
+    expected_pmid = str(pmid or "").strip()
+    if not expected_doi and not expected_pmid:
+        return {}
+    query = (
+        f'DOI:"{expected_doi}"'
+        if expected_doi
+        else f"EXT_ID:{expected_pmid} AND SRC:MED"
+    )
+    params = {
+        "query": query,
+        "resultType": "core",
+        "format": "json",
+        "pageSize": "10",
+    }
+    lookup_url = europepmc.BASE_URL + "/search?" + urllib.parse.urlencode(params)
+    response = _fetch(lookup_url)
+    raw = bytes(response.get("body") or b"")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Europe PMC exact-identifier response is invalid JSON: {exc}") from exc
+    raw_results = (
+        payload.get("resultList", {}).get("result", [])
+        if isinstance(payload, dict)
+        else []
+    )
+    if not isinstance(raw_results, list):
+        raise ValueError("Europe PMC exact-identifier resultList.result must be a list")
+
+    matched = []
+    locations = []
+    for raw_record in raw_results:
+        if not isinstance(raw_record, dict):
+            continue
+        try:
+            record = europepmc.canonicalize_europepmc_record(raw_record)
+        except Exception:
+            continue
+        identifiers = record.get("identifiers")
+        identifiers = identifiers if isinstance(identifiers, dict) else {}
+        record_doi = _doi(identifiers.get("doi"))
+        record_pmid = str(identifiers.get("pmid") or "").strip()
+        if expected_doi and record_doi != expected_doi:
+            continue
+        if expected_pmid and record_pmid != expected_pmid:
+            continue
+        matched.append(identifiers)
+        full_text = raw_record.get("fullTextUrlList")
+        full_text = full_text if isinstance(full_text, dict) else {}
+        full_text_urls = full_text.get("fullTextUrl") or []
+        if isinstance(full_text_urls, dict):
+            full_text_urls = [full_text_urls]
+        if isinstance(full_text_urls, list):
+            for item in full_text_urls:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("url") or "").strip()
+                if url.startswith(("http://", "https://")) and url not in locations:
+                    locations.append(url)
+    if not matched:
+        return {}
+
+    resolved = {
+        "doi": expected_doi,
+        "pmid": expected_pmid,
+        "pmcid": "",
+        "registered_locations": locations,
+    }
+    for identifiers in matched:
+        for key, normalizer in (
+            ("doi", _doi),
+            ("pmid", lambda value: str(value or "").strip()),
+            ("pmcid", lambda value: str(value or "").strip().upper()),
+        ):
+            value = normalizer(identifiers.get(key))
+            if not value:
+                continue
+            if resolved[key] and resolved[key] != value:
+                raise ValueError(
+                    f"Europe PMC exact-identifier lookup returned conflicting {key} values"
+                )
+            resolved[key] = value
+    return resolved
+
+
+def _merge_exact_identifiers(contract, resolved):
+    enriched = copy.deepcopy(contract)
+    if not isinstance(resolved, dict):
+        return enriched
+    for key, normalizer in (
+        ("doi", _doi),
+        ("pmid", lambda value: str(value or "").strip()),
+        ("pmcid", lambda value: str(value or "").strip().upper()),
+    ):
+        value = normalizer(resolved.get(key))
+        if not value:
+            continue
+        existing = normalizer(enriched.get(key))
+        if existing and existing != value:
+            raise ValueError(f"exact source identifier conflicts with selected paper {key}")
+        enriched[key] = value
+    enriched["registered_locations"] = _unique(
+        list(enriched.get("registered_locations") or [])
+        + list(resolved.get("registered_locations") or [])
+    )
+    if enriched.get("pmcid") or resolved.get("registered_locations"):
+        enriched["full_text_status"] = "available_oa"
+    return enriched
+
+
 def _plan(contract):
     plan = []
     for item in contract.get("registered_locations", []):
@@ -286,26 +442,6 @@ class _RedirectRecorder(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         self.chain.append(str(newurl))
         return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
-def _fetch(value):
-    request = urllib.request.Request(value, headers={
-        "User-Agent": "RLR-L4B-Closed-Corpus/1.0",
-        "Accept": "application/xml,text/xml,text/html,text/plain",
-    })
-    redirects = _RedirectRecorder()
-    opener = urllib.request.build_opener(redirects)
-    with opener.open(request, timeout=30) as response:
-        body = response.read(MAX_BYTES + 1)
-        return {
-            "resolved_url": response.geturl(),
-            "redirect_chain": redirects.chain,
-            "http_status": int(getattr(response, "status", 200)),
-            "content_type": str(
-                response.headers.get("Content-Type") or "application/octet-stream"
-            ),
-            "body": body,
-        }
 
 
 def normalized_source_text(value):
@@ -476,7 +612,8 @@ def _attempt(contract, location, method):
     }
 
 
-def resolve_contract(project, contract, *, fetcher=None):
+def resolve_contract(project, contract, *, fetcher=None, identifier_resolver=None):
+    custom_fetcher = fetcher is not None
     fetcher = fetcher or _fetch
     attempts = []
     resolver_contract = copy.deepcopy(contract)
@@ -485,8 +622,28 @@ def resolve_contract(project, contract, *, fetcher=None):
         resolver_contract["registered_locations"] = _unique(
             [frozen_location] + list(resolver_contract.get("registered_locations") or [])
         )
+    elif not resolver_contract.get("pmcid") and (
+        resolver_contract.get("doi") or resolver_contract.get("pmid")
+    ):
+        resolver = identifier_resolver
+        if resolver is None and not custom_fetcher:
+            resolver = _europe_pmc_exact_identifiers
+        if resolver is not None:
+            try:
+                resolved_identifiers = resolver(
+                    doi=str(resolver_contract.get("doi") or ""),
+                    pmid=str(resolver_contract.get("pmid") or ""),
+                )
+                resolver_contract = _merge_exact_identifiers(
+                    resolver_contract, resolved_identifiers
+                )
+            except (OSError, ValueError):
+                # Exact source-location enrichment is advisory to retrieval.
+                # Identity conflicts are never merged; the original frozen
+                # DOI/PMID contract remains the only allowed fallback corpus.
+                resolver_contract = copy.deepcopy(contract)
     for location, method in _plan(resolver_contract):
-        receipt = _attempt(contract, location, method)
+        receipt = _attempt(resolver_contract, location, method)
         try:
             if _local(location):
                 path = _local_path(project, location)
@@ -538,7 +695,7 @@ def resolve_contract(project, contract, *, fetcher=None):
             attempts.append(receipt)
             return {
                 "status": "resolved",
-                "contract": _public(contract),
+                "contract": _public(resolver_contract),
                 "source_payload": payload,
                 "source_bytes": body,
                 "content_type": receipt["content_type"],
@@ -553,7 +710,7 @@ def resolve_contract(project, contract, *, fetcher=None):
             attempts.append(receipt)
     return {
         "status": "failed",
-        "contract": _public(contract),
+        "contract": _public(resolver_contract),
         "source_payload": "",
         "source_bytes": b"",
         "content_type": "",
