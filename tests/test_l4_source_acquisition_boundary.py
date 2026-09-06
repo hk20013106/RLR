@@ -176,6 +176,7 @@ def test_corrupt_frozen_source_is_not_reused(tmp_path):
 def test_doi_only_contract_enriches_pmcid_before_publisher(tmp_path):
     calls = []
     lookup_calls = []
+    contract = cc._internal_contract(_asset())
 
     def identifier_resolver(*, doi="", pmid=""):
         lookup_calls.append((doi, pmid))
@@ -191,7 +192,7 @@ def test_doi_only_contract_enriches_pmcid_before_publisher(tmp_path):
 
     result = cc.resolve_contract(
         tmp_path,
-        cc._internal_contract(_asset()),
+        contract,
         fetcher=fetcher,
         identifier_resolver=identifier_resolver,
     )
@@ -201,8 +202,74 @@ def test_doi_only_contract_enriches_pmcid_before_publisher(tmp_path):
         "https://www.ebi.ac.uk/europepmc/webservices/rest/PMC4302049/fullTextXML"
     ]
     assert result["status"] == "resolved"
+    assert result["contract"]["paper_id"] == "P_method"
     assert result["contract"]["pmcid"] == "PMC4302049"
+    assert contract["paper_id"] == "P_method"
+    assert contract["pmcid"] == ""
     assert result["receipt"]["retrieval_method"] == "europe_pmc_fulltext_xml"
+
+
+def test_no_exact_identifier_match_falls_back_to_original_doi(tmp_path):
+    calls = []
+
+    def fetcher(url):
+        calls.append(url)
+        return _response(url)
+
+    result = cc.resolve_contract(
+        tmp_path,
+        cc._internal_contract(_asset()),
+        fetcher=fetcher,
+        identifier_resolver=lambda **_kwargs: {},
+    )
+
+    assert result["status"] == "resolved"
+    assert result["contract"]["paper_id"] == "P_method"
+    assert result["contract"]["pmcid"] == ""
+    assert calls == ["https://doi.org/10.1234/example.method"]
+
+
+def test_exact_identifier_lookup_unavailable_falls_back_to_original_doi(tmp_path):
+    calls = []
+
+    def unavailable(**_kwargs):
+        raise OSError("Europe PMC unavailable")
+
+    def fetcher(url):
+        calls.append(url)
+        return _response(url)
+
+    result = cc.resolve_contract(
+        tmp_path,
+        cc._internal_contract(_asset()),
+        fetcher=fetcher,
+        identifier_resolver=unavailable,
+    )
+
+    assert result["status"] == "resolved"
+    assert result["contract"]["paper_id"] == "P_method"
+    assert calls == ["https://doi.org/10.1234/example.method"]
+
+
+def test_exact_identifier_identity_conflict_fails_closed(tmp_path):
+    calls = []
+
+    def conflicting(**_kwargs):
+        raise ValueError("exact source identifier conflicts with selected paper doi")
+
+    def fetcher(url):
+        calls.append(url)
+        return _response(url)
+
+    with pytest.raises(ValueError, match="conflicts with selected paper"):
+        cc.resolve_contract(
+            tmp_path,
+            cc._internal_contract(_asset()),
+            fetcher=fetcher,
+            identifier_resolver=conflicting,
+        )
+
+    assert calls == []
 
 
 class _Response:
