@@ -559,6 +559,8 @@ def resolve_contract(project, contract, *, fetcher=None, identifier_resolver=Non
                     doi=str(resolver_contract.get("doi") or ""),
                     pmid=str(resolver_contract.get("pmid") or ""),
                 )
+            except europepmc.EuropePmcIdentityConflictError:
+                raise
             except (OSError, europepmc.CurieContractError):
                 # Exact source-location enrichment is advisory when the lookup
                 # itself is unavailable. Preserve the original frozen identity
