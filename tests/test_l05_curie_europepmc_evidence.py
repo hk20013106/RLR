@@ -1,4 +1,6 @@
 import hashlib
+import json
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -7,6 +9,7 @@ from research_loop.l05_curie.europepmc import (
     EuropePmcEvidenceRetriever,
     EuropePmcEvidenceVerifier,
     canonicalize_europepmc_record,
+    lookup_exact_identifiers,
 )
 
 
@@ -54,6 +57,44 @@ def _raw(**overrides):
     }
     item.update(overrides)
     return item
+
+
+def test_exact_identifier_lookup_returns_same_paper_pmcid_and_oa_location():
+    calls = []
+    fulltext_url = (
+        "https://www.ebi.ac.uk/europepmc/webservices/rest/PMC3257301/fullTextXML"
+    )
+    raw = _raw(
+        fullTextUrlList={"fullTextUrl": [{"url": fulltext_url}]}
+    )
+    payload = json.dumps({
+        "hitCount": 1,
+        "resultList": {"result": [raw]},
+    }).encode("utf-8")
+
+    def http_get(url, timeout):
+        calls.append((url, timeout))
+        return payload
+
+    result = lookup_exact_identifiers(
+        doi="10.1371/journal.ppat.1002485",
+        http_get=http_get,
+        timeout=7,
+    )
+
+    assert result == {
+        "doi": "10.1371/journal.ppat.1002485",
+        "pmid": "22253597",
+        "pmcid": "PMC3257301",
+        "registered_locations": [fulltext_url],
+    }
+    assert len(calls) == 1
+    parsed = urlsplit(calls[0][0])
+    assert parsed.path.endswith("/search")
+    assert parse_qs(parsed.query)["query"] == [
+        'DOI:"10.1371/journal.ppat.1002485"'
+    ]
+    assert calls[0][1] == 7
 
 
 def test_retriever_snapshots_xml_and_verifier_relocates_exact_text(tmp_path):
