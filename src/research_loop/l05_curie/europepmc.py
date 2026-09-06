@@ -35,6 +35,14 @@ _TARGET_SECTION_WORDS = ("result", "discussion", "conclusion")
 _SOURCE_ROOT = Path("09_Literature_Database") / "source_snapshots" / "l05"
 
 
+class EuropePmcLookupUnavailableError(CurieContractError):
+    """Europe PMC exact lookup could not be completed; retrieval may fall back."""
+
+
+class EuropePmcIdentityConflictError(CurieContractError):
+    """Europe PMC exact lookup returned conflicting identifiers for one paper."""
+
+
 def _canonical_bytes(value: object) -> bytes:
     return json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -279,7 +287,7 @@ def lookup_exact_identifiers(
     try:
         raw = getter(_core_search_url(query, page_size=10), timeout)
     except Exception as exc:
-        raise CurieContractError(
+        raise EuropePmcLookupUnavailableError(
             f"Europe PMC exact identifier lookup failed: {exc}"
         ) from exc
     _payload, results = _decode_core_response(raw)
@@ -335,7 +343,7 @@ def lookup_exact_identifiers(
             if not value:
                 continue
             if resolved[key] and resolved[key] != value:
-                raise CurieContractError(
+                raise EuropePmcIdentityConflictError(
                     f"Europe PMC exact identifier lookup returned conflicting {key} values"
                 )
             resolved[key] = value
