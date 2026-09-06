@@ -559,14 +559,18 @@ def resolve_contract(project, contract, *, fetcher=None, identifier_resolver=Non
                     doi=str(resolver_contract.get("doi") or ""),
                     pmid=str(resolver_contract.get("pmid") or ""),
                 )
+            except (OSError, europepmc.CurieContractError):
+                # Exact source-location enrichment is advisory when the lookup
+                # itself is unavailable. Preserve the original frozen identity
+                # and continue through other exact-source routes.
+                resolver_contract = copy.deepcopy(contract)
+            else:
+                # Identifier conflicts are integrity failures, not retrieval
+                # gaps. Keep this outside the advisory-exception path so the
+                # canonical frozen identity can never be silently replaced.
                 resolver_contract = _merge_exact_identifiers(
                     resolver_contract, resolved_identifiers
                 )
-            except (OSError, ValueError, europepmc.CurieContractError):
-                # Exact source-location enrichment is advisory to retrieval.
-                # Identity conflicts are never merged; the original frozen
-                # DOI/PMID contract remains the only allowed fallback corpus.
-                resolver_contract = copy.deepcopy(contract)
     for location, method in _plan(resolver_contract):
         receipt = _attempt(resolver_contract, location, method)
         try:
