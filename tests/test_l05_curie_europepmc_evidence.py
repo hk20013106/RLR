@@ -97,6 +97,39 @@ def test_exact_identifier_lookup_returns_same_paper_pmcid_and_oa_location():
     assert calls[0][1] == 7
 
 
+def test_exact_identifier_lookup_classifies_provider_unavailable():
+    def http_get(_url, _timeout):
+        raise OSError("network unavailable")
+
+    with pytest.raises(CurieContractError) as exc_info:
+        lookup_exact_identifiers(
+            doi="10.1371/journal.ppat.1002485",
+            http_get=http_get,
+        )
+
+    assert type(exc_info.value).__name__ == "EuropePmcLookupUnavailableError"
+
+
+def test_exact_identifier_lookup_classifies_identity_conflict():
+    payload = json.dumps({
+        "hitCount": 2,
+        "resultList": {
+            "result": [
+                _raw(pmid="22253597", id="22253597"),
+                _raw(pmid="99999999", id="99999999", pmcid="PMC9999999"),
+            ]
+        },
+    }).encode("utf-8")
+
+    with pytest.raises(CurieContractError) as exc_info:
+        lookup_exact_identifiers(
+            doi="10.1371/journal.ppat.1002485",
+            http_get=lambda _url, _timeout: payload,
+        )
+
+    assert type(exc_info.value).__name__ == "EuropePmcIdentityConflictError"
+
+
 def test_retriever_snapshots_xml_and_verifier_relocates_exact_text(tmp_path):
     paper = canonicalize_europepmc_record(_raw())
 
