@@ -1,5 +1,9 @@
 import hashlib
+import io
 import json
+import urllib.error
+
+import pytest
 
 from research_loop import l4_closed_corpus as cc
 from research_loop.l05_curie import selector
@@ -167,3 +171,104 @@ def test_corrupt_frozen_source_is_not_reused(tmp_path):
     assert result["status"] == "resolved"
     assert result["receipt"]["retrieval_method"] != "registered_local_payload"
     assert calls
+
+
+def test_doi_only_contract_enriches_pmcid_before_publisher(tmp_path):
+    calls = []
+    lookup_calls = []
+
+    def identifier_resolver(*, doi="", pmid=""):
+        lookup_calls.append((doi, pmid))
+        return {
+            "doi": "10.1234/example.method",
+            "pmid": "25516281",
+            "pmcid": "PMC4302049",
+        }
+
+    def fetcher(url):
+        calls.append(url)
+        return _response(url)
+
+    result = cc.resolve_contract(
+        tmp_path,
+        cc._internal_contract(_asset()),
+        fetcher=fetcher,
+        identifier_resolver=identifier_resolver,
+    )
+
+    assert lookup_calls == [("10.1234/example.method", "")]
+    assert calls == [
+        "https://www.ebi.ac.uk/europepmc/webservices/rest/PMC4302049/fullTextXML"
+    ]
+    assert result["status"] == "resolved"
+    assert result["contract"]["pmcid"] == "PMC4302049"
+    assert result["receipt"]["retrieval_method"] == "europe_pmc_fulltext_xml"
+
+
+class _Response:
+    def __init__(self, url, body):
+        self._url = url
+        self._body = body
+        self.status = 200
+        self.headers = {"Content-Type": "application/xml"}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self, _limit):
+        return self._body
+
+    def geturl(self):
+        return self._url
+
+
+class _RetryOpener:
+    def __init__(self, url, *, status):
+        self.url = url
+        self.status = status
+        self.calls = 0
+
+    def open(self, request, timeout=30):
+        del timeout
+        self.calls += 1
+        if self.calls == 1 or self.status == 403:
+            raise urllib.error.HTTPError(
+                self.url,
+                self.status,
+                "blocked",
+                {"Retry-After": "0"},
+                io.BytesIO(b"blocked"),
+            )
+        return _Response(self.url, METHOD_XML.encode("utf-8"))
+
+
+def test_default_fetch_retries_429_and_honors_retry_after(monkeypatch):
+    url = "https://example.org/paper"
+    opener = _RetryOpener(url, status=429)
+    sleeps = []
+    monkeypatch.setattr(cc.urllib.request, "build_opener", lambda *_args: opener)
+    monkeypatch.setattr(cc.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    response = cc._fetch(url)
+
+    assert response["http_status"] == 200
+    assert opener.calls == 2
+    assert sleeps == [0.0]
+
+
+def test_default_fetch_does_not_retry_403(monkeypatch):
+    url = "https://example.org/paper"
+    opener = _RetryOpener(url, status=403)
+    sleeps = []
+    monkeypatch.setattr(cc.urllib.request, "build_opener", lambda *_args: opener)
+    monkeypatch.setattr(cc.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        cc._fetch(url)
+
+    assert exc_info.value.code == 403
+    assert opener.calls == 1
+    assert sleeps == []
