@@ -19,12 +19,16 @@ from pathlib import Path
 from research_loop.process_runner import DEFAULT_PROCESS_RUNNER, ProcessRunner
 
 from .contracts import CurieContractError
-from .paperqa2 import PAPERQA2_RUNTIME_SCHEMA_VERSION, PaperQA2Retriever
+from .paperqa2 import (
+    PAPERQA2_DOCUMENT_RUNTIME_SCHEMA_VERSION,
+    PAPERQA2_RUNTIME_SCHEMA_VERSION,
+    PaperQA2Retriever,
+)
 
 _GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
-_REQUIRED_RUNTIME = (
+_COMMON_REQUIRED_RUNTIME = (
     "package", "version", "upstream_repo", "upstream_tag", "upstream_commit",
-    "fork_repo", "pdf_sha256",
+    "fork_repo",
 )
 PAPERQA2_PACKAGE = "paper-qa"
 PAPERQA2_VERSION = "2026.8.12"
@@ -52,9 +56,9 @@ def _text(value: object, name: str) -> str:
     return value
 
 
-def _sha256_file(path: Path) -> str:
+def _sha256_file(path: Path, *, label: str = "document") -> str:
     if not path.is_file():
-        raise CurieContractError(f"PaperQA2 PDF is missing: {path}")
+        raise CurieContractError(f"PaperQA2 {label} is missing: {path}")
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
@@ -67,13 +71,28 @@ def _tokens(value: object) -> list[str]:
     return re.findall(r"[\w]+", normalized, flags=re.UNICODE)
 
 
-def validate_pinned_paperqa2_runtime(runtime: object, *, pdf_sha256: str) -> dict:
+def validate_pinned_paperqa2_runtime(
+    runtime: object,
+    *,
+    pdf_sha256: str = "",
+    document_sha256: str = "",
+    document_media_type: str = "",
+) -> dict:
     """Validate immutable PaperQA2 integration provenance at every use boundary."""
     if not isinstance(runtime, dict):
         raise CurieContractError("PaperQA2 bridge runtime provenance must be an object")
-    if runtime.get("schema_version") != PAPERQA2_RUNTIME_SCHEMA_VERSION:
+    schema_version = runtime.get("schema_version")
+    if schema_version not in {
+        PAPERQA2_RUNTIME_SCHEMA_VERSION,
+        PAPERQA2_DOCUMENT_RUNTIME_SCHEMA_VERSION,
+    }:
         raise CurieContractError("PaperQA2 bridge runtime schema_version is invalid")
-    for field in _REQUIRED_RUNTIME:
+    required = list(_COMMON_REQUIRED_RUNTIME)
+    if schema_version == PAPERQA2_RUNTIME_SCHEMA_VERSION:
+        required.append("pdf_sha256")
+    else:
+        required.extend(("document_sha256", "document_media_type"))
+    for field in required:
         _text(runtime.get(field), f"PaperQA2 bridge runtime {field}")
     commit = str(runtime["upstream_commit"]).lower()
     if not _GIT_COMMIT.fullmatch(commit):
@@ -84,8 +103,21 @@ def validate_pinned_paperqa2_runtime(runtime: object, *, pdf_sha256: str) -> dic
             raise CurieContractError(
                 f"PaperQA2 runtime {field} does not match the pinned integration"
             )
-    if runtime["pdf_sha256"].lower() != pdf_sha256:
-        raise CurieContractError("PaperQA2 runtime PDF hash does not match the requested PDF")
+    if schema_version == PAPERQA2_RUNTIME_SCHEMA_VERSION:
+        expected_hash = _text(pdf_sha256, "requested PaperQA2 PDF hash")
+        if runtime["pdf_sha256"].lower() != expected_hash.lower():
+            raise CurieContractError("PaperQA2 runtime PDF hash does not match the requested PDF")
+    else:
+        expected_hash = _text(document_sha256, "requested PaperQA2 document hash")
+        expected_media_type = _text(document_media_type, "requested PaperQA2 document media type")
+        if runtime["document_sha256"].lower() != expected_hash.lower():
+            raise CurieContractError(
+                "PaperQA2 runtime document hash does not match the requested document"
+            )
+        if str(runtime["document_media_type"]).strip().casefold() != expected_media_type.casefold():
+            raise CurieContractError(
+                "PaperQA2 runtime document media type does not match the requested document"
+            )
     return copy.deepcopy(runtime)
 
 
@@ -122,13 +154,37 @@ class PaperQA2SubprocessBackend:
     def __call__(self, *, paper: dict, question: str) -> list[dict]:
         if not isinstance(paper, dict):
             raise CurieContractError("PaperQA2 subprocess paper must be an object")
-        pdf_path = Path(_text(paper.get("pdf_path"), "PaperQA2 paper pdf_path")).resolve()
-        pdf_sha256 = _sha256_file(pdf_path)
+
+        document_value = str(paper.get("document_path") or "").strip()
+        if document_value:
+            document_path = Path(document_value).resolve()
+            document_media_type = _text(
+                paper.get("document_media_type"), "PaperQA2 paper document_media_type"
+            )
+            document_sha256 = _sha256_file(document_path)
+            request_path = {
+                "document_path": str(document_path),
+                "document_media_type": document_media_type,
+            }
+            runtime_validation = {
+                "document_sha256": document_sha256,
+                "document_media_type": document_media_type,
+            }
+            runtime_paths = {
+                "document_path": str(document_path),
+            }
+        else:
+            pdf_path = Path(_text(paper.get("pdf_path"), "PaperQA2 paper pdf_path")).resolve()
+            pdf_sha256 = _sha256_file(pdf_path, label="PDF")
+            request_path = {"pdf_path": str(pdf_path)}
+            runtime_validation = {"pdf_sha256": pdf_sha256}
+            runtime_paths = {"pdf_path": str(pdf_path)}
+
         request = {
             "paper_id": _text(paper.get("paper_id"), "PaperQA2 paper_id"),
             "title": _text(paper.get("title"), "PaperQA2 paper title"),
             "doi": str((paper.get("identifiers") or {}).get("doi") or "").strip(),
-            "pdf_path": str(pdf_path),
+            **request_path,
             "question": _text(question, "PaperQA2 question"),
             "pqa_home": str(self.pqa_home),
             "paperqa_repo": str(self.paperqa_repo),
@@ -164,13 +220,13 @@ class PaperQA2SubprocessBackend:
             raise CurieContractError("PaperQA2 bridge engine identity is invalid")
         runtime = validate_pinned_paperqa2_runtime(
             payload.get("runtime"),
-            pdf_sha256=pdf_sha256,
+            **runtime_validation,
         )
         runtime.update({
             "python_executable": str(self.python_executable),
             "paperqa_repo": str(self.paperqa_repo),
             "pqa_home": str(self.pqa_home),
-            "pdf_path": str(pdf_path),
+            **runtime_paths,
         })
         hits = payload.get("hits")
         if not isinstance(hits, list):
