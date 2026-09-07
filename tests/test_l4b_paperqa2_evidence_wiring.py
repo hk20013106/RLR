@@ -1,0 +1,227 @@
+import json
+
+from research_loop import deep_research as dr
+from research_loop import l4_evidence_bundle as bundle
+from research_loop import l4_inventory
+from research_loop import l4_pipeline as l4p
+from research_loop.l05_curie import europepmc
+
+
+METHOD_TEXT = (
+    "Single-cell transcriptomes were normalized, homologous cell types were "
+    "matched across species, gene co-expression modules were estimated, and "
+    "module preservation was evaluated across developmental stages. " * 12
+)
+XML = (
+    "<?xml version='1.0' encoding='UTF-8'?>"
+    "<article><front><article-meta>"
+    "<article-id pub-id-type='doi'>10.1002/dvdy.384</article-id>"
+    "<article-id pub-id-type='pmid'>34114716</article-id>"
+    "<article-id pub-id-type='pmcid'>PMC9545966</article-id>"
+    "</article-meta></front><body>"
+    "<sec id='procedures'><title>EXPERIMENTAL PROCEDURES</title>"
+    f"<p>{METHOD_TEXT}</p></sec>"
+    "<sec><title>Results</title><p>Observed developmental patterns.</p></sec>"
+    "</body></article>"
+)
+
+
+def _receipt():
+    return dr.skill_receipt("codex", ["codex", "exec"], "inventory", "test")
+
+
+def _asset():
+    return {
+        "asset_id": "L05_P_526704b9fe982d2a0cb7",
+        "doi": "10.1002/dvdy.384",
+        "pmid": "34114716",
+        "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC9545966/",
+        "title": "Assessing evolutionary and developmental transcriptome dynamics in homologous cell types",
+        "year": 2021,
+        "role": "method",
+        "journal": "Developmental Dynamics",
+        "abstract": "",
+        "source_database": "frozen_l05_evidence_pack",
+        "source_metadata_response": {
+            "paper_id": "P_526704b9fe982d2a0cb7",
+            "pmcid": "PMC9545966",
+        },
+        "open_access_status": "open",
+        "full_text_status": "available_oa",
+        "full_text_locations": [
+            "https://www.ebi.ac.uk/europepmc/webservices/rest/PMC9545966/fullTextXML"
+        ],
+        "relevance_score": 10.0,
+        "selection_status": "selected",
+        "selection_reason": "Exact source referenced by method inventory.",
+        "hypothesis_ids": [],
+        "method_component_hints": ["cross_species_single_cell_workflow"],
+        "diagnostic_requirements": [],
+    }
+
+
+def _method():
+    return {
+        "method_id": "cross_species_single_cell_workflow",
+        "name": "cross-species single-cell transcriptome workflow",
+        "purpose": "Compare homologous cell types and co-expression modules across species.",
+        "inventory_reason": "The selected claim requires an auditable cross-species workflow.",
+        "source_asset_ids": ["L05_P_526704b9fe982d2a0cb7"],
+        "source_hints": [],
+    }
+
+
+def _manifest(project):
+    return l4_inventory.persist_discovery(
+        l4p,
+        dr,
+        project,
+        "C1",
+        {
+            "schema_version": l4p.L4A_DISCOVERY_SCHEMA_VERSION,
+            "queries": [{
+                "query_id": "Q1",
+                "query": "offline method inventory",
+                "purpose": "Inventory only.",
+                "status": "completed",
+                "receipt": "fixture",
+            }],
+            "assets": [_asset()],
+            "method_inventory": [_method()],
+        },
+        _receipt(),
+        question="How should homologous cell types be compared across species?",
+        claim="Cross-species developmental programs can be compared at single-cell resolution.",
+        project_id="P1",
+        round_id="1",
+        profile_id="v2.1-catalog-1",
+    )
+
+
+def _fetch(url):
+    return {
+        "requested_url": url,
+        "resolved_url": url,
+        "redirect_chain": [],
+        "http_status": 200,
+        "content_type": "application/xml",
+        "body": XML.encode("utf-8"),
+    }
+
+
+class _FakePaperQA2Runtime:
+    def __init__(self):
+        self.calls = []
+
+    def retrieve_and_verify(self, *, paper, question, source_candidates, verify):
+        self.calls.append({
+            "paper": dict(paper),
+            "question": question,
+            "source_candidates": list(source_candidates),
+        })
+        target = next(
+            item for item in source_candidates
+            if item["section"] == "EXPERIMENTAL PROCEDURES"
+        )
+        candidate = {
+            "schema_version": "L05PaperQA2Candidate/v1",
+            "evidence_id": "EC_PQA2_TEST",
+            "paper_id": paper["paper_id"],
+            "section": target["section"],
+            "text": target["text"],
+            "locator": target["locator"],
+            "verification_status": "UNVERIFIED",
+            "retrieval": {
+                "engine": "paperqa2",
+                "backend_id": "paperqa2-test",
+                "source_identity": {"pmid": "34114716"},
+                "runtime": {
+                    "schema_version": "PaperQA2Runtime/v2",
+                    "package": "paper-qa",
+                    "version": "2026.8.12",
+                    "upstream_repo": "https://github.com/Future-House/paper-qa",
+                    "upstream_tag": "v2026.08.12",
+                    "upstream_commit": "57e89f7223b0960d5ee5ea048c69e3c47e088572",
+                    "fork_repo": "https://github.com/hk20013106/paper-qa",
+                    "python_executable": "test-python",
+                    "paperqa_repo": "test-repo",
+                    "pqa_home": "test-home",
+                    "document_path": paper["document_path"],
+                    "document_sha256": "a" * 64,
+                    "media_type": paper["media_type"],
+                },
+            },
+        }
+        located = verify([candidate])
+        return {"chunks": [], "unverified": [candidate], "located": located}
+
+
+def test_jats_paragraph_owner_exposes_experimental_procedures_without_heading_allowlist():
+    paragraphs = europepmc.parse_jats_paragraphs(XML.encode("utf-8"))
+
+    target = next(item for item in paragraphs if item["section"] == "EXPERIMENTAL PROCEDURES")
+    assert target["text"] == METHOD_TEXT.strip()
+    assert target["locator"].startswith("sec:")
+
+
+def test_native_l4b_uses_paperqa2_then_independent_jats_verifier(tmp_path):
+    manifest = _manifest(tmp_path)
+    runtime = _FakePaperQA2Runtime()
+
+    artifact = bundle.run_l4b_evidence(
+        l4p,
+        dr,
+        tmp_path,
+        "C1",
+        manifest,
+        tmp_path / "work",
+        project_id="P1",
+        round_id="1",
+        profile_id="v2.1-catalog-1",
+        fetcher=_fetch,
+        paperqa_runtime=runtime,
+    )
+
+    assert len(runtime.calls) == 1
+    call = runtime.calls[0]
+    assert call["paper"]["paper_id"] == "P_526704b9fe982d2a0cb7"
+    assert call["paper"]["media_type"] == "application/xml"
+    assert call["paper"]["document_path"].endswith(".xml")
+    assert any(
+        item["section"] == "EXPERIMENTAL PROCEDURES"
+        for item in call["source_candidates"]
+    )
+    assert len(artifact["evidence_cards"]) == 1
+    card = artifact["evidence_cards"][0]
+    assert card["paper_id"] == "P_526704b9fe982d2a0cb7"
+    assert card["section"] == "EXPERIMENTAL PROCEDURES"
+    assert artifact["evidence_gaps"] == []
+    assert bundle.audit_bundle(l4p, dr, tmp_path, "C1", artifact) == (True, "")
+
+
+def test_native_l4b_does_not_accept_legacy_methods_parser_without_paperqa2(tmp_path):
+    xml = XML.replace("EXPERIMENTAL PROCEDURES", "Materials and methods")
+
+    def fetch(url):
+        response = _fetch(url)
+        response["body"] = xml.encode("utf-8")
+        return response
+
+    manifest = _manifest(tmp_path)
+    artifact = bundle.run_l4b_evidence(
+        l4p,
+        dr,
+        tmp_path,
+        "C1",
+        manifest,
+        tmp_path / "work",
+        project_id="P1",
+        round_id="1",
+        profile_id="v2.1-catalog-1",
+        fetcher=fetch,
+        paperqa_runtime=None,
+    )
+
+    assert artifact["evidence_cards"] == []
+    assert len(artifact["evidence_gaps"]) == 1
+    assert "PaperQA2" in artifact["evidence_gaps"][0]["failure_reason"]
