@@ -4,10 +4,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import pathlib
 import subprocess
 import sys
-import os
 
 
 def _text(value, name: str) -> str:
@@ -29,11 +29,31 @@ def _git(repo: pathlib.Path, *args: str) -> str:
 
 
 async def _run(request: dict) -> dict:
-    pdf_path = pathlib.Path(_text(request.get("pdf_path"), "pdf_path")).resolve()
     repo = pathlib.Path(_text(request.get("paperqa_repo"), "paperqa_repo")).resolve()
     pqa_home = pathlib.Path(_text(request.get("pqa_home"), "pqa_home")).resolve()
-    if not pdf_path.is_file() or pdf_path.read_bytes()[:5] != b"%PDF-":
-        raise ValueError("pdf_path must point to a real PDF")
+
+    document_value = str(request.get("document_path") or "").strip()
+    if document_value:
+        source_path = pathlib.Path(document_value).resolve()
+        document_media_type = _text(
+            request.get("document_media_type"), "document_media_type"
+        )
+        if not source_path.is_file():
+            raise ValueError("document_path must point to a real file")
+        runtime_schema = "PaperQA2Runtime/v2"
+        runtime_source = {
+            "document_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+            "document_media_type": document_media_type,
+        }
+    else:
+        source_path = pathlib.Path(_text(request.get("pdf_path"), "pdf_path")).resolve()
+        if not source_path.is_file() or source_path.read_bytes()[:5] != b"%PDF-":
+            raise ValueError("pdf_path must point to a real PDF")
+        runtime_schema = "PaperQA2Runtime/v1"
+        runtime_source = {
+            "pdf_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        }
+
     os.environ["PQA_HOME"] = str(pqa_home)
     from paperqa import Docs, Settings, __version__
 
@@ -51,7 +71,7 @@ async def _run(request: dict) -> dict:
     )
     docs = Docs()
     await docs.aadd(
-        pdf_path,
+        source_path,
         citation=title,
         title=title,
         doi=doi or None,
@@ -87,18 +107,17 @@ async def _run(request: dict) -> dict:
             "docname": text.doc.docname,
             "content_hash": text.doc.content_hash,
         })
-    pdf_sha256 = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
     return {
         "engine": "paperqa2",
         "runtime": {
-            "schema_version": "PaperQA2Runtime/v1",
+            "schema_version": runtime_schema,
             "package": "paper-qa",
             "version": str(__version__),
             "upstream_repo": "https://github.com/Future-House/paper-qa",
             "upstream_tag": _git(repo, "describe", "--tags", "--exact-match", "HEAD"),
             "upstream_commit": _git(repo, "rev-parse", "HEAD"),
             "fork_repo": "https://github.com/hk20013106/paper-qa",
-            "pdf_sha256": pdf_sha256,
+            **runtime_source,
         },
         "hits": hits,
     }
