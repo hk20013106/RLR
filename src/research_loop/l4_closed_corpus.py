@@ -605,9 +605,6 @@ def resolve_contract(project, contract, *, fetcher=None, identifier_resolver=Non
             methods = extract_methods_section(
                 payload, str(response.get("content_type") or "")
             )
-            role = str((resolver_contract.get("_asset") or {}).get("role") or "method").lower()
-            if role not in {"review", "navigation"} and not methods:
-                raise ValueError("no explicit Methods section found")
             if methods and not extract_is_contiguous(payload, methods["text"]):
                 raise ValueError("Methods extract is not contiguous in retained payload")
             receipt.update({

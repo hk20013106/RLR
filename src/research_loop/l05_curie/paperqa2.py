@@ -14,6 +14,7 @@ from .contracts import CurieContractError
 
 PAPERQA2_CANDIDATE_SCHEMA_VERSION = "L05PaperQA2Candidate/v1"
 PAPERQA2_RUNTIME_SCHEMA_VERSION = "PaperQA2Runtime/v1"
+PAPERQA2_DOCUMENT_RUNTIME_SCHEMA_VERSION = "PaperQA2Runtime/v2"
 
 
 def _text(value: object, name: str) -> str:
@@ -71,13 +72,20 @@ def validate_paperqa2_candidate(candidate: dict) -> dict:
     if runtime is not None:
         if not isinstance(runtime, dict):
             raise CurieContractError("PaperQA2 runtime provenance must be an object")
-        if runtime.get("schema_version") != PAPERQA2_RUNTIME_SCHEMA_VERSION:
-            raise CurieContractError("PaperQA2 runtime provenance schema_version is invalid")
-        for field in (
+        schema_version = runtime.get("schema_version")
+        common_fields = (
             "package", "version", "upstream_repo", "upstream_tag", "upstream_commit",
             "fork_repo", "python_executable", "paperqa_repo", "pqa_home",
-            "pdf_path", "pdf_sha256",
-        ):
+        )
+        if schema_version == PAPERQA2_RUNTIME_SCHEMA_VERSION:
+            runtime_fields = common_fields + ("pdf_path", "pdf_sha256")
+        elif schema_version == PAPERQA2_DOCUMENT_RUNTIME_SCHEMA_VERSION:
+            runtime_fields = common_fields + (
+                "document_path", "document_sha256", "media_type",
+            )
+        else:
+            raise CurieContractError("PaperQA2 runtime provenance schema_version is invalid")
+        for field in runtime_fields:
             _text(runtime.get(field), f"PaperQA2 runtime {field}")
     return json.loads(json.dumps(candidate))
 

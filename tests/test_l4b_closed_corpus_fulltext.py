@@ -282,8 +282,10 @@ def test_short_abstract_and_discontinuous_text_cannot_become_methods_anchor(tmp_
         tmp_path, contract,
         fetcher=lambda url: _response(url, payload=abstract_xml),
     )
-    assert result["status"] == "failed"
-    assert all(item["section_locator"] == "" for item in result["attempts"])
+    assert result["status"] == "resolved"
+    assert result["methods_section"] is None
+    assert result["receipt"]["parser"] == "payload-only"
+    assert result["receipt"]["section_locator"] == ""
 
     payload = _blocked_payload()
     payload["papers"][0]["source_payload"] = "A" * 600 + "B" * 600
