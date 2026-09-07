@@ -195,14 +195,12 @@ def _source_kind(asset: dict) -> str:
 
 
 def _paper_id(dr, asset: dict, result: dict) -> str:
-    seed = {
-        "asset_id": asset.get("asset_id"),
-        "doi": asset.get("doi"),
-        "pmid": asset.get("pmid"),
-        "url": asset.get("url"),
-        "content_hash": (result.get("receipt") or {}).get("content_hash", ""),
-    }
-    return _safe(dr, _sha(_canonical_json(seed))[:16])
+    metadata = asset.get("source_metadata_response")
+    if isinstance(metadata, dict):
+        canonical_paper_id = str(metadata.get("paper_id") or "").strip()
+        if canonical_paper_id:
+            return canonical_paper_id
+    return str(asset.get("asset_id") or "").strip()
 
 
 def _receipt_payload(result: dict) -> dict:
