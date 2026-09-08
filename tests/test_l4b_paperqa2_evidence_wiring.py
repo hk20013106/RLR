@@ -1,5 +1,3 @@
-import json
-
 from research_loop import deep_research as dr
 from research_loop import l4_evidence_bundle as bundle
 from research_loop import l4_inventory
@@ -24,6 +22,7 @@ XML = (
     "<sec><title>Results</title><p>Observed developmental patterns.</p></sec>"
     "</body></article>"
 )
+METHOD_XML = XML.replace("EXPERIMENTAL PROCEDURES", "Materials and methods")
 
 
 def _receipt():
@@ -98,14 +97,14 @@ def _manifest(project):
     )
 
 
-def _fetch(url):
+def _fetch(url, payload=XML):
     return {
         "requested_url": url,
         "resolved_url": url,
         "redirect_chain": [],
         "http_status": 200,
         "content_type": "application/xml",
-        "body": XML.encode("utf-8"),
+        "body": payload.encode("utf-8"),
     }
 
 
@@ -119,10 +118,7 @@ class _FakePaperQA2Runtime:
             "question": question,
             "source_candidates": list(source_candidates),
         })
-        target = next(
-            item for item in source_candidates
-            if item["section"] == "EXPERIMENTAL PROCEDURES"
-        )
+        target = source_candidates[0]
         candidate = {
             "schema_version": "L05PaperQA2Candidate/v1",
             "evidence_id": "EC_PQA2_TEST",
@@ -178,7 +174,7 @@ def test_native_l4b_uses_paperqa2_then_independent_jats_verifier(tmp_path):
         project_id="P1",
         round_id="1",
         profile_id="v2.1-catalog-1",
-        fetcher=_fetch,
+        fetcher=lambda url: _fetch(url, METHOD_XML),
         paperqa_runtime=runtime,
     )
 
@@ -187,26 +183,43 @@ def test_native_l4b_uses_paperqa2_then_independent_jats_verifier(tmp_path):
     assert call["paper"]["paper_id"] == "P_526704b9fe982d2a0cb7"
     assert call["paper"]["media_type"] == "application/xml"
     assert call["paper"]["document_path"].endswith(".xml")
-    assert any(
-        item["section"] == "EXPERIMENTAL PROCEDURES"
+    assert all(
+        dr._is_methods_section(item["section"])
         for item in call["source_candidates"]
     )
     assert len(artifact["evidence_cards"]) == 1
     card = artifact["evidence_cards"][0]
     assert card["paper_id"] == "P_526704b9fe982d2a0cb7"
-    assert card["section"] == "EXPERIMENTAL PROCEDURES"
+    assert card["section"] == "Materials and methods"
     assert artifact["evidence_gaps"] == []
     assert bundle.audit_bundle(l4p, dr, tmp_path, "C1", artifact) == (True, "")
 
 
+def test_native_l4b_does_not_assign_method_role_to_unclassified_jats_section(tmp_path):
+    manifest = _manifest(tmp_path)
+    runtime = _FakePaperQA2Runtime()
+
+    artifact = bundle.run_l4b_evidence(
+        l4p,
+        dr,
+        tmp_path,
+        "C1",
+        manifest,
+        tmp_path / "work",
+        project_id="P1",
+        round_id="1",
+        profile_id="v2.1-catalog-1",
+        fetcher=_fetch,
+        paperqa_runtime=runtime,
+    )
+
+    assert runtime.calls == []
+    assert artifact["evidence_cards"] == []
+    assert len(artifact["evidence_gaps"]) == 1
+    assert "Methods" in artifact["evidence_gaps"][0]["failure_reason"]
+
+
 def test_native_l4b_does_not_accept_legacy_methods_parser_without_paperqa2(tmp_path):
-    xml = XML.replace("EXPERIMENTAL PROCEDURES", "Materials and methods")
-
-    def fetch(url):
-        response = _fetch(url)
-        response["body"] = xml.encode("utf-8")
-        return response
-
     manifest = _manifest(tmp_path)
     artifact = bundle.run_l4b_evidence(
         l4p,
@@ -218,7 +231,7 @@ def test_native_l4b_does_not_accept_legacy_methods_parser_without_paperqa2(tmp_p
         project_id="P1",
         round_id="1",
         profile_id="v2.1-catalog-1",
-        fetcher=fetch,
+        fetcher=lambda url: _fetch(url, METHOD_XML),
         paperqa_runtime=None,
     )
 
