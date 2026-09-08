@@ -492,7 +492,7 @@ def test_inventory_hint_materializes_selected_exact_source(tmp_path):
     ]
 
 
-def test_l4b_mixed_cards_and_gaps_pass_integrity_audit(tmp_path):
+def test_l4b_mixed_cards_and_gaps_pass_integrity_audit(tmp_path, l4_paperqa2_runtime):
     project = tmp_path / "project"
     methods = [
         _method("deseq2", source_hints=[_hint()]),
@@ -525,6 +525,7 @@ def test_l4b_mixed_cards_and_gaps_pass_integrity_audit(tmp_path):
         round_id="1",
         profile_id="v2.1-catalog-1",
         fetcher=fetcher,
+        paperqa_runtime=l4_paperqa2_runtime(METHOD_TEXT)[0],
     )
 
     assert artifact["evidence_bundle_schema"] == bundle.EVIDENCE_BUNDLE_SCHEMA
@@ -542,7 +543,7 @@ def test_l4b_mixed_cards_and_gaps_pass_integrity_audit(tmp_path):
     ) == (True, "")
 
 
-def test_l4b_summary_exposes_short_l4c_reference_handles_not_canonical_ids(tmp_path):
+def test_l4b_summary_exposes_short_l4c_reference_handles_not_canonical_ids(tmp_path, l4_paperqa2_runtime):
     project = tmp_path / "project"
     methods = [
         _method("deseq2", source_hints=[_hint()]),
@@ -562,6 +563,7 @@ def test_l4b_summary_exposes_short_l4c_reference_handles_not_canonical_ids(tmp_p
         manifest,
         tmp_path / "work",
         fetcher=lambda url: _response(url),
+        paperqa_runtime=l4_paperqa2_runtime(METHOD_TEXT)[0],
     )
     summary = (project / artifact["summary_path"]).read_text(encoding="utf-8")
 
@@ -624,8 +626,7 @@ def test_l4b_audit_rejects_tampered_source_payload(tmp_path):
 
 
 def test_l4b_audit_requires_exact_method_outcomes_and_selected_asset_identity(
-    tmp_path,
-):
+    tmp_path, l4_paperqa2_runtime,):
     project = tmp_path / "project"
     manifest = _persist(
         project,
@@ -643,6 +644,7 @@ def test_l4b_audit_requires_exact_method_outcomes_and_selected_asset_identity(
         round_id="1",
         profile_id="v2.1-catalog-1",
         fetcher=lambda url: _response(url),
+        paperqa_runtime=l4_paperqa2_runtime(METHOD_TEXT)[0],
     )
 
     extra_outcome = {

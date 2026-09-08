@@ -492,10 +492,14 @@ def run_l4b_evidence(
                 parse_failure = f"structured JATS parsing failed: {exc}"
             else:
                 parse_failure = ""
+            source_candidates = [
+                item for item in source_candidates
+                if dr._is_methods_section(item.get("section"))
+            ]
             if not source_candidates:
                 for method_id in method_ids:
                     gap_reason_by_method[method_id] = parse_failure or (
-                        "structured JATS source contains no locatable paragraphs"
+                        "structured JATS source contains no independently classified Methods paragraphs"
                     )
             else:
                 paper = {
@@ -536,6 +540,7 @@ def run_l4b_evidence(
                         located = [
                             item for item in runtime_result.get("located") or []
                             if item.get("verification_status") == "LOCATED"
+                            and dr._is_methods_section(item.get("section"))
                             and len(str(item.get("text") or "").encode("utf-8")) >= cc.MIN_BYTES
                         ]
                     except Exception as exc:
@@ -900,6 +905,7 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
         return False, "L4B method_inventory does not match the native L4A manifest"
 
     records = {}
+    record_payloads = {}
     selected_assets = {
         str(asset.get("asset_id") or "")
         for asset in l4p.selected_l4a_assets(manifest, require=True)
@@ -914,7 +920,52 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
         record_asset_id = str(record.get("asset_id") or "")
         if ref_asset_id not in selected_assets or record_asset_id != ref_asset_id:
             return False, "L4B paper record is not bound to a selected L4A asset"
-        records[str(record.get("paper_id") or "")] = record
+        paper_id = str(record.get("paper_id") or "")
+        try:
+            source_path = _bound_path(
+                project, record.get("source_payload_path"), "L4B source-payload path"
+            )
+        except ValueError:
+            return False, f"L4B paper {paper_id} source payload path is unsafe"
+        if not source_path.is_file():
+            return False, f"L4B paper {paper_id} source payload is missing"
+        try:
+            payload_bytes = source_path.read_bytes()
+            payload = payload_bytes.decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            return False, f"L4B paper {paper_id} source payload is unreadable"
+        payload_hash = _sha(payload_bytes)
+        if payload_hash != str(record.get("content_hash") or ""):
+            return False, f"L4B paper {paper_id} content hash mismatch"
+        try:
+            receipt_path = _bound_path(
+                project, record.get("retrieval_receipt_path"), "L4B retrieval-receipt path"
+            )
+        except ValueError:
+            return False, f"L4B paper {paper_id} retrieval receipt path is unsafe"
+        if not receipt_path.is_file():
+            return False, f"L4B paper {paper_id} retrieval receipt is missing"
+        try:
+            receipt_bytes = receipt_path.read_bytes()
+        except OSError:
+            return False, f"L4B paper {paper_id} retrieval receipt is unreadable"
+        if _sha(receipt_bytes) != str(record.get("retrieval_receipt_sha256") or ""):
+            return False, f"L4B paper {paper_id} retrieval receipt hash mismatch"
+        try:
+            receipt_data = json.loads(receipt_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return False, f"L4B paper {paper_id} retrieval receipt is unreadable"
+        selected_attempt = receipt_data.get("selected_attempt") or {}
+        if str(selected_attempt.get("content_hash") or "") != payload_hash:
+            return False, f"L4B paper {paper_id} receipt content hash mismatch"
+        try:
+            receipt_byte_length = int(selected_attempt.get("byte_length"))
+        except (TypeError, ValueError):
+            return False, f"L4B paper {paper_id} receipt byte count is invalid"
+        if receipt_byte_length != len(payload_bytes):
+            return False, f"L4B paper {paper_id} receipt byte count mismatch"
+        records[paper_id] = record
+        record_payloads[paper_id] = (payload_bytes, payload, payload_hash)
 
     for ref in artifact.get("full_text_retrieval") or []:
         if str(ref.get("paper_id") or "") not in selected_assets:
@@ -934,22 +985,10 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
             return False, f"L4B evidence card {card_id} references an unknown paper"
         if str(record.get("asset_id") or "") != str(card.get("asset_id") or ""):
             return False, f"L4B evidence card {card_id} asset identity does not match its paper"
-        try:
-            source_path = _bound_path(
-                project, record.get("source_payload_path"), "L4B source-payload path"
-            )
-        except ValueError:
-            return False, f"L4B evidence card {card_id} source payload path is unsafe"
-        if not source_path.is_file():
-            return False, f"L4B evidence card {card_id} source payload is missing"
-        try:
-            payload_bytes = source_path.read_bytes()
-            payload = payload_bytes.decode("utf-8")
-        except (OSError, UnicodeDecodeError):
-            return False, f"L4B evidence card {card_id} source payload is unreadable"
-        payload_hash = _sha(payload_bytes)
-        if payload_hash != str(record.get("content_hash") or ""):
-            return False, f"L4B evidence card {card_id} paper content hash mismatch"
+        payload_data = record_payloads.get(str(card.get("paper_id") or ""))
+        if not payload_data:
+            return False, f"L4B evidence card {card_id} paper payload was not audited"
+        payload_bytes, payload, payload_hash = payload_data
         if payload_hash != str(card.get("content_hash") or ""):
             return False, f"L4B evidence card {card_id} content hash mismatch"
         extracts = {
@@ -980,31 +1019,12 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
                 located = None
             if not located or located.get("text") != text:
                 return False, f"L4B evidence card {card_id} JATS locator/text mismatch"
+            if not dr._is_methods_section(located.get("section")):
+                return False, (
+                    f"L4B evidence card {card_id} JATS section is not independently classified as Methods"
+                )
         elif not cc.extract_is_contiguous(payload, text):
             return False, f"L4B evidence card {card_id} extract is not contiguous"
-        try:
-            receipt_path = _bound_path(
-                project, record.get("retrieval_receipt_path"), "L4B retrieval-receipt path"
-            )
-        except ValueError:
-            return False, f"L4B evidence card {card_id} retrieval receipt path is unsafe"
-        if not receipt_path.is_file():
-            return False, f"L4B evidence card {card_id} retrieval receipt is missing"
-        if _sha(receipt_path.read_bytes()) != str(record.get("retrieval_receipt_sha256") or ""):
-            return False, f"L4B evidence card {card_id} retrieval receipt hash mismatch"
-        try:
-            receipt_data = json.loads(receipt_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return False, f"L4B evidence card {card_id} retrieval receipt is unreadable"
-        selected_attempt = receipt_data.get("selected_attempt") or {}
-        if str(selected_attempt.get("content_hash") or "") != payload_hash:
-            return False, f"L4B evidence card {card_id} receipt content hash mismatch"
-        try:
-            receipt_byte_length = int(selected_attempt.get("byte_length"))
-        except (TypeError, ValueError):
-            return False, f"L4B evidence card {card_id} receipt byte count is invalid"
-        if receipt_byte_length != len(payload_bytes):
-            return False, f"L4B evidence card {card_id} receipt byte count mismatch"
     if len(card_ids) != len(set(card_ids)):
         return False, "L4B evidence_card_id values must be unique"
 

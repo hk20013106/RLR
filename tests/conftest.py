@@ -148,6 +148,31 @@ def complete_legacy_staged_l4_fixtures(request, monkeypatch):
         monkeypatch.setattr(module.l4p, "_persist_l4b_linkage", lambda *_a, **_k: None)
 
 
+@pytest.fixture
+def l4_paperqa2_runtime():
+    """Build the real PaperQA2 Curie runtime around a deterministic test backend."""
+    from research_loop.l05_curie.paperqa2_runtime import PaperQA2CurieRuntime
+
+    def build(text):
+        calls = []
+
+        def backend(*, paper, question):
+            calls.append({"paper": dict(paper), "question": str(question)})
+            return [{
+                "text": str(text).strip(),
+                "section": "PaperQA2",
+                "locator": "paperqa2-test/chunk:1",
+                "score": 1.0,
+            }]
+
+        return (
+            PaperQA2CurieRuntime(backend=backend, backend_id="paperqa2-test/v1"),
+            calls,
+        )
+
+    return build
+
+
 @pytest.fixture(autouse=True)
 def complete_deep_research_l0_fixture(request, monkeypatch):
     """Migrate old provider-runtime fixtures to current L0/L0.5 preconditions.

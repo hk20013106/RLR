@@ -108,50 +108,6 @@ def _fetch(url, payload=XML):
     }
 
 
-class _FakePaperQA2Runtime:
-    def __init__(self):
-        self.calls = []
-
-    def retrieve_and_verify(self, *, paper, question, source_candidates, verify):
-        self.calls.append({
-            "paper": dict(paper),
-            "question": question,
-            "source_candidates": list(source_candidates),
-        })
-        target = source_candidates[0]
-        candidate = {
-            "schema_version": "L05PaperQA2Candidate/v1",
-            "evidence_id": "EC_PQA2_TEST",
-            "paper_id": paper["paper_id"],
-            "section": target["section"],
-            "text": target["text"],
-            "locator": target["locator"],
-            "verification_status": "UNVERIFIED",
-            "retrieval": {
-                "engine": "paperqa2",
-                "backend_id": "paperqa2-test",
-                "source_identity": {"pmid": "34114716"},
-                "runtime": {
-                    "schema_version": "PaperQA2Runtime/v2",
-                    "package": "paper-qa",
-                    "version": "2026.8.12",
-                    "upstream_repo": "https://github.com/Future-House/paper-qa",
-                    "upstream_tag": "v2026.08.12",
-                    "upstream_commit": "57e89f7223b0960d5ee5ea048c69e3c47e088572",
-                    "fork_repo": "https://github.com/hk20013106/paper-qa",
-                    "python_executable": "test-python",
-                    "paperqa_repo": "test-repo",
-                    "pqa_home": "test-home",
-                    "document_path": paper["document_path"],
-                    "document_sha256": "a" * 64,
-                    "media_type": paper["media_type"],
-                },
-            },
-        }
-        located = verify([candidate])
-        return {"chunks": [], "unverified": [candidate], "located": located}
-
-
 def test_jats_paragraph_owner_exposes_experimental_procedures_without_heading_allowlist():
     paragraphs = europepmc.parse_jats_paragraphs(XML.encode("utf-8"))
 
@@ -160,9 +116,9 @@ def test_jats_paragraph_owner_exposes_experimental_procedures_without_heading_al
     assert target["locator"].startswith("sec:")
 
 
-def test_native_l4b_uses_paperqa2_then_independent_jats_verifier(tmp_path):
+def test_native_l4b_uses_paperqa2_then_independent_jats_verifier(tmp_path, l4_paperqa2_runtime):
     manifest = _manifest(tmp_path)
-    runtime = _FakePaperQA2Runtime()
+    runtime, calls = l4_paperqa2_runtime(METHOD_TEXT)
 
     artifact = bundle.run_l4b_evidence(
         l4p,
@@ -178,15 +134,11 @@ def test_native_l4b_uses_paperqa2_then_independent_jats_verifier(tmp_path):
         paperqa_runtime=runtime,
     )
 
-    assert len(runtime.calls) == 1
-    call = runtime.calls[0]
+    assert len(calls) == 1
+    call = calls[0]
     assert call["paper"]["paper_id"] == "P_526704b9fe982d2a0cb7"
     assert call["paper"]["media_type"] == "application/xml"
     assert call["paper"]["document_path"].endswith(".xml")
-    assert all(
-        dr._is_methods_section(item["section"])
-        for item in call["source_candidates"]
-    )
     assert len(artifact["evidence_cards"]) == 1
     card = artifact["evidence_cards"][0]
     assert card["paper_id"] == "P_526704b9fe982d2a0cb7"
@@ -195,9 +147,9 @@ def test_native_l4b_uses_paperqa2_then_independent_jats_verifier(tmp_path):
     assert bundle.audit_bundle(l4p, dr, tmp_path, "C1", artifact) == (True, "")
 
 
-def test_native_l4b_does_not_assign_method_role_to_unclassified_jats_section(tmp_path):
+def test_native_l4b_does_not_assign_method_role_to_unclassified_jats_section(tmp_path, l4_paperqa2_runtime):
     manifest = _manifest(tmp_path)
-    runtime = _FakePaperQA2Runtime()
+    runtime, calls = l4_paperqa2_runtime(METHOD_TEXT)
 
     artifact = bundle.run_l4b_evidence(
         l4p,
@@ -213,7 +165,7 @@ def test_native_l4b_does_not_assign_method_role_to_unclassified_jats_section(tmp
         paperqa_runtime=runtime,
     )
 
-    assert runtime.calls == []
+    assert calls == []
     assert artifact["evidence_cards"] == []
     assert len(artifact["evidence_gaps"]) == 1
     assert "Methods" in artifact["evidence_gaps"][0]["failure_reason"]

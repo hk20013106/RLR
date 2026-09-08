@@ -144,8 +144,7 @@ def _bind_round_data(project):
 
 
 def test_staged_l4b_passes_real_l4_context_boundary(
-    tmp_path, monkeypatch, capsys
-):
+    tmp_path, monkeypatch, capsys, l4_paperqa2_runtime):
     project = tmp_path / "project"
     project.mkdir()
     store = tmp_path / "hypotheses.sqlite"
@@ -181,6 +180,7 @@ def test_staged_l4b_passes_real_l4_context_boundary(
         profile_id=PROFILE_V21_CATALOG_1,
         research_persona="Curie",
         fetcher=_fetcher,
+        paperqa_runtime=l4_paperqa2_runtime(METHOD_TEXT)[0],
     )
     assert bundle.audit_bundle(l4p, dr, project, "C1", artifact) == (True, "")
 
@@ -233,7 +233,7 @@ def test_staged_l4b_passes_real_l4_context_boundary(
     ] == "EvidenceRunReceipt/v1.1"
 
 
-def test_emit_delta_is_the_l4_handle_binding_boundary(tmp_path, monkeypatch):
+def test_emit_delta_is_the_l4_handle_binding_boundary(tmp_path, monkeypatch, l4_paperqa2_runtime):
     project = tmp_path / "project"
     project.mkdir()
     store = tmp_path / "hypotheses.sqlite"
@@ -268,6 +268,7 @@ def test_emit_delta_is_the_l4_handle_binding_boundary(tmp_path, monkeypatch):
         profile_id=PROFILE_V21_CATALOG_1,
         research_persona="Curie",
         fetcher=_fetcher,
+        paperqa_runtime=l4_paperqa2_runtime(METHOD_TEXT)[0],
     )
 
     assemble_args = SimpleNamespace(
