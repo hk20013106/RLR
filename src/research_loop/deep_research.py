@@ -50,6 +50,7 @@ class RuntimeSpec:
     timeout: int | None = None
     skill_path: str | None = None
     top_k_per_method: int | None = None
+    paperqa2: dict | None = None
 
 
 def runtime_config_path(project_dir: str | Path) -> Path:
@@ -104,6 +105,7 @@ def default_runtime_config(backend: str | None = None,
         "skill_version": "unknown",
         "timeout": 900,
         "top_k_per_method": 5,
+        "paperqa2": {},
     }
     if backend == "codex":
         codex_root = Path.home() / ".codex"
@@ -185,11 +187,15 @@ def load_runtime_spec(project_dir: str | Path, overrides: dict | None = None) ->
         if value not in (None, ""):
             config[key] = value
     backend = str(config.get("backend", ""))
+    paperqa2 = config.get("paperqa2")
+    if paperqa2 is not None and not isinstance(paperqa2, dict):
+        raise DeepResearchError("runtime paperqa2 config must be an object")
     return RuntimeSpec(
         backend=backend, executable=str(config.get("executable") or backend),
         plugin_dir=config.get("plugin_dir") or None, model=config.get("model") or None,
         timeout=config.get("timeout"), skill_path=config.get("skill_path") or None,
         top_k_per_method=config.get("top_k_per_method"),
+        paperqa2=dict(paperqa2 or {}) or None,
     ), str(config.get("skill_version") or "unknown")
 
 

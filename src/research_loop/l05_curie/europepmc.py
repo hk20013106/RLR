@@ -350,7 +350,8 @@ def lookup_exact_identifiers(
     return resolved
 
 
-def _parse_target_paragraphs(raw: bytes) -> list[dict]:
+def parse_jats_paragraphs(raw: bytes) -> list[dict]:
+    """Parse source-located paragraphs from JATS XML without guessing section semantics."""
     try:
         root = ET.fromstring(raw)
     except ET.ParseError as exc:
@@ -366,9 +367,6 @@ def _parse_target_paragraphs(raw: bytes) -> list[dict]:
             None,
         )
         title = _element_text(title_element) if title_element is not None else ""
-        normalized_title = title.casefold()
-        if not any(word in normalized_title for word in _TARGET_SECTION_WORDS):
-            continue
         paragraphs = [child for child in element.iter() if _local_name(child.tag) == "p"]
         for paragraph_index, paragraph in enumerate(paragraphs, 1):
             text = _element_text(paragraph)
@@ -382,8 +380,15 @@ def _parse_target_paragraphs(raw: bytes) -> list[dict]:
     return extracted
 
 
+def _parse_target_paragraphs(raw: bytes) -> list[dict]:
+    return [
+        item for item in parse_jats_paragraphs(raw)
+        if any(word in item["section"].casefold() for word in _TARGET_SECTION_WORDS)
+    ]
+
+
 def _paragraph_locator_map(raw: bytes) -> dict[str, dict]:
-    return {item["locator"]: item for item in _parse_target_paragraphs(raw)}
+    return {item["locator"]: item for item in parse_jats_paragraphs(raw)}
 
 
 class EuropePmcEvidenceRetriever:
@@ -493,6 +498,101 @@ class EuropePmcEvidenceRetriever:
         return {"snapshot": snapshot, "candidates": candidates}
 
 
+def verify_jats_candidates(
+    raw: bytes,
+    candidates: list[dict],
+    *,
+    paper_id: str,
+    role_override: str = "",
+    retrieval_base: dict | None = None,
+) -> list[dict]:
+    """Independently relocate candidates in exact JATS bytes and emit LOCATED extracts."""
+    if not isinstance(raw, (bytes, bytearray)):
+        raise CurieContractError("JATS source verifier requires source bytes")
+    raw = bytes(raw)
+    paper_id = _require_text(paper_id, "JATS source paper_id")
+    if not isinstance(candidates, list) or not candidates:
+        raise CurieContractError("Europe PMC evidence candidates must be a non-empty list")
+    locator_map = _paragraph_locator_map(raw)
+    source_sha256 = hashlib.sha256(raw).hexdigest()
+    base = json.loads(json.dumps(retrieval_base or {}))
+    base.setdefault("engine", "independent-jats-verifier/v1")
+    base.setdefault("source_sha256", source_sha256)
+    verified: list[dict] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            raise CurieContractError("Europe PMC evidence candidate must be an object")
+        is_paperqa2_candidate = candidate.get("schema_version") == "L05PaperQA2Candidate/v1"
+        if (
+            candidate.get("schema_version") != EVIDENCE_CANDIDATE_SCHEMA_VERSION
+            and not is_paperqa2_candidate
+        ):
+            raise CurieContractError("Europe PMC evidence candidate schema_version is invalid")
+        if candidate.get("verification_status") != "UNVERIFIED":
+            raise CurieContractError("Europe PMC evidence candidate must be UNVERIFIED")
+        if is_paperqa2_candidate:
+            from .paperqa2 import validate_paperqa2_candidate
+
+            candidate = validate_paperqa2_candidate(candidate)
+        if candidate.get("paper_id") != paper_id:
+            raise CurieContractError("Europe PMC evidence candidate paper_id mismatch")
+        locator = _require_text(candidate.get("locator"), "evidence candidate locator")
+        located = locator_map.get(locator)
+        if located is None:
+            raise CurieContractError(
+                f"Europe PMC evidence locator cannot be resolved: {locator}"
+            )
+        candidate_text = _normalize_text(candidate.get("text"))
+        if candidate_text != located["text"]:
+            raise CurieContractError(
+                f"Europe PMC evidence text does not match source at locator {locator}"
+            )
+        section = _require_text(candidate.get("section"), "evidence candidate section")
+        if _normalize_text(section) != located["section"]:
+            raise CurieContractError(
+                f"Europe PMC evidence section does not match source at locator {locator}"
+            )
+        role = _require_text(
+            role_override or candidate.get("role") or "CONTEXT",
+            "evidence candidate role",
+        )
+        upstream_retrieval = candidate.get("retrieval")
+        if not isinstance(upstream_retrieval, dict):
+            raise CurieContractError("Europe PMC evidence candidate retrieval is missing")
+        retrieval = json.loads(json.dumps(base))
+        if is_paperqa2_candidate:
+            retrieval["upstream_engine"] = "paperqa2"
+            if upstream_retrieval.get("backend_id"):
+                retrieval["upstream_backend_id"] = str(upstream_retrieval["backend_id"])
+            for provenance_key in ("runtime", "paperqa2", "source_alignment"):
+                if provenance_key in upstream_retrieval:
+                    if not isinstance(upstream_retrieval[provenance_key], dict):
+                        raise CurieContractError(
+                            f"Europe PMC PaperQA2 {provenance_key} provenance must be an object"
+                        )
+                    retrieval[provenance_key] = json.loads(
+                        json.dumps(upstream_retrieval[provenance_key])
+                    )
+        extract = {
+            "schema_version": EVIDENCE_EXTRACT_SCHEMA_VERSION,
+            "evidence_id": "E_" + _sha({
+                "paper_id": paper_id,
+                "locator": locator,
+                "text": candidate_text,
+                "source_sha256": source_sha256,
+            })[:20],
+            "paper_id": paper_id,
+            "section": located["section"],
+            "text": candidate_text,
+            "locator": locator,
+            "role": role,
+            "verification_status": "LOCATED",
+            "retrieval": retrieval,
+        }
+        verified.append(validate_evidence_extract(extract))
+    return verified
+
+
 class EuropePmcEvidenceVerifier:
     """Independently re-open source XML and certify exact located extracts."""
 
@@ -541,83 +641,15 @@ class EuropePmcEvidenceVerifier:
 
     def verify(self, snapshot: dict, candidates: list[dict]) -> list[dict]:
         raw = self._load_snapshot(snapshot)
-        if not isinstance(candidates, list) or not candidates:
-            raise CurieContractError("Europe PMC evidence candidates must be a non-empty list")
-        locator_map = _paragraph_locator_map(raw)
-        verified: list[dict] = []
-        for candidate in candidates:
-            if not isinstance(candidate, dict):
-                raise CurieContractError("Europe PMC evidence candidate must be an object")
-            is_paperqa2_candidate = candidate.get("schema_version") == "L05PaperQA2Candidate/v1"
-            if (
-                candidate.get("schema_version") != EVIDENCE_CANDIDATE_SCHEMA_VERSION
-                and not is_paperqa2_candidate
-            ):
-                raise CurieContractError("Europe PMC evidence candidate schema_version is invalid")
-            if candidate.get("verification_status") != "UNVERIFIED":
-                raise CurieContractError("Europe PMC evidence candidate must be UNVERIFIED")
-            if is_paperqa2_candidate:
-                from .paperqa2 import validate_paperqa2_candidate
-
-                candidate = validate_paperqa2_candidate(candidate)
-            if candidate.get("paper_id") != snapshot.get("paper_id"):
-                raise CurieContractError("Europe PMC evidence candidate paper_id mismatch")
-            locator = _require_text(candidate.get("locator"), "evidence candidate locator")
-            located = locator_map.get(locator)
-            if located is None:
-                raise CurieContractError(
-                    f"Europe PMC evidence locator cannot be resolved: {locator}"
-                )
-            text = _normalize_text(candidate.get("text"))
-            if text != located["text"]:
-                raise CurieContractError(
-                    f"Europe PMC evidence text does not match source at locator {locator}"
-                )
-            section = _require_text(candidate.get("section"), "evidence candidate section")
-            if _normalize_text(section) != located["section"]:
-                raise CurieContractError(
-                    f"Europe PMC evidence section does not match source at locator {locator}"
-                )
-            role = _require_text(candidate.get("role") or "CONTEXT", "evidence candidate role")
-            upstream_retrieval = candidate.get("retrieval")
-            if not isinstance(upstream_retrieval, dict):
-                raise CurieContractError("Europe PMC evidence candidate retrieval is missing")
-            extract = {
-                "schema_version": EVIDENCE_EXTRACT_SCHEMA_VERSION,
-                "evidence_id": "E_" + _sha({
-                    "paper_id": snapshot["paper_id"],
-                    "locator": locator,
-                    "text": text,
-                    "source_sha256": snapshot["artifact_sha256"],
-                })[:20],
-                "paper_id": snapshot["paper_id"],
-                "section": located["section"],
-                "text": text,
-                "locator": locator,
-                "role": role,
-                "verification_status": "LOCATED",
-                "retrieval": {
-                    "engine": "europe-pmc-fulltext-xml/v1",
-                    "source_sha256": snapshot["artifact_sha256"],
-                    "snapshot_path": snapshot["artifact_path"],
-                    "pmcid": snapshot["pmcid"],
-                    "verifier": "europe-pmc-source-relocator/v1",
-                },
-            }
-            if is_paperqa2_candidate:
-                extract["retrieval"]["upstream_engine"] = "paperqa2"
-                if upstream_retrieval.get("backend_id"):
-                    extract["retrieval"]["upstream_backend_id"] = str(
-                        upstream_retrieval["backend_id"]
-                    )
-                for provenance_key in ("runtime", "paperqa2", "source_alignment"):
-                    if provenance_key in upstream_retrieval:
-                        if not isinstance(upstream_retrieval[provenance_key], dict):
-                            raise CurieContractError(
-                                f"Europe PMC PaperQA2 {provenance_key} provenance must be an object"
-                            )
-                        extract["retrieval"][provenance_key] = json.loads(
-                            json.dumps(upstream_retrieval[provenance_key])
-                        )
-            verified.append(validate_evidence_extract(extract))
-        return verified
+        return verify_jats_candidates(
+            raw,
+            candidates,
+            paper_id=str(snapshot.get("paper_id") or ""),
+            retrieval_base={
+                "engine": "europe-pmc-fulltext-xml/v1",
+                "source_sha256": snapshot["artifact_sha256"],
+                "snapshot_path": snapshot["artifact_path"],
+                "pmcid": snapshot["pmcid"],
+                "verifier": "europe-pmc-source-relocator/v1",
+            },
+        )

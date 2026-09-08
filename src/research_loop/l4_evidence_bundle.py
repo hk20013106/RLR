@@ -15,6 +15,7 @@ from typing import Any
 
 from research_loop import l4_closed_corpus as cc
 from research_loop import l4_inventory
+from research_loop.l05_curie import europepmc
 
 
 EVIDENCE_BUNDLE_SCHEMA = "L4BEvidenceBundle/v2"
@@ -203,6 +204,36 @@ def _paper_id(dr, asset: dict, result: dict) -> str:
     return str(asset.get("asset_id") or "").strip()
 
 
+def _paperqa_runtime_from_spec(dr, spec):
+    config = getattr(spec, "paperqa2", None)
+    if not config:
+        return None
+    required = ("python_executable", "bridge_script", "paperqa_repo", "pqa_home")
+    missing = [field for field in required if not str(config.get(field) or "").strip()]
+    if missing:
+        raise dr.DeepResearchError(
+            "PaperQA2 runtime config is incomplete: " + ", ".join(missing)
+        )
+    try:
+        from research_loop.l05_curie.paperqa2_runtime import (
+            PaperQA2CurieRuntime,
+            PaperQA2SubprocessBackend,
+        )
+
+        backend = PaperQA2SubprocessBackend(
+            python_executable=config["python_executable"],
+            bridge_script=config["bridge_script"],
+            paperqa_repo=config["paperqa_repo"],
+            pqa_home=config["pqa_home"],
+            timeout_seconds=int(config.get("timeout_seconds") or 300),
+        )
+        return PaperQA2CurieRuntime(backend=backend, backend_id=backend.backend_id)
+    except Exception as exc:
+        if isinstance(exc, dr.DeepResearchError):
+            raise
+        raise dr.DeepResearchError(f"PaperQA2 runtime is invalid: {exc}") from exc
+
+
 def _receipt_payload(result: dict) -> dict:
     return {
         "schema_version": cc.RECEIPT_SCHEMA,
@@ -222,9 +253,9 @@ def _failure_reason(result: dict) -> str:
     ]
     if reasons:
         return reasons[-1]
-    if result.get("status") == "resolved" and not result.get("methods_section"):
-        return "resolved source has no explicit Methods section"
-    return "exact source could not produce a substantive located Methods payload"
+    if result.get("status") == "resolved":
+        return "resolved source has no independently verified METHOD evidence"
+    return "exact source retrieval failed"
 
 
 def _render_summary(artifact: dict) -> str:
@@ -345,6 +376,7 @@ def run_l4b_evidence(
     profile_id: str = "",
     research_persona: str = "Curie",
     fetcher=None,
+    paperqa_runtime=None,
 ) -> dict:
     """Resolve inventory sources and persist a deterministic L4B bundle."""
     project = Path(project_dir)
@@ -409,9 +441,7 @@ def run_l4b_evidence(
             "path": receipt_path.relative_to(project).as_posix(),
             "sha256": _sha(receipt_raw),
             "status": str(result.get("status") or "failed"),
-            "section_locator": str(
-                (result.get("methods_section") or {}).get("locator") or ""
-            ),
+            "section_locator": "",
         }
         retrieval_refs.append(receipt_ref)
 
@@ -423,45 +453,128 @@ def run_l4b_evidence(
             else payload.encode("utf-8")
         )
         payload_hash = _sha(payload_bytes) if payload_bytes else ""
-        methods = result.get("methods_section") or None
-        accepted = bool(
-            result.get("status") == "resolved"
-            and methods
-            and len(str(methods.get("text") or "").encode("utf-8")) >= cc.MIN_BYTES
-            and cc.extract_is_contiguous(payload, str(methods.get("text") or ""))
-        )
-
         paper_id = _paper_id(dr, asset, result)
         source_path = ""
         extracts = []
+        content_type = str(result.get("content_type") or "")
         if payload:
-            content_type = str(result.get("content_type") or "")
             suffix = ".xml" if "xml" in content_type.casefold() else ".html" if "html" in content_type.casefold() else ".txt"
             source_file = sources_dir / f"{paper_id}{suffix}"
             source_file.write_bytes(payload_bytes)
             source_path = source_file.relative_to(project).as_posix()
+        else:
+            source_file = None
 
-        anchor_id = ""
-        evidence_id = ""
-        if accepted:
-            anchor_id = _safe(dr, f"anchor-{asset_id}-{_sha(methods['text'])[:10]}")
-            evidence_id = (
-                f"{paper_id}:{_safe(dr, methods.get('section') or 'Methods')}:1:"
-                f"{_sha(methods['text'])[:10]}"
-            )
-            extracts.append({
-                "evidence_id": evidence_id,
-                "anchor_id": anchor_id,
-                "section": str(methods.get("section") or "Methods"),
-                "text": str(methods.get("text") or ""),
-                "locator": str(methods.get("locator") or ""),
-                "extraction_method": f"deterministic-{methods.get('parser') or 'source'}",
-                "verification_status": "located",
-                "source_hash": payload_hash,
-                "method_ids": method_ids,
-                "source_ref_ids": source_ref_ids,
-                "source_kind": _source_kind(asset),
-            })
+        method_inventory = {
+            str(item.get("method_id") or ""): item
+            for item in manifest.get("method_inventory") or []
+        }
+        accepted_by_method = {}
+        gap_reason_by_method = {}
+        if result.get("status") != "resolved" or not payload_bytes:
+            for method_id in method_ids:
+                gap_reason_by_method[method_id] = _failure_reason(result)
+        elif paperqa_runtime is None:
+            for method_id in method_ids:
+                gap_reason_by_method[method_id] = (
+                    "PaperQA2 runtime is not configured for native L4B evidence retrieval"
+                )
+        elif "xml" not in content_type.casefold():
+            for method_id in method_ids:
+                gap_reason_by_method[method_id] = (
+                    "native L4B PaperQA2 verification currently requires structured JATS XML"
+                )
+        else:
+            try:
+                source_candidates = europepmc.parse_jats_paragraphs(payload_bytes)
+            except Exception as exc:
+                source_candidates = []
+                parse_failure = f"structured JATS parsing failed: {exc}"
+            else:
+                parse_failure = ""
+            if not source_candidates:
+                for method_id in method_ids:
+                    gap_reason_by_method[method_id] = parse_failure or (
+                        "structured JATS source contains no locatable paragraphs"
+                    )
+            else:
+                paper = {
+                    "paper_id": paper_id,
+                    "title": str(asset.get("title") or asset_id),
+                    "identifiers": {
+                        key: value for key, value in {
+                            "doi": str(asset.get("doi") or contract.get("doi") or ""),
+                            "pmid": str(asset.get("pmid") or contract.get("pmid") or ""),
+                            "pmcid": str(contract.get("pmcid") or (asset.get("source_metadata_response") or {}).get("pmcid") or ""),
+                        }.items() if value
+                    },
+                    "document_path": str(source_file.resolve()),
+                    "media_type": content_type or "application/xml",
+                }
+                for method_id in method_ids:
+                    method = method_inventory.get(method_id, {})
+                    question = str(
+                        method.get("purpose") or method.get("name") or method_id
+                    ).strip()
+                    try:
+                        runtime_result = paperqa_runtime.retrieve_and_verify(
+                            paper=paper,
+                            question=question,
+                            source_candidates=source_candidates,
+                            verify=lambda candidates, _paper_id=paper_id: europepmc.verify_jats_candidates(
+                                payload_bytes,
+                                candidates,
+                                paper_id=_paper_id,
+                                role_override="METHOD",
+                                retrieval_base={
+                                    "engine": "l4b-exact-source-jats/v1",
+                                    "source_sha256": payload_hash,
+                                    "verifier": "europe-pmc-jats-source-relocator/v1",
+                                },
+                            ),
+                        )
+                        located = [
+                            item for item in runtime_result.get("located") or []
+                            if item.get("verification_status") == "LOCATED"
+                            and len(str(item.get("text") or "").encode("utf-8")) >= cc.MIN_BYTES
+                        ]
+                    except Exception as exc:
+                        gap_reason_by_method[method_id] = (
+                            f"PaperQA2 evidence retrieval failed: {exc}"
+                        )
+                        continue
+                    if not located:
+                        gap_reason_by_method[method_id] = (
+                            "PaperQA2 produced no substantive independently verified METHOD evidence"
+                        )
+                        continue
+                    located_extract = located[0]
+                    evidence_id = str(located_extract.get("evidence_id") or "")
+                    anchor_id = _safe(
+                        dr,
+                        f"anchor-{asset_id}-{method_id}-{_sha(located_extract['text'])[:10]}",
+                    )
+                    extract = {
+                        "evidence_id": evidence_id,
+                        "anchor_id": anchor_id,
+                        "section": str(located_extract.get("section") or ""),
+                        "text": str(located_extract.get("text") or ""),
+                        "locator": str(located_extract.get("locator") or ""),
+                        "extraction_method": "paperqa2+independent-jats-verifier",
+                        "verification_status": "located",
+                        "source_hash": payload_hash,
+                        "method_ids": [method_id],
+                        "source_ref_ids": source_ref_ids,
+                        "source_kind": _source_kind(asset),
+                        "retrieval": copy.deepcopy(located_extract.get("retrieval") or {}),
+                    }
+                    extracts.append(extract)
+                    accepted_by_method[method_id] = {
+                        "evidence_id": evidence_id,
+                        "anchor_id": anchor_id,
+                        "section": extract["section"],
+                        "locator": extract["locator"],
+                    }
 
         if payload:
             record = {
@@ -479,6 +592,7 @@ def run_l4b_evidence(
                 "source_metadata_response": asset.get("source_metadata_response") or {},
                 "metadata_response_hash": _sha(_canonical_json(asset.get("source_metadata_response") or {})),
                 "open_access": True,
+                "content_type": content_type,
                 "content_hash": payload_hash,
                 "source_payload_path": source_path,
                 "retrieval_receipt_path": receipt_ref["path"],
@@ -502,6 +616,7 @@ def run_l4b_evidence(
             })
 
         for method_id in method_ids:
+            accepted = accepted_by_method.get(method_id)
             if accepted:
                 card_id = _safe(dr, f"card-{method_id}-{asset_id}")
                 evidence_cards.append({
@@ -510,11 +625,11 @@ def run_l4b_evidence(
                     "source_ref_id": source_ref_id,
                     "asset_id": asset_id,
                     "paper_id": paper_id,
-                    "evidence_id": evidence_id,
-                    "anchor_id": anchor_id,
+                    "evidence_id": accepted["evidence_id"],
+                    "anchor_id": accepted["anchor_id"],
                     "source_kind": _source_kind(asset),
-                    "section": str(methods.get("section") or "Methods"),
-                    "locator": str(methods.get("locator") or ""),
+                    "section": accepted["section"],
+                    "locator": accepted["locator"],
                     "content_hash": payload_hash,
                     "status": "accepted",
                 })
@@ -531,7 +646,7 @@ def run_l4b_evidence(
                         "registered_locations": list(contract.get("registered_locations") or []),
                     },
                     "attempts": copy.deepcopy(result.get("attempts") or []),
-                    "failure_reason": _failure_reason(result),
+                    "failure_reason": gap_reason_by_method.get(method_id) or _failure_reason(result),
                     "status": "unresolved",
                 })
 
@@ -636,6 +751,7 @@ def run_l4b_from_manifest(
     profile_id: str = "",
     research_persona: str = "Curie",
     fetcher=None,
+    paperqa_runtime=None,
 ) -> dict:
     """Resume deterministic L4B from one existing, immutable L4A manifest.
 
@@ -717,6 +833,15 @@ def run_l4b_from_manifest(
         profile_id=str(profile_id or manifest.get("profile_id") or ""),
         research_persona=research_persona,
         fetcher=fetcher,
+        paperqa_runtime=(
+            paperqa_runtime
+            if paperqa_runtime is not None
+            else (
+                _paperqa_runtime_from_spec(dr, dr.load_runtime_spec(project)[0])
+                if dr.runtime_config_path(project).is_file()
+                else None
+            )
+        ),
     )
     try:
         after_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
@@ -839,9 +964,23 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
         text = str(extract.get("text") or "")
         if len(text.encode("utf-8")) < cc.MIN_BYTES:
             return False, f"L4B evidence card {card_id} extract is below 500 bytes"
-        if not str(extract.get("locator") or ""):
+        locator = str(extract.get("locator") or "")
+        if not locator:
             return False, f"L4B evidence card {card_id} locator is missing"
-        if not cc.extract_is_contiguous(payload, text):
+        if (
+            "xml" in str(record.get("content_type") or "").casefold()
+            and extract.get("extraction_method") == "paperqa2+independent-jats-verifier"
+        ):
+            try:
+                located = {
+                    item["locator"]: item
+                    for item in europepmc.parse_jats_paragraphs(payload_bytes)
+                }.get(locator)
+            except Exception:
+                located = None
+            if not located or located.get("text") != text:
+                return False, f"L4B evidence card {card_id} JATS locator/text mismatch"
+        elif not cc.extract_is_contiguous(payload, text):
             return False, f"L4B evidence card {card_id} extract is not contiguous"
         try:
             receipt_path = _bound_path(
@@ -1061,6 +1200,7 @@ def install(l4p, dr) -> None:
             profile_id=profile_id,
             research_persona=research_persona,
             fetcher=getattr(dr, "_l4b_fulltext_fetcher", None),
+            paperqa_runtime=_paperqa_runtime_from_spec(dr, spec),
         )
 
     def audit_evidence_pack(project_dir, candidate_id, node, *, run_id=None):
