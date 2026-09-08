@@ -147,7 +147,7 @@ def test_native_l4b_uses_paperqa2_then_independent_jats_verifier(tmp_path, l4_pa
     assert bundle.audit_bundle(l4p, dr, tmp_path, "C1", artifact) == (True, "")
 
 
-def test_native_l4b_does_not_assign_method_role_to_unclassified_jats_section(tmp_path, l4_paperqa2_runtime):
+def test_native_l4b_classifies_experimental_procedures_as_methods(tmp_path, l4_paperqa2_runtime):
     manifest = _manifest(tmp_path)
     runtime, calls = l4_paperqa2_runtime(METHOD_TEXT)
 
@@ -162,6 +162,32 @@ def test_native_l4b_does_not_assign_method_role_to_unclassified_jats_section(tmp
         round_id="1",
         profile_id="v2.1-catalog-1",
         fetcher=_fetch,
+        paperqa_runtime=runtime,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["paper"]["paper_id"] == "P_526704b9fe982d2a0cb7"
+    assert len(artifact["evidence_cards"]) == 1
+    assert artifact["evidence_cards"][0]["section"] == "EXPERIMENTAL PROCEDURES"
+    assert artifact["evidence_gaps"] == []
+    assert bundle.audit_bundle(l4p, dr, tmp_path, "C1", artifact) == (True, "")
+
+
+def test_native_l4b_does_not_assign_method_role_to_experimental_results(tmp_path, l4_paperqa2_runtime):
+    manifest = _manifest(tmp_path)
+    runtime, calls = l4_paperqa2_runtime(METHOD_TEXT)
+
+    artifact = bundle.run_l4b_evidence(
+        l4p,
+        dr,
+        tmp_path,
+        "C1",
+        manifest,
+        tmp_path / "work",
+        project_id="P1",
+        round_id="1",
+        profile_id="v2.1-catalog-1",
+        fetcher=lambda url: _fetch(url, XML.replace("EXPERIMENTAL PROCEDURES", "EXPERIMENTAL RESULTS")),
         paperqa_runtime=runtime,
     )
 

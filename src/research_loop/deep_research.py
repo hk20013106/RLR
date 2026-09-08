@@ -829,6 +829,22 @@ _SECTION_HEADING_DASHES = str.maketrans({
     "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-", "―": "-", "−": "-",
 })
 
+# JATS exposes semantic section type as optional metadata, so a source may
+# have to be classified from its heading.  Keep this vocabulary explicit and
+# bounded: these are unambiguous Methods/Procedures headings, not a substring
+# match on words such as "experimental" or "method".
+_METHODS_SECTION_HEADINGS = frozenset({
+    "method",
+    "methods",
+    "methodology",
+    "materials and methods",
+    "methods and materials",
+    "experimental method",
+    "experimental methods",
+    "experimental procedure",
+    "experimental procedures",
+})
+
 
 def _normalize_section_heading(section: object) -> str:
     normalized = str(section or "").strip().casefold()
@@ -851,8 +867,9 @@ def _is_section_heading(section: object, heading: str, *,
 
 def _is_methods_section(section: object) -> bool:
     """Return whether a located section is an accepted Methods heading."""
+    normalized = _normalize_section_heading(section)
     return (_is_section_heading(section, "methods")
-            or _normalize_section_heading(section) == "materials and methods")
+            or normalized in _METHODS_SECTION_HEADINGS)
 
 
 def _is_results_section(section: object) -> bool:

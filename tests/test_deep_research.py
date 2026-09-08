@@ -353,6 +353,23 @@ def test_l4_contract_accepts_normalized_methods_section_variants(tmp_path, secti
     assert dr.audit_evidence_pack(tmp_path, "C1", "L4") == (True, "")
 
 
+@pytest.mark.parametrize("section", [
+    "Experimental procedures",
+    "EXPERIMENTAL PROCEDURE",
+    "Experimental methods",
+])
+def test_methods_classifier_accepts_general_procedure_heading_variants(section):
+    assert dr._is_methods_section(section)
+
+
+@pytest.mark.parametrize("section", [
+    "Experimental results",
+    "Results: experimental procedures",
+])
+def test_methods_classifier_rejects_experimental_results_headings(section):
+    assert not dr._is_methods_section(section)
+
+
 def test_l4_contract_rejects_unrelated_section_containing_methods_word(tmp_path):
     payload = _payload()
     payload["papers"][0]["extracts"][-1]["section"] = "Results: comparison of methods"
