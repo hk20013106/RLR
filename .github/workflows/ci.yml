@@ -69,18 +69,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: mamba-org/setup-micromamba@v3
         with:
-          python-version: "3.13"
+          environment-file: environment.yml
+          environment-name: rlr
+          init-shell: bash
+          cache-environment: true
 
       - name: Install dependencies
-        run: pip install -r requirements.txt -r requirements-dev.txt
+        run: micromamba run -n rlr python -m pip install -r requirements-specter2.txt -r requirements-dev.txt
 
       - name: Import check
-        run: python -c "import sys; sys.path.insert(0, 'src'); import research_loop"
+        run: micromamba run -n rlr python -c "import sys; sys.path.insert(0, 'src'); import research_loop"
 
       - name: CLI help
-        run: python research_loop_v04.py --help
+        run: micromamba run -n rlr python research_loop_v04.py --help
 
       # research_loop_v04.py has no packaging metadata (no setup.py/pyproject.toml);
       # it self-installs src/ onto sys.path, so pytest needs the same PYTHONPATH to
@@ -89,7 +92,7 @@ jobs:
         env:
           PYTHONPATH: src
         run: |
-          python -m pytest -q --no-header -p no:cacheprovider \
+          micromamba run -n rlr python -m pytest -q --no-header -p no:cacheprovider \
             --cov=src --cov-report=term-missing | tee pytest-output.txt
 
       - name: Coverage summary

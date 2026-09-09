@@ -38,15 +38,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: mamba-org/setup-micromamba@v3
         with:
-          python-version: "3.13"
+          environment-file: environment.yml
+          environment-name: rlr
+          init-shell: powershell
+          cache-environment: true
       - name: Install dependencies
-        run: pip install -r requirements.txt -r requirements-dev.txt
+        run: micromamba run -n rlr python -m pip install -r requirements-specter2.txt -r requirements-dev.txt
       - name: Compile L0 modules
         shell: bash
         run: |
-          python -m py_compile \
+          micromamba run -n rlr python -m py_compile \
             run_loop.py \
             src/research_loop/l0_contract.py \
             src/research_loop/l0_intake.py \
@@ -63,7 +66,7 @@ jobs:
             src/run_loop.py
       - name: Run round data authority tests
         run: >-
-          python -m pytest -q
+          micromamba run -n rlr python -m pytest -q
           tests/test_round_data_contract.py
           tests/test_round_data_intake.py
           tests/test_round_data_binding.py
@@ -74,7 +77,7 @@ jobs:
           tests/test_l6_l7_script_contract.py
       - name: Run targeted L0 regression tests
         run: >-
-          python -m pytest -q
+          micromamba run -n rlr python -m pytest -q
           tests/test_l0_input_contract.py
           tests/test_l0_intake.py
           tests/test_l0_structured_intake.py

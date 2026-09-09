@@ -1,0 +1,26 @@
+name: rlr
+channels:
+  - conda-forge
+dependencies:
+  # Create with Python 3.13; the resolver selects the current 3.13.x patch.
+  - python=3.13
+  - pip
+  # Conda-forge owns the numerical, test, and stable low-level layer.
+  - numpy
+  - pandas
+  - scipy
+  - pyyaml
+  - psutil
+  # jsonschema is constrained by requirements.txt and installed through the
+  # same rlr interpreter's pip layer below.
+  - pytest
+  - pytest-cov
+variables:
+  # Prevent user-level Python 3.13 packages from entering the formal runtime.
+  PYTHONNOUSERSITE: "1"
+  # Formal L4A operators must run runtime_preflight before research execution.
+  RLR_FORMAL_RUNTIME: "rlr"
+
+# Install the pip layer only through the same interpreter, in this order:
+#   micromamba run -n rlr python -m pip install -r requirements-specter2.txt
+#   micromamba run -n rlr python -m pip install -e <paper-qa checkout>

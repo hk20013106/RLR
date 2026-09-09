@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -186,6 +187,39 @@ def test_provider_delta_hash_tamper_rejects_before_any_write(tmp_path):
         tmp_path
     )
     source.write_text(source.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    assert _emit_l1(project, store, candidate, source, manifest, receipt) == 1
+    _assert_zero_native_writes(project, store, candidate)
+
+
+def test_transformed_provider_receipt_rejects_tampered_raw_to_bound_edge(tmp_path):
+    project, store, candidate, source, manifest, receipt = _native_l1_boundary(
+        tmp_path
+    )
+    raw = tmp_path / "raw-provider.json"
+    raw.write_text('{"raw":true}\n', encoding="utf-8")
+    edge = tmp_path / "binding.json"
+    edge.write_text(json.dumps({
+        "schema_version": "L4CReferenceBinding/v1",
+        "raw_provider_delta_path": str(raw),
+        "raw_provider_delta_sha256": "0" * 64,
+        "bound_delta_path": str(source),
+        "bound_delta_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+    }), encoding="utf-8")
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    payload.update({
+        "schema_version": "RunReceipt/v2",
+        "git_head": "a" * 40,
+        "git_dirty": True,
+        "working_tree_diff_sha256": "b" * 64,
+        "config_sha256": "c" * 64,
+        "code_state_id": "d" * 64,
+        "raw_provider_delta_path": str(raw),
+        "raw_provider_delta_hash": hashlib.sha256(raw.read_bytes()).hexdigest(),
+        "transformation_receipt_path": str(edge),
+        "transformation_receipt_hash": hashlib.sha256(edge.read_bytes()).hexdigest(),
+    })
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
+
     assert _emit_l1(project, store, candidate, source, manifest, receipt) == 1
     _assert_zero_native_writes(project, store, candidate)
 

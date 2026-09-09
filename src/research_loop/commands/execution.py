@@ -6,6 +6,7 @@ import shutil
 import sys
 from pathlib import Path
 
+from research_loop import authority
 from research_loop.commands.lifecycle import PREFLIGHT_FILES
 from research_loop.common import _append_decision, _now, _set_status, _stamp
 from research_loop.delta import (
@@ -13,11 +14,7 @@ from research_loop.delta import (
     l6_analysis_plan_scripts,
     l6_script_name,
 )
-from research_loop.l0_data import (
-    L0DataError,
-    current_round_data_binding_path,
-    verify_current_round_data_binding,
-)
+from research_loop.l0_data import L0DataError, current_round_data_binding_path
 from research_loop.l0_state import _resolve_registered_path
 from research_loop.paths import _candidate_file, _sha256
 from research_loop.yamlio import _load_yaml_front, _yaml_value
@@ -30,8 +27,18 @@ def _workspace_role(value):
 
 
 def _bound_local_inputs(project_dir, cand_id):
-    """Revalidate and resolve the sole current-round scientific data authority."""
-    binding = verify_current_round_data_binding(project_dir, cand_id)
+    """Resolve the sole current-round data authority through the shared boundary."""
+    try:
+        resolved_authority = authority.resolve_authority(
+            project_dir,
+            cand_id,
+            "current_round_data_binding",
+            consumer_node="L7",
+            mode="execution",
+        )
+    except authority.AuthorityError as exc:
+        raise L0DataError("L0_DATA_AUTHORITY_INVALID", str(exc)) from exc
+    binding = resolved_authority.payload
     project = Path(project_dir)
     resolved = []
     for item in binding.get("authorized_inputs") or []:

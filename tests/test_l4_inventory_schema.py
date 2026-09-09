@@ -231,7 +231,7 @@ def test_l4_inventory_codex_jsonl_owner_uses_observability_proxy(
             tmp_path / "work",
             project_id="P1",
             round_id="1",
-            profile_id="v2.1-catalog-1",
+            profile_id="v2.0-legacy",
         )
     finally:
         _CONTEXT.reset(token)

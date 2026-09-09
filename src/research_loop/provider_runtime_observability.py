@@ -777,7 +777,11 @@ class _ObservedExecutor:
 
         execution = run_observed_provider(
             command=[str(part) for part in command],
-            prompt=str(context["prompt"]),
+            prompt=(
+                str(kwargs["input_text"])
+                if kwargs.get("input_text") is not None
+                else str(command[-1])
+            ),
             runtime_dir=context["runtime_dir"],
             backend=str(context["backend"]),
             task_id=str(context["task_id"]),
@@ -878,16 +882,12 @@ def install(deep_research_module: Any, detached_task_module: Any) -> None:
                     "timeout": getattr(spec, "timeout", None),
                 },
             })
-        _command, prompt = build_invocation(
-            spec, node, question, claim, work_dir, result_context
-        )
         context = {
             "runtime_dir": runtime_dir,
             "task_id": task_id,
             "candidate_id": candidate_id,
             "node": node,
             "backend": getattr(spec, "backend", ""),
-            "prompt": prompt,
             "execution": None,
         }
         token = _CONTEXT.set(context)

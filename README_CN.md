@@ -16,21 +16,24 @@ v2.0 清理均已移出 v0.9，作为独立后续阶段。
 
 - [中文完整说明](docs/README_CN.md)
 - [English README](README.md)
-- 运行入口：`python run_loop.py run PROJECT CAND`
+- 运行入口：`micromamba run -n rlr python run_loop.py run PROJECT CAND`
 
 ## 安装与最小验证
 
-```bash
-# 安装运行依赖
-python -m pip install -r requirements.txt
+```powershell
+# 创建唯一正式运行环境（Python 3.13）
+micromamba create --channel-priority strict -n rlr -f environment.yml
+micromamba run -n rlr python -m pip install -r requirements-specter2.txt
+micromamba run -n rlr python -m pip install -e D:\research_loop\paper-qa
 
-# 可选：安装测试依赖
-python -m pip install -r requirements-dev.txt
+# 正式 L4A/SPECTER2 预检
+$env:PYTHONPATH = "src"
+micromamba run -n rlr python -m research_loop.runtime_preflight
 
 # 最小本地演示，不代表真实研究流程已通过全部门禁
-python research_loop_v04.py demo
-python research_loop_v04.py --help
-python run_loop.py --help
+micromamba run -n rlr python research_loop_v04.py demo
+micromamba run -n rlr python research_loop_v04.py --help
+micromamba run -n rlr python run_loop.py --help
 ```
 
 真实研究流程仍需要 Academic Research runtime、Zotero connector 和

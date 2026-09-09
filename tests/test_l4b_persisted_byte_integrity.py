@@ -97,7 +97,7 @@ def _manifest(project: Path) -> dict:
     )
 
 
-def test_staged_l4b_persists_and_audits_exact_downloaded_bytes(tmp_path):
+def test_staged_l4b_persists_and_audits_exact_downloaded_bytes(tmp_path, l4_paperqa2_runtime):
     project = tmp_path / "project"
     manifest = _manifest(project)
 
@@ -122,6 +122,7 @@ def test_staged_l4b_persists_and_audits_exact_downloaded_bytes(tmp_path):
         round_id="1",
         profile_id="v2.1-catalog-1",
         fetcher=fetcher,
+        paperqa_runtime=l4_paperqa2_runtime(METHOD_TEXT)[0],
     )
 
     paper = json.loads(

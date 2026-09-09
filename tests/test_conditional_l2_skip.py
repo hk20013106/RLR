@@ -6,11 +6,9 @@ from pathlib import Path
 import pytest
 
 
-ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-if str(ROOT / "tests") not in sys.path:
-    sys.path.insert(0, str(ROOT / "tests"))
+TESTS = Path(__file__).resolve().parent
+if str(TESTS) not in sys.path:
+    sys.path.insert(0, str(TESTS))
 
 import research_loop_v04 as rl
 from native_v2_helpers import commit_v2

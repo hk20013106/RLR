@@ -10,8 +10,6 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from research_loop import deep_research as dr
 from research_loop import deep_research_task as dr_task
@@ -353,6 +351,23 @@ def test_l4_contract_accepts_normalized_methods_section_variants(tmp_path, secti
                    dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"))
 
     assert dr.audit_evidence_pack(tmp_path, "C1", "L4") == (True, "")
+
+
+@pytest.mark.parametrize("section", [
+    "Experimental procedures",
+    "EXPERIMENTAL PROCEDURE",
+    "Experimental methods",
+])
+def test_methods_classifier_accepts_general_procedure_heading_variants(section):
+    assert dr._is_methods_section(section)
+
+
+@pytest.mark.parametrize("section", [
+    "Experimental results",
+    "Results: experimental procedures",
+])
+def test_methods_classifier_rejects_experimental_results_headings(section):
+    assert not dr._is_methods_section(section)
 
 
 def test_l4_contract_rejects_unrelated_section_containing_methods_word(tmp_path):

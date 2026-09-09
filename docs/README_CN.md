@@ -325,7 +325,7 @@ PR #18 只是修正这个维护层的历史 scope test，没有改变 production
 Canonical runner：
 
 ```bash
-python run_loop.py run PROJECT CAND
+micromamba run -n rlr python run_loop.py run PROJECT CAND
 ```
 
 `research_loop_v04.py` 继续作为历史 CLI/import compatibility shim；新代码应直接使用 `research_loop.cli`、`research_loop.engine` 或 `research_loop.api`。
@@ -334,13 +334,16 @@ python run_loop.py run PROJECT CAND
 
 # 十一、安装与最小检查
 
-```bash
-python -m pip install -r requirements.txt
-python -m pip install -r requirements-dev.txt   # 可选测试依赖
+```powershell
+micromamba create --channel-priority strict -n rlr -f environment.yml
+micromamba run -n rlr python -m pip install -r requirements-specter2.txt
+micromamba run -n rlr python -m pip install -e D:\research_loop\paper-qa
 
-python research_loop_v04.py demo
-python research_loop_v04.py --help
-python run_loop.py --help
+$env:PYTHONPATH = "src"
+micromamba run -n rlr python -m research_loop.runtime_preflight
+micromamba run -n rlr python research_loop_v04.py demo
+micromamba run -n rlr python research_loop_v04.py --help
+micromamba run -n rlr python run_loop.py --help
 ```
 
 真实研究运行必须满足当前 L0 blocking contract 和后续各阶段 gate；readiness-only WARN 会被记录，但不会被静默升级成 blocking failure。

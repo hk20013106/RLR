@@ -26,6 +26,8 @@ class ProviderExecutionResult:
     stdout_bytes: int = 0
     stderr_bytes: int = 0
     process_tree_cleanup: Mapping[str, Any] | None = None
+    timed_out: bool = False
+    terminal_state: str = "completed"
 
 
 class ProviderExecutionError(RuntimeError):
@@ -141,6 +143,8 @@ class ProviderExecutor:
             stdout_bytes=process.stdout_bytes,
             stderr_bytes=process.stderr_bytes,
             process_tree_cleanup=process.process_tree_cleanup,
+            timed_out=False,
+            terminal_state=process.terminal_state,
         )
         if check and result.returncode != 0:
             raise ProviderExecutionError(

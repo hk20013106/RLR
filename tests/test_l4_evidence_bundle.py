@@ -492,7 +492,7 @@ def test_inventory_hint_materializes_selected_exact_source(tmp_path):
     ]
 
 
-def test_l4b_mixed_cards_and_gaps_pass_integrity_audit(tmp_path):
+def test_l4b_mixed_cards_and_gaps_pass_integrity_audit(tmp_path, l4_paperqa2_runtime):
     project = tmp_path / "project"
     methods = [
         _method("deseq2", source_hints=[_hint()]),
@@ -525,6 +525,7 @@ def test_l4b_mixed_cards_and_gaps_pass_integrity_audit(tmp_path):
         round_id="1",
         profile_id="v2.1-catalog-1",
         fetcher=fetcher,
+        paperqa_runtime=l4_paperqa2_runtime(METHOD_TEXT)[0],
     )
 
     assert artifact["evidence_bundle_schema"] == bundle.EVIDENCE_BUNDLE_SCHEMA
@@ -540,6 +541,37 @@ def test_l4b_mixed_cards_and_gaps_pass_integrity_audit(tmp_path):
     assert dr.audit_evidence_pack(
         project, "C1", "L4", run_id=artifact["run_id"]
     ) == (True, "")
+
+
+def test_l4b_summary_exposes_short_l4c_reference_handles_not_canonical_ids(tmp_path, l4_paperqa2_runtime):
+    project = tmp_path / "project"
+    methods = [
+        _method("deseq2", source_hints=[_hint()]),
+        _method("unresolved", source_hints=[]),
+    ]
+    manifest = _persist(
+        project,
+        assets=[_asset(selection_status="selected")],
+        methods=methods,
+    )
+
+    artifact = bundle.run_l4b_evidence(
+        l4p,
+        dr,
+        project,
+        "C1",
+        manifest,
+        tmp_path / "work",
+        fetcher=lambda url: _response(url),
+        paperqa_runtime=l4_paperqa2_runtime(METHOD_TEXT)[0],
+    )
+    summary = (project / artifact["summary_path"]).read_text(encoding="utf-8")
+
+    assert "### L4C reference handles" in summary
+    assert "E1 method=deseq2" in summary
+    assert "G1 method=unresolved" in summary
+    assert "card-deseq2-A1" not in summary
+    assert "gap-unresolved-no-source" not in summary
 
 
 def test_l4b_no_source_becomes_gap_not_global_failure(tmp_path):
@@ -594,8 +626,7 @@ def test_l4b_audit_rejects_tampered_source_payload(tmp_path):
 
 
 def test_l4b_audit_requires_exact_method_outcomes_and_selected_asset_identity(
-    tmp_path,
-):
+    tmp_path, l4_paperqa2_runtime,):
     project = tmp_path / "project"
     manifest = _persist(
         project,
@@ -613,6 +644,7 @@ def test_l4b_audit_requires_exact_method_outcomes_and_selected_asset_identity(
         round_id="1",
         profile_id="v2.1-catalog-1",
         fetcher=lambda url: _response(url),
+        paperqa_runtime=l4_paperqa2_runtime(METHOD_TEXT)[0],
     )
 
     extra_outcome = {
@@ -680,6 +712,85 @@ def test_required_path_accepts_card_and_allows_optional_gap():
     )
     assert components[0]["required"] is True
     assert len(candidates) == 2
+
+
+def test_l4c_resolves_short_reference_handles_to_canonical_ids():
+    delta = {
+        "deep_research_run_id": "C1_L4_bundle",
+        "method_components": [{
+            "component_id": "MC1", "name": "model", "required": True,
+            "rationale": "required",
+        }],
+        "method_candidates": [{
+            "method_id": "M1",
+            "component_id": "MC1",
+            "status": "eligible",
+            "execution_required": True,
+            "evidence_card_handles": ["E1"],
+            "evidence_gap_handles": ["G1"],
+            "method_anchor_handles": ["A1"],
+        }],
+    }
+
+    resolved, binding = bundle.resolve_l4c_reference_handles(
+        _evidence_artifact(), delta
+    )
+
+    candidate = resolved["method_candidates"][0]
+    assert candidate["evidence_card_ids"] == ["CARD1"]
+    assert candidate["evidence_gap_ids"] == ["GAP1"]
+    assert candidate["method_anchor_ids"] == ["ANCHOR1"]
+    assert not any(key.endswith("_handles") for key in candidate)
+    assert binding["schema_version"] == "L4CReferenceBinding/v1"
+    assert binding["resolved_handles"] == [{
+        "candidate_index": 0,
+        "evidence_card_handles": {"E1": "CARD1"},
+        "evidence_gap_handles": {"G1": "GAP1"},
+        "method_anchor_handles": {"A1": "ANCHOR1"},
+    }]
+
+
+def test_l4c_rejects_unknown_short_reference_handle_without_repair():
+    delta = {
+        "deep_research_run_id": "C1_L4_bundle",
+        "method_components": [{
+            "component_id": "MC1", "name": "model", "required": True,
+            "rationale": "required",
+        }],
+        "method_candidates": [{
+            "method_id": "M1",
+            "component_id": "MC1",
+            "status": "eligible",
+            "execution_required": True,
+            "evidence_card_handles": ["E-typo"],
+            "evidence_gap_handles": [],
+            "method_anchor_handles": [],
+        }],
+    }
+
+    with pytest.raises(dr.DeepResearchError, match="unknown evidence-card handle"):
+        bundle.resolve_l4c_reference_handles(_evidence_artifact(), delta)
+
+
+def test_required_path_accepts_evidence_card_id_as_legacy_anchor_alias():
+    delta = {
+        "deep_research_run_id": "C1_L4_bundle",
+        "method_components": [{
+            "component_id": "MC1", "name": "model", "required": True,
+            "rationale": "required",
+        }],
+        "method_candidates": [{
+            **_candidate("M1", execution_required=True, cards=["CARD1"]),
+            "method_anchor_ids": ["CARD1"],
+        }],
+    }
+
+    components, candidates = bundle._validate_required_paths(
+        dr, _evidence_artifact(), delta
+    )
+
+    assert components[0]["component_id"] == "MC1"
+    assert candidates[0]["method_anchor_ids"] == ["CARD1"]
 
 
 def test_required_path_rejects_gap_as_substitute_for_card():

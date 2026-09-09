@@ -27,9 +27,14 @@ Define the method components needed by the study. For every serious method candi
 9. feasible alternatives;
 10. status: `eligible`, `ineligible`, or `needs_user_source`;
 11. `execution_required`: whether this candidate is a Fisher-declared implementation path needed to cover a required component;
-12. accepted `evidence_card_ids` supporting the candidate;
-13. unresolved `evidence_gap_ids` relevant to the candidate;
-14. compatible legacy `method_anchor_ids` when available.
+12. `evidence_card_handles` (for example `E1`) supporting the candidate;
+13. `evidence_gap_handles` (for example `G1`) relevant to the candidate;
+14. `method_anchor_handles` (for example `A1`) when available.
+
+The authorized L4B context gives local reference handles. Use only those
+handles; the `emit-delta` commit boundary deterministically binds them to
+canonical evidence IDs.
+Always provide all three handle arrays, using `[]` when none applies.
 
 A method name plus a citation is not a sufficient method description.
 

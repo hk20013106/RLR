@@ -29,11 +29,21 @@ def _git(repo: pathlib.Path, *args: str) -> str:
 
 
 async def _run(request: dict) -> dict:
-    pdf_path = pathlib.Path(_text(request.get("pdf_path"), "pdf_path")).resolve()
+    document_value = str(request.get("document_path") or "").strip()
+    if document_value:
+        document_path = pathlib.Path(document_value).resolve()
+        media_type = _text(request.get("media_type"), "media_type")
+        schema_version = "PaperQA2Runtime/v2"
+        if not document_path.is_file():
+            raise ValueError("document_path must point to a real file")
+    else:
+        document_path = pathlib.Path(_text(request.get("pdf_path"), "pdf_path")).resolve()
+        media_type = "application/pdf"
+        schema_version = "PaperQA2Runtime/v1"
+        if not document_path.is_file() or document_path.read_bytes()[:5] != b"%PDF-":
+            raise ValueError("pdf_path must point to a real PDF")
     repo = pathlib.Path(_text(request.get("paperqa_repo"), "paperqa_repo")).resolve()
     pqa_home = pathlib.Path(_text(request.get("pqa_home"), "pqa_home")).resolve()
-    if not pdf_path.is_file() or pdf_path.read_bytes()[:5] != b"%PDF-":
-        raise ValueError("pdf_path must point to a real PDF")
     os.environ["PQA_HOME"] = str(pqa_home)
     from paperqa import Docs, Settings, __version__
 
@@ -51,7 +61,7 @@ async def _run(request: dict) -> dict:
     )
     docs = Docs()
     await docs.aadd(
-        pdf_path,
+        document_path,
         citation=title,
         title=title,
         doi=doi or None,
@@ -87,19 +97,26 @@ async def _run(request: dict) -> dict:
             "docname": text.doc.docname,
             "content_hash": text.doc.content_hash,
         })
-    pdf_sha256 = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
+    document_sha256 = hashlib.sha256(document_path.read_bytes()).hexdigest()
+    runtime = {
+        "schema_version": schema_version,
+        "package": "paper-qa",
+        "version": str(__version__),
+        "upstream_repo": "https://github.com/Future-House/paper-qa",
+        "upstream_tag": _git(repo, "describe", "--tags", "--exact-match", "HEAD"),
+        "upstream_commit": _git(repo, "rev-parse", "HEAD"),
+        "fork_repo": "https://github.com/hk20013106/paper-qa",
+    }
+    if schema_version == "PaperQA2Runtime/v1":
+        runtime["pdf_sha256"] = document_sha256
+    else:
+        runtime.update({
+            "document_sha256": document_sha256,
+            "media_type": media_type,
+        })
     return {
         "engine": "paperqa2",
-        "runtime": {
-            "schema_version": "PaperQA2Runtime/v1",
-            "package": "paper-qa",
-            "version": str(__version__),
-            "upstream_repo": "https://github.com/Future-House/paper-qa",
-            "upstream_tag": _git(repo, "describe", "--tags", "--exact-match", "HEAD"),
-            "upstream_commit": _git(repo, "rev-parse", "HEAD"),
-            "fork_repo": "https://github.com/hk20013106/paper-qa",
-            "pdf_sha256": pdf_sha256,
-        },
+        "runtime": runtime,
         "hits": hits,
     }
 

@@ -24,7 +24,7 @@ from research_loop.common import (
 from research_loop.delta import _delta_for_candidate, artifact_for_node
 from research_loop.compatibility import PROFILE_V20, get_profile
 from research_loop.persona_catalog import resolve_persona_template, PersonaCatalogError
-from research_loop.hypothesis_contracts import SCHEMA_REGISTRY
+from research_loop.hypothesis_contracts import provider_schema_for_profile
 from research_loop.hypothesis_ledger import (
     HypothesisLedger, LedgerError, binding_path, canonical_json,
 )
@@ -38,6 +38,7 @@ from research_loop.gates import (
     _audit_pre_research, _audit_divergence, _audit_branch_coverage,
     _audit_l0_contract,
 )
+from research_loop.authority import AuthorityError, project_context_authorities
 from research_loop import l0_contract
 from research_loop import deep_research, research_seed
 
@@ -90,12 +91,12 @@ def _condense_delta(delta_key, data):
         return data
     import copy
     d = copy.deepcopy(data)
-    
+
     # 1. Truncate large lists in L0 Linnaeus skills found
     if delta_key == "L0_linnaeus":
         if "skills_found" in d and isinstance(d["skills_found"], list) and len(d["skills_found"]) > 10:
             d["skills_found"] = d["skills_found"][:5] + [f"... ({len(d['skills_found'])} skills found in total)"]
-            
+
     # 2. Truncate large lists of steps in L4 Fisher
     elif delta_key == "L4_fisher":
         if "strategies" in d and isinstance(d["strategies"], list):
@@ -131,13 +132,13 @@ def _condense_delta(delta_key, data):
 
     return d
 
-def _generate_contract(node_info, project_dir, schema_version):
+def _generate_contract(node_info, project_dir, schema_version, profile_id=""):
     """Generate compact template contract for cognitive nodes."""
     node_id = node_info["node"]
     persona = node_info["persona"]
     title = node_info.get("title", PERSONA_TITLE.get(persona, ""))
     schema_key = f"{node_id}_{persona.lower()}"
-    schema = SCHEMA_REGISTRY[schema_version].get(node_id, {})
+    schema = provider_schema_for_profile(profile_id, node_id, schema_version) or {}
     kb = node_info.get("knowledge_base", "none")
     lines = []
     lines.append(f"=== CONTRACT: {node_id} | {persona} | {title} ===")
@@ -149,6 +150,9 @@ def _generate_contract(node_info, project_dir, schema_version):
         lines.append("AUTHORITY: No status changes, no code execution.")
     inputs = node_info.get("context_inputs", [])
     lines.append(f"INPUT SCOPE: {', '.join(inputs)}")
+    authorities = node_info.get("requires_authorities") or []
+    if authorities:
+        lines.append(f"AUTHORITY INPUTS: {', '.join(authorities)}")
     if kb == "read-write":
         lines.append("KB: read-write")
     elif kb == "read":
@@ -248,6 +252,13 @@ def cmd_assemble_context(args):
         return 2
     node_info = node_map[node_id]
     inputs = node_info["context_inputs"]
+    try:
+        authority_sections, injected_authorities = project_context_authorities(
+            project_dir, args.cand_id, node_info
+        )
+    except AuthorityError as exc:
+        print(f"ERROR: authority context resolution failed: {exc}", file=sys.stderr)
+        return 2
 
     def _profile_delta_key(delta_key: str) -> str:
         """Map the historical L8 list entry to this project's bound artifact."""
@@ -293,6 +304,7 @@ def cmd_assemble_context(args):
             if key != "artifact_path"
         }))
         sections.append("")
+    sections.extend(authority_sections)
 
     injected = []  # audit: deltas actually embedded {delta_key, sha256, path}
 
@@ -580,7 +592,7 @@ def cmd_assemble_context(args):
         return 2
 
     contract_text = "\n".join(_generate_contract(
-        node_info, project_dir, profile.delta_schema_version
+        node_info, project_dir, profile.delta_schema_version, profile.profile_id
     ))
     contract_hash = hashlib.sha256(contract_text.encode("utf-8")).hexdigest()
     sections.append(contract_text)
@@ -677,6 +689,8 @@ def cmd_assemble_context(args):
         "full_templates_injected": full_templates_injected,
         "allowed_inputs": list(inputs),
         "injected_deltas": injected,
+        "required_authorities": list(node_info.get("requires_authorities") or []),
+        "injected_authorities": injected_authorities,
         "tools_policy": node_info.get("tools_policy"),
         "everos_read_scopes": _everos_scopes_for(node_info, project_id),
         "knowledge_base": node_info.get("knowledge_base"),

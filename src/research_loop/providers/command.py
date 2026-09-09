@@ -20,6 +20,10 @@ class CommandProvider(AgentProvider):
         self.last_prompt_file = None
         self.last_delta_file = None
         self.last_fresh_session = True
+        self.last_exit_code = None
+        self.last_timed_out = None
+        self.last_terminal_state = None
+        self.last_execution_status = None
         if not self.command:
             raise ProviderError(
                 "command provider requires a 'command' template (using "

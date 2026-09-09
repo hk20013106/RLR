@@ -225,10 +225,16 @@ def _matches(method: dict, entry: dict) -> bool:
 
 
 def apply_registry(
-    project_dir: str | Path, inventory: list[dict]
+    project_dir: str | Path, inventory: list[dict], *,
+    loaded_registry: tuple[list[dict], dict] | None = None,
 ) -> tuple[list[dict], dict]:
     """Add exact hints for methods already present in the cognitive inventory."""
-    entries, receipt = load_registry(project_dir)
+    if loaded_registry is None:
+        entries, receipt = load_registry(project_dir)
+    else:
+        entries, receipt = loaded_registry
+        entries = copy.deepcopy(list(entries))
+        receipt = copy.deepcopy(dict(receipt))
     result = copy.deepcopy(inventory)
     matches = []
     for method in result:

@@ -78,7 +78,7 @@ class ProviderConfig:
       - manual: DEBUG-ONLY human-in-the-loop.
     """
 
-    def __init__(self, data=None):
+    def __init__(self, data=None, *, source_path=None):
         self.data = data or {}
         self.mode = self.data.get("mode", "main_agent")
         self.max_rounds = self.data.get("max_rounds", 3)
@@ -91,6 +91,7 @@ class ProviderConfig:
         self.timeout = self.data.get("timeout")
         self.review = self.data.get("review", {"enabled": True}) or {"enabled": True}
         self.stop_policy = self.data.get("stop_policy", {}) or {}
+        self.source_path = str(Path(source_path).resolve()) if source_path else None
 
     def for_node(self, node):
         spec = dict(self.default)
@@ -100,5 +101,5 @@ class ProviderConfig:
     @classmethod
     def load(cls, path):
         if path and Path(path).exists():
-            return cls(load_config(path))
+            return cls(load_config(path), source_path=path)
         return cls({})

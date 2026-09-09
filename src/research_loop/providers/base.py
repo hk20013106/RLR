@@ -14,6 +14,15 @@ class ProviderError(Exception):
     """Raised when a provider cannot be constructed / resolved. The runner turns
     this into a fail-loud error (it never silently falls back to manual)."""
 
+    def __init__(self, message, *, returncode=None, timed_out=None,
+                 terminal_state=None):
+        super().__init__(message)
+        # These values are copied from ProviderExecutionError. They are
+        # intentionally not inferred from the exception text.
+        self.returncode = returncode
+        self.timed_out = timed_out
+        self.terminal_state = terminal_state
+
 class AgentProvider:
     """Provider interface. Subclasses turn (node, persona, context) into a delta
     dict using whatever backend they wrap."""
@@ -56,6 +65,13 @@ def _compose_auto_prompt(node, persona, context, output_schema=None,
         lines.append(f"# WORKSPACE (Path A; read/write ONLY inside): {workspace}")
     if tools:
         lines.append(f"# tools / policy: {tools}")
+    if node == "L4":
+        lines.extend([
+            "# L4 method-input contract:",
+            "# For every method candidate, separate required_inputs from optional_diagnostics.",
+            "# Missing source means exact method evidence only; never put missing user data there.",
+            "# If an executable candidate lacks required user data, use needs_user_data and list missing_inputs.",
+        ])
     if output_schema:
         lines += ["# JSON delta schema:",
                   json.dumps(_schema_repr(output_schema), indent=2,
@@ -74,12 +90,27 @@ def _run_command_agent(command, node, persona, context, output_schema,
                                        workspace, tools), encoding="utf-8")
     provider.last_prompt_file = str(pf)
     provider.last_delta_file = str(of)
+    provider.last_exit_code = None
+    provider.last_timed_out = None
+    provider.last_terminal_state = None
+    provider.last_execution_status = None
     cmd = command.format(prompt_file=str(pf), output_file=str(of), node=node,
                          persona=persona, workspace=workspace or "")
     try:
-        DEFAULT_EXECUTOR.run(cmd, shell=True, timeout=timeout)
+        result = DEFAULT_EXECUTOR.run(cmd, shell=True, timeout=timeout)
+        provider.last_exit_code = result.returncode
+        provider.last_timed_out = result.timed_out
+        provider.last_terminal_state = result.terminal_state
+        provider.last_execution_status = "succeeded"
     except ProviderExecutionError as exc:
-        raise ProviderError(str(exc)) from exc
+        provider.last_exit_code = exc.returncode
+        provider.last_timed_out = exc.timed_out
+        provider.last_terminal_state = exc.terminal_state or None
+        provider.last_execution_status = "failed"
+        raise ProviderError(
+            str(exc), returncode=exc.returncode, timed_out=exc.timed_out,
+            terminal_state=exc.terminal_state or None,
+        ) from exc
     try:
         return json.loads(of.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
@@ -98,7 +129,10 @@ def run_text_command(command, prompt, run_dir, tag, timeout=None):
     try:
         DEFAULT_EXECUTOR.run(cmd, shell=True, timeout=timeout)
     except ProviderExecutionError as exc:
-        raise ProviderError(str(exc)) from exc
+        raise ProviderError(
+            str(exc), returncode=exc.returncode, timed_out=exc.timed_out,
+            terminal_state=exc.terminal_state or None,
+        ) from exc
     return of.read_text(encoding="utf-8")
 
 @dataclass
@@ -126,24 +160,54 @@ class RunReceipt:
     rendered_context_hash: str | None = None
     provider_delta_path: str | None = None
     provider_delta_hash: str | None = None
+    raw_provider_delta_path: str | None = None
+    raw_provider_delta_hash: str | None = None
+    transformation_receipt_path: str | None = None
+    transformation_receipt_hash: str | None = None
+    git_head: str | None = None
+    git_dirty: bool | None = None
+    working_tree_diff_sha256: str | None = None
+    config_sha256: str | None = None
+    code_state_id: str | None = None
     schema_version: str = "RunReceipt/v1"
+    exit_code: int | None = None
+    timed_out: bool | None = None
+    terminal_state: str | None = None
+    execution_status: str | None = None
 
     def validate(self):
-        if self.schema_version != "RunReceipt/v1":
-            raise ValueError("RunReceipt schema_version must be 'RunReceipt/v1'")
+        if self.schema_version not in {"RunReceipt/v1", "RunReceipt/v2"}:
+            raise ValueError("RunReceipt schema_version must be 'RunReceipt/v1' or 'RunReceipt/v2'")
         for name in (
             "node", "persona", "provider", "timestamp", "context_hash",
             "project_id", "candidate_id", "round_id", "profile_id",
             "context_manifest_path", "context_manifest_hash",
             "rendered_context_path", "rendered_context_hash",
-            "prompt_file", "prompt_hash", "provider_delta_path",
-            "provider_delta_hash",
+            "prompt_file", "prompt_hash",
         ):
             if not str(getattr(self, name, "") or "").strip():
                 raise ValueError(f"RunReceipt {name} is required")
+        has_provider_delta = bool(str(self.provider_delta_path or "").strip())
+        if not has_provider_delta and self.execution_status != "failed":
+            raise ValueError("RunReceipt provider_delta_path is required")
+        if has_provider_delta and not str(self.provider_delta_hash or "").strip():
+            raise ValueError("RunReceipt provider_delta_hash is required")
+        if self.execution_status is not None and self.execution_status not in {
+            "succeeded", "failed"
+        }:
+            raise ValueError("RunReceipt execution_status must be 'succeeded' or 'failed'")
+        if self.exit_code is not None and (
+            isinstance(self.exit_code, bool) or not isinstance(self.exit_code, int)
+        ):
+            raise ValueError("RunReceipt exit_code must be an integer or null")
+        if self.timed_out is not None and not isinstance(self.timed_out, bool):
+            raise ValueError("RunReceipt timed_out must be a bool or null")
+        if self.terminal_state is not None and not str(self.terminal_state).strip():
+            raise ValueError("RunReceipt terminal_state must be non-empty or null")
         for name in (
             "context_hash", "context_manifest_hash", "rendered_context_hash",
             "prompt_hash", "delta_hash", "provider_delta_hash",
+            "raw_provider_delta_hash", "transformation_receipt_hash",
         ):
             value = getattr(self, name, None)
             if value is not None and (
@@ -153,6 +217,30 @@ class RunReceipt:
                 raise ValueError(f"RunReceipt {name} must be a SHA-256 hex digest")
         if self.rendered_context_hash and self.rendered_context_hash != self.context_hash:
             raise ValueError("RunReceipt rendered_context_hash must equal context_hash")
+        if self.schema_version == "RunReceipt/v2":
+            for name in (
+                "git_head", "working_tree_diff_sha256", "config_sha256",
+                "code_state_id",
+            ):
+                if not str(getattr(self, name, "") or "").strip():
+                    raise ValueError(f"RunReceipt {name} is required for v2")
+            if has_provider_delta:
+                for name in ("raw_provider_delta_path", "raw_provider_delta_hash"):
+                    if not str(getattr(self, name, "") or "").strip():
+                        raise ValueError(f"RunReceipt {name} is required for v2")
+            if not isinstance(self.git_dirty, bool):
+                raise ValueError("RunReceipt git_dirty must be a bool for v2")
+            if re.fullmatch(r"[0-9a-f]{40,64}", str(self.git_head)) is None:
+                raise ValueError("RunReceipt git_head must be a Git object ID for v2")
+            for name in ("working_tree_diff_sha256", "config_sha256", "code_state_id"):
+                if re.fullmatch(r"[0-9a-f]{64}", str(getattr(self, name))) is None:
+                    raise ValueError(f"RunReceipt {name} must be a SHA-256 hex digest for v2")
+            if has_provider_delta and self.raw_provider_delta_path != self.provider_delta_path:
+                for name in ("transformation_receipt_path", "transformation_receipt_hash"):
+                    if not str(getattr(self, name, "") or "").strip():
+                        raise ValueError(
+                            f"RunReceipt {name} is required when provider delta is transformed"
+                        )
         return self
 
     def write(self, path):

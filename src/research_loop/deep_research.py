@@ -49,6 +49,8 @@ class RuntimeSpec:
     model: str | None = None
     timeout: int | None = None
     skill_path: str | None = None
+    top_k_per_method: int | None = None
+    paperqa2: dict | None = None
 
 
 def runtime_config_path(project_dir: str | Path) -> Path:
@@ -102,6 +104,8 @@ def default_runtime_config(backend: str | None = None,
         "plugin_dir": "",
         "skill_version": "unknown",
         "timeout": 900,
+        "top_k_per_method": 5,
+        "paperqa2": {},
     }
     if backend == "codex":
         codex_root = Path.home() / ".codex"
@@ -183,10 +187,15 @@ def load_runtime_spec(project_dir: str | Path, overrides: dict | None = None) ->
         if value not in (None, ""):
             config[key] = value
     backend = str(config.get("backend", ""))
+    paperqa2 = config.get("paperqa2")
+    if paperqa2 is not None and not isinstance(paperqa2, dict):
+        raise DeepResearchError("runtime paperqa2 config must be an object")
     return RuntimeSpec(
         backend=backend, executable=str(config.get("executable") or backend),
         plugin_dir=config.get("plugin_dir") or None, model=config.get("model") or None,
         timeout=config.get("timeout"), skill_path=config.get("skill_path") or None,
+        top_k_per_method=config.get("top_k_per_method"),
+        paperqa2=dict(paperqa2 or {}) or None,
     ), str(config.get("skill_version") or "unknown")
 
 
@@ -820,6 +829,22 @@ _SECTION_HEADING_DASHES = str.maketrans({
     "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-", "―": "-", "−": "-",
 })
 
+# JATS exposes semantic section type as optional metadata, so a source may
+# have to be classified from its heading.  Keep this vocabulary explicit and
+# bounded: these are unambiguous Methods/Procedures headings, not a substring
+# match on words such as "experimental" or "method".
+_METHODS_SECTION_HEADINGS = frozenset({
+    "method",
+    "methods",
+    "methodology",
+    "materials and methods",
+    "methods and materials",
+    "experimental method",
+    "experimental methods",
+    "experimental procedure",
+    "experimental procedures",
+})
+
 
 def _normalize_section_heading(section: object) -> str:
     normalized = str(section or "").strip().casefold()
@@ -842,8 +867,9 @@ def _is_section_heading(section: object, heading: str, *,
 
 def _is_methods_section(section: object) -> bool:
     """Return whether a located section is an accepted Methods heading."""
+    normalized = _normalize_section_heading(section)
     return (_is_section_heading(section, "methods")
-            or _normalize_section_heading(section) == "materials and methods")
+            or normalized in _METHODS_SECTION_HEADINGS)
 
 
 def _is_results_section(section: object) -> bool:

@@ -1,12 +1,74 @@
 """Native v2.1 contracts for evidence-backed method selection."""
 from __future__ import annotations
 
+import copy
+
+
+_L4C_REFERENCE_FIELDS = {
+    "evidence_card_ids": "evidence_card_handles",
+    "evidence_gap_ids": "evidence_gap_handles",
+    "method_anchor_ids": "method_anchor_handles",
+}
+
+
+def _rename_schema_fields(value, mapping):
+    """Rename contract field references in properties and conditional rules."""
+    if isinstance(value, dict):
+        properties = value.get("properties")
+        if isinstance(properties, dict):
+            for old, new in mapping.items():
+                if old in properties:
+                    properties[new] = properties.pop(old)
+        required = value.get("required")
+        if isinstance(required, list):
+            value["required"] = [mapping.get(item, item) for item in required]
+        dependent = value.get("dependentRequired")
+        if isinstance(dependent, dict):
+            value["dependentRequired"] = {
+                mapping.get(key, key): [mapping.get(item, item) for item in values]
+                for key, values in dependent.items()
+            }
+        for child in value.values():
+            _rename_schema_fields(child, mapping)
+    elif isinstance(value, list):
+        for child in value:
+            _rename_schema_fields(child, mapping)
+
 
 def _string_array(*, min_items=0):
     return {
         "type": "array", "minItems": min_items, "uniqueItems": True,
         "items": {"type": "string", "minLength": 1},
     }
+
+
+def validate_input_requirements(candidate: dict) -> None:
+    """Keep executable inputs, optional diagnostics, and source gaps separate."""
+    required = {
+        str(value).strip().casefold()
+        for value in candidate.get("required_inputs", [])
+        if str(value).strip()
+    }
+    optional = {
+        str(value).strip().casefold()
+        for value in candidate.get("optional_diagnostics", [])
+        if str(value).strip()
+    }
+    overlap = sorted(required & optional)
+    if overlap:
+        raise ValueError(
+            "L4C required_inputs and optional_diagnostics overlap: "
+            + ", ".join(overlap)
+        )
+    status = str(candidate.get("status") or "")
+    if status == "needs_user_source" and candidate.get("missing_inputs"):
+        raise ValueError(
+            "L4C needs_user_source cannot carry missing_inputs; use needs_user_data"
+        )
+    if status == "needs_user_data" and str(candidate.get("missing_source") or "").strip():
+        raise ValueError(
+            "L4C needs_user_data cannot carry missing_source; reserve it for evidence"
+        )
 
 
 def install(contracts_module) -> None:
@@ -28,7 +90,9 @@ def install(contracts_module) -> None:
         "component_id": hc._ID,
         "hypothesis_ids": hc._target_ids(),
         "name": hc._STR,
-        "status": {"enum": ["eligible", "ineligible", "needs_user_source"]},
+        "status": {"enum": [
+            "eligible", "ineligible", "needs_user_source", "needs_user_data",
+        ]},
         "purpose": hc._STR,
         "applicable_to": _string_array(min_items=1),
         "implementation_steps": _string_array(min_items=1),
@@ -40,6 +104,9 @@ def install(contracts_module) -> None:
         "method_anchor_ids": _string_array(),
         "rejection_reasons": _string_array(),
         "missing_source": {"type": "string"},
+        "required_inputs": _string_array(min_items=1),
+        "optional_diagnostics": _string_array(),
+        "missing_inputs": _string_array(),
         # Staged L4 v2 fields. They are additive so historical native-v2.1
         # deltas remain readable. Once one appears, all three are required.
         "execution_required": {"type": "boolean"},
@@ -94,6 +161,11 @@ def install(contracts_module) -> None:
             "if": {"properties": {"status": {"const": "needs_user_source"}},
                    "required": ["status"]},
             "then": {"properties": {"missing_source": {"minLength": 1}}},
+        },
+        {
+            "if": {"properties": {"status": {"const": "needs_user_data"}},
+                   "required": ["status"]},
+            "then": {"properties": {"missing_inputs": {"minItems": 1}}},
         },
     ]
 
@@ -159,5 +231,19 @@ def install(contracts_module) -> None:
     # Rebuild the persisted v2.1 contracts from the extended submission schemas.
     hc.PERSISTED_SCHEMA_REGISTRY["2.1"] = {
         node: hc._persisted_schema(node, "2.1") for node in schemas
+    }
+
+    # Native catalog providers receive local handles.  The historical v2.1
+    # registry remains the canonical-ID wire contract for the legacy profile;
+    # the profile-specific projection prevents those two paths from sharing a
+    # semantically ambiguous schema.
+    provider_l4 = copy.deepcopy(l4)
+    _rename_schema_fields(provider_l4, _L4C_REFERENCE_FIELDS)
+    provider_candidate = provider_l4["properties"]["method_candidates"]["items"]
+    provider_candidate["required"].extend([
+        "required_inputs", "optional_diagnostics", "missing_inputs",
+    ])
+    hc.PROVIDER_SCHEMA_REGISTRY["v2.1-catalog-1"] = {
+        "2.1": {"L4": provider_l4}
     }
     hc._METHOD_CONTRACTS_INSTALLED = True
