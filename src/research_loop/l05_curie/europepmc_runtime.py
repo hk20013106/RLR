@@ -15,7 +15,12 @@ from typing import Callable
 
 from research_loop import research_seed
 
-from .contracts import CurieContractError, judge_coverage, validate_query_plan
+from .contracts import (
+    MAX_ACQUISITION_ROUNDS,
+    CurieContractError,
+    judge_coverage,
+    validate_query_plan,
+)
 from .europepmc import EuropePmcEvidenceRetriever, EuropePmcEvidenceVerifier, EuropePmcTransport
 from .multisource import (
     build_multisource_query_plan,
@@ -23,6 +28,7 @@ from .multisource import (
     run_multisource_discovery,
     run_multisource_discovery_strict,
 )
+from .query_planner import MAX_REFORMULATION_INDEX
 from .native_runtime import bind_initial_curie_pack
 from .paperqa2_runtime import (
     PAPERQA2_BACKEND_ID,
@@ -45,6 +51,7 @@ _PAPERQA2_STOPWORDS = frozenset({
     "how", "in", "is", "it", "of", "on", "or", "that", "the", "these",
     "this", "to", "was", "what", "which", "with",
 })
+MAX_INITIAL_QUERY_REFORMULATIONS = MAX_REFORMULATION_INDEX
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -212,6 +219,80 @@ def _selected_europepmc_papers(discovery: dict, selection: dict) -> list[dict]:
     return selected
 
 
+def _validate_initial_reformulations(value: object) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= MAX_INITIAL_QUERY_REFORMULATIONS
+    ):
+        raise CurieContractError(
+            "max_initial_reformulations must be between 0 and "
+            f"{MAX_INITIAL_QUERY_REFORMULATIONS}"
+        )
+    return value
+
+
+def _discovery_outcome(discovery: dict) -> dict:
+    if not isinstance(discovery, dict):
+        raise CurieContractError("initial discovery result must be an object")
+    records = discovery.get("records")
+    batches = discovery.get("batches")
+    if not isinstance(records, list) or not isinstance(batches, list):
+        raise CurieContractError(
+            "initial discovery result must contain records and batches lists"
+        )
+    hit_count = 0
+    for batch in batches:
+        if not isinstance(batch, dict):
+            raise CurieContractError("initial discovery batch must be an object")
+        raw_hit_count = batch.get("hit_count", 0)
+        if isinstance(raw_hit_count, bool) or not isinstance(raw_hit_count, int):
+            raise CurieContractError("initial discovery hit_count must be an integer")
+        hit_count += max(0, raw_hit_count)
+    failures = discovery.get("failures")
+    if failures is None:
+        failures = []
+    if not isinstance(failures, list):
+        raise CurieContractError("initial discovery failures must be a list")
+    source_qualified_count = sum(
+        1
+        for record in records
+        if isinstance(record, dict)
+        and _europepmc_full_text_eligibility(record)[0]
+    )
+    if source_qualified_count:
+        outcome = "records_found"
+    elif records:
+        outcome = "no_source_qualified_records"
+    else:
+        outcome = "zero_discovery_records"
+    return {
+        "hit_count": hit_count,
+        "record_count": len(records),
+        "source_qualified_record_count": source_qualified_count,
+        "batch_count": len(batches),
+        "failure_count": len(failures),
+        "outcome": outcome,
+    }
+
+
+def _executed_query_records(attempts: list[dict], *, final_only: bool = False) -> list[dict]:
+    selected = attempts[-1:] if final_only and attempts else attempts
+    executed: list[dict] = []
+    for attempt in selected:
+        plan = attempt["query_plan"]
+        for query in plan["queries"]:
+            for provider in query["providers"]:
+                executed.append({
+                    "attempt_index": int(attempt["attempt_index"]),
+                    "query_id": str(query["query_id"]),
+                    "intent": str(query["intent"]),
+                    "query": str(query["query"]),
+                    "provider": str(provider),
+                })
+    return executed
+
+
 def _prepare_europepmc_acquisition(
     project: Path,
     candidate_id: str,
@@ -223,8 +304,9 @@ def _prepare_europepmc_acquisition(
     http_get: Callable[[str, int], bytes] | None,
     timeout: int,
     round_index: int,
+    max_initial_reformulations: int,
 ) -> dict:
-    """Discover and select Europe PMC records once for each acquisition mode."""
+    """Discover and select records through one bounded initial-plan loop."""
     try:
         seed = research_seed.load_l1_research_seed(project, candidate_id)
     except research_seed.ResearchSeedError as exc:
@@ -235,14 +317,9 @@ def _prepare_europepmc_acquisition(
     # selection remain in Curie's provider-neutral planner/orchestrator path.
     # The declared one-provider plan is deliberate: every selected record must
     # be retrievable from the exact Europe PMC OA full-text source below.
-    query_plan = build_multisource_query_plan(
-        seed,
-        seed_sha256=seed_digest,
-        round_index=round_index,
-        explicit_queries=explicit_queries,
-        providers=["europe-pmc"],
+    max_initial_reformulations = _validate_initial_reformulations(
+        max_initial_reformulations
     )
-    validate_query_plan(query_plan, seed_sha256=seed_digest)
     transport = EuropePmcTransport(
         project,
         candidate_id=candidate_id,
@@ -250,12 +327,69 @@ def _prepare_europepmc_acquisition(
         http_get=http_get,
         timeout=timeout,
     )
-    discovery = run_multisource_discovery_strict(
-        query_plan,
-        {"europe-pmc": transport},
-        seed_sha256=seed_digest,
-        page_size=page_size,
-    )
+    attempts: list[dict] = []
+    query_plans: list[dict] = []
+    discovery_batches: list[dict] = []
+    discovery = None
+    reformulation_reason = None
+    reformulated = False
+    next_reformulation_reason = None
+    max_attempts = 0 if explicit_queries is not None else max_initial_reformulations
+    for attempt_index in range(max_attempts + 1):
+        query_plan = build_multisource_query_plan(
+            seed,
+            seed_sha256=seed_digest,
+            round_index=round_index,
+            explicit_queries=explicit_queries,
+            providers=["europe-pmc"],
+            reformulation_index=attempt_index,
+            query_id_prefix="Q" if attempt_index == 0 else f"R{attempt_index}",
+        )
+        validate_query_plan(query_plan, seed_sha256=seed_digest)
+        discovery = run_multisource_discovery_strict(
+            query_plan,
+            {"europe-pmc": transport},
+            seed_sha256=seed_digest,
+            page_size=page_size,
+        )
+        outcome = _discovery_outcome(discovery)
+        attempts.append({
+            "attempt_index": attempt_index,
+            "reformulated": attempt_index > 0,
+            "reformulation_reason": next_reformulation_reason,
+            "query_plan": query_plan,
+            "discovery_outcome": outcome,
+        })
+        query_plans.append(query_plan)
+        discovery_batches.extend(discovery["batches"])
+        if (
+            outcome["source_qualified_record_count"] > 0
+            or attempt_index >= max_attempts
+        ):
+            break
+        reformulated = True
+        next_reformulation_reason = outcome["outcome"]
+        reformulation_reason = next_reformulation_reason
+    if discovery is None:
+        raise CurieContractError("initial Europe PMC discovery did not execute")
+    final_plan = query_plans[-1]
+    query_ids = {
+        str(item["query_id"])
+        for plan in query_plans
+        for item in plan["queries"]
+    }
+    initial_acquisition = {
+        "mode": "initial",
+        "max_reformulations": max_initial_reformulations,
+        "reformulated": reformulated,
+        "reformulation_reason": reformulation_reason,
+        "attempts": attempts,
+        "final_attempt_index": int(attempts[-1]["attempt_index"]),
+        "exhausted": bool(
+            reformulated
+            and attempts[-1]["discovery_outcome"]["source_qualified_record_count"] == 0
+        ),
+    }
     generic_selection = select_candidates_strict(
         discovery["records"],
         seed=seed,
@@ -265,16 +399,20 @@ def _prepare_europepmc_acquisition(
         project_dir=project,
         candidate_id=candidate_id,
         run_id=normalized_run_id,
-        query_ids={str(item["query_id"]) for item in query_plan["queries"]},
+        query_ids=query_ids,
     )
     selected = _selected_europepmc_papers(discovery, generic_selection)
     return {
         "seed": seed,
         "seed_sha256": seed_digest,
         "run_id": normalized_run_id,
-        "query_plan": query_plan,
+        "query_plan": final_plan,
+        "query_plans": query_plans,
         "transport_handshake": transport.handshake(),
-        "discovery_batches": discovery["batches"],
+        "discovery_batches": discovery_batches,
+        "initial_acquisition": initial_acquisition,
+        "queries_executed": _executed_query_records(attempts),
+        "final_executed_queries": _executed_query_records(attempts, final_only=True),
         "selection": {
             "provider": "europe-pmc",
             "selected": selected,
@@ -408,6 +546,7 @@ def run_europepmc_acquisition(
     http_get: Callable[[str, int], bytes] | None = None,
     timeout: int = 20,
     round_index: int = 1,
+    max_initial_reformulations: int = MAX_INITIAL_QUERY_REFORMULATIONS,
 ) -> dict:
     """Execute one auditable Europe PMC acquisition round through FREEZE."""
     project = Path(project_dir)
@@ -422,13 +561,16 @@ def run_europepmc_acquisition(
         http_get=http_get,
         timeout=timeout,
         round_index=round_index,
+        max_initial_reformulations=max_initial_reformulations,
     )
     seed = prepared["seed"]
     seed_digest = prepared["seed_sha256"]
     run_id = prepared["run_id"]
     query_plan = prepared["query_plan"]
+    query_plans = prepared["query_plans"]
     handshake = prepared["transport_handshake"]
     discovery_batches = prepared["discovery_batches"]
+    initial_acquisition = prepared["initial_acquisition"]
     selection = prepared["selection"]
 
     source_snapshots: list[dict] = []
@@ -452,7 +594,11 @@ def run_europepmc_acquisition(
     coverage = _coverage_for(
         source_snapshots,
         verified_evidence,
-        round_index=round_index,
+        round_index=(
+            MAX_ACQUISITION_ROUNDS
+            if initial_acquisition["exhausted"]
+            else round_index
+        ),
     )
 
     evidence_pack_manifest = None
@@ -463,7 +609,7 @@ def run_europepmc_acquisition(
             round_id=str(seed["round_id"]),
             seed_sha256=seed_digest,
             version=1,
-            query_plans=[query_plan],
+            query_plans=query_plans,
             discovery_receipts=discovery_batches,
             selected_papers=selection["selected"],
             evidence=verified_evidence,
@@ -482,7 +628,11 @@ def run_europepmc_acquisition(
         "seed_sha256": seed_digest,
         "transport_handshake": handshake,
         "query_plan": query_plan,
+        "query_plans": query_plans,
         "discovery_batches": discovery_batches,
+        "initial_acquisition": initial_acquisition,
+        "queries_executed": prepared["queries_executed"],
+        "final_executed_queries": prepared["final_executed_queries"],
         "selection": selection,
         "source_snapshots": source_snapshots,
         "verified_evidence_ids": [item["evidence_id"] for item in verified_evidence],
@@ -506,6 +656,11 @@ def run_europepmc_acquisition(
         "evidence_pack": evidence_pack_manifest,
         "acquisition_manifest_path": audit_path,
         "acquisition_manifest_sha256": audit_sha,
+        "query_plan": query_plan,
+        "query_plans": query_plans,
+        "initial_acquisition": initial_acquisition,
+        "queries_executed": prepared["queries_executed"],
+        "final_executed_queries": prepared["final_executed_queries"],
     }
 
 
@@ -523,6 +678,7 @@ def run_paperqa2_europepmc_acquisition(
     run_id: str | None = None,
     http_get: Callable[[str, int], bytes] | None = None,
     timeout: int = 20,
+    max_initial_reformulations: int = MAX_INITIAL_QUERY_REFORMULATIONS,
 ) -> dict:
     """Run pinned PaperQA2 retrieval through independent verification into L1 v1."""
     if not isinstance(paperqa_runtime, PaperQA2CurieRuntime):
@@ -549,11 +705,14 @@ def run_paperqa2_europepmc_acquisition(
         http_get=http_get,
         timeout=timeout,
         round_index=1,
+        max_initial_reformulations=max_initial_reformulations,
     )
     seed = prepared["seed"]
     seed_digest = prepared["seed_sha256"]
     normalized_run_id = prepared["run_id"]
+    query_plans = prepared["query_plans"]
     selection = prepared["selection"]
+    initial_acquisition = prepared["initial_acquisition"]
     semantic_target = _paperqa2_semantic_target(seed)
     source_snapshots: list[dict] = []
     located_evidence: list[dict] = []
@@ -616,7 +775,15 @@ def run_paperqa2_europepmc_acquisition(
                 "semantic_verifications": all_semantics,
             })
 
-    coverage = _coverage_for(source_snapshots, located_evidence, round_index=1)
+    coverage = _coverage_for(
+        source_snapshots,
+        located_evidence,
+        round_index=(
+            MAX_ACQUISITION_ROUNDS
+            if initial_acquisition["exhausted"]
+            else 1
+        ),
+    )
     evidence_pack_manifest = None
     native_binding = None
     status = coverage["verdict"]
@@ -626,7 +793,7 @@ def run_paperqa2_europepmc_acquisition(
             round_id=str(seed["round_id"]),
             seed_sha256=seed_digest,
             version=1,
-            query_plans=[prepared["query_plan"]],
+            query_plans=query_plans,
             discovery_receipts=prepared["discovery_batches"],
             selected_papers=selection["selected"],
             evidence=located_evidence,
@@ -649,7 +816,11 @@ def run_paperqa2_europepmc_acquisition(
         "seed_sha256": seed_digest,
         "transport_handshake": prepared["transport_handshake"],
         "query_plan": prepared["query_plan"],
+        "query_plans": query_plans,
         "discovery_batches": prepared["discovery_batches"],
+        "initial_acquisition": initial_acquisition,
+        "queries_executed": prepared["queries_executed"],
+        "final_executed_queries": prepared["final_executed_queries"],
         "selection": selection,
         "paperqa2": paperqa_audit,
         "coverage": coverage,
@@ -674,4 +845,9 @@ def run_paperqa2_europepmc_acquisition(
         "native_binding": native_binding,
         "acquisition_manifest_path": audit_path,
         "acquisition_manifest_sha256": audit_sha,
+        "query_plan": prepared["query_plan"],
+        "query_plans": query_plans,
+        "initial_acquisition": initial_acquisition,
+        "queries_executed": prepared["queries_executed"],
+        "final_executed_queries": prepared["final_executed_queries"],
     }

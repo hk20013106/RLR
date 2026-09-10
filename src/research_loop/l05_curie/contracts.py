@@ -82,6 +82,18 @@ def validate_query_plan(plan: dict, *, seed_sha256: str) -> dict:
     if actual_seed != expected_seed:
         raise CurieContractError("query plan seed_sha256 does not match canonical ResearchSeed")
     _require_text(plan.get("plan_id"), "query plan plan_id")
+    if "reformulation_index" in plan:
+        reformulation_index = plan.get("reformulation_index")
+        if (
+            isinstance(reformulation_index, bool)
+            or not isinstance(reformulation_index, int)
+            or reformulation_index < 0
+        ):
+            raise CurieContractError(
+                "query plan reformulation_index must be a non-negative integer"
+            )
+    if "planning" in plan:
+        _require_dict(plan.get("planning"), "query plan planning")
     round_index = plan.get("round_index")
     if not isinstance(round_index, int) or isinstance(round_index, bool) or not (1 <= round_index <= MAX_ACQUISITION_ROUNDS):
         raise CurieContractError(
@@ -99,6 +111,8 @@ def validate_query_plan(plan: dict, *, seed_sha256: str) -> dict:
         seen.add(query_id)
         _require_text(query.get("intent"), f"query {query_id} intent")
         _require_text(query.get("query"), f"query {query_id} query")
+        if "concepts" in query:
+            _require_string_list(query.get("concepts"), f"query {query_id} concepts")
         _require_string_list(query.get("providers"), f"query {query_id} providers")
     return copy.deepcopy(plan)
 
