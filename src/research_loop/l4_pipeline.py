@@ -7,6 +7,7 @@ a deterministic commit gate and never calls a model.
 from __future__ import annotations
 
 import datetime as _dt
+import copy
 import hashlib
 import json
 import re
@@ -14,6 +15,11 @@ from pathlib import Path
 from typing import Any
 
 from research_loop import deep_research as _deep_research
+from research_loop import l0_contract
+from research_loop.l0_data import (
+    current_round_data_binding_path,
+    verify_current_round_data_binding,
+)
 
 PIPELINE_SCHEMA_VERSION = "L4MethodPlanningPipeline/v1"
 L4A_DISCOVERY_SCHEMA_VERSION = "L4ADiscoveryManifest/v1"
@@ -666,6 +672,39 @@ def _ids(records: list[dict], key: str) -> list[str]:
     return sorted(values)
 
 
+def _l45_input_authority(project: Path, candidate_id: str) -> dict | None:
+    """Carry typed L0 input authority into the deterministic L4.5 receipt.
+
+    L4.5 is not a second scientific-input owner.  It records the same
+    CurrentRoundDataBinding identity only when the candidate declares the
+    typed upstream authority, and reuses that owner's verifier.
+    """
+    contract, _contract_path, _raw = l0_contract.load_contract(project, candidate_id)
+    if not isinstance(contract, dict) or "upstream_completed_inputs" not in contract:
+        return None
+    try:
+        binding = verify_current_round_data_binding(project, candidate_id)
+    except Exception as exc:
+        raise _deep_research.DeepResearchError(
+            f"L4.5 current-round input authority verification failed: {exc}"
+        ) from exc
+    binding_path = current_round_data_binding_path(project, candidate_id).resolve()
+    try:
+        stored_path = binding_path.relative_to(project.resolve()).as_posix()
+    except ValueError as exc:
+        raise _deep_research.DeepResearchError(
+            "L4.5 current-round input authority path escapes the project"
+        ) from exc
+    return {
+        "schema_version": binding.get("schema_version"),
+        "path": stored_path,
+        "sha256": _sha256_bytes(binding_path.read_bytes()),
+        "upstream_completed_inputs": copy.deepcopy(
+            binding.get("upstream_completed_inputs")
+        ),
+    }
+
+
 def commit_l45_method_projection(
     project_dir: str | Path,
     candidate_id: str,
@@ -722,6 +761,9 @@ def commit_l45_method_projection(
         "method_ids": _ids(evidence_artifact.get("method_candidates") or [], "method_id"),
         "anchor_ids": _ids(evidence_artifact.get("method_anchors") or [], "anchor_id"),
     }
+    input_authority = _l45_input_authority(project, candidate_id)
+    if input_authority is not None:
+        artifact["current_round_data_binding"] = input_authority
     identity = _sha256_json(artifact)[:20]
     relative = Path("08_Audit/l4_method_commits") / f"{candidate_id}_{run_id}_{identity}.json"
     artifact["path"] = relative.as_posix()
@@ -745,6 +787,18 @@ def validate_l45_method_commit(project_dir: str | Path, commit: dict) -> tuple[b
     actual = str(unsigned.pop("commit_sha256", ""))
     if not actual or _sha256_json(unsigned) != actual:
         raise _deep_research.DeepResearchError("L4.5 commit SHA256 mismatch")
+    expected_input_authority = _l45_input_authority(
+        project, str(commit.get("candidate_id") or "")
+    )
+    if expected_input_authority is None:
+        if "current_round_data_binding" in commit:
+            raise _deep_research.DeepResearchError(
+                "L4.5 commit carries input authority absent from the L0 contract"
+            )
+    elif commit.get("current_round_data_binding") != expected_input_authority:
+        raise _deep_research.DeepResearchError(
+            "L4.5 current-round input authority changed after commit"
+        )
     manifest_path = _bound_project_path(project, str(commit.get("l4a_manifest_path") or ""), "L4A manifest")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

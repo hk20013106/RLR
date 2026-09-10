@@ -7,12 +7,13 @@ Large files are never copied here; local file identity is path + SHA-256.
 """
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
-from research_loop import l0_contract
+from research_loop import l0_contract, l0_plan_intake
 from research_loop.hypothesis_ledger import binding_path
 from research_loop.l0_state import (
     EVIDENCE_BINDING_SCHEMA,
@@ -162,6 +163,241 @@ def _current_file_records(project: Path, source: dict | None) -> tuple[list[dict
     return records, non_files
 
 
+def _canonical_source_path(value: str | Path) -> str:
+    """Reuse structured-intake path normalization for authority joins."""
+    _resolved, normalized = l0_plan_intake._normalize_path(str(value))
+    return normalized
+
+
+def _manifest_identity(manifest: Any) -> tuple | None:
+    """Return the order-independent byte identity of a verified file manifest."""
+    if not isinstance(manifest, list):
+        return None
+    rows = []
+    for item in manifest:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            return None
+        try:
+            normalized_path = _canonical_source_path(item["path"])
+        except (OSError, RuntimeError, ValueError):
+            return None
+        rows.append(
+            (
+                str(item.get("role") or ""),
+                normalized_path,
+                str(item.get("bytes") or ""),
+                str(item.get("sha256") or ""),
+            )
+        )
+    return tuple(sorted(rows))
+
+
+def _upstream_snapshot(project: Path, contract: dict) -> dict | None:
+    """Verify the byte-frozen plan snapshot before trusting its declaration."""
+    if "upstream_completed_inputs" not in contract:
+        return None
+    provenance = contract.get("provenance")
+    if not isinstance(provenance, dict):
+        raise L0DataError(
+            "L0_DATA_UPSTREAM_PLAN_INVALID",
+            "typed upstream authority requires contract provenance",
+        )
+    stored_value = str(provenance.get("research_plan_snapshot_path") or "")
+    expected_hash = str(provenance.get("research_plan_snapshot_sha256") or "")
+    if not stored_value:
+        raise L0DataError(
+            "L0_DATA_UPSTREAM_PLAN_INVALID",
+            "provenance.research_plan_snapshot_path is missing",
+        )
+    path = _resolve_local(project, stored_value)
+    if not path.is_file():
+        raise L0DataError("L0_DATA_UPSTREAM_PLAN_MISSING", str(path))
+    raw = path.read_bytes()
+    actual_hash = hashlib.sha256(raw).hexdigest()
+    if actual_hash != expected_hash:
+        raise L0DataError(
+            "L0_DATA_UPSTREAM_PLAN_HASH_MISMATCH",
+            f"{stored_value}: expected={expected_hash} actual={actual_hash}",
+        )
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise L0DataError(
+            "L0_DATA_UPSTREAM_PLAN_INVALID",
+            f"snapshot is not valid UTF-8: {exc}",
+        ) from exc
+    parsed, errors = l0_plan_intake.parse_plan_text_strict(text)
+    if errors:
+        raise L0DataError(
+            "L0_DATA_UPSTREAM_PLAN_INVALID",
+            "; ".join(errors),
+        )
+    declared = l0_plan_intake.extract_upstream_completed_inputs(
+        parsed.get("research_plan") if isinstance(parsed, dict) else None
+    )
+    if declared != contract.get("upstream_completed_inputs"):
+        raise L0DataError(
+            "L0_DATA_UPSTREAM_PLAN_MISMATCH",
+            "snapshot upstream_completed_inputs differs from the L0 contract",
+        )
+    snapshot_source = parsed.get("source_input") if isinstance(parsed, dict) else None
+    contract_source = contract.get("source_input")
+    snapshot_manifest = (
+        snapshot_source.get("file_manifest")
+        if isinstance(snapshot_source, dict)
+        else None
+    )
+    contract_manifest = (
+        contract_source.get("file_manifest")
+        if isinstance(contract_source, dict)
+        else None
+    )
+    if _manifest_identity(snapshot_manifest) != _manifest_identity(contract_manifest):
+        raise L0DataError(
+            "L0_DATA_UPSTREAM_PLAN_MISMATCH",
+            "snapshot source_input.file_manifest differs from the L0 contract",
+        )
+    return {
+        "path": _stored_path(project, path),
+        "bytes": len(raw),
+        "sha256": actual_hash,
+    }
+
+
+def _read_feature_ids(path: Path, role: str, key: str) -> tuple[list[str], int]:
+    """Read only feature identifiers and row count; never rewrite source data."""
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            rows = csv.reader(handle, delimiter="\t")
+            header = next(rows, None)
+            if not header or header[0] != key or len(header) < 2:
+                raise L0DataError(
+                    "L0_DATA_FEATURE_SPACE_MISMATCH",
+                    f"{role}: expected a tabular header beginning with {key!r} and at least one data column",
+                )
+            identifiers: list[str] = []
+            seen: set[str] = set()
+            for line_number, row in enumerate(rows, start=2):
+                if not row or not row[0]:
+                    raise L0DataError(
+                        "L0_DATA_FEATURE_SPACE_MISMATCH",
+                        f"{role}: empty feature identifier at line {line_number}",
+                    )
+                identifier = row[0]
+                if identifier in seen:
+                    raise L0DataError(
+                        "L0_DATA_FEATURE_SPACE_MISMATCH",
+                        f"{role}: duplicate feature identifier {identifier!r}",
+                    )
+                seen.add(identifier)
+                identifiers.append(identifier)
+    except OSError as exc:
+        raise L0DataError(
+            "L0_DATA_FEATURE_SPACE_MISMATCH",
+            f"{role}: cannot read {path}: {exc}",
+        ) from exc
+    except UnicodeDecodeError as exc:
+        raise L0DataError(
+            "L0_DATA_FEATURE_SPACE_MISMATCH",
+            f"{role}: source is not valid UTF-8: {exc}",
+        ) from exc
+    return identifiers, len(identifiers)
+
+
+def _bind_upstream_completed_inputs(
+    project: Path,
+    contract: dict,
+    current_records: list[dict],
+) -> dict | None:
+    """Build the typed projection inside the one canonical L0 data binding."""
+    if "upstream_completed_inputs" not in contract:
+        return None
+
+    snapshot = _upstream_snapshot(project, contract)
+    declared = contract["upstream_completed_inputs"]
+    orthology = declared["orthology"]
+    feature = orthology["feature_space"]
+    key = feature["key"]
+    expected_rows = feature["rows"]
+
+    records_by_key = {}
+    for record in current_records:
+        records_by_key[
+            (_canonical_source_path(record["path"]), str(record.get("role") or ""))
+        ] = record
+
+    source_files: list[dict] = []
+    observed_rows: dict[str, int] = {}
+    row_orders: dict[str, list[str]] = {}
+    aligned = feature["aligned_source_files"]
+    for role in l0_contract.ORTHOLOGY_SOURCE_ROLES:
+        item = next(
+            (candidate for candidate in aligned if candidate.get("role") == role),
+            None,
+        )
+        if item is None:
+            raise L0DataError(
+                "L0_DATA_UPSTREAM_SOURCE_NOT_BOUND",
+                f"missing aligned source declaration for role {role!r}",
+            )
+        source_path = _resolve_local(project, str(item["path"]))
+        record = records_by_key.get(
+            (_canonical_source_path(source_path), role)
+        )
+        if record is None or record.get("origin") != "current_round":
+            raise L0DataError(
+                "L0_DATA_UPSTREAM_SOURCE_NOT_BOUND",
+                f"{role}: {item['path']!r} is not an authorized current-round source",
+            )
+        identifiers, row_count = _read_feature_ids(source_path, role, key)
+        observed_rows[role] = row_count
+        row_orders[role] = identifiers
+        source_files.append({
+            "path": record["path"],
+            "bytes": record["bytes"],
+            "sha256": record["sha256"],
+            "role": role,
+            "origin": record.get("origin", "current_round"),
+            "reason": record.get("reason", ""),
+        })
+
+    if any(value != expected_rows for value in observed_rows.values()):
+        raise L0DataError(
+            "L0_DATA_FEATURE_SPACE_MISMATCH",
+            f"declared rows={expected_rows} observed={observed_rows}",
+        )
+    baseline = row_orders[l0_contract.ORTHOLOGY_SOURCE_ROLES[0]]
+    if any(order != baseline for order in row_orders.values()):
+        raise L0DataError(
+            "L0_DATA_FEATURE_SPACE_MISMATCH",
+            "aligned source files do not have identical feature row order",
+        )
+
+    return {
+        "orthology": {
+            "status": orthology["status"],
+            "method": orthology["method"],
+            "policy": orthology["policy"],
+            "orthogroup_count": orthology["orthogroup_count"],
+            "species_tree": orthology["species_tree"],
+            "formal_species": list(orthology["formal_species"]),
+            "feature_space": {
+                "key": key,
+                "rows": expected_rows,
+                "source_files": source_files,
+                "validation": {
+                    "observed_rows": {
+                        role: observed_rows[role]
+                        for role in l0_contract.ORTHOLOGY_SOURCE_ROLES
+                    },
+                    "row_order_matches": True,
+                },
+            },
+        },
+        "source_preplan": snapshot,
+    }
+
+
 def _verified_index(evidence_binding: dict | None) -> tuple[dict[tuple[str, str], dict], dict[str, list[dict]]]:
     exact: dict[tuple[str, str], dict] = {}
     by_path: dict[str, list[dict]] = {}
@@ -261,6 +497,9 @@ def build_current_round_data_binding(project_dir, cand_id, evidence_binding=None
     current, non_files = _current_file_records(project, contract.get("source_input"))
     inherited = _inherited_records(project, contract, evidence_binding)
     authorized = _deduplicate(current + inherited)
+    upstream_completed_inputs = _bind_upstream_completed_inputs(
+        project, contract, current
+    )
 
     if not authorized and not non_files:
         raise L0DataError(
@@ -279,6 +518,8 @@ def build_current_round_data_binding(project_dir, cand_id, evidence_binding=None
         "authorized_inputs": authorized,
         "non_file_inputs": non_files,
     }
+    if upstream_completed_inputs is not None:
+        payload["upstream_completed_inputs"] = upstream_completed_inputs
 
     if inherited:
         evidence_path = (project / "08_Audit" / "l0_restore" /
@@ -368,6 +609,22 @@ def verify_current_round_data_binding(project_dir, cand_id) -> dict:
         raise L0DataError("L0_DATA_BINDING_CONTRACT_MISMATCH", "L0 contract hash changed")
     if str(binding.get("round_id")) != str(contract.get("round_id")):
         raise L0DataError("L0_DATA_BINDING_IDENTITY_MISMATCH", "round_id mismatch")
+
+    current, _non_files = _current_file_records(project, contract.get("source_input"))
+    expected_upstream = _bind_upstream_completed_inputs(
+        project, contract, current
+    )
+    if expected_upstream is None:
+        if "upstream_completed_inputs" in binding:
+            raise L0DataError(
+                "L0_DATA_UPSTREAM_BINDING_MISMATCH",
+                "binding contains typed upstream authority absent from the contract",
+            )
+    elif binding.get("upstream_completed_inputs") != expected_upstream:
+        raise L0DataError(
+            "L0_DATA_UPSTREAM_BINDING_MISMATCH",
+            "typed upstream authority changed after the current-round binding was written",
+        )
 
     evidence_path_value = str(binding.get("previous_evidence_binding_path") or "")
     if evidence_path_value:

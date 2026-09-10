@@ -19,6 +19,7 @@ Leaf module: imports stdlib + PyYAML + research_loop.paths/topology (both leaves
 -> no engine import, no cycle.
 """
 import hashlib
+import os
 import re
 from pathlib import Path
 
@@ -40,6 +41,20 @@ INHERITED_INPUT_FIELDS = ("path", "sha256", "role", "reuse_reason")
 # carry an explicit verification status + reason. There is NO verified:false
 # escape for local file/directory inputs (those hard-fail when missing).
 DATASET_VERIFICATION_STATUS = ("verified", "unverifiable", "pending")
+
+# Batch 3 upstream science facts are declared once by the structured preplan
+# and then carried by the canonical L0 contract/binding.  Keep these values in
+# this owner so validators and downstream binding code share one vocabulary.
+ORTHOLOGY_METHOD = "FastOMA v0.5.1 + OMAmer"
+ORTHOLOGY_POLICY = "strict_one_to_one_single_copy"
+ORTHOLOGY_SPECIES_TREE = "((Mmus,Rnor)Rodentia,(Skuh,Smur)Eulipotyphla)Boreoeutheria"
+ORTHOLOGY_FORMAL_SPECIES = ("Mmus", "Rn", "Sk", "Sm")
+ORTHOLOGY_FEATURE_KEY = "Mmus_symbol"
+ORTHOLOGY_SOURCE_ROLES = (
+    "gene_length",
+    "raw_counts",
+    "length_scaled_expression",
+)
 
 # Reuse the repo's terminal decision enum (do NOT invent one). The L10b final
 # decision is exactly the set of terminal transitions out of UNDER_REVIEW.
@@ -177,6 +192,153 @@ def build_continuation_contract(cand_id, round_id, parent_round_id,
         },
         "current_round": {"hypothesis": new_hypothesis or ""},
     }
+
+
+def _normalized_contract_path(value):
+    """Return a stable comparison key for two declared local paths."""
+    path = Path(str(value)).expanduser().resolve().as_posix()
+    return path.casefold() if os.name == "nt" else path
+
+
+def _validate_upstream_completed_inputs(contract, rlabel, err):
+    """Validate the typed upstream authority carried by the L0 contract.
+
+    This is structural/input validation only.  It does not trust the declared
+    count or source metadata as physical proof; l0_data verifies the frozen
+    snapshot and source bytes before creating CurrentRoundDataBinding/v1.
+    """
+    if "upstream_completed_inputs" not in contract:
+        return
+    value = contract.get("upstream_completed_inputs")
+    prefix = f"[round={rlabel}] upstream_completed_inputs"
+    if not isinstance(value, dict):
+        err(f"{prefix} must be a mapping containing orthology")
+        return
+    orthology = value.get("orthology")
+    if not isinstance(orthology, dict):
+        err(f"{prefix}.orthology must be a mapping")
+        return
+
+    expected_scalars = {
+        "status": "completed_upstream",
+        "method": ORTHOLOGY_METHOD,
+        "policy": ORTHOLOGY_POLICY,
+        "species_tree": ORTHOLOGY_SPECIES_TREE,
+    }
+    for field, expected in expected_scalars.items():
+        actual = orthology.get(field)
+        if actual != expected:
+            err(f"{prefix}.orthology.{field} must be {expected!r}; got {actual!r}")
+
+    count = orthology.get("orthogroup_count")
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        err(f"{prefix}.orthology.orthogroup_count must be a positive integer")
+
+    species = orthology.get("formal_species")
+    if species != list(ORTHOLOGY_FORMAL_SPECIES):
+        err(
+            f"{prefix}.orthology.formal_species must be "
+            f"{list(ORTHOLOGY_FORMAL_SPECIES)!r}; got {species!r}"
+        )
+
+    feature = orthology.get("feature_space")
+    if not isinstance(feature, dict):
+        err(f"{prefix}.orthology.feature_space must be a mapping")
+        return
+    if feature.get("key") != ORTHOLOGY_FEATURE_KEY:
+        err(
+            f"{prefix}.orthology.feature_space.key must be "
+            f"{ORTHOLOGY_FEATURE_KEY!r}; got {feature.get('key')!r}"
+        )
+    rows = feature.get("rows")
+    if isinstance(rows, bool) or not isinstance(rows, int) or rows <= 0:
+        err(f"{prefix}.orthology.feature_space.rows must be a positive integer")
+    if isinstance(count, int) and not isinstance(count, bool) and isinstance(rows, int) and not isinstance(rows, bool):
+        if count != rows:
+            err(
+                f"{prefix}.orthology.feature_space.rows must equal "
+                f"orthogroup_count ({count}); got {rows}"
+            )
+
+    aligned = feature.get("aligned_source_files")
+    if not isinstance(aligned, list) or not aligned:
+        err(
+            f"{prefix}.orthology.feature_space.aligned_source_files must be a non-empty list"
+        )
+        aligned = []
+    seen_roles = set()
+    seen_paths = set()
+    for index, item in enumerate(aligned):
+        item_prefix = f"{prefix}.orthology.feature_space.aligned_source_files[{index}]"
+        if not isinstance(item, dict):
+            err(f"{item_prefix} must be a mapping with role and path")
+            continue
+        role = item.get("role")
+        path = item.get("path")
+        if not isinstance(role, str) or _is_placeholder(role):
+            err(f"{item_prefix}.role must be non-placeholder text")
+        elif role in seen_roles:
+            err(f"{item_prefix}.role duplicates {role!r}")
+        else:
+            seen_roles.add(role)
+        if not isinstance(path, str) or _is_placeholder(path):
+            err(f"{item_prefix}.path must be non-placeholder text")
+        else:
+            try:
+                normalized = _normalized_contract_path(path)
+            except (OSError, RuntimeError, ValueError) as exc:
+                err(f"{item_prefix}.path is invalid: {exc}")
+            else:
+                if normalized in seen_paths:
+                    err(f"{item_prefix}.path duplicates an aligned source path")
+                seen_paths.add(normalized)
+
+    if set(seen_roles) != set(ORTHOLOGY_SOURCE_ROLES):
+        err(
+            f"{prefix}.orthology.feature_space.aligned_source_files must contain "
+            f"roles {list(ORTHOLOGY_SOURCE_ROLES)!r}; got {sorted(seen_roles)!r}"
+        )
+
+    source = contract.get("source_input")
+    manifest = source.get("file_manifest") if isinstance(source, dict) else None
+    manifest_keys = set()
+    if isinstance(manifest, list):
+        for item in manifest:
+            if isinstance(item, dict) and isinstance(item.get("path"), str):
+                try:
+                    manifest_keys.add(
+                        (_normalized_contract_path(item["path"]), str(item.get("role") or ""))
+                    )
+                except (OSError, RuntimeError, ValueError):
+                    pass
+    for index, item in enumerate(aligned):
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            continue
+        try:
+            key = (_normalized_contract_path(item["path"]), str(item.get("role") or ""))
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if key not in manifest_keys:
+            err(
+                f"{prefix}.orthology.feature_space.aligned_source_files[{index}] "
+                "must reference the same role/path in source_input.file_manifest"
+            )
+
+    provenance = contract.get("provenance")
+    snapshot_path = provenance.get("research_plan_snapshot_path") if isinstance(provenance, dict) else None
+    snapshot_sha = provenance.get("research_plan_snapshot_sha256") if isinstance(provenance, dict) else None
+    if not isinstance(snapshot_path, str) or _is_placeholder(snapshot_path):
+        err(f"{prefix} requires provenance.research_plan_snapshot_path")
+    elif Path(snapshot_path).is_absolute() or ".." in Path(snapshot_path).parts:
+        err(
+            f"{prefix} provenance.research_plan_snapshot_path must be "
+            "project-relative and must not escape the project"
+        )
+    if not isinstance(snapshot_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", snapshot_sha):
+        err(
+            f"{prefix} requires provenance.research_plan_snapshot_sha256 "
+            "as a 64-character lowercase hex string"
+        )
 
 
 # --- the ONE validator ------------------------------------------------------
@@ -365,6 +527,8 @@ def validate_l0_input_contract(contract, fm, project_dir, cand_id,
             if provenance.get("llm_used") is not False:
                 err(f"[round={rlabel}] provenance.llm_used must be false for rules intake")
 
+    _validate_upstream_completed_inputs(contract, rlabel, err)
+
     # 6. round-type-specific state consistency
     if rt == "initial":
         if fm.get("from_memory") or contract.get("previous_round") not in (None, {}):
@@ -445,6 +609,15 @@ def render_contract_block(contract):
         lines.append(f"  verification_status: {si.get('verification_status')}")
     if "reason" in si:
         lines.append(f"  reason: {si.get('reason')}")
+    if "upstream_completed_inputs" in contract:
+        lines.append("upstream_completed_inputs:")
+        rendered_upstream = yaml.safe_dump(
+            contract.get("upstream_completed_inputs"),
+            allow_unicode=True,
+            sort_keys=True,
+            default_flow_style=False,
+        ).rstrip("\n")
+        lines.extend(f"  {line}" for line in rendered_upstream.splitlines())
     inherited = contract.get("inherited_inputs")
     if isinstance(inherited, list) and inherited:
         lines.append("inherited_inputs:")

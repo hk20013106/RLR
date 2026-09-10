@@ -192,6 +192,63 @@ def _small_json_semantics(project: Path, item: dict[str, Any]) -> dict[str, Any]
     return _bounded_semantics(value)
 
 
+def _upstream_completed_projection(value: Any) -> dict[str, Any] | None:
+    """Project the typed upstream facts without depth-truncating source refs."""
+    if not isinstance(value, dict):
+        return None
+    orthology = value.get("orthology")
+    if not isinstance(orthology, dict):
+        return None
+    feature = orthology.get("feature_space")
+    if not isinstance(feature, dict):
+        return None
+    source_files = []
+    for item in feature.get("source_files") or []:
+        if not isinstance(item, dict):
+            continue
+        source_files.append({
+            key: item.get(key)
+            for key in ("path", "bytes", "sha256", "role", "origin", "reason")
+            if key in item
+        })
+    validation = feature.get("validation")
+    if not isinstance(validation, dict):
+        validation = {}
+    observed_rows = validation.get("observed_rows")
+    if not isinstance(observed_rows, dict):
+        observed_rows = {}
+    projected = {
+        "orthology": {
+            key: orthology.get(key)
+            for key in (
+                "status", "method", "policy", "orthogroup_count",
+                "species_tree", "formal_species",
+            )
+            if key in orthology
+        },
+    }
+    projected["orthology"]["feature_space"] = {
+        "key": feature.get("key"),
+        "rows": feature.get("rows"),
+        "source_files": source_files,
+        "validation": {
+            "observed_rows": {
+                str(key): observed_rows[key]
+                for key in sorted(observed_rows, key=str)
+            },
+            "row_order_matches": validation.get("row_order_matches"),
+        },
+    }
+    source_preplan = value.get("source_preplan")
+    if isinstance(source_preplan, dict):
+        projected["source_preplan"] = {
+            key: source_preplan.get(key)
+            for key in ("path", "bytes", "sha256")
+            if key in source_preplan
+        }
+    return projected
+
+
 def _context_projection(resolved: ResolvedAuthority, project: Path) -> dict[str, Any]:
     payload = resolved.payload
     authorized = []
@@ -205,7 +262,7 @@ def _context_projection(resolved: ResolvedAuthority, project: Path) -> dict[str,
         if semantics is not None:
             row["semantic_projection"] = semantics
         authorized.append(row)
-    return {
+    projection = {
         "authority": resolved.spec.name,
         "producer": resolved.spec.producer,
         "schema_version": resolved.spec.schema_version,
@@ -216,6 +273,16 @@ def _context_projection(resolved: ResolvedAuthority, project: Path) -> dict[str,
         "authorized_inputs": authorized,
         "non_file_inputs": _bounded_semantics(payload.get("non_file_inputs") or []),
     }
+    if "upstream_completed_inputs" in payload:
+        upstream = _upstream_completed_projection(
+            payload.get("upstream_completed_inputs")
+        )
+        if upstream is None:
+            raise AuthorityError(
+                "current_round_data_binding upstream_completed_inputs is malformed"
+            )
+        projection["upstream_completed_inputs"] = upstream
+    return projection
 
 
 def project_context_authorities(
