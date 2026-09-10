@@ -6,7 +6,7 @@ import sys
 
 import pitfall_ledger as pl
 
-from research_loop.context import cmd_assemble_context
+from research_loop.context import DEFAULT_CONTEXT_TOKEN_BUDGET, cmd_assemble_context
 from research_loop.errors import RLRError
 from research_loop.hypothesis_ledger import LedgerError
 from research_loop.topology import AGENTS, NODE_MAP
@@ -234,8 +234,11 @@ def build_parser():
                     help="digest: Runtime digest section only (default); excerpt: truncated; full: entire file; none: manifest only")
     sp.add_argument("--pre-research-token-budget", type=int, default=None,
                     help="max tokens for pre-research injection (default: node-specific, e.g. L1=800)")
-    sp.add_argument("--context-token-budget", type=int, default=8000,
-                    help="max estimated tokens for assembled context (default: 8000; 0 disables)")
+    sp.add_argument(
+        "--context-token-budget", type=int, default=DEFAULT_CONTEXT_TOKEN_BUDGET,
+        help=("max estimated tokens for assembled context "
+              f"(default: {DEFAULT_CONTEXT_TOKEN_BUDGET}; 0 disables)"),
+    )
     sp.add_argument("--authorization-id",
                     help="fixed hypothesis context authorization to inject")
     sp.add_argument("--evidence-run-id",

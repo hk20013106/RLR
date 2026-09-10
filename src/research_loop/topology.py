@@ -31,6 +31,11 @@ DECISION_TRANSITIONS = {
     "ARCHIVED": set(),
 }
 
+# The topology owns the complete set of lifecycle states.  Keep this adjacent
+# to the transition graph so templates and command modules do not depend on
+# engine-time global injection.
+VALID_STATUSES = list(DECISION_TRANSITIONS)
+
 # Canonical per-node authority for the external literature knowledge base.
 # Topology owns this policy because topology_for_profile() is the canonical
 # construction path consumed by both the modular CLI/context code and engine.

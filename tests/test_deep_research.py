@@ -1048,6 +1048,9 @@ def _mismatch_project(tmp_path):
 
 def test_deep_research_run_refuses_a_host_backend_mismatch(tmp_path, monkeypatch, capsys):
     from research_loop.commands.research import cmd_deep_research_run
+    # The formal Codex smoke environment sets the explicit backend marker.
+    # This test isolates the Claude-marker mismatch path instead.
+    monkeypatch.delenv("RLR_HOST_BACKEND", raising=False)
     monkeypatch.setenv("CLAUDECODE", "1")
     args = _mismatch_project(tmp_path)
     assert cmd_deep_research_run(args) == 3

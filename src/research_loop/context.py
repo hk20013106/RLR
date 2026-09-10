@@ -43,6 +43,9 @@ from research_loop import l0_contract
 from research_loop import deep_research, research_seed
 
 
+DEFAULT_CONTEXT_TOKEN_BUDGET = 40000
+
+
 def strip_candidate_to_frontmatter(candidate_path, include_source_path=False):
     """Read a candidate .md, return only frontmatter dict (not body).
 
@@ -655,7 +658,9 @@ def cmd_assemble_context(args):
     context_text = "\n".join(sections)
     context_text, caveman_meta = _caveman_lite(
         context_text, required_literals=[args.cand_id, node_id, persona])
-    context_budget = getattr(args, "context_token_budget", 8000)
+    context_budget = getattr(
+        args, "context_token_budget", DEFAULT_CONTEXT_TOKEN_BUDGET
+    )
     est_context_tokens = _estimate_tokens(context_text)
     if context_budget and est_context_tokens > context_budget:
         print(f"ERROR: context token budget exceeded "

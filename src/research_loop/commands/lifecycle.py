@@ -37,19 +37,13 @@ from research_loop.templates import (
 )
 from research_loop.topology import (
     AGENTS, DECISION_TRANSITIONS, KNOWLEDGE_BASE_ACCESS, NODE_MAP,
+    VALID_STATUSES,
     topology_for_profile,
 )
 from research_loop.yamlio import _load_yaml_front, _replace_field
 
 # Preserve repository-relative lookup semantics from the former engine owner.
 __file__ = str(Path(__file__).resolve().parents[1] / "engine.py")
-
-VALID_STATUSES = [
-    "NEW", "IDEA_PROPOSED", "IDEA_REJECTED", "IDEA_SELECTED",
-    "METHOD_PROPOSED", "METHOD_REJECTED", "METHOD_APPROVED",
-    "NEEDS_EXECUTION", "EXECUTED", "AUDITED", "UNDER_REVIEW",
-    "KEEP", "REVISE", "DOWNGRADE", "DROP", "ARCHIVED",
-]
 
 FINAL_STATUSES = {"KEEP", "REVISE", "DOWNGRADE", "DROP", "ARCHIVED"}
 
@@ -1035,9 +1029,15 @@ def cmd_normalize_l0_input(args):
                      agent="Oppenheimer", kind="seed")
     print(f"Written to: 01_Candidates/{artifact_path.name}")
     if args.run_l0:
+        from research_loop.runtime_preflight import FORMAL_ENVIRONMENT
+
         runner = Path(__file__).resolve().parents[1] / "run_loop.py"
-        return subprocess.run([sys.executable, str(runner), "run", str(project_dir),
-                               cand_id, "--stop-after-node", "L0"]).returncode
+        command = [
+            "micromamba", "run", "-n", FORMAL_ENVIRONMENT, "python",
+            str(runner), "run", str(project_dir), cand_id,
+            "--stop-after-node", "L0",
+        ]
+        return subprocess.run(command).returncode
     return 0
 
 def cmd_preflight(args):

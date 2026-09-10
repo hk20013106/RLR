@@ -23,10 +23,14 @@ class _Result:
 def test_main_agent_run_emits_handoff_without_python_provider():
     old_ctl = run_loop._ctl
     old_run_round = run_loop.run_round
+    old_runtime_preflight = run_loop.runtime_preflight.require_ready
     try:
         run_loop._ctl = lambda *args: _Result(0, "", "")
         run_loop.run_round = lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("main-agent mode must not enter python run_round"))
+        run_loop.runtime_preflight.require_ready = lambda: {
+            "environment": "rlr", "sys_executable": "test"
+        }
         with tempfile.TemporaryDirectory() as d:
             project = Path(d)
             store = project / "hypotheses.sqlite"
@@ -53,6 +57,7 @@ def test_main_agent_run_emits_handoff_without_python_provider():
     finally:
         run_loop._ctl = old_ctl
         run_loop.run_round = old_run_round
+        run_loop.runtime_preflight.require_ready = old_runtime_preflight
 
 
 def test_assemble_context_raises_when_controller_fails():
@@ -67,6 +72,30 @@ def test_assemble_context_raises_when_controller_fails():
             raise AssertionError("assemble_context must raise on controller failure")
     finally:
         run_loop._ctl = old_ctl
+
+
+def test_stop_after_node_executes_the_requested_cognitive_node_before_halting():
+    old_next_step = run_loop.next_step
+    old_exec_cognitive = run_loop.exec_cognitive
+    calls = []
+    try:
+        run_loop.next_step = lambda *_args: {
+            "node": "L0", "persona": "Linnaeus", "advance_command": "decision"
+        }
+        run_loop.exec_cognitive = lambda *args, **kwargs: calls.append(args[2]["node"]) or True
+        cfg = SimpleNamespace(stop_policy={"max_l7_failures": 2, "max_node_failures": 2})
+        args = SimpleNamespace(stop_after_node="L0")
+
+        outcome = run_loop.run_round(
+            "Project", "C1", cfg, args, 1, 1,
+            {"l7_failures": 0, "node_failures": {}},
+        )
+
+        assert outcome == "stopped_after_node"
+        assert calls == ["L0"]
+    finally:
+        run_loop.next_step = old_next_step
+        run_loop.exec_cognitive = old_exec_cognitive
 
 
 def test_exec_turing_stops_when_workspace_prepare_fails():

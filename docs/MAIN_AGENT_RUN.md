@@ -31,6 +31,12 @@ is **MISSING, the command exits non-zero and you MUST HALT** — do not proceed 
 L1, do not skip. Install the missing dependency, re-run preflight, then continue.
 `run_loop.py` enforces this automatically before round 1.
 
+For a Codex-hosted PowerShell session, set `$env:RLR_HOST_BACKEND='codex'`
+before the first command. Do not set that value on a non-Codex host. Every
+formal RLR command, including the canonical runner and its L0 stop run, must
+use `micromamba run -n rlr python`; the runner performs the fail-closed formal
+runtime preflight before controller/provider startup.
+
 Before a native contextual L4A/SPECTER2 run, also run the heavy formal
 runtime gate. It verifies the `rlr` interpreter, the PaperQA2/SPECTER2 stack,
 and one real adapter forward; a non-zero result is a hard stop:

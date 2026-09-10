@@ -10,20 +10,28 @@ Your job: drive the Research Loop Room V0.9 DAG from L0 to L10c by calling
 `research_loop_v04.py` CLI commands. Do NOT ask me to copy-paste between nodes.
 You do everything yourself.
 
+Runtime boundary:
+- On a Codex host, first run `$env:RLR_HOST_BACKEND='codex'` in the launching
+  PowerShell. Do not set it to codex on non-Codex hosts.
+- Run every RLR command with `micromamba run -n rlr python`.
+- Before a formal run, verify the environment with
+  `micromamba run -n rlr python -m research_loop.runtime_preflight`; if it
+  fails, stop and report it.
+
 Loop:
-1. Run `python research_loop_v04.py next-step PROJECT_DIR CAND_ID` to get the
+1. Run `micromamba run -n rlr python research_loop_v04.py next-step PROJECT_DIR CAND_ID` to get the
    current DAG node.
 2. DEEP RESEARCH (V0.7): if the node is L1, L4, or L8.5, run
-   `python research_loop_v04.py deep-research-run PROJECT_DIR CAND_ID --node NODE`.
+   `micromamba run -n rlr python research_loop_v04.py deep-research-run PROJECT_DIR CAND_ID --node NODE`.
    This explicitly invokes configured Codex ARS or Claude ARS, and persists
    source-located evidence. L7 remains a separate code-search pre-step.
-3. Run `python research_loop_v04.py assemble-context PROJECT_DIR CAND_ID --node NODE`
+3. Run `micromamba run -n rlr python research_loop_v04.py assemble-context PROJECT_DIR CAND_ID --node NODE`
    to get the isolated context for that node (it now includes the pre-research
    summary when present).
 4. Act as the specified persona. Using ONLY the assemble-context output, generate
    a strict JSON delta matching the persona's schema.
 5. Write the delta to a temp file.
-6. Run `python research_loop_v04.py emit-delta PROJECT_DIR CAND_ID --node NODE --persona PERSONA --file TEMP_DELTA.json --context-manifest MANIFEST --provider-receipt RECEIPT`
+6. Run `micromamba run -n rlr python research_loop_v04.py emit-delta PROJECT_DIR CAND_ID --node NODE --persona PERSONA --file TEMP_DELTA.json --context-manifest MANIFEST --provider-receipt RECEIPT`
 7. If emit-delta says VALIDATION: PASS, run the advance_command.
 8. If emit-delta fails, fix the JSON and retry. Do NOT skip.
 9. Repeat until L10c (aggregate-report). After aggregate-report, ALWAYS run
