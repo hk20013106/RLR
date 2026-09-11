@@ -1,12 +1,18 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from rlr_maintenance import autowake
 from rlr_maintenance import autowake_adapter as adapter
 from rlr_maintenance.autowake import (
     AUTOWAKE_CONFIG_ENV,
     AUTOWAKE_RETRY_GUARD_ENV,
     RepairHandoff,
 )
+from rlr_maintenance.contracts import validate_maintenance_event
+
+
+BASE_SHA = "a" * 40
 
 
 def _handoff(tmp_path: Path, entrypoint: str = "research_loop_v04.py") -> RepairHandoff:
@@ -20,6 +26,29 @@ def _handoff(tmp_path: Path, entrypoint: str = "research_loop_v04.py") -> Repair
         commit_sha="a" * 40,
         worktree_path=worktree,
     )
+
+
+def _config(tmp_path: Path) -> Path:
+    path = tmp_path / "autowake.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "RLRMetaAutoWakeConfig/v1",
+                "loopx_project": str(tmp_path / "loopx-project"),
+                "goal_id": "goal-first-mile",
+                "agent_id": "meta-rlr",
+                "workspace_parent": str(tmp_path / "repairs"),
+                "registry": str(tmp_path / "loopx-registry.json"),
+                "loopx_executable": "loopx",
+                "quota_runtime_profile": "outer_controller",
+                "quota_scan_root": str(tmp_path),
+                "codex_executable": "codex",
+                "capabilities": ["shell"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
 
 
 def test_first_mile_wrapper_success_is_inert(monkeypatch, tmp_path):
@@ -203,3 +232,66 @@ def test_resume_verified_cli_uses_repaired_entrypoint_and_preserves_argv(
     assert command[2:] == argv
     assert kwargs["shell"] is False
     assert AUTOWAKE_RETRY_GUARD_ENV not in kwargs["env"]
+
+
+def test_repairable_first_mile_failure_uses_existing_meta_cli_and_l0_profile(
+    monkeypatch, tmp_path
+):
+    project = tmp_path / "project"
+    (project / "00_Preflight").mkdir(parents=True)
+    (project / "00_Preflight" / "preflight_receipt.json").write_text(
+        "{}\n", encoding="utf-8"
+    )
+    config = _config(tmp_path)
+    repair_worktree = tmp_path / "repairs" / "verified"
+    repair_worktree.mkdir(parents=True)
+    monkeypatch.setenv(AUTOWAKE_CONFIG_ENV, str(config))
+    monkeypatch.setattr(autowake, "_current_revision", lambda _repo, _runner: BASE_SHA)
+    monkeypatch.setattr(
+        autowake,
+        "_resolve_verified_worktree",
+        lambda **_kwargs: repair_worktree,
+    )
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append((list(command), kwargs))
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "outcome": "verified",
+                    "event_id": "unused",
+                    "todo_id": "todo-1",
+                    "profile_id": "l0_state_integrity",
+                    "commit_sha": "b" * 40,
+                    "reason": None,
+                }
+            ),
+            stderr="",
+        )
+
+    result = autowake.maybe_wake_first_mile_failure(
+        project_dir=project,
+        operation="preflight",
+        failure={
+            "code": "PROJECT_READY_BINDING_MISMATCH",
+            "reason": "project binding differs from receipt",
+        },
+        command_runner=runner,
+    )
+
+    assert result is not None
+    assert result.worktree_path == repair_worktree
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert Path(command[1]).name == "meta_rlr.py"
+    assert command[2] == "run-once"
+    assert kwargs["env"][AUTOWAKE_RETRY_GUARD_ENV] == "1"
+    event = validate_maintenance_event(
+        json.loads(result.event_path.read_text(encoding="utf-8"))
+    )
+    assert event["event_type"] == "contract_failure"
+    assert event["component"] == "first_mile:preflight"
+    assert event["expected_contract"] == "first_mile_project_ready_integrity"
+    assert event["observed"]["error_code"] == "PROJECT_READY_BINDING_MISMATCH"
