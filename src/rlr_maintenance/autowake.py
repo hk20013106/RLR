@@ -1,12 +1,12 @@
-"""Thin Phase 3 bridge from observed RLR runtime failure to Phase 2 Meta-RLR.
+"""Thin bridges from classified RLR failures to the existing Meta-RLR host.
 
-This module owns no scheduler and no repair logic. It converts an already
-classified provider-runtime failure into the canonical maintenance event,
-invokes the existing ``meta_rlr.py run-once`` entry point, and resolves the
-verified repair through the existing GitWorkspace provenance authority.
+This module owns no scheduler and no repair logic.  Failure-specific callers
+normalize authoritative RLR facts into ``RLRMaintenanceEvent/v1`` and reuse one
+common event -> MetaRLRHost -> verified-worktree handoff.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import re
@@ -19,7 +19,8 @@ from typing import Callable, Mapping, MutableMapping
 from .bounded_process import DEFAULT_MAX_OUTPUT_BYTES, run_bounded_process
 from .codex_cli import DEFAULT_REPAIR_JOB_TIMEOUT
 from .contracts import validate_maintenance_event
-from .observer import observe_provider_runtime_failure
+from .observer import observe_contract_failure, observe_provider_runtime_failure
+from .profiles import profile_for_event
 from .verification import VERIFICATION_COMMAND_TIMEOUT, VERIFICATION_RECEIPT_FILENAME
 from .workspace import GIT_COMMAND_TIMEOUT, GitWorkspace, GitWorkspaceError
 
@@ -29,6 +30,14 @@ AUTOWAKE_RETRY_GUARD_ENV = "RLR_META_RLR_AUTOWAKE_RETRY"
 AUTOWAKE_CONFIG_SCHEMA = "RLRMetaAutoWakeConfig/v1"
 PROVIDER_RUNTIME_CONTRACT = "provider_runtime_execution_integrity"
 PROVIDER_RUNTIME_PROFILE = "provider_runtime_integrity"
+FIRST_MILE_CONTRACT = "first_mile_project_ready_integrity"
+_REPAIRABLE_FIRST_MILE_CODES = frozenset(
+    {
+        "PROJECT_READY_BINDING_MISMATCH",
+        "PROJECT_READY_BACKEND_MISMATCH",
+        "PROJECT_READY_RUNTIME_INVALID",
+    }
+)
 OUTER_SAFETY_MARGIN = 300.0
 # OUTER_SAFETY_MARGIN is outer slack, not a separately consumable inner
 # settlement/orchestration budget. The two known hard inner budgets are the
@@ -209,7 +218,9 @@ def _provider_failure_is_repairable(status: Mapping[str, object]) -> bool:
     return reason in _REPAIRABLE_TERMINATION_REASONS or reason.startswith("launch_failed:")
 
 
-def _failure_evidence_refs(task_id: str, status: Mapping[str, object]) -> tuple[dict[str, str], ...]:
+def _failure_evidence_refs(
+    task_id: str, status: Mapping[str, object]
+) -> tuple[dict[str, str], ...]:
     """Bind an occurrence to the logical task and its isolated attempt."""
     refs: list[dict[str, str]] = [{
         "kind": "rlr_artifact",
@@ -249,7 +260,7 @@ def _event_for_failure(
 ) -> dict:
     node = str(handler_args.get("node") or "unknown")
     candidate = handler_args.get("cand_id")
-    event = observe_provider_runtime_failure(
+    return observe_provider_runtime_failure(
         component=f"deep_research_provider:{node}",
         task_id=task_id,
         provider_state=str(status.get("state") or "unknown"),
@@ -261,7 +272,6 @@ def _event_for_failure(
         candidate_ref=str(candidate) if isinstance(candidate, str) and candidate else None,
         evidence_refs=_failure_evidence_refs(task_id, status),
     )
-    return event
 
 
 def _meta_command(
@@ -309,6 +319,7 @@ def _resolve_verified_worktree(
     revision: str,
     event: Mapping[str, object],
     commit_sha: str,
+    profile_id: str,
 ) -> Path | None:
     workspace = GitWorkspace(repo_root=repo_root, workspace_parent=workspace_parent)
     work = workspace.find_existing(
@@ -321,58 +332,45 @@ def _resolve_verified_worktree(
     if (
         binding.commit_sha != commit_sha
         or binding.event_id != event["event_id"]
-        or binding.profile_id != PROVIDER_RUNTIME_PROFILE
+        or binding.profile_id != profile_id
     ):
         return None
     return work.path
 
 
-def maybe_wake_meta_rlr(
+def wake_meta_rlr_for_event(
     *,
     project_dir: str | Path,
-    task_id: str,
-    handler_args: Mapping[str, object],
-    returncode: int,
-    status: Mapping[str, object],
+    event: Mapping[str, object],
+    revision: str | None = None,
     command_runner: Callable[..., object] | None = None,
     environ: MutableMapping[str, str] | None = None,
     timeout: float = AUTOWAKE_OUTER_TIMEOUT,
     max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
 ) -> RepairHandoff | None:
-    """Run one existing Meta-RLR turn for an already-classified runtime failure.
-
-    Any unavailable/invalid maintenance infrastructure leaves the original RLR
-    failure unchanged. Only independently verified/recovered Phase 2 outcomes
-    are returned as a code-activation handoff.
-    """
+    """Route one canonical maintenance event through the existing Meta-RLR host."""
     environment = os.environ if environ is None else environ
     if environment.get(AUTOWAKE_RETRY_GUARD_ENV):
         return None
     config_token = environment.get(AUTOWAKE_CONFIG_ENV)
-    if not config_token or not _provider_failure_is_repairable(status):
+    if not config_token:
         return None
 
     try:
         config = _load_config(Path(config_token))
         repo_root = _repo_root()
-        revision = _current_revision(repo_root, command_runner)
+        current_revision = revision or _current_revision(repo_root, command_runner)
+        normalized = validate_maintenance_event(event)
+        if normalized["rlr_revision"] != current_revision:
+            return None
+        profile_id = profile_for_event(normalized).profile_id
         project_root = Path(project_dir).resolve()
-        event = _event_for_failure(
-            project_dir=project_root,
-            task_id=task_id,
-            handler_args=handler_args,
-            returncode=returncode,
-            status=status,
-            revision=revision,
-        )
         event_dir = project_root / "08_Audit" / "meta_rlr" / "events"
-        event_path = event_dir / f"{event['event_id']}.json"
-        _write_json_atomic(event_path, event)
+        event_path = event_dir / f"{normalized['event_id']}.json"
+        _write_json_atomic(event_path, normalized)
 
-        # The maintenance process and every verifier/Codex child it launches
-        # inherit the guard. That keeps Phase 3 single-shot: verification of a
-        # repair may observe failures, but it must never recursively wake a
-        # second Meta-RLR turn from inside the first maintenance tree.
+        # Maintenance children inherit the recursion guard. A separately
+        # launched verified RLR process removes it at the activation boundary.
         meta_environment = dict(environment)
         meta_environment[AUTOWAKE_RETRY_GUARD_ENV] = "1"
         command = _meta_command(repo_root=repo_root, event_path=event_path, config=config)
@@ -406,21 +404,24 @@ def maybe_wake_meta_rlr(
             "recovered",
         }:
             return None
+        if payload.get("profile_id") != profile_id:
+            return None
         commit_sha = payload.get("commit_sha")
         if not isinstance(commit_sha, str) or len(commit_sha) != 40:
             return None
         worktree = _resolve_verified_worktree(
             repo_root=repo_root,
             workspace_parent=config.workspace_parent,
-            revision=revision,
-            event=event,
+            revision=current_revision,
+            event=normalized,
             commit_sha=commit_sha,
+            profile_id=profile_id,
         )
         if worktree is None:
             return None
         return RepairHandoff(
             outcome=str(payload["outcome"]),
-            event_id=str(event["event_id"]),
+            event_id=str(normalized["event_id"]),
             event_path=event_path,
             commit_sha=commit_sha,
             worktree_path=worktree,
@@ -428,9 +429,103 @@ def maybe_wake_meta_rlr(
     except (
         AutoWakeConfigError,
         GitWorkspaceError,
+        KeyError,
         OSError,
         RuntimeError,
         ValueError,
         json.JSONDecodeError,
     ):
+        return None
+
+
+def maybe_wake_first_mile_failure(
+    *,
+    project_dir: str | Path,
+    operation: str,
+    failure: Mapping[str, object],
+    command_runner: Callable[..., object] | None = None,
+    environ: MutableMapping[str, str] | None = None,
+    timeout: float = AUTOWAKE_OUTER_TIMEOUT,
+    max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
+) -> RepairHandoff | None:
+    """Wake Meta-RLR only for RLR-owned PROJECT_READY integrity failures."""
+    code = str(failure.get("code") or "")
+    if code not in _REPAIRABLE_FIRST_MILE_CODES:
+        return None
+    environment = os.environ if environ is None else environ
+    if environment.get(AUTOWAKE_RETRY_GUARD_ENV) or not environment.get(AUTOWAKE_CONFIG_ENV):
+        return None
+
+    try:
+        repo_root = _repo_root()
+        revision = _current_revision(repo_root, command_runner)
+        project_root = Path(project_dir).resolve()
+        evidence_refs = []
+        receipt = project_root / "00_Preflight" / "preflight_receipt.json"
+        if receipt.is_file():
+            evidence_refs.append(
+                {"kind": "rlr_artifact", "ref": "00_Preflight/preflight_receipt.json"}
+            )
+        event = observe_contract_failure(
+            component=f"first_mile:{operation}",
+            error_code=code,
+            expected_contract=FIRST_MILE_CONTRACT,
+            rlr_revision=revision,
+            observed_at=_dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat(),
+            evidence_refs=evidence_refs,
+        )
+        return wake_meta_rlr_for_event(
+            project_dir=project_root,
+            event=event,
+            revision=revision,
+            command_runner=command_runner,
+            environ=environment,
+            timeout=timeout,
+            max_output_bytes=max_output_bytes,
+        )
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def maybe_wake_meta_rlr(
+    *,
+    project_dir: str | Path,
+    task_id: str,
+    handler_args: Mapping[str, object],
+    returncode: int,
+    status: Mapping[str, object],
+    command_runner: Callable[..., object] | None = None,
+    environ: MutableMapping[str, str] | None = None,
+    timeout: float = AUTOWAKE_OUTER_TIMEOUT,
+    max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
+) -> RepairHandoff | None:
+    """Run one existing Meta-RLR turn for an already-classified runtime failure."""
+    environment = os.environ if environ is None else environ
+    if environment.get(AUTOWAKE_RETRY_GUARD_ENV):
+        return None
+    if not environment.get(AUTOWAKE_CONFIG_ENV) or not _provider_failure_is_repairable(status):
+        return None
+
+    try:
+        repo_root = _repo_root()
+        revision = _current_revision(repo_root, command_runner)
+        project_root = Path(project_dir).resolve()
+        event = _event_for_failure(
+            project_dir=project_root,
+            task_id=task_id,
+            handler_args=handler_args,
+            returncode=returncode,
+            status=status,
+            revision=revision,
+        )
+        return wake_meta_rlr_for_event(
+            project_dir=project_root,
+            event=event,
+            revision=revision,
+            command_runner=command_runner,
+            environ=environment,
+            timeout=timeout,
+            max_output_bytes=max_output_bytes,
+        )
+    except (OSError, RuntimeError, ValueError):
         return None
