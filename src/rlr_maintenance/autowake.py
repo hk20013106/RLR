@@ -1,6 +1,6 @@
 """Thin bridges from classified RLR failures to the existing Meta-RLR host.
 
-This module owns no scheduler and no repair logic.  Failure-specific callers
+This module owns no scheduler and no repair logic. Failure-specific callers
 normalize authoritative RLR facts into ``RLRMaintenanceEvent/v1`` and reuse one
 common event -> MetaRLRHost -> verified-worktree handoff.
 """
@@ -38,6 +38,7 @@ _REPAIRABLE_FIRST_MILE_CODES = frozenset(
         "PROJECT_READY_RUNTIME_INVALID",
     }
 )
+_UNHANDLED_FIRST_MILE_PREFIX = "FIRST_MILE_UNHANDLED_EXCEPTION:"
 OUTER_SAFETY_MARGIN = 300.0
 # OUTER_SAFETY_MARGIN is outer slack, not a separately consumable inner
 # settlement/orchestration budget. The two known hard inner budgets are the
@@ -216,6 +217,15 @@ def _provider_failure_is_repairable(status: Mapping[str, object]) -> bool:
         return True
     reason = str(status.get("termination_reason") or "")
     return reason in _REPAIRABLE_TERMINATION_REASONS or reason.startswith("launch_failed:")
+
+
+def _first_mile_failure_is_repairable(code: str) -> bool:
+    if code in _REPAIRABLE_FIRST_MILE_CODES:
+        return True
+    if not code.startswith(_UNHANDLED_FIRST_MILE_PREFIX):
+        return False
+    exception_type = code[len(_UNHANDLED_FIRST_MILE_PREFIX):]
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", exception_type))
 
 
 def _failure_evidence_refs(
@@ -448,9 +458,9 @@ def maybe_wake_first_mile_failure(
     timeout: float = AUTOWAKE_OUTER_TIMEOUT,
     max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
 ) -> RepairHandoff | None:
-    """Wake Meta-RLR only for RLR-owned PROJECT_READY integrity failures."""
+    """Wake Meta-RLR only for RLR-owned First-Mile implementation failures."""
     code = str(failure.get("code") or "")
-    if code not in _REPAIRABLE_FIRST_MILE_CODES:
+    if not _first_mile_failure_is_repairable(code):
         return None
     environment = os.environ if environ is None else environ
     if environment.get(AUTOWAKE_RETRY_GUARD_ENV) or not environment.get(AUTOWAKE_CONFIG_ENV):
