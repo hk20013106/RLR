@@ -832,6 +832,14 @@ def _inject_pre_research(prf, pr_cfg, args, node_id):
     warns = []
     fatal_error = None
     digest = _extract_section(full_text, "Runtime digest")
+    # L4B summaries keep the complete E/G/A handle index outside the bounded
+    # runtime digest.  Inject that index alongside the digest so Fisher still
+    # has every local handle available without making the literature gate count
+    # the full registry toward its fixed 1000-token digest budget.
+    handle_index = (
+        _extract_section(full_text, "L4C reference index")
+        if node_id == "L4" else ""
+    )
     archived_only = False
     omitted_reason = None
 
@@ -884,6 +892,12 @@ def _inject_pre_research(prf, pr_cfg, args, node_id):
                 sections.append(f"=== PRE-RESEARCH ({pr_cfg['type']}) [digest] ===")
                 sections.append(digest)
                 injected_text = digest
+                if handle_index:
+                    sections.extend([
+                        "=== L4C reference index (provider handles) ===",
+                        handle_index,
+                    ])
+                    injected_text = f"{digest}\n{handle_index}"
         else:
             if est_full <= budget:
                 sections.append(f"=== PRE-RESEARCH ({pr_cfg['type']}) [fallback: full under budget] ===")
