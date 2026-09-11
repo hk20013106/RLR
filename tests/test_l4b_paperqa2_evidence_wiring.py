@@ -144,6 +144,15 @@ def test_native_l4b_uses_paperqa2_then_independent_jats_verifier(tmp_path, l4_pa
     assert card["paper_id"] == "P_526704b9fe982d2a0cb7"
     assert card["section"] == "Materials and methods"
     assert artifact["evidence_gaps"] == []
+    assert artifact["kind"] == "l4_native_evidence_run"
+    assert artifact["research_phase"] == "l4b_evidence"
+    assert "skill_receipt" not in artifact
+    assert artifact["deterministic_resolution_receipt"]["resolver"] == (
+        "closed-corpus-exact-source-resolver"
+    )
+    assert not (
+        tmp_path / "02_Agent_Notes" / "_pre_research" / "L4_research.md"
+    ).exists()
     assert bundle.audit_bundle(l4p, dr, tmp_path, "C1", artifact) == (True, "")
 
 

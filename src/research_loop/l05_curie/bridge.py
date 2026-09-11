@@ -1,8 +1,8 @@
-"""Compatibility bridge from the existing L1 Deep Research store into L0.5.
+"""Compatibility bridge from the historical L1 store into L0.5.
 
-The existing Academic Research runtime remains an acquisition backend.  Its
-validated run is snapshotted into the new immutable L0.5 EvidencePack before
-Einstein is allowed to consume literature evidence.
+Native L0.5 owns acquisition through the Curie multisource/PaperQA2/verifier
+pipeline. This module remains only for historical bridge callers that need to
+snapshot a validated legacy run into an immutable L0.5 EvidencePack.
 """
 from __future__ import annotations
 

@@ -1139,9 +1139,12 @@ def cmd_preflight(args):
         )
         created.append(runtime_file.name)
         if runtime_config["backend"] == "claude":
-            print("NOTE: set plugin_dir in "
-                  f"{runtime_file.name} to the academic-research-skills plugin path; "
-                  "deep-research-run stays blocked until it is set.", file=sys.stderr)
+            print(
+                "NOTE: native Curie stages use the generic Claude structured "
+                "provider boundary. The optional plugin_dir field is only for "
+                "historical Deep Research compatibility runs.",
+                file=sys.stderr,
+            )
     for fname in PREFLIGHT_FILES:
         target = pf / fname
         if target.exists() and not args.force:

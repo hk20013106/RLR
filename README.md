@@ -48,7 +48,7 @@ This is the shortest way to understand who does what.
 | **Fisher** | L4 (cognitive L4C inside staged L4) | Designs the analysis/experimental strategy using frozen method evidence. |
 | **Tukey** | L5, L8 in native v2.1 | Challenges method/QC assumptions before execution and audits reproducibility/results after execution. |
 | **Turing** | L7 | The **only** persona allowed to execute code; runs approved scripts only against binding-authorized data in the controlled workspace. |
-| **Curie** | L8.5; also the evidence-research persona before L1/L4 | Acquires/locates literature evidence and verifies actual results against published literature. |
+| **Curie** | Native L0.5/L8.5 and native L4 evidence ownership | Acquires/locates canonical literature evidence and verifies actual results against published literature; historical profiles retain the compatibility path. |
 | **Darwin** | L9b | Produces bounded biological interpretation after receiving the authorized finalized L9a snapshot. |
 | **Jobs** | L10a | Assesses scientific/practical value and frames manuscript direction without changing the formal decision. |
 
@@ -63,7 +63,7 @@ The table below is the reader-facing description of the executable topology in `
 | Node | Persona | What it reads / depends on | What it actually does | Formal boundary |
 |---|---|---|---|---|
 | **L0** | Linnaeus | Candidate frontmatter, authoritative `l0_input`, runtime/readiness state; for continuations, prior round manifest + selected inherited refs | Runs **pre-flight + state restore + current-round data binding**. Verifies current local files, restores and hash-verifies prior evidence for continuation rounds, verifies selected `inherited_inputs`, and freezes exactly one `CurrentRoundDataBinding/v1`. It does **not** interpret data. | Fail-closed on blocking readiness, contract, restore, selector, or hash errors; successful L0 moves the round from `NEW` toward hypothesis generation. |
-| **L1** | Einstein | Candidate question/frontmatter + L0 + verified pre-research evidence | Generates testable hypotheses. Each proposal must be operationalizable and include at least one predeclared falsification criterion. | Produces the hypothesis delta; does not design methods or execute code. |
+| **L1** | Einstein | Candidate question/frontmatter + L0 + native frozen L0.5 EvidencePack (historical profiles: verified pre-research evidence) | Generates testable hypotheses. Each proposal must be operationalizable and include at least one predeclared falsification criterion. | Produces the hypothesis delta; does not design methods or execute code. |
 | **L2** | Feynman | L1 hypotheses + candidate anchor | Blindly attacks every L1 hypothesis: confounders, logical weaknesses, diagnostic tests, severity, and exhaustive verdicts are bound to hypothesis IDs. | Critique only; no status change and no execution. |
 | **L3** | Oppenheimer | L1 + L2 | Triages the debate: selects hypotheses worth testing and rejects weak ones with explicit reasons. | `triage-idea` produces the formal hypothesis selection. Optional ranking may run afterward as advisory-only shadow output. |
 | **L4** | Fisher | Selected hypotheses + L1/L2/L3 + method evidence | Formal method-planning node. Internally executes the auditable **L4A → L4B → L4C → L4.5** pipeline: discovery, evidence construction, Fisher method design, deterministic commit. | Produces `L4_fisher` / `METHOD_PROPOSED`; no code execution. |
@@ -133,7 +133,7 @@ L5 Tukey
 ```
 
 - **L4A — discovery only:** query planning, metadata discovery, identifier-first deduplication, relevance selection, full-text availability. It cannot fabricate method anchors.
-- **L4B — evidence construction:** consumes the frozen L4A selection and uses the existing Academic Research/RLR evidence stack for full-text retrieval, Methods extraction, source-payload retention, anchor validation, and method candidates.
+- **L4B — evidence construction:** consumes the frozen L4A selection and uses the existing Curie multisource/PaperQA2/verifier stack for full-text retrieval, Methods extraction, source-payload retention, anchor validation, and method evidence.
 - **L4C — Fisher cognition:** designs the actual method/analysis plan.
 - **L4.5 — deterministic commit:** revalidates the exact L4A manifest, L4B evidence, and L4C delta hash before persisting the formal method projection.
 
@@ -143,9 +143,9 @@ These are internal responsibilities, **not four new DAG nodes**.
 
 ## Literature evidence
 
-Before L1, L4, and L8.5, RLR uses verifiable Academic Research evidence rather than trusting handwritten summaries.
+Native L0.5/L4/L8.5 stages use verifiable Curie-owned evidence rather than trusting handwritten summaries. Historical profiles retain their Deep Research compatibility path.
 
-- **L1:** located Results/Discussion/Conclusion evidence for hypothesis generation.
+- **L1:** native frozen L0.5 EvidencePack with located Results/Discussion/Conclusion evidence (historical profiles: compatible pre-research evidence).
 - **L4:** frozen metadata discovery plus primary-study Methods and review-search evidence.
 - **L8.5:** result-driven verification against located published evidence.
 
@@ -162,7 +162,7 @@ Current L0 separates **blocking dependencies** from **readiness-only probes**.
 Blocking framework-owned checks correspond to real current consumers, including:
 
 - core Python/packages and filesystem requirements;
-- Academic Research runtime;
+- generic structured-provider runtime for native model cognition;
 - activated hypothesis ledger;
 - evidence-store/project evidence availability;
 - Obsidian projection requirements.
@@ -255,7 +255,7 @@ Common runtime commands:
 | `preflight` | Run L0 pre-flight/readiness checks |
 | `check-deps` | Standalone dependency/readiness report |
 | `next-step` | Return the next DAG dispatch packet |
-| `deep-research-run` | Run configured Academic Research and persist a verified evidence pack |
+| `deep-research-run` | Run historical Deep Research or a native canonical Curie literature stage |
 | `audit-literature-evidence` / `literature-report` | Audit / render source-located literature evidence |
 | `assemble-context` | Build isolated Path-B context for one node |
 | `emit-delta` | Validate and persist a node delta |
@@ -318,7 +318,7 @@ research_loop/
 │   ├── l0_intake.py                  # request/data normalization
 │   ├── l0_state.py                   # previous-round restore/state binding
 │   ├── l0_data.py                    # CurrentRoundDataBinding/v1
-│   ├── deep_research.py              # Academic Research receipts/evidence packs
+│   ├── deep_research.py              # RuntimeSpec + historical evidence compatibility
 │   ├── ranking.py                    # advisory shadow ranking
 │   └── providers/                    # main-agent/command/headless/manual providers
 ├── src/rlr_maintenance/              # Meta-RLR maintenance boundary; outside DAG

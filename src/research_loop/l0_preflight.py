@@ -19,7 +19,7 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from research_loop import deep_research
+from research_loop import deep_research, structured_execution
 from research_loop.compatibility import get_profile
 from research_loop.hypothesis_ledger import HypothesisLedger, LedgerError, binding_path
 
@@ -100,21 +100,35 @@ def _filesystem_probe(project_dir: Path) -> ProbeResult:
     return _pass("core.filesystem", detail, "project artifacts and audit receipts")
 
 
-def _academic_research_probe(project_dir: Path) -> ProbeResult:
+def _structured_execution_probe(project_dir: Path) -> ProbeResult:
+    """Check the generic model boundary used by native planner stages.
+
+    Literature discovery and evidence verification are separate Curie-owned
+    components. PROJECT_READY must not be coupled to an optional historical
+    academic-research skill/plugin installation.
+    """
     try:
         spec, _version = deep_research.load_runtime_spec(project_dir)
-        ready, reason = deep_research.runtime_ready(spec)
+        ready, reason = structured_execution.runtime_ready(spec)
     except deep_research.DeepResearchError as exc:
         ready, reason = False, str(exc)
     if not ready:
         return _fail(
-            "research.academic_research", "L0_RESEARCH_ARS_UNAVAILABLE", reason,
-            "L1/L4/L8.5 research reasoning",
+            "research.structured_execution",
+            "L0_RESEARCH_STRUCTURED_EXECUTION_UNAVAILABLE",
+            reason,
+            "native L4 planning/adjudication and configured provider boundary",
         )
     return _pass(
-        "research.academic_research", "Academic Research runtime ready",
-        "L1/L4/L8.5 research reasoning",
+        "research.structured_execution",
+        "generic structured provider runtime ready",
+        "native L4 planning/adjudication and configured provider boundary",
     )
+
+
+def _academic_research_probe(project_dir: Path) -> ProbeResult:
+    """Historical function name retained as a test/plugin compatibility shim."""
+    return _structured_execution_probe(project_dir)
 
 
 def _runtime_binding_report(project_dir: Path, backend: str | None) -> dict:
@@ -514,12 +528,24 @@ def build_project_ready_metadata(
                       if item.enforcement == ENFORCEMENT_READINESS_ONLY]
     blocking_failed = [item for item in blocking if item["status"] != "PASS"]
     formal_checks = list(runtime_report.get("checks") or [])
-    academic = next((item for item in results
-                     if item.component == "research.academic_research"), None)
+    runtime_probe = next(
+        (
+            item for item in results
+            if item.component in {
+                "research.structured_execution",
+                "research.academic_research",
+            }
+        ),
+        None,
+    )
     formal_checks.append({
-        "name": "runtime_ready",
-        "status": "PASS" if academic and academic.status == "PASS" else "FAIL",
-        "detail": (academic.detail if academic else "academic runtime probe missing"),
+        "name": "structured_runtime_ready",
+        "status": "PASS" if runtime_probe and runtime_probe.status == "PASS" else "FAIL",
+        "detail": (
+            runtime_probe.detail
+            if runtime_probe
+            else "structured execution runtime probe missing"
+        ),
     })
     formal_status = "PASS" if all(
         item["status"] == "PASS" for item in formal_checks

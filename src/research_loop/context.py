@@ -22,7 +22,11 @@ from research_loop.common import (
     PERSONA_TITLE, _now, _stamp, _input_alias, _everos_scopes_for,
 )
 from research_loop.delta import _delta_for_candidate, artifact_for_node
-from research_loop.compatibility import PROFILE_V20, get_profile
+from research_loop.compatibility import (
+    PROFILE_V20,
+    PROFILE_V21_CATALOG_1,
+    get_profile,
+)
 from research_loop.persona_catalog import resolve_persona_template, PersonaCatalogError
 from research_loop.hypothesis_contracts import provider_schema_for_profile
 from research_loop.hypothesis_ledger import (
@@ -387,6 +391,108 @@ def cmd_assemble_context(args):
                 sections.append(f"=== DELTA: {inp} (not yet emitted) ===")
                 sections.append("")
 
+    # Native L4 receives the immutable canonical Curie evidence bundle when the
+    # orchestrator has just created one. This is a bounded method/evidence view,
+    # not a legacy pre-research artifact or a second retrieval authority.
+    canonical_l4_meta = None
+    if node_id == "L4" and profile_id == PROFILE_V21_CATALOG_1:
+        native_run_id = str(getattr(args, "evidence_run_id", None) or "").strip()
+        if native_run_id:
+            try:
+                native_run = deep_research._artifact(
+                    project_dir, args.cand_id, "L4", run_id=native_run_id
+                )
+                if not isinstance(native_run, dict):
+                    raise deep_research.DeepResearchError(
+                        f"canonical L4 evidence run is missing: {native_run_id}"
+                    )
+                ok, reason = deep_research.audit_evidence_pack(
+                    project_dir, args.cand_id, "L4", run_id=native_run_id
+                )
+                if not ok:
+                    raise deep_research.DeepResearchError(
+                        f"canonical L4 evidence run failed audit: {reason}"
+                    )
+                run_value = str(native_run.get("path") or "").strip()
+                run_path = (Path(project_dir) / run_value).resolve()
+                run_path.relative_to(Path(project_dir).resolve())
+                if not run_path.is_file():
+                    raise deep_research.DeepResearchError(
+                        f"canonical L4 evidence artifact is missing: {run_value}"
+                    )
+                run_sha256 = _sha256(run_path)
+            except (deep_research.DeepResearchError, OSError, ValueError) as exc:
+                print(
+                    f"ERROR: native L4 canonical evidence run is invalid: {exc}",
+                    file=sys.stderr,
+                )
+                return 3
+            canonical_l4_meta = {
+                "run_id": str(native_run["run_id"]),
+                "run_sha256": run_sha256,
+                "l4a_run_id": str(native_run.get("l4a_run_id") or ""),
+                "l4a_manifest_sha256": str(
+                    native_run.get("l4a_manifest_sha256") or ""
+                ),
+                "evidence_card_count": len(native_run.get("evidence_cards") or []),
+                "evidence_gap_count": len(native_run.get("evidence_gaps") or []),
+            }
+            sections.append("=== NATIVE L4 CANONICAL EVIDENCE ===")
+            sections.append(canonical_json({
+                "run_id": native_run["run_id"],
+                "run_sha256": run_sha256,
+                "l4a_run_id": native_run.get("l4a_run_id"),
+                "l4a_manifest_sha256": native_run.get("l4a_manifest_sha256"),
+                "method_inventory": native_run.get("method_inventory") or [],
+                "papers": native_run.get("papers") or [],
+                "evidence_cards": native_run.get("evidence_cards") or [],
+                "evidence_gaps": native_run.get("evidence_gaps") or [],
+                "full_text_retrieval": native_run.get("full_text_retrieval") or [],
+            }))
+            sections.append("")
+
+    # Native L8.5 receives the immutable canonical Curie verification run when
+    # the orchestrator has just created one. This is a bounded evidence view,
+    # not a legacy pre-research artifact or a second retrieval authority.
+    canonical_l85_meta = None
+    if node_id == "L8.5" and profile_id == PROFILE_V21_CATALOG_1:
+        native_run_id = str(getattr(args, "evidence_run_id", None) or "").strip()
+        if native_run_id:
+            from research_loop import l85_literature_verification
+
+            try:
+                native_run = l85_literature_verification.load_run_manifest(
+                    project_dir, args.cand_id, native_run_id
+                )
+            except l85_literature_verification.L85VerificationError as exc:
+                print(
+                    f"ERROR: native L8.5 canonical literature run is invalid: {exc}",
+                    file=sys.stderr,
+                )
+                return 3
+            canonical_l85_meta = {
+                "run_id": str(native_run["run_id"]),
+                "run_sha256": str(native_run["run_sha256"]),
+                "finding_count": len(native_run.get("findings") or []),
+                "located_evidence_ids": [
+                    str(item.get("evidence_id") or "")
+                    for item in native_run.get("located_evidence") or []
+                    if isinstance(item, dict) and item.get("evidence_id")
+                ],
+            }
+            sections.append("=== NATIVE L8.5 CANONICAL VERIFICATION ===")
+            sections.append(canonical_json({
+                "run_id": native_run["run_id"],
+                "run_sha256": native_run["run_sha256"],
+                "findings": native_run.get("findings") or [],
+                "verdicts": native_run.get("verdicts") or [],
+                "located_evidence": native_run.get("located_evidence") or [],
+                "semantic_verifications": native_run.get(
+                    "semantic_verifications"
+                ) or [],
+            }))
+            sections.append("")
+
     # L10 receives immutable source-located extracts rather than a database path.
     evidence_meta = []
     if node_id in {"L10a", "L10b"}:
@@ -400,12 +506,16 @@ def cmd_assemble_context(args):
                              "evidence_ids": deep_research.evidence_ids(
                                  project_dir, args.cand_id, evidence_nodes)}
 
-    # --- V0.7 deep-research gate + pre-research injection --------------------
-    # L1/L4/L8.5 are mandatory Deep Research stages. assemble-context fails
-    # closed unless their note and persisted evidence pack validate; L7 stays
-    # a separate soft code-search pre-step.
+    # --- Profile-owned pre-research compatibility surface -------------------
+    # The legacy map is not an authority for native literature nodes. Native
+    # L0.5/L1/L4/L8.5 have explicit Curie owners; only a topology-declared
+    # compatibility pre-step (currently native L7 code search or a historical
+    # profile's L1/L4/L8.5 entry) may consult the old map.
     pre_research_meta = None
-    pr_cfg = PRE_RESEARCH_MAP.get(node_id)
+    declared_pre_research = str(node_info.get("pre_research") or "").strip()
+    pr_cfg = PRE_RESEARCH_MAP.get(node_id) if declared_pre_research else None
+    if pr_cfg and str(pr_cfg.get("type") or "") != declared_pre_research:
+        pr_cfg = None
     if pr_cfg:
         prf = _pre_research_file(project_dir, node_id)
         is_lit = pr_cfg.get("type") in _LIT_PRE_RESEARCH_TYPES
@@ -703,6 +813,8 @@ def cmd_assemble_context(args):
                       if (is_exec and workspaces) else None),
         "pre_research": pre_research_meta,
         "deep_research_evidence": evidence_meta,
+        "canonical_l4_evidence": canonical_l4_meta,
+        "canonical_l85_literature": canonical_l85_meta,
         "research_seed": (
             research_seed.manifest_entry(l1_research_seed)
             if l1_research_seed is not None else None

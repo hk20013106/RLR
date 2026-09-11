@@ -1,8 +1,11 @@
-"""Component-level L4 method evidence extension.
+"""Component-level L4 method evidence extension for historical profiles.
 
 The extension is installed by :mod:`research_loop.__init__` after the base
 ``deep_research`` module loads.  Keeping the method-catalog responsibility in a
 focused module avoids further enlarging the runtime/provider implementation.
+Native catalog runs use the Curie-owned L4 inventory/evidence pipeline; the
+skill-shaped render/receipt behavior below remains an explicit compatibility
+surface for older projects.
 """
 from __future__ import annotations
 
@@ -340,11 +343,11 @@ def install(deep_research_module) -> None:
         return _extend_l4_schema(schema) if node == "L4" else schema
 
     def build_invocation(spec, node, question, claim, work_dir, result_context="",
-                         user_sources=None):
+                         user_sources=None, **kwargs):
         command, prompt = original_build_invocation(
-            spec, node, question, claim, work_dir, result_context
+            spec, node, question, claim, work_dir, result_context, **kwargs
         )
-        if node == "L4":
+        if node == "L4" and kwargs.get("execution_kind", "legacy_research") == "legacy_research":
             prompt += """
 Identify the critical method components implied by this study. For each component,
 construct comparable method candidates with purpose, applicable inputs,

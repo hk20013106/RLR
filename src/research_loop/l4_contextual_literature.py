@@ -816,7 +816,7 @@ def _run_method_support_adjudication(
             "direct_count": 0,
             "shortlisted_pair_count": 0,
             "adjudication_call_count": 0,
-            "skill_receipts": [],
+            "model_execution_receipts": [],
         }
 
     batches = _method_support_batches(methods, selected_records, pairs)
@@ -839,19 +839,15 @@ def _run_method_support_adjudication(
             json.dumps(_method_support_schema(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        command, _ = dr.build_invocation(
+        command, _ = inventory_module._structured_model_invocation(
+            dr,
             spec,
             "L4",
             "L4A metadata-only method-support adjudication",
             "",
             method_work,
+            schema_path,
         )
-        command = [
-            str(schema_path)
-            if value == str(method_work / "deep_research_output.schema.json")
-            else value
-            for value in command
-        ]
         command = inventory_module._offline_provider_command(
             command, spec, method_work
         )
@@ -869,14 +865,14 @@ def _run_method_support_adjudication(
             timeout=spec.timeout,
             label=f"L4A method-support adjudication CLI ({method_id})",
         )
-        receipt = dr.skill_receipt(
-            spec.backend,
+        receipt = inventory_module._structured_model_receipt(
+            dr,
+            spec,
             command,
             prompt,
             skill_version,
             exit_code=completed.returncode,
             stdout_hash=inventory_module._sha(completed.stdout),
-            model=spec.model,
         )
         receipts.append(receipt)
         if completed.returncode != 0:
@@ -905,7 +901,7 @@ def _run_method_support_adjudication(
                 str(pair["paper_id"]).strip() for pair in method_pairs
             ],
             "decisions": bound_decisions,
-            "skill_receipt": receipt,
+            "model_execution_receipt": receipt,
         })
         decisions.extend(bound_decisions)
 
@@ -919,7 +915,7 @@ def _run_method_support_adjudication(
         ),
         "shortlisted_pair_count": len(pairs),
         "adjudication_call_count": len(method_batches),
-        "skill_receipts": receipts,
+        "model_execution_receipts": receipts,
     }
 
 
@@ -1263,13 +1259,8 @@ def install(l4_inventory_module, deep_research_module) -> None:
 
         work = Path(work_dir)
         work.mkdir(parents=True, exist_ok=True)
-        legacy_schema_path = work / "deep_research_output.schema.json"
         inventory_schema_path = work / "l4a_method_inventory_output.schema.json"
         contextual_schema_path = work / "l4a_contextual_query_plan_output.schema.json"
-        legacy_schema_path.write_text(
-            json.dumps(dr._runtime_schema("L4"), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
         inventory_schema_path.write_text(
             json.dumps(l4_inventory_module.discovery_schema(l4p), ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -1279,11 +1270,15 @@ def install(l4_inventory_module, deep_research_module) -> None:
             encoding="utf-8",
         )
 
-        command, _ = dr.build_invocation(spec, "L4", question, claim, work)
-        command = [
-            str(inventory_schema_path) if value == str(legacy_schema_path) else value
-            for value in command
-        ]
+        command, _ = l4_inventory_module._structured_model_invocation(
+            dr,
+            spec,
+            "L4",
+            question,
+            claim,
+            work,
+            inventory_schema_path,
+        )
         command = l4_inventory_module._offline_provider_command(command, spec, work)
         prompt = l4_inventory_module.build_prompt(question, claim, known_sources)
         command[0] = dr.resolve_subprocess_executable(command[0])
@@ -1294,14 +1289,14 @@ def install(l4_inventory_module, deep_research_module) -> None:
             timeout=spec.timeout,
             label="L4A method-inventory CLI",
         )
-        receipt = dr.skill_receipt(
-            spec.backend,
+        receipt = l4_inventory_module._structured_model_receipt(
+            dr,
+            spec,
             command,
             prompt,
             skill_version,
             exit_code=completed.returncode,
             stdout_hash=l4_inventory_module._sha(completed.stdout),
-            model=spec.model,
         )
         pack = known_sources["evidence_pack"]
         receipt["known_source_catalog"] = {
@@ -1342,11 +1337,15 @@ def install(l4_inventory_module, deep_research_module) -> None:
         enriched_inventory = copy.deepcopy(registry_inventory)
         contextual_queries: list[dict] = []
         if unresolved:
-            search_command, _ = dr.build_invocation(spec, "L4", question, claim, work)
-            search_command = [
-                str(contextual_schema_path) if value == str(legacy_schema_path) else value
-                for value in search_command
-            ]
+            search_command, _ = l4_inventory_module._structured_model_invocation(
+                dr,
+                spec,
+                "L4",
+                question,
+                claim,
+                work,
+                contextual_schema_path,
+            )
             search_command = l4_inventory_module._offline_provider_command(
                 search_command, spec, work
             )
@@ -1363,14 +1362,14 @@ def install(l4_inventory_module, deep_research_module) -> None:
                 timeout=spec.timeout,
                 label="L4A contextual query-planner CLI",
             )
-            search_receipt = dr.skill_receipt(
-                spec.backend,
+            search_receipt = l4_inventory_module._structured_model_receipt(
+                dr,
+                spec,
                 search_command,
                 search_prompt,
                 skill_version,
                 exit_code=search_completed.returncode,
                 stdout_hash=l4_inventory_module._sha(search_completed.stdout),
-                model=spec.model,
             )
             if search_completed.returncode != 0:
                 raise dr.DeepResearchError(
@@ -1484,10 +1483,7 @@ def install(l4_inventory_module, deep_research_module) -> None:
                 "selection": selection,
                 "method_support_adjudication": adjudication,
                 "selected_asset_ids": selected_asset_ids,
-                "planner_skill_receipt": search_receipt,
-                # Keep the historical key for receipt readers; its contents are
-                # now explicitly a query-planner invocation, never paper output.
-                "skill_receipt": search_receipt,
+                "planner_execution_receipt": search_receipt,
             }
             receipt["contextual_literature_search"] = contextual_receipt
 

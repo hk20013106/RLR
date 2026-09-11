@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
-"""PR2: L1/L4 pre-research gate enforces PR1 provenance (fail closed rc=3).
+"""PR2: historical L1 pre-research provenance remains fail-closed.
 
-For literature nodes the artifact must carry, on top of the V0.5 checks
+For historical literature nodes the artifact must carry, on top of the V0.5 checks
 (artifact present, non-empty, not NOT YET RUN, `## Runtime digest` with a
 DOI/PMID/URL): a non-empty `## Query log`, a non-empty `## Tool receipt`, and an
 explicit `## Source count` >= 1.
+
+Native L4 does not consume this legacy digest path; its evidence binding is
+covered by the native L4 evidence tests.
 """
 import sys
 import subprocess
@@ -124,24 +127,18 @@ def test_not_yet_run_still_fails():
     _fail("=== PRE-RESEARCH (deep_research): NOT YET RUN ===\n", "not yet run")
 
 
-def test_l4_digest_near_781_tokens_passes_under_literature_budget():
+def test_native_l4_does_not_apply_legacy_digest_budget():
     artifact = _art(
         _digest_with_estimated_tokens(781), _QLOG, _TREC, _SCOUNT)
     r = _assemble_node(_mkproj(), "L4", artifact)
-    assert r.returncode == 0, f"expected rc=0, got {r.returncode}: {r.stderr}"
+    assert r.returncode == 0, f"native L4 should ignore legacy digest, got {r.returncode}: {r.stderr}"
 
 
-def test_digest_over_1000_tokens_fails_with_actionable_compression_message():
+def test_native_l4_ignores_oversized_legacy_digest():
     artifact = _art(
         _digest_with_estimated_tokens(1001), _QLOG, _TREC, _SCOUNT)
     r = _assemble_node(_mkproj(), "L4", artifact)
-    assert r.returncode == 3, f"expected rc=3, got {r.returncode}: {r.stderr}"
-    message = r.stderr.lower()
-    assert "1001" in message and "1000" in message
-    assert "caveman" in message
-    assert "provenance-preserving" in message
-    for required in ("query log", "tool receipt", "source count", "doi/pmid/url"):
-        assert required in message
+    assert r.returncode == 0, f"native L4 should ignore legacy digest, got {r.returncode}: {r.stderr}"
 
 
 def test_missing_identifier_still_fails():

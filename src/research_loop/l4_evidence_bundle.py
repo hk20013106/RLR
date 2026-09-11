@@ -15,12 +15,22 @@ from typing import Any
 
 from research_loop import l4_closed_corpus as cc
 from research_loop import l4_inventory
+from research_loop.compatibility import PROFILE_V21_CATALOG_1
 from research_loop.l05_curie import europepmc
 
 
 EVIDENCE_BUNDLE_SCHEMA = "L4BEvidenceBundle/v2"
 EVIDENCE_RECEIPT_SCHEMA = "EvidenceRunReceipt/v1.1"
 DETERMINISTIC_RECEIPT_SCHEMA = "DeterministicResolverReceipt/v2"
+
+
+def _resolution_receipt(artifact: dict) -> dict:
+    """Return the deterministic L4B receipt across native and legacy names."""
+    return (
+        artifact.get("deterministic_resolution_receipt")
+        or artifact.get("skill_receipt")
+        or {}
+    )
 
 
 def _canonical_json(value: Any) -> str:
@@ -262,7 +272,7 @@ def _render_summary(artifact: dict) -> str:
     papers = artifact.get("papers") or []
     cards = artifact.get("evidence_cards") or []
     gaps = artifact.get("evidence_gaps") or []
-    receipt = artifact.get("skill_receipt") or {}
+    receipt = _resolution_receipt(artifact)
 
     identifiers = []
     for paper in papers:
@@ -327,8 +337,8 @@ def _render_summary(artifact: dict) -> str:
         "## Tool receipt",
         (
             f"- {receipt.get('backend') or 'deterministic'} / "
-            f"{receipt.get('skill') or 'closed-corpus-exact-source-resolver'} "
-            f"{receipt.get('skill_version') or ''}; "
+            f"{receipt.get('resolver') or receipt.get('skill') or 'deterministic-source-resolver'} "
+            f"{receipt.get('resolver_version') or receipt.get('skill_version') or ''}; "
             f"command_hash={receipt.get('command_hash') or ''}; "
             f"prompt_hash={receipt.get('prompt_hash') or ''}"
         ),
@@ -675,11 +685,11 @@ def run_l4b_evidence(
         "gaps": evidence_gaps,
         "retrieval": retrieval_refs,
     }))
-    skill_receipt = {
+    deterministic_receipt = {
         "schema_version": DETERMINISTIC_RECEIPT_SCHEMA,
         "backend": "deterministic",
-        "skill": "closed-corpus-exact-source-resolver",
-        "skill_version": "2",
+        "resolver": "closed-corpus-exact-source-resolver",
+        "resolver_version": "2",
         "command_hash": _sha(_canonical_json([item.get("contract") for item in results])),
         "prompt_hash": str(manifest.get("manifest_sha256") or ""),
         "stdout_hash": output_hash,
@@ -691,12 +701,13 @@ def run_l4b_evidence(
         for item in manifest.get("queries") or []
         if str(item.get("query") or "").strip()
     ] or ["deterministic exact-source resolution"]
+    native_catalog = str(profile_id or "") == PROFILE_V21_CATALOG_1
     artifact = {
         "schema_version": dr.SCHEMA_VERSION,
         "evidence_receipt_schema": EVIDENCE_RECEIPT_SCHEMA,
         "evidence_bundle_schema": EVIDENCE_BUNDLE_SCHEMA,
-        "kind": "deep_research_run",
-        "research_phase": "pre_research",
+        "kind": "l4_native_evidence_run" if native_catalog else "deep_research_run",
+        "research_phase": "l4b_evidence" if native_catalog else "pre_research",
         "research_persona": research_persona,
         "run_id": run_id,
         "project_id": project_id,
@@ -707,7 +718,6 @@ def run_l4b_evidence(
         "node": "L4",
         "created_at": dr._now(),
         "queries": queries,
-        "skill_receipt": skill_receipt,
         "papers": paper_refs,
         "rejected_papers": [],
         "review_search": {
@@ -726,6 +736,17 @@ def run_l4b_evidence(
         "l4a_manifest_sha256": manifest["manifest_sha256"],
         "l4a_run_id": manifest["run_id"],
     }
+    if native_catalog:
+        artifact["deterministic_resolution_receipt"] = deterministic_receipt
+    else:
+        # Historical v2.0/v2.1 projects retain the old field name and summary
+        # semantics for compatibility. Native catalog runs never expose a
+        # skill-shaped receipt.
+        artifact["skill_receipt"] = {
+            **deterministic_receipt,
+            "skill": "closed-corpus-exact-source-resolver",
+            "skill_version": "2",
+        }
     run_path = runs_dir / f"{run_id}.json"
     summary_path = runs_dir / f"{run_id}.md"
     artifact["path"] = run_path.relative_to(project).as_posix()
@@ -736,9 +757,10 @@ def run_l4b_evidence(
     )
     summary = _render_summary(artifact)
     summary_path.write_text(summary, encoding="utf-8")
-    pre_research = project / "02_Agent_Notes" / "_pre_research" / "L4_research.md"
-    pre_research.parent.mkdir(parents=True, exist_ok=True)
-    pre_research.write_text(summary, encoding="utf-8")
+    if not native_catalog:
+        pre_research = project / "02_Agent_Notes" / "_pre_research" / "L4_research.md"
+        pre_research.parent.mkdir(parents=True, exist_ok=True)
+        pre_research.write_text(summary, encoding="utf-8")
     l4p._persist_l4b_linkage(project, artifact)
     return artifact
 
@@ -882,7 +904,7 @@ def audit_bundle(l4p, dr, project_dir, candidate_id, artifact: dict) -> tuple[bo
         return False, "L4B evidence candidate mismatch"
     if artifact.get("method_components") or artifact.get("method_candidates"):
         return False, "L4B v2 must not define method components or candidates"
-    receipt = artifact.get("skill_receipt") or {}
+    receipt = _resolution_receipt(artifact)
     if receipt.get("backend") != "deterministic" or receipt.get("exit_code") != 0:
         return False, "L4B deterministic resolver receipt is invalid"
 

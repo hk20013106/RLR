@@ -19,8 +19,9 @@ from pathlib import Path
 
 from research_loop import deep_research, l0_contract, l0_data, research_seed
 import research_loop.l05_curie as curie
-from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
+from research_loop.compatibility import DEFAULT_NATIVE_PROFILE, PROFILE_V20
 from research_loop.hypothesis_ledger import HypothesisLedger
+from research_loop.preresearch import PRE_RESEARCH_MAP
 from research_loop.yamlio import _replace_field
 
 HERE = Path(__file__).resolve().parent
@@ -33,7 +34,7 @@ def _run(*args):
                           encoding="utf-8", errors="replace")
 
 
-def _mkproj():
+def _mkproj(profile_id=DEFAULT_NATIVE_PROFILE):
     d = tempfile.mkdtemp(prefix="rlr_pr3_")
     project = Path(d)
     (project / "00_Project_Index.md").write_text(
@@ -72,10 +73,48 @@ def _mkproj():
     )
     _replace_field(candidate, "input_contract_hash", contract_hash)
     HypothesisLedger(os.environ["RLR_HYPOTHESIS_STORE"]).bind_project(
-        project, profile_id=DEFAULT_NATIVE_PROFILE
+        project, profile_id=profile_id
     )
     l0_data.write_current_round_data_binding(project, "C1")
     return d
+
+
+def _write_synthetic_legacy_acquisition(project_dir):
+    """Create the historical acquisition fixture without native pre-research dispatch."""
+    project = Path(project_dir)
+    seed = research_seed.load_l1_research_seed(project, "C1")
+    payload = {
+        "schema_version": deep_research.SCHEMA_VERSION,
+        "queries": list(PRE_RESEARCH_MAP["L1"]["queries"])
+        or [seed["scientific_question"], seed["hypothesis_seed"]],
+        "papers": [{
+            "doi": "10.1000/abc123",
+            "title": "Synthetic Smith 2020",
+            "source_database": "synthetic-test",
+            "metadata": {},
+            "source_metadata_response": {"fixture": "write-synthetic"},
+            "open_access": False,
+            "extracts": [
+                {"section": "Results", "text": "Synthetic result.", "locator": "Results"},
+                {"section": "Discussion", "text": "Synthetic discussion.", "locator": "Discussion"},
+                {"section": "Conclusion", "text": "Synthetic conclusion.", "locator": "Conclusion"},
+                {"section": "Methods", "text": "Synthetic method.", "locator": "Methods"},
+            ],
+        }],
+    }
+    return deep_research.persist_run(
+        project,
+        "C1",
+        "L1",
+        payload,
+        deep_research.skill_receipt(
+            "codex", ["synthetic-test"], "synthetic-test", "test-only"
+        ),
+        project_id=project.name,
+        round_id=str(seed["round_id"]),
+        profile_id=DEFAULT_NATIVE_PROFILE,
+        research_persona="Curie",
+    )
 
 
 def _bind_synthetic_native_l1(project_dir):
@@ -100,7 +139,7 @@ def _bind_synthetic_native_l1(project_dir):
 # 1. Running pre-research node L1 creates a placeholder that contains sections
 #    and fails closed with rc=3.
 def test_l1_placeholder_fails_gate():
-    d = _mkproj()
+    d = _mkproj(profile_id=PROFILE_V20)
     # Execute pre-research to write placeholder
     r = _run("pre-research", d, "C1", "--node", "L1")
     assert r.returncode == 0, f"expected rc=0 for pre-research, got {r.returncode}: {r.stderr}"
@@ -114,16 +153,16 @@ def test_l1_placeholder_fails_gate():
     assert "## Source count" in text
     assert "NOT YET RUN" in text
 
-    # Native L1 has no Curie binding, so context must fail closed with rc=3.
+    # Historical L1 still uses the legacy placeholder gate.
     r_assem = _run("assemble-context", d, "C1", "--node", "L1")
     assert r_assem.returncode == 3, f"expected rc=3, got {r_assem.returncode}: {r_assem.stderr}"
-    assert "native l1 evidence binding" in r_assem.stderr.lower()
+    assert "not yet run" in r_assem.stderr.lower() or "gate" in r_assem.stderr.lower()
 
 
-# 2. Running pre-research node L4 creates a placeholder that contains sections
-#    and fails closed with rc=3.
-def test_l4_placeholder_fails_gate():
-    d = _mkproj()
+# 2. L4 has no historical pre-research context gate; the compatibility command
+#    may still render its prompt without becoming a native evidence authority.
+def test_l4_legacy_prompt_is_not_a_context_gate():
+    d = _mkproj(profile_id=PROFILE_V20)
     # Execute pre-research to write placeholder
     r = _run("pre-research", d, "C1", "--node", "L4")
     assert r.returncode == 0, f"expected rc=0 for pre-research, got {r.returncode}: {r.stderr}"
@@ -137,16 +176,10 @@ def test_l4_placeholder_fails_gate():
     assert "## Source count" in text
     assert "NOT YET RUN" in text
 
-    # Assemble context on L4 must fail closed with rc=3. Exact-run ambiguity is
-    # also an intentional fail-closed outcome and is not a production failure.
+    # Historical topology never declared L4 pre-research, so the prompt remains
+    # a compatibility artifact and does not block context assembly.
     r_assem = _run("assemble-context", d, "C1", "--node", "L4")
-    assert r_assem.returncode == 3, f"expected rc=3, got {r_assem.returncode}: {r_assem.stderr}"
-    error = r_assem.stderr.lower()
-    assert (
-        "gate" in error
-        or "not yet run" in error
-        or "requires --evidence-run-id" in error
-    )
+    assert r_assem.returncode == 0, f"expected rc=0, got {r_assem.returncode}: {r_assem.stderr}"
 
 
 # 3. A synthetic legacy acquisition is usable by native L1 only after explicit
@@ -154,14 +187,7 @@ def test_l4_placeholder_fails_gate():
 def test_write_synthetic_passes_gate_after_native_curie_binding():
     d = _mkproj()
 
-    r = _run("pre-research", d, "C1", "--node", "L1", "--write-synthetic")
-    assert r.returncode == 0, f"expected rc=0 for pre-research, got {r.returncode}: {r.stderr}"
-
-    target = Path(d) / "02_Agent_Notes" / "_pre_research" / "L1_research.md"
-    assert target.exists()
-    text = target.read_text(encoding="utf-8")
-    assert "NOT YET RUN" not in text
-    assert "## Source count\n1" in text
+    _write_synthetic_legacy_acquisition(d)
 
     lit_dir = Path(d) / "09_Literature_Database"
     lit_dir.mkdir(parents=True, exist_ok=True)
@@ -179,7 +205,7 @@ def test_write_synthetic_passes_gate_after_native_curie_binding():
 
 # 4. L7 pre-research node is not gated by literature provenance checks
 def test_l7_pre_research_not_gated():
-    d = _mkproj()
+    d = _mkproj(profile_id=PROFILE_V20)
 
     # Running pre-research L7. By default it is "code_search", which is not a literature node.
     r = _run("pre-research", d, "C1", "--node", "L7")
@@ -193,7 +219,7 @@ def test_l7_pre_research_not_gated():
 
 # 5. Existing pre-research files (even with placeholders) are not overwritten unless requested
 def test_existing_file_not_overwritten():
-    d = _mkproj()
+    d = _mkproj(profile_id=PROFILE_V20)
     pr = Path(d) / "02_Agent_Notes" / "_pre_research"
     pr.mkdir(parents=True, exist_ok=True)
     target = pr / "L1_research.md"
@@ -216,8 +242,7 @@ def test_l1_evidence_is_rejected_after_canonical_research_seed_drift():
     d = _mkproj()
     project = Path(d)
 
-    r = _run("pre-research", d, "C1", "--node", "L1", "--write-synthetic")
-    assert r.returncode == 0, r.stderr
+    _write_synthetic_legacy_acquisition(d)
 
     lit_dir = project / "09_Literature_Database"
     lit_dir.mkdir(parents=True, exist_ok=True)

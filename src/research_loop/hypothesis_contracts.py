@@ -257,6 +257,67 @@ _V21_NODE_SCHEMAS["L6"]["properties"]["analysis_plan"]["items"]["properties"].up
     },
 })
 _V21_NODE_SCHEMAS["L6"]["properties"]["analysis_plan"]["items"]["required"].append("feasibility_assessment")
+
+# Native catalog projects do not submit a Deep Research evidence-pack handle
+# for L8.5.  They bind an immutable canonical Curie verification run instead.
+# Keep the historical branch in the v2.1 schema so existing v2.1 projects and
+# fixtures remain readable; profile-specific ledger code decides which branch
+# is authoritative for a given project.
+_legacy_l85_schema = copy.deepcopy(_V21_NODE_SCHEMAS["L8.5"])
+_native_l85_assessment = _object(
+    {
+        "hypothesis_id": _ID,
+        "outcome": {"enum": ["SUPPORTS", "CONTRADICTS", "INCONCLUSIVE"]},
+        "comparison": _STR,
+        "evidence_ids": {
+            "type": "array", "uniqueItems": True, "items": _ID,
+        },
+    },
+    ["hypothesis_id", "outcome", "comparison", "evidence_ids"],
+    extra=True,
+)
+_native_l85_assessment["allOf"] = [
+    {
+        "if": {
+            "properties": {
+                "outcome": {"enum": ["SUPPORTS", "CONTRADICTS"]},
+            },
+            "required": ["outcome"],
+        },
+        "then": {"properties": {"evidence_ids": {"minItems": 1}}},
+    },
+    {
+        "if": {
+            "properties": {"outcome": {"const": "INCONCLUSIVE"}},
+            "required": ["outcome"],
+        },
+        "then": {"properties": {"evidence_ids": {"maxItems": 0}}},
+    },
+]
+_native_l85_schema = {
+    "type": "object",
+    "properties": {
+        "schema_version": {"const": "2.1"},
+        "candidate_id": _ID,
+        "literature_run_id": _ID,
+        "literature_receipt_hash": {
+            "type": "string", "pattern": "^[0-9a-f]{64}$",
+        },
+        "assessments": {
+            "type": "array", "minItems": 1,
+            "items": _native_l85_assessment,
+        },
+        "summary": _STR,
+    },
+    "required": [
+        "schema_version", "literature_run_id", "literature_receipt_hash",
+        "assessments", "summary",
+    ],
+    "additionalProperties": True,
+}
+_V21_NODE_SCHEMAS["L8.5"] = {
+    "anyOf": [_legacy_l85_schema, _native_l85_schema],
+}
 SCHEMA_REGISTRY = {"2.0": NODE_SCHEMAS, "2.1": _V21_NODE_SCHEMAS}
 # Provider-facing contracts may be profile-specific when a native profile has
 # a different wire representation from the canonical persisted artifact.  The
@@ -311,8 +372,10 @@ def _persisted_schema(node: str, schema_version: str) -> dict[str, Any]:
     explicit identities assigned during normalization.
     """
     schema = copy.deepcopy(SCHEMA_REGISTRY[schema_version][node])
-    schema["properties"]["project_id"] = _ID
-    schema["required"].extend(["candidate_id", "project_id"])
+    variants = schema.get("anyOf") or [schema]
+    for variant in variants:
+        variant["properties"]["project_id"] = _ID
+        variant["required"].extend(["candidate_id", "project_id"])
     if node == "L1":
         item = schema["properties"]["hypotheses"]["items"]
         item["properties"].update({"hypothesis_id": _ID,

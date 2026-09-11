@@ -1,8 +1,10 @@
-"""Versioned Deep Research runtime, evidence packs, and audit helpers.
+"""Versioned historical Deep Research runtime plus shared evidence helpers.
 
-The module deliberately has no dependency on the RLR engine.  A successful
-research run is an external CLI invocation plus a validated, persisted source
-record; a prose pre-research note alone is never evidence of execution.
+The module deliberately has no dependency on the RLR engine. Native catalog
+stages reuse its RuntimeSpec and shared provider-execution boundary through the
+``structured_model`` execution kind, while the skill/plugin launcher and
+pre-research persistence remain explicitly historical compatibility behavior.
+A prose pre-research note alone is never evidence of execution.
 """
 from __future__ import annotations
 
@@ -86,7 +88,9 @@ def default_runtime_config(backend: str | None = None,
     """Runtime config for an explicit backend, or for the detected host.
 
     Fails loud when the host cannot be detected: silently defaulting to one
-    backend is what sent Claude-hosted runs to the Codex CLI.
+    backend is what sent Claude-hosted runs to the Codex CLI. The optional
+    skill/plugin fields are emitted only for historical compatibility readers;
+    native Curie stages use backend/executable/model without those fields.
     """
     backend = backend or detect_host_backend(env)
     if backend is None:
@@ -335,13 +339,32 @@ def _stage_instruction(node: str) -> str:
 
 
 def build_invocation(spec: RuntimeSpec, node: str, question: str, claim: str,
-                     work_dir: str | Path, result_context: str = "") -> tuple[list[str], str]:
+                     work_dir: str | Path, result_context: str = "", *,
+                     execution_kind: str = "legacy_research",
+                     schema_path: str | Path | None = None) -> tuple[list[str], str]:
     """Build an explicit ARS command and a JSON-only evidence request.
 
-    Codex uses the single-suite skill name. Claude receives a plugin directory
-    and the installed ARS alias.  There is intentionally no generic command
-    template or environment-variable fallback.
+    The default is the historical Academic Research launcher. Native stages
+    may request ``execution_kind='structured_model'`` to retain only the
+    schema-constrained provider invocation; that path has no literature skill,
+    plugin, or paper-retrieval authority.
     """
+    if execution_kind == "structured_model":
+        if node not in {"L4", "L8.5"}:
+            raise DeepResearchError(
+                f"structured model execution is not supported for {node!r}"
+            )
+        from research_loop import structured_execution
+
+        try:
+            return structured_execution.build_invocation(
+                spec,
+                schema_path or Path(work_dir) / "structured_model_output.schema.json",
+            ), ""
+        except structured_execution.StructuredExecutionError as exc:
+            raise DeepResearchError(str(exc)) from exc
+    if execution_kind != "legacy_research":
+        raise DeepResearchError(f"unknown execution kind {execution_kind!r}")
     if node not in _STAGES:
         raise DeepResearchError(f"unsupported Deep Research stage {node!r}")
     if spec.backend not in SUPPORTED_BACKENDS:
@@ -406,7 +429,21 @@ extract, paper section, or retrieval receipt.
 
 def skill_receipt(backend: str, command: list[str], prompt: str,
                   skill_version: str, *, exit_code: int = 0,
-                  stdout_hash: str = "", model: str | None = None) -> dict:
+                  stdout_hash: str = "", model: str | None = None,
+                  execution_kind: str = "legacy_research") -> dict:
+    if execution_kind == "structured_model":
+        from research_loop import structured_execution
+
+        return structured_execution.execution_receipt(
+            backend,
+            command,
+            prompt,
+            exit_code=exit_code,
+            stdout_hash=stdout_hash,
+            model=model,
+        )
+    if execution_kind != "legacy_research":
+        raise DeepResearchError(f"unknown execution kind {execution_kind!r}")
     return {
         "schema_version": SCHEMA_VERSION,
         "backend": backend,
@@ -1132,6 +1169,11 @@ def run_and_persist(
 
 
 def runtime_ready(spec: RuntimeSpec) -> tuple[bool, str]:
+    """Check the historical Academic Research launcher contract.
+
+    Native stages call :func:`research_loop.structured_execution.runtime_ready`
+    instead, which checks only the generic provider executable.
+    """
     if spec.backend not in SUPPORTED_BACKENDS:
         return False, f"backend must be one of {', '.join(SUPPORTED_BACKENDS)}"
     if not shutil.which(spec.executable):

@@ -2,10 +2,9 @@
 """RLR v0.9.2 loop runner — the canonical active runtime entry point.
 
 `python run_loop.py run PROJECT CAND` is the one documented way to drive the
-loop. It drives the v0.9.2 engine (research_loop_v04.py) whose `assemble-context`
-enforces the V0.7 Deep Research gate: L1/L4/L8.5 fail closed (rc=3) without a
-successful ARS receipt and a valid evidence pack; `assemble_context()` here
-re-raises that as a hard stop.
+loop. It drives the v0.9.2 engine (research_loop_v04.py). Native catalog
+projects use explicit Curie-owned L0.5/L4/L8.5 evidence stages; historical
+profiles retain the older Deep Research compatibility gate.
 
 Drives research_loop_v04.py (the controller) around its DAG using a
 provider-neutral orchestrator, and decides whether to open another round with a
@@ -41,7 +40,11 @@ from research_loop.api import (  # noqa: E402
     load_rendered_context_artifact,
 )
 from research_loop.context import DEFAULT_CONTEXT_TOKEN_BUDGET
-from research_loop.compatibility import PROFILE_V20, get_profile
+from research_loop.compatibility import (
+    PROFILE_V20,
+    PROFILE_V21_CATALOG_1,
+    get_profile,
+)
 from research_loop.code_state import capture_code_state
 from research_loop import deep_research, l0_preflight, runtime_preflight
 from research_loop.loopx_policy import LoopXRetryPolicy
@@ -74,6 +77,8 @@ headless:
 deep_research:
   backend: ""
   executable: ""
+  # The following fields are historical Deep Research compatibility options.
+  # Native catalog stages use only the generic backend/executable/model boundary.
   skill_path: ""
   plugin_dir: ""
   skill_version: unknown
@@ -85,7 +90,7 @@ manual:
 
 review:
   enabled: true
-  academy_research_skill: optional
+  academic_research_skill: historical_optional
 
 stop_policy:
   keep_requires_review_accept: true
@@ -929,6 +934,22 @@ def _native_l1_binding_ready(project, cand):
         return False
 
 
+def _bound_profile_id(project):
+    """Read the already-bound project profile for profile-owned dispatch.
+
+    The binding is created and validated by the hypothesis-ledger owner.  The
+    loop only needs the immutable profile identifier here to choose between a
+    native Curie path and the historical pre-research compatibility path; it
+    must not infer a profile from files or from the provider runtime.
+    """
+    try:
+        path = rl.binding_path(project)
+        binding = json.loads(Path(path).read_text(encoding="utf-8"))
+        return str(binding.get("profile_id") or "").strip()
+    except (OSError, TypeError, json.JSONDecodeError):
+        return ""
+
+
 def _ensure_native_l1_recall(project, cand):
     """Create the fixed-cursor recall artifact required by native L1 once."""
     project = Path(project)
@@ -964,6 +985,79 @@ def _ensure_native_l1_recall(project, cand):
 
 
 def ensure_pre_research(project, cand, node, cfg, args, run_dir):
+    native_catalog = _bound_profile_id(project) == PROFILE_V21_CATALOG_1
+
+    # Native L1 consumes the active frozen L0.5 EvidencePack.  It must never
+    # fall through to the historical Deep Research launcher when the native
+    # binding is absent or invalid.
+    if native_catalog and node == "L1":
+        if not _native_l1_binding_root(project, cand).is_dir():
+            log("ERROR: native L1 requires an active frozen L0.5 EvidencePack")
+            return False
+        if not _native_l1_binding_ready(project, cand):
+            log("ERROR: native L1 binding exists but is not valid/active")
+            return False
+        if not _ensure_native_l1_recall(project, cand):
+            return False
+        log("native L1 binding already active; independent literature search is not applicable")
+        return True
+
+    # Native L4/L8.5 keep this function as the loop's research-stage hook, but
+    # dispatch to their canonical Curie pipelines.  The old pre-research map,
+    # summary file, and ARS/plugin options are deliberately not consulted.
+    if native_catalog and node in {"L4", "L8.5"}:
+        existing = _ctl("audit-literature-evidence", project, cand, "--node", node)
+        if existing.returncode == 0:
+            try:
+                audited = json.loads(existing.stdout)
+                run_id = str(audited.get("run_id") or "").strip()
+            except (json.JSONDecodeError, TypeError):
+                run_id = ""
+            if run_id:
+                args.evidence_run_ids = getattr(args, "evidence_run_ids", {})
+                args.evidence_run_ids[node] = run_id
+                log(f"native {node}: valid canonical literature run already present: {run_id}")
+                return True
+
+        dr_cfg = _deep_research_config(cfg)
+        backend = str(dr_cfg.get("backend", "")).strip()
+        if backend and backend not in SUPPORTED_BACKENDS:
+            log(
+                f"ERROR: native {node} runner override "
+                f"deep_research.backend={backend!r} must be one of {SUPPORTED_BACKENDS}"
+            )
+            return False
+        command = ["deep-research-run", project, cand, "--node", node]
+        if backend:
+            command.extend(["--backend", backend])
+        # These are generic RuntimeSpec overrides.  Legacy skill/plugin fields
+        # are intentionally not forwarded to native stages.
+        for option, key in (
+            ("--executable", "executable"),
+            ("--model", "model"),
+            ("--timeout", "timeout"),
+        ):
+            value = dr_cfg.get(key)
+            if value not in (None, ""):
+                command.extend([option, str(value)])
+        result = _ctl(*command)
+        if result.returncode != 0:
+            log(
+                f"ERROR: native {node} canonical literature run failed closed: "
+                f"{(result.stderr or result.stdout).strip()}"
+            )
+            return False
+        try:
+            artifact = json.loads(result.stdout)
+            run_id = str(artifact["run_id"])
+        except (KeyError, TypeError, json.JSONDecodeError):
+            log(f"ERROR: native {node} command did not return a run_id")
+            return False
+        args.evidence_run_ids = getattr(args, "evidence_run_ids", {})
+        args.evidence_run_ids[node] = run_id
+        log(f"native {node}: persisted canonical literature run {run_id}")
+        return True
+
     if node not in rl.PRE_RESEARCH_MAP:
         return True
     if node == "L1" and _native_l1_binding_root(project, cand).is_dir():
@@ -1513,16 +1607,10 @@ Instructions:
    If that gate fails, stop and report it.
 1. Run:  micromamba run -n rlr python research_loop_v04.py next-step {project} {cand_id}
 2. Read the JSON output to get the current DAG node, persona, and context_files.
-3. DEEP RESEARCH (mandatory): before L1, L4, or L8.5, run the configured
-   Academic Research runtime; it invokes `$academic-research-suite` for Codex
-   or the installed ARS plugin for Claude and persists located paper evidence:
-     micromamba run -n rlr python research_loop_v04.py deep-research-run {project} {cand_id} --node NODE
-   L1 requires Results/Discussion/Conclusion evidence; L4 requires Methods plus
-   a review-search receipt; L8.5 requires paper-based result verification. Do
-   not hand-write a pre-research note. L7 remains the separate code-search step.
+3. Research stages are profile-owned. {research_rule}
 4. Run:  micromamba run -n rlr python research_loop_v04.py assemble-context {project} {cand_id} --node NODE
-5. The assemble-context output is your ONLY input for this node (it now includes the
-   pre-research summary when present). Do NOT read other delta files.
+5. The assemble-context output is your ONLY input for this node (it includes the
+   profile-owned canonical evidence block when applicable). Do NOT read other delta files.
 6. Act as the specified persona. Generate a strict JSON delta matching the schema.
 7. Write the delta to a temp file, then run:
    micromamba run -n rlr python research_loop_v04.py emit-delta {project} {cand_id} --node NODE --persona PERSONA --file TEMP_DELTA.json
@@ -1534,8 +1622,8 @@ Instructions:
 
 Key rules:
 - Do NOT read DAG-disallowed delta files. Only use assemble-context output.
-- Deep Research runs BEFORE L1/L4/L8.5 and is embedded via assemble-context; it does NOT
-  change the 15-node DAG topology.
+- Native Curie evidence and historical Deep Research compatibility artifacts are
+  embedded via assemble-context; neither changes the DAG topology.
 - The provider receipt must bind the exact raw file passed to `emit-delta`; do not
   reserialize or copy a provider delta before emission.
 - L4 Fisher references the local E/G/A handles shown in context. The `emit-delta`
@@ -1563,9 +1651,22 @@ def cmd_print_main_agent_prompt(args):
         if profile_id == PROFILE_V20 else
         "L9: emit and finalize L9a, then assemble and emit L9b, then permit L10a."
     )
+    research_rule = (
+        "For the native catalog profile, L1 consumes the frozen L0.5 EvidencePack "
+        "and does not search independently. Before L4 run the canonical Curie "
+        "method-inventory/multisource/PaperQA2 evidence stage; before L8.5 run "
+        "the canonical finding-derived multisource/source-verifier stage with "
+        "`deep-research-run` as its compatibility entry point. L7 remains the "
+        "separate code-search step."
+        if profile_id == PROFILE_V21_CATALOG_1 else
+        f"For a historical profile, run the configured Deep Research compatibility "
+        f"stage before L1/L4/L8.5 with: micromamba run -n rlr python "
+        f"research_loop_v04.py deep-research-run {project} {cand} --node NODE. "
+        "L7 remains the separate code-search step."
+    )
     prompt = MAIN_AGENT_PROMPT_TEMPLATE.format(
         project=project, cand_id=cand, max_rounds=max_rounds,
-        l9_rule=l9_rule)
+        l9_rule=l9_rule, research_rule=research_rule)
     prompt, meta = rl._caveman_lite(
         prompt,
         required_literals=[

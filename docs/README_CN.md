@@ -169,7 +169,7 @@ L5 Tukey
 ```
 
 - **L4A：发现。**只负责 query planning、metadata discovery、identifier-first 去重、相关性选择、全文可用性记录。它**不能生成 Methods anchor**。
-- **L4B：证据构建。**消费已经冻结的 L4A corpus，调用既有 Academic Research / RLR evidence stack 获取全文、保留 source payload、提取 Methods、核验 anchor、构建 method candidate。
+- **L4B：证据构建。**消费已经冻结的 L4A corpus，调用既有 Curie multisource / PaperQA2 / verifier stack 获取全文、保留 source payload、提取 Methods、核验 anchor、构建 method evidence。
 - **L4C：Fisher 真正设计方法。**这是 cognitive method design。
 - **L4.5：deterministic commit。**重新验证 L4A manifest、L4B evidence 和 L4C delta hash 后才提交正式方法 projection。
 
@@ -179,11 +179,11 @@ L5 Tukey
 
 # 五、文献证据怎么进入 RLR
 
-L1、L4、L8.5 前都需要真实、可定位、可审计的 Academic Research evidence。
+Native L0.5/L4/L8.5 使用 Curie-owned 的真实、可定位、可审计证据；历史 profile 仍保留 Deep Research compatibility path。
 
 | 阶段 | 文献证据用途 |
 |---|---|
-| L1 前 | 为提出假设提供 Results / Discussion / Conclusion 证据 |
+| L0.5 → L1 | native 先冻结 Curie-owned EvidencePack，再为提出假设提供可定位的 Results / Discussion / Conclusion 证据；历史 profile 继续使用兼容路径 |
 | L4 内 | 冻结 metadata corpus，并获得 primary-study Methods / review evidence |
 | L8.5 | 用 L7/L8 的真实结果去做论文支持/矛盾核验 |
 
@@ -202,7 +202,7 @@ RLR 不以“AI 写了一段文献综述”作为证据成功条件。evidence p
 对应现在真实存在的 consumer，包括：
 
 - core Python / package / filesystem；
-- Academic Research runtime；
+- native structured-provider runtime；
 - 已激活 Hypothesis Ledger；
 - Evidence Store / 项目证据；
 - Obsidian projection 所需条件。
@@ -308,7 +308,7 @@ PR #18 只是修正这个维护层的历史 scope test，没有改变 production
 | `preflight` | 运行 L0 pre-flight/readiness |
 | `check-deps` | 单独输出依赖/ready 状态 |
 | `next-step` | 获取下一个 DAG dispatch packet |
-| `deep-research-run` | 执行配置好的 Academic Research 并保存 evidence pack |
+| `deep-research-run` | 执行历史 Deep Research 或 native Curie literature stage |
 | `audit-literature-evidence` / `literature-report` | 证据审计 / 定位证据报告 |
 | `assemble-context` | 为一个认知节点生成 Path-B 隔离上下文 |
 | `emit-delta` | 校验并持久化节点 delta |
@@ -371,7 +371,7 @@ research_loop/
 │   ├── l0_intake.py                  # 请求/数据 normalizer
 │   ├── l0_state.py                   # previous-round restore
 │   ├── l0_data.py                    # CurrentRoundDataBinding/v1
-│   ├── deep_research.py              # Academic Research evidence packs
+│   ├── deep_research.py              # RuntimeSpec 与历史 evidence compatibility
 │   ├── ranking.py                    # advisory shadow ranking
 │   └── providers/                    # provider adapters
 ├── src/rlr_maintenance/              # Meta-RLR maintenance boundary，科学 DAG 之外

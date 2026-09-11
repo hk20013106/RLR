@@ -4,10 +4,17 @@ import json
 import sys
 from pathlib import Path
 
-from research_loop import deep_research, deep_research_task, l0_preflight
+from research_loop import (
+    deep_research,
+    l05_curie,
+    deep_research_task,
+    l0_preflight,
+    l85_literature_verification,
+    structured_execution,
+)
 from research_loop import l4_evidence_bundle, l4_pipeline, research_seed
 from research_loop.common import _now
-from research_loop.compatibility import PROFILE_V20, get_profile
+from research_loop.compatibility import PROFILE_V20, PROFILE_V21_CATALOG_1, get_profile
 from research_loop.delta import _delta_for_candidate, artifact_for_node
 from research_loop.hypothesis_ledger import binding_path
 from research_loop.paths import _candidate_file, _pre_research_file
@@ -36,17 +43,30 @@ def _l8_storage_key(project_dir):
     return artifact_for_node(profile, "L8").storage_key
 
 def cmd_pre_research(args):
-    """Output a pre-research prompt for the orchestrator to execute before a node.
+    """Output a historical compatibility pre-step prompt.
 
-    For L1: deep research (academic-research-suite) on the scientific question.
-    For L4: literature review on methods used in similar studies.
-    For L7: code search on GitHub/Bioconductor for existing pipelines.
-
-    The orchestrator runs the research, saves results to
-    02_Agent_Notes/_pre_research/<node>_research.md, then proceeds.
+    Native catalog projects use explicit Curie owners for L0.5/L1/L4/L8.5;
+    this command remains only for historical profiles and the native L7 code
+    search compatibility surface.
     """
     project_dir = Path(args.project_dir)
     node = args.node
+
+    try:
+        bound_profile, _binding = _bound_profile(project_dir)
+    except deep_research.DeepResearchError as exc:
+        print(f"ERROR: project profile is invalid: {exc}", file=sys.stderr)
+        return 3
+    if (
+        bound_profile.profile_id == PROFILE_V21_CATALOG_1
+        and node in {"L1", "L4", "L8.5"}
+    ):
+        print(
+            f"ERROR: native {node} does not use legacy pre-research; "
+            "use the Curie-owned canonical acquisition/verification path",
+            file=sys.stderr,
+        )
+        return 3
 
     research_config = PRE_RESEARCH_MAP.get(node)
     if research_config is None:
@@ -458,9 +478,23 @@ This summary will be injected into the {node} assemble-context as additional inp
 def cmd_audit_pre_research(args):
     """Audit existing pre-research artifacts in a project directory."""
     project_dir = Path(args.project_dir)
+    try:
+        bound_profile, _binding = _bound_profile(project_dir)
+    except deep_research.DeepResearchError as exc:
+        print(f"ERROR: project profile is invalid: {exc}", file=sys.stderr)
+        return 3
     results = {}
     for node, pr_cfg in PRE_RESEARCH_MAP.items():
         is_lit = pr_cfg.get("type") in _LIT_PRE_RESEARCH_TYPES
+        if (
+            bound_profile.profile_id == PROFILE_V21_CATALOG_1
+            and node in {"L1", "L4", "L8.5"}
+        ):
+            results[node] = {
+                "status": "NOT_APPLICABLE",
+                "reason": "native Curie-owned literature path",
+            }
+            continue
         if not is_lit:
             results[node] = {
                 "status": "NOT_APPLICABLE",
@@ -512,12 +546,79 @@ def _deep_research_spec_from_args(args):
     return deep_research.load_runtime_spec(args.project_dir, overrides)
 
 def cmd_deep_research_run(args):
-    """Execute an explicit Academic Research Skills CLI run and persist evidence."""
+    """Run historical Deep Research or a native canonical Curie stage."""
     project_dir = Path(args.project_dir)
     cf = _candidate_file(project_dir, args.cand_id)
     if not cf.exists():
         print(f"ERROR: candidate not found: {args.cand_id}", file=sys.stderr)
         return 2
+    try:
+        bound_profile, bound_profile_binding = _bound_profile(project_dir)
+    except deep_research.DeepResearchError as exc:
+        print(f"ERROR: project profile is invalid: {exc}", file=sys.stderr)
+        return 3
+
+    # Native catalog projects use the canonical Curie multisource/source-
+    # verifier path for L8.5.  Keep the command name as a compatibility entry
+    # point, but do not load the historical ARS runtime for this branch.
+    if (
+        args.node == "L8.5"
+        and bound_profile.profile_id == PROFILE_V21_CATALOG_1
+    ):
+        project_ready = l0_preflight.validate_project_ready(
+            project_dir, candidate_path=cf
+        )
+        if project_ready.get("status") != "PASS":
+            print(
+                f"ERROR: PROJECT_NOT_READY: {project_ready.get('code')}: "
+                f"{project_ready.get('reason')}",
+                file=sys.stderr,
+            )
+            return 3
+        try:
+            semantic_assessor = None
+            semantic_assessor_id = "l85-semantic-adjudicator/v1"
+            assessor_command = str(
+                getattr(args, "semantic_assessor_command", "") or ""
+            ).strip()
+            if assessor_command:
+                from research_loop.l05_curie_cli import _semantic_assessor_from_command
+
+                semantic_assessor, semantic_assessor_id = (
+                    _semantic_assessor_from_command(
+                        assessor_command,
+                        run_dir=project_dir
+                        / "08_Audit"
+                        / "l85_literature_verification"
+                        / str(args.cand_id),
+                        timeout=max(
+                            1,
+                            int(
+                                getattr(args, "semantic_assessor_timeout", 300)
+                                or 300
+                            ),
+                        ),
+                    )
+                )
+            artifact = l85_literature_verification.run_native_l85(
+                project_dir,
+                args.cand_id,
+                semantic_assessor=semantic_assessor,
+                semantic_assessor_id=semantic_assessor_id,
+                timeout=max(1, min(int(getattr(args, "timeout", 20) or 20), 120)),
+            )
+        except (
+            l85_literature_verification.L85VerificationError,
+            research_seed.ResearchSeedError,
+            KeyError,
+            OSError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            print(f"ERROR: canonical L8.5 verification failed: {exc}", file=sys.stderr)
+            return 3
+        print(json.dumps(artifact, ensure_ascii=False, indent=2))
+        return 0
     project_ready = l0_preflight.validate_project_ready(
         project_dir, candidate_path=cf
     )
@@ -597,9 +698,22 @@ def cmd_deep_research_run(args):
         print(f"ERROR: Deep Research runtime spec is inconsistent: {consistency_reason}",
               file=sys.stderr)
         return 3
-    ready, reason = deep_research.runtime_ready(spec)
+    ready, reason = (
+        structured_execution.runtime_ready(spec)
+        if (
+            bound_profile.profile_id == PROFILE_V21_CATALOG_1
+            and args.node == "L4"
+        )
+        else deep_research.runtime_ready(spec)
+    )
     if not ready:
-        print(f"ERROR: Deep Research runtime is not ready: {reason}", file=sys.stderr)
+        label = (
+            "structured model runtime"
+            if bound_profile.profile_id == PROFILE_V21_CATALOG_1
+            and args.node == "L4"
+            else "Deep Research runtime"
+        )
+        print(f"ERROR: {label} is not ready: {reason}", file=sys.stderr)
         return 3
     fm = _load_yaml_front(cf)
     try:
@@ -733,16 +847,224 @@ def cmd_deep_research_worker(args):
     )
 
 def cmd_audit_literature_evidence(args):
-    ok, reason = deep_research.audit_evidence_pack(args.project_dir, args.cand_id, args.node)
-    print(json.dumps({"candidate_id": args.cand_id, "node": args.node,
-                      "status": "PASS" if ok else "FAIL", "reason": reason}, indent=2))
+    project_dir = Path(args.project_dir)
+    profile, _binding = _bound_profile(project_dir)
+    run_id = ""
+    if profile.profile_id == PROFILE_V21_CATALOG_1 and args.node == "L8.5":
+        ok, reason, run = l85_literature_verification.audit_run_manifest(
+            project_dir, args.cand_id
+        )
+        if run:
+            run_id = str(run.get("run_id") or "")
+    elif profile.profile_id == PROFILE_V21_CATALOG_1 and args.node == "L4":
+        run_ids = deep_research.run_ids_for_stage(
+            project_dir, args.cand_id, "L4"
+        )
+        if len(run_ids) != 1:
+            ok = False
+            reason = (
+                "native L4 canonical evidence run is missing"
+                if not run_ids
+                else "native L4 canonical evidence run is ambiguous"
+            )
+        else:
+            run_id = run_ids[0]
+            ok, reason = deep_research.audit_evidence_pack(
+                project_dir, args.cand_id, "L4", run_id=run_id
+            )
+    else:
+        ok, reason = deep_research.audit_evidence_pack(
+            args.project_dir, args.cand_id, args.node
+        )
+        artifact = deep_research._artifact(
+            args.project_dir, args.cand_id, args.node
+        )
+        run_id = str((artifact or {}).get("run_id") or "")
+    print(json.dumps({
+        "candidate_id": args.cand_id,
+        "node": args.node,
+        "run_id": run_id,
+        "status": "PASS" if ok else "FAIL",
+        "reason": reason,
+    }, indent=2))
     return 0 if ok else 3
 
 def cmd_literature_report(args):
+    """Render native Curie evidence or a historical evidence digest."""
     nodes = args.node or ["L1", "L4", "L8.5"]
-    text = deep_research.render_evidence_digest(args.project_dir, args.cand_id, nodes)
+    profile, _binding = _bound_profile(args.project_dir)
+    if profile.profile_id != PROFILE_V21_CATALOG_1:
+        text = deep_research.render_evidence_digest(
+            args.project_dir, args.cand_id, nodes
+        )
+        if args.format == "json":
+            print(json.dumps({
+                "candidate_id": args.cand_id,
+                "nodes": nodes,
+                "digest": text,
+            }, ensure_ascii=False))
+        else:
+            print(text, end="")
+        return 0
+
+    project = Path(args.project_dir)
+    report = {
+        "candidate_id": str(args.cand_id),
+        "profile_id": profile.profile_id,
+        "nodes": [],
+    }
+    try:
+        for node in nodes:
+            if node == "L1":
+                seed = research_seed.load_l1_research_seed(project, args.cand_id)
+                run_id = research_seed.active_l1_native_evidence_run_id(
+                    project, seed
+                )
+                if not run_id:
+                    raise deep_research.DeepResearchError(
+                        "native L1 has no active frozen L0.5 EvidencePack"
+                    )
+                binding = research_seed.load_l1_native_evidence_binding(
+                    project, seed, run_id
+                )
+                pack = l05_curie.load_frozen_evidence_pack(
+                    project,
+                    binding["evidence_pack"],
+                    candidate_id=str(seed["candidate_id"]),
+                    round_id=str(seed["round_id"]),
+                    seed_sha256=research_seed.seed_sha256(seed),
+                )
+                report["nodes"].append({
+                    "node": "L1",
+                    "evidence_owner": "research_loop.l05_curie.store",
+                    "acquisition_run_id": str(run_id),
+                    "evidence_pack_id": str(pack["pack_id"]),
+                    "evidence_pack_version": int(pack["version"]),
+                    "evidence_pack_content_sha256": str(
+                        pack["content_sha256"]
+                    ),
+                    "selected_paper_ids": [
+                        str(item["paper_id"])
+                        for item in pack.get("selected_papers") or []
+                    ],
+                    "evidence_ids": [
+                        str(item["evidence_id"])
+                        for item in pack.get("evidence") or []
+                    ],
+                })
+                continue
+
+            if node == "L4":
+                run_ids = deep_research.run_ids_for_stage(
+                    project, args.cand_id, "L4"
+                )
+                if len(run_ids) != 1:
+                    raise deep_research.DeepResearchError(
+                        "native L4 canonical evidence run is missing or ambiguous"
+                    )
+                run_id = run_ids[0]
+                ok, reason = deep_research.audit_evidence_pack(
+                    project, args.cand_id, "L4", run_id=run_id
+                )
+                if not ok:
+                    raise deep_research.DeepResearchError(
+                        f"native L4 canonical evidence audit failed: {reason}"
+                    )
+                artifact = deep_research._artifact(
+                    project, args.cand_id, "L4", run_id=run_id
+                )
+                report["nodes"].append({
+                    "node": "L4",
+                    "evidence_owner": "research_loop.l4_evidence_bundle",
+                    "run_id": run_id,
+                    "run_path": artifact.get("path"),
+                    "summary_path": artifact.get("summary_path"),
+                    "l4a_run_id": artifact.get("l4a_run_id"),
+                    "method_inventory": artifact.get("method_inventory") or [],
+                    "evidence_cards": artifact.get("evidence_cards") or [],
+                    "evidence_gaps": artifact.get("evidence_gaps") or [],
+                    "deterministic_resolution_receipt": artifact.get(
+                        "deterministic_resolution_receipt"
+                    ),
+                })
+                continue
+
+            if node == "L8.5":
+                ok, reason, artifact = l85_literature_verification.audit_run_manifest(
+                    project, args.cand_id
+                )
+                if not ok or artifact is None:
+                    raise deep_research.DeepResearchError(
+                        f"native L8.5 canonical evidence audit failed: {reason}"
+                    )
+                report["nodes"].append({
+                    "node": "L8.5",
+                    "evidence_owner": "research_loop.l85_literature_verification",
+                    "run_id": artifact.get("run_id"),
+                    "run_sha256": artifact.get("run_sha256"),
+                    "finding_count": len(artifact.get("findings") or []),
+                    "located_evidence_ids": [
+                        str(item["evidence_id"])
+                        for item in artifact.get("located_evidence") or []
+                    ],
+                    "verdicts": artifact.get("verdicts") or [],
+                    "semantic_verification_ids": [
+                        str(item["verification_id"])
+                        for item in artifact.get("semantic_verifications") or []
+                    ],
+                })
+                continue
+
+            raise deep_research.DeepResearchError(
+                f"unsupported native literature report node: {node}"
+            )
+    except (
+        deep_research.DeepResearchError,
+        l85_literature_verification.L85VerificationError,
+        research_seed.ResearchSeedError,
+        l05_curie.CurieContractError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        print(f"ERROR: native literature report failed: {exc}", file=sys.stderr)
+        return 3
+
     if args.format == "json":
-        print(json.dumps({"candidate_id": args.cand_id, "nodes": nodes, "digest": text}, ensure_ascii=False))
-    else:
-        print(text, end="")
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+
+    lines = [
+        f"# Canonical Curie literature report: {args.cand_id}",
+        "",
+    ]
+    for entry in report["nodes"]:
+        node = entry["node"]
+        lines.append(f"## {node}")
+        if node == "L1":
+            lines.extend([
+                f"- Frozen EvidencePack: `{entry['evidence_pack_id']}`",
+                f"- Acquisition run: `{entry['acquisition_run_id']}`",
+                f"- EvidencePack SHA256: `{entry['evidence_pack_content_sha256']}`",
+                f"- Selected papers: {len(entry['selected_paper_ids'])}",
+                f"- Located evidence: {len(entry['evidence_ids'])}",
+            ])
+        elif node == "L4":
+            lines.extend([
+                f"- Canonical run: `{entry['run_id']}`",
+                f"- L4A run: `{entry['l4a_run_id']}`",
+                f"- Method inventory: {len(entry['method_inventory'])}",
+                f"- Evidence cards: {len(entry['evidence_cards'])}",
+                f"- Evidence gaps: {len(entry['evidence_gaps'])}",
+            ])
+        else:
+            lines.extend([
+                f"- Canonical run: `{entry['run_id']}`",
+                f"- Findings: {entry['finding_count']}",
+                f"- Located evidence: {len(entry['located_evidence_ids'])}",
+                f"- Verdicts: {len(entry['verdicts'])}",
+            ])
+        lines.append("")
+    print("\n".join(lines))
     return 0

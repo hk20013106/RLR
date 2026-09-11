@@ -1,6 +1,8 @@
-"""Pre-research artifact text utilities + literature-gate constants (Phase 3a leaf).
+"""Historical pre-research utilities plus the native L7 code-search entry.
 
-No intra-repo imports -> pure leaf.
+No intra-repo imports -> pure leaf. Native L0.5/L1/L4/L8.5 topology entries do
+not consult ``PRE_RESEARCH_MAP``; its literature entries remain only so bound
+historical projects can be read and audited without migration-time rewriting.
 """
 import re
 import json

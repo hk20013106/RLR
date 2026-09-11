@@ -21,13 +21,16 @@ Runtime boundary:
 Loop:
 1. Run `micromamba run -n rlr python research_loop_v04.py next-step PROJECT_DIR CAND_ID` to get the
    current DAG node.
-2. DEEP RESEARCH (V0.7): if the node is L1, L4, or L8.5, run
-   `micromamba run -n rlr python research_loop_v04.py deep-research-run PROJECT_DIR CAND_ID --node NODE`.
-   This explicitly invokes configured Codex ARS or Claude ARS, and persists
-   source-located evidence. L7 remains a separate code-search pre-step.
+2. EVIDENCE (profile-owned): for native `v2.1-catalog-1`, let the Curie-owned
+   L0.5/L4/L8.5 path produce and bind the canonical evidence receipt; do not
+   invoke the Academic Research Skill as a pre-research dependency. For a
+   historical profile only, run
+   `micromamba run -n rlr python research_loop_v04.py deep-research-run PROJECT_DIR CAND_ID --node NODE`
+   before L1, L4, or L8.5. L7 remains a separate code-search pre-step.
 3. Run `micromamba run -n rlr python research_loop_v04.py assemble-context PROJECT_DIR CAND_ID --node NODE`
-   to get the isolated context for that node (it now includes the pre-research
-   summary when present).
+   to get the isolated context for that node. Native contexts contain the
+   profile-owned Curie evidence block; historical contexts may contain the
+   compatible pre-research summary.
 4. Act as the specified persona. Using ONLY the assemble-context output, generate
    a strict JSON delta matching the persona's schema.
 5. Write the delta to a temp file.
@@ -47,8 +50,9 @@ Key rules:
 - L4 Fisher must use the E/G/A handles shown in its assembled context. The
   `emit-delta` commit boundary performs deterministic binding to canonical IDs and
   records the raw-to-canonical provenance edge; do not create a second bound copy.
-- Deep Research runs BEFORE L1/L4/L8.5 and is embedded via assemble-context;
-  it does NOT change the 15-node DAG topology.
+- Native Curie evidence is profile-owned at L0.5/L4/L8.5 and is embedded via
+  `assemble-context`; the historical Deep Research compatibility path does not
+  change the 15-node DAG topology.
 - L7 Turing: use prepare-turing-workspace. Run scripts only in that workspace.
 - Native v2.1 L9: emit/finalize L9a first, then assemble L9b from its
   ledger-authorized L9a snapshot. L9a never reads L9b.

@@ -60,6 +60,92 @@ from research_loop.yamlio import _load_yaml_front, _replace_field
 
 FINAL_STATUSES = {"KEEP", "REVISE", "DOWNGRADE", "DROP", "ARCHIVED"}
 
+
+def _native_l4_evidence_manifest(args, reference: dict) -> dict:
+    """Revalidate one native L4 canonical evidence reference.
+
+    Native L4 stores its immutable evidence binding under
+    ``canonical_l4_evidence``.  Historical projects continue to use the
+    ``pre_research.evidence_artifacts`` compatibility field, but that field
+    is not an authority for the native catalog profile.
+    """
+    if not isinstance(reference, dict):
+        raise LedgerError("native L4 canonical evidence reference is invalid")
+    run_id = str(reference.get("run_id") or "").strip()
+    if not run_id:
+        raise LedgerError("native L4 context manifest has no canonical evidence run ID")
+    try:
+        current = deep_research.evidence_artifact_manifest(
+            args.project_dir, str(args.cand_id), "L4", run_id
+        )
+    except deep_research.DeepResearchError as exc:
+        raise LedgerError(f"native L4 canonical evidence is invalid: {exc}") from exc
+    run_file = next(
+        (item for item in current.get("files", []) if item.get("kind") == "run"),
+        None,
+    )
+    if run_file is None:
+        raise LedgerError("native L4 canonical evidence has no immutable run hash")
+    artifact = deep_research._artifact(
+        args.project_dir, str(args.cand_id), "L4", run_id=run_id
+    )
+    if not isinstance(artifact, dict):
+        raise LedgerError("native L4 canonical evidence run is missing")
+    expected = {
+        "run_id": run_id,
+        "run_sha256": str(run_file.get("sha256") or ""),
+        "l4a_run_id": str(artifact.get("l4a_run_id") or ""),
+        "l4a_manifest_sha256": str(artifact.get("l4a_manifest_sha256") or ""),
+        "evidence_card_count": len(artifact.get("evidence_cards") or []),
+        "evidence_gap_count": len(artifact.get("evidence_gaps") or []),
+    }
+    for field, value in expected.items():
+        if reference.get(field) != value:
+            raise LedgerError(
+                f"native L4 canonical evidence {field} changed since context assembly"
+            )
+    ok, reason = deep_research.audit_evidence_pack(
+        args.project_dir, str(args.cand_id), "L4", run_id=run_id
+    )
+    if not ok:
+        raise LedgerError(f"native L4 canonical evidence failed revalidation: {reason}")
+    return current
+
+
+def _native_l85_evidence_manifest(args, reference: dict) -> dict:
+    """Revalidate one native L8.5 canonical literature verification run."""
+    if not isinstance(reference, dict):
+        raise LedgerError("native L8.5 canonical literature reference is invalid")
+    run_id = str(reference.get("run_id") or "").strip()
+    if not run_id:
+        raise LedgerError("native L8.5 context manifest has no canonical run ID")
+    from research_loop import l85_literature_verification
+
+    ok, reason, run = l85_literature_verification.audit_run_manifest(
+        args.project_dir, str(args.cand_id), run_id=run_id
+    )
+    if not ok or not isinstance(run, dict):
+        raise LedgerError(
+            f"native L8.5 canonical literature run failed revalidation: {reason}"
+        )
+    expected = {
+        "run_id": str(run.get("run_id") or ""),
+        "run_sha256": str(run.get("run_sha256") or ""),
+        "finding_count": len(run.get("findings") or []),
+        "located_evidence_ids": [
+            str(item.get("evidence_id") or "")
+            for item in run.get("located_evidence") or []
+            if isinstance(item, dict) and item.get("evidence_id")
+        ],
+    }
+    for field, value in expected.items():
+        if reference.get(field) != value:
+            raise LedgerError(
+                f"native L8.5 canonical literature {field} changed since context assembly"
+            )
+    return expected
+
+
 def _ledger_for(
     project_dir, configured_path=None, *, require_binding=True, readonly=False
 ):
@@ -277,6 +363,14 @@ def _validate_native_receipts(
         )
         if not ok:
             raise LedgerError(f"exact evidence run failed revalidation: {reason}")
+    elif args.node == "L4" and manifest.get("canonical_l4_evidence") is not None:
+        recorded_evidence = _native_l4_evidence_manifest(
+            args, manifest["canonical_l4_evidence"]
+        )
+    elif args.node == "L8.5" and manifest.get("canonical_l85_literature") is not None:
+        recorded_evidence = _native_l85_evidence_manifest(
+            args, manifest["canonical_l85_literature"]
+        )
     elif args.node in {"L1", "L4", "L8.5"}:
         raise LedgerError(
             f"native {args.node} emission requires exact evidence artifact hashes"
@@ -377,6 +471,8 @@ def _bind_l4_delta_for_commit(args, data, source_file):
         raise LedgerError(f"invalid L4 context manifest for handle binding: {exc}") from exc
     pre_research = manifest.get("pre_research") or {}
     evidence_ref = pre_research.get("evidence_artifacts") or {}
+    if not evidence_ref:
+        evidence_ref = manifest.get("canonical_l4_evidence") or {}
     run_id = str(evidence_ref.get("run_id") or "")
     if not run_id:
         raise LedgerError("L4 context manifest lacks the frozen evidence run ID")
@@ -724,7 +820,9 @@ def cmd_emit_delta(args):
         zotero_found = bool(zotero_env) or any(os.path.exists(d) for d in zotero_dirs)
         if not zotero_found:
             dep_errors.append("Zotero is not installed or Zotero API credentials ($ZOTERO_API_KEY / $ZOTERO_USER_ID) are missing.")
-        # 3. Check Academic Research Suite / Skill
+        # 3. Historical v1-only check. Activated native v2.1 projects return
+        # through _emit_delta_v2 above and never execute this compatibility
+        # dependency policy; native literature ownership is Curie-owned.
         skills = data.get("skills_found", [])
         has_academic = any("academic" in s.lower() for s in skills)
         custom_dirs = [

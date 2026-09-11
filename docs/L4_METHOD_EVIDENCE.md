@@ -19,10 +19,14 @@ formal node numbering and authority model are unchanged.
 
 ### L4A — method inventory
 
-L4A uses the configured Academic Research Skills runtime for metadata-only
+Native v2.1 L4A uses the Curie-owned multisource query planner, canonical
+source metadata, and the existing selector/verifier adapters for metadata-only
 work. It persists the existing immutable `L4ADiscoveryManifest/v1` plus the
 additive marker `inventory_schema: L4MethodInventory/v2` and a
 `method_inventory` array.
+
+The historical Academic Research Skills runtime remains a compatibility path
+for historical profiles only; it is not a native L4A owner.
 
 The cognitive provider identifies method entities and carries forward exact
 identifiers already present in authorized context. It does not have sole

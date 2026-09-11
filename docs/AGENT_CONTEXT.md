@@ -32,7 +32,11 @@ src/research_loop/hypothesis_contracts.py node delta v2 schemas
 src/research_loop/hypothesis_ledger.py append-only hypothesis facts
 src/research_loop/gates.py          boundary gates and traceability checks
 src/research_loop/l0_contract.py    authoritative L0 validator
-src/research_loop/deep_research.py  general ARS evidence receipts/packs
+src/research_loop/deep_research.py  historical Deep Research receipts/packs + profile-aware compatibility command
+src/research_loop/structured_execution.py generic schema-constrained provider execution
+src/research_loop/l05_curie/multisource.py native Curie multisource query/retrieval ownership
+src/research_loop/l05_curie/store.py native immutable EvidencePack/store ownership
+src/research_loop/l85_literature_verification.py native finding-derived L8.5 verification
 src/research_loop/l4_pipeline.py    staged L4 persistence and commit boundary
 src/research_loop/l4_inventory.py   L4A method inventory and exact identifiers
 src/research_loop/l4_closed_corpus.py exact-source resolver service
@@ -68,6 +72,7 @@ L0 → L1 → L2 → L3 → L4 → L5 → L6 → L7 → L8 → L8.5
 | Node(s) | Authority |
 | --- | --- |
 | L0 Linnaeus | Validate inputs, dependencies, capability plan; no code or scientific interpretation. |
+| L0.5 Curie (native v2.1) | Acquire, verify, and freeze the canonical multisource EvidencePack consumed by native L1. |
 | L1 Einstein / L2 Feynman | Generate and falsify testable hypotheses. |
 | L3 Oppenheimer | Formal hypothesis triage through `triage-idea`. |
 | L4 Fisher / L5 Tukey | Method design and QC/falsification. |
@@ -148,16 +153,25 @@ real production failure.
 
 ## Evidence and research stages
 
-Before L1, L4, and L8.5, run:
+Native `v2.1-catalog-1` projects do not run the historical Academic Research
+Skill before L1, L4, or L8.5. L0.5 owns the canonical Curie multisource
+acquisition and immutable EvidencePack consumed by L1. Native L4 uses the
+Curie multisource/PaperQA2/verifier path for method evidence, and native L8.5
+derives finding-specific verification from the actual L7/L8 results. The
+profile-aware `deep-research-run` command is retained as the public entry point
+for those native Curie stages and for historical compatibility; it does not
+make the old skill/plugin the native owner.
+
+For a native project, use `next-step` and `assemble-context` to receive the
+profile-owned evidence block. Do not create a second literature retriever,
+identity/dedup layer, verifier, or EvidencePack. The native Curie runtime owns
+source identity, retrieval, verification, and immutable receipts.
+
+Historical profiles retain the original pre-research contract. Only those
+profiles use the historical command and optional detached wrapper:
 
 ```powershell
 micromamba run -n rlr python research_loop_v04.py deep-research-run PROJECT CANDIDATE --node NODE
-```
-
-When the caller cannot wait for a long nested provider run, use the detached
-wrapper around that same command:
-
-```powershell
 micromamba run -n rlr python research_loop_v04.py deep-research-start PROJECT CANDIDATE --node NODE
 micromamba run -n rlr python research_loop_v04.py deep-research-status PROJECT TASK_ID
 micromamba run -n rlr python research_loop_v04.py deep-research-collect PROJECT TASK_ID
@@ -196,10 +210,12 @@ Important boundaries:
 See [`L4_METHOD_EVIDENCE.md`](L4_METHOD_EVIDENCE.md) for artifact and user-PDF
 details.
 
-The general Academic Research Skills path persists source-located evidence,
-receipts, metadata, and evidence packs. `assemble-context` fails closed when
-required evidence is missing or invalid. L7 instead has its own code-search
-step for existing pipelines; do not substitute one for the other.
+Native Curie stages persist source-located evidence, receipts, metadata, and
+immutable EvidencePacks through their canonical owners. `assemble-context`
+fails closed when required native evidence is missing or invalid. Historical
+Academic Research compatibility persists its own source-located packs for
+historical profiles only. L7 instead has its own code-search step for existing
+pipelines; do not substitute one for the other.
 
 Separate observed inputs, computed results, and interpretation in all deltas
 and reports. A passing synthetic test is evidence of software behavior only,
@@ -215,7 +231,8 @@ use a Python provider for cognitive nodes.
 preflight / check-deps
 repeat until terminal:
     next-step
-    deep-research-run before L1, L4, and L8.5
+    native: profile-owned Curie evidence before L1/L4/L8.5
+    historical: deep-research-run before L1/L4/L8.5
     assemble-context for the active node
     create a schema-conforming delta
     emit-delta
@@ -251,8 +268,8 @@ preserve that dependency direction and pass only valid scoped context.
 Stable project artifact anchors include:
 
 - `01_Candidates/<candidate>.md`: candidate identity/frontmatter.
-- `02_Agent_Notes/_pre_research/<node>_research.md`: compatible pre-research
-  summary path.
+- `02_Agent_Notes/_pre_research/<node>_research.md`: historical compatibility
+  pre-research summary path; native v2.1 uses profile-owned Curie evidence.
 - `08_Audit/`: audits and advisory ranking artifacts.
 - `09_Literature_Database/evidence_packs/`: verified research evidence.
 - `_turing_workspace_*`: generated L7 controlled workspaces.

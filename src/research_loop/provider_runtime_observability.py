@@ -27,6 +27,7 @@ from research_loop.providers.executor import (
     ProviderExecutionResult,
     ProviderExecutor,
 )
+from research_loop.providers import executor as _provider_executor
 
 try:  # Optional at import time; requirements install it in supported runtime.
     import psutil  # type: ignore
@@ -844,6 +845,9 @@ def install(deep_research_module: Any, detached_task_module: Any) -> None:
         command, prompt = original_build(*args, **kwargs)
         spec = args[0] if args else kwargs.get("spec")
         work_dir = args[4] if len(args) > 4 else kwargs.get("work_dir")
+        execution_kind = kwargs.get("execution_kind", "legacy_research")
+        if execution_kind == "structured_model":
+            return command, prompt
         if getattr(spec, "backend", "") == "codex":
             if "--json" not in command:
                 command.append("--json")
@@ -945,11 +949,12 @@ def install(deep_research_module: Any, detached_task_module: Any) -> None:
             }
         return value
 
-    # Deep Research already executes through DEFAULT_EXECUTOR. Replace only the
-    # executor object with a ProviderExecutor-compatible observational view.
-    deep_research_module.DEFAULT_EXECUTOR = _ObservedExecutor(
-        deep_research_module.DEFAULT_EXECUTOR
-    )
+    # Historical Deep Research and native structured execution share one
+    # provider boundary. Replace only the executor object with a
+    # ProviderExecutor-compatible observational view.
+    observed_executor = _ObservedExecutor(deep_research_module.DEFAULT_EXECUTOR)
+    deep_research_module.DEFAULT_EXECUTOR = observed_executor
+    _provider_executor.DEFAULT_EXECUTOR = observed_executor
     deep_research_module.build_invocation = build_invocation
     deep_research_module.run_and_persist = run_and_persist
     deep_research_module.skill_receipt = skill_receipt

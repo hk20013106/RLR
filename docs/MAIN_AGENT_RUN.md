@@ -1,8 +1,9 @@
 # Main-Agent Run Protocol (RLR V0.9)
 
-> v0.9: before L1/L4/L8.5, run `deep-research-run`. It invokes the configured
-> Academic Research Skills runtime and persists a validated evidence pack;
-> `assemble-context` fails closed without its receipt and located paper evidence.
+> Native v2.1: L0.5/L4/L8.5 use the canonical Curie-owned evidence paths and
+> `assemble-context` fails closed without their exact receipts and located
+> evidence. Historical profiles retain the `deep-research-run` compatibility
+> path and its original evidence-pack contract.
 
 ## What this is
 
@@ -45,23 +46,32 @@ and one real adapter forward; a non-zero result is a hard stop:
 micromamba run -n rlr python -m research_loop.runtime_preflight
 ```
 
-## Deep Research evidence (v0.9)
+## Profile-owned evidence
 
-Deep Research runs automatically *before* L1, L4, and L8.5 — it does **not**
-change the 15-node DAG topology; their results are embedded into the node's
-`assemble-context` as extra reference context:
+Native `v2.1-catalog-1` projects do not invoke the Academic Research Skill as a
+pre-research dependency. L0.5 freezes the canonical Curie multisource
+EvidencePack for L1; L4 uses Curie multisource/PaperQA2/verifier evidence; and
+L8.5 verifies findings derived from the actual L7/L8 results. These receipts and
+evidence blocks are injected by the profile-owned context path.
+
+Historical profiles retain Deep Research before L1, L4, and L8.5. The command
+name remains profile-aware and does **not** change the 15-node DAG topology:
 
 | Before | Step | What you do |
 |--------|------|-------------|
-| **L1** (hypotheses) | deep research | Persist Results/Discussion/Conclusion extracts from retrieved research papers. |
-| **L4** (method design) | method literature review | Persist Methods from research papers and review Results/Conclusion or a zero-result review receipt. |
-| **L8.5** (verification) | post-result verification | Persist paper-based support/contradiction evidence for the actual L7/L8 results. |
+| **L0.5** (native L1 input) | Curie multisource | Freeze source-located EvidencePack and bind it to native L1. |
+| **L4** (native method design) | Curie multisource + PaperQA2/verifiers | Persist exact method inventory, source-located Methods evidence, and truthful gaps. |
+| **L8.5** (native verification) | finding-derived Curie verification | Verify exactly the actual L7/L8 findings; DOI/PMID metadata alone is not verification. |
+| **L1/L4/L8.5** (historical profiles) | Deep Research compatibility | Persist the historical source-located evidence pack under the original contract. |
 | **L7** (execution) | code search | Search GitHub / Bioconductor / CRAN for existing pipelines; summarize reusable tools and the gap you must write yourself. |
 
-Run `deep-research-run PROJECT CAND --node L1|L4|L8.5`. It uses Codex
-`$academic-research-suite` or the configured Claude ARS plugin and writes CLI
-receipt, source metadata, permitted OA payload, and located extracts below
-`09_Literature_Database/evidence_packs/`; it also renders the compatible note.
+For native projects, use the profile-owned `next-step`/`assemble-context` path
+and the profile-aware `deep-research-run` entry point only where the stage
+requires an explicit run. It uses the existing Curie multisource, PaperQA2,
+and independent verifier owners; it does not add an Academic Research
+Skill/plugin, second retriever, identity/dedup layer, verifier, or EvidencePack
+owner. For historical profiles, the same command retains the configured
+historical runtime and compatible note.
 
 ## Step-by-step protocol
 
@@ -75,8 +85,10 @@ edge.
 ```
 while not terminal:
     1. step = micromamba run -n rlr python research_loop_v04.py next-step PROJECT CAND
-    1b. # v0.9 DEEP RESEARCH: before L1/L4/L8.5, acquire evidence FIRST
-        if step.node in (L1, L4, L8.5):
+    1b. # Evidence is profile-owned: native Curie stages bind their canonical
+        # receipt/evidence block; historical profiles run the compatibility
+        # command before L1/L4/L8.5.
+        if historical_profile and step.node in (L1, L4, L8.5):
             micromamba run -n rlr python research_loop_v04.py deep-research-run PROJECT CAND --node step.node
     2. if step.is_parallel:  # historical v2.0 L9a + L9b only
          for sub in step.nodes:

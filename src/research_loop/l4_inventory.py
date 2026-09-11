@@ -797,6 +797,93 @@ def _offline_provider_command(
     return result
 
 
+def _structured_model_invocation(
+    dr,
+    spec,
+    node: str,
+    question: str,
+    claim: str,
+    work_dir: str | Path,
+    schema_path: str | Path,
+) -> tuple[list[str], str]:
+    """Use the shared provider boundary for native structured cognition.
+
+    A few historical tests replace ``deep_research.build_invocation`` with a
+    five-argument fixture.  The narrow fallback keeps those fixtures usable
+    while the production call is explicitly marked as structured-model work.
+    The fallback is still rejected if it exposes an ARS/plugin authority.
+    """
+    try:
+        command, prompt = dr.build_invocation(
+            spec,
+            node,
+            question,
+            claim,
+            work_dir,
+            execution_kind="structured_model",
+            schema_path=schema_path,
+        )
+    except TypeError as exc:
+        message = str(exc)
+        if "execution_kind" not in message and "schema_path" not in message:
+            raise
+        command, prompt = dr.build_invocation(
+            spec, node, question, claim, work_dir
+        )
+        legacy_schema = str(Path(work_dir) / "deep_research_output.schema.json")
+        command = [
+            str(schema_path) if str(value) == legacy_schema else value
+            for value in command
+        ]
+    lowered = " ".join(str(value) for value in command).casefold()
+    if (
+        "academic-research" in lowered
+        or "--plugin-dir" in lowered
+        or "--skill-path" in lowered
+        or "/ars-" in lowered
+    ):
+        raise dr.DeepResearchError(
+            "native structured model execution exposed a legacy literature skill"
+        )
+    return command, prompt
+
+
+def _structured_model_receipt(
+    dr,
+    spec,
+    command: list[str],
+    prompt: str,
+    skill_version: str,
+    *,
+    exit_code: int,
+    stdout_hash: str,
+) -> dict:
+    """Create a generic model receipt without the historical skill fields."""
+    try:
+        return dr.skill_receipt(
+            spec.backend,
+            command,
+            prompt,
+            skill_version,
+            exit_code=exit_code,
+            stdout_hash=stdout_hash,
+            model=spec.model,
+            execution_kind="structured_model",
+        )
+    except TypeError as exc:
+        if "execution_kind" not in str(exc):
+            raise
+        return dr.skill_receipt(
+            spec.backend,
+            command,
+            prompt,
+            skill_version,
+            exit_code=exit_code,
+            stdout_hash=stdout_hash,
+            model=spec.model,
+        )
+
+
 def _validate_controller_boundary(canonical: dict, known_sources: dict, dr) -> list[dict]:
     if canonical.get("assets"):
         raise dr.DeepResearchError(
@@ -1020,22 +1107,33 @@ def run_discovery(
     work.mkdir(parents=True, exist_ok=True)
     legacy_schema_path = work / "deep_research_output.schema.json"
     inventory_schema_path = work / "l4a_method_inventory_output.schema.json"
-    legacy_schema_path.write_text(
-        json.dumps(dr._runtime_schema("L4"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    known_sources, registry_snapshot = _native_known_source_catalog(
+        project_dir, candidate_id, profile_id, dr
     )
     inventory_schema_path.write_text(
         json.dumps(discovery_schema(l4p), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    known_sources, registry_snapshot = _native_known_source_catalog(
-        project_dir, candidate_id, profile_id, dr
-    )
-    command, _ = dr.build_invocation(spec, "L4", question, claim, work)
-    command = [
-        str(inventory_schema_path) if value == str(legacy_schema_path) else value
-        for value in command
-    ]
+    if known_sources is not None:
+        command, _ = _structured_model_invocation(
+            dr,
+            spec,
+            "L4",
+            question,
+            claim,
+            work,
+            inventory_schema_path,
+        )
+    else:
+        legacy_schema_path.write_text(
+            json.dumps(dr._runtime_schema("L4"), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        command, _ = dr.build_invocation(spec, "L4", question, claim, work)
+        command = [
+            str(inventory_schema_path) if value == str(legacy_schema_path) else value
+            for value in command
+        ]
     command = _offline_provider_command(command, spec, work)
     prompt = build_prompt(question, claim, known_sources)
     command[0] = dr.resolve_subprocess_executable(command[0])
@@ -1046,15 +1144,26 @@ def run_discovery(
         timeout=spec.timeout,
         label="L4A method-inventory CLI",
     )
-    receipt = dr.skill_receipt(
-        spec.backend,
-        command,
-        prompt,
-        skill_version,
-        exit_code=completed.returncode,
-        stdout_hash=_sha(completed.stdout),
-        model=spec.model,
-    )
+    if known_sources is not None:
+        receipt = _structured_model_receipt(
+            dr,
+            spec,
+            command,
+            prompt,
+            skill_version,
+            exit_code=completed.returncode,
+            stdout_hash=_sha(completed.stdout),
+        )
+    else:
+        receipt = dr.skill_receipt(
+            spec.backend,
+            command,
+            prompt,
+            skill_version,
+            exit_code=completed.returncode,
+            stdout_hash=_sha(completed.stdout),
+            model=spec.model,
+        )
     if known_sources is not None:
         pack = known_sources["evidence_pack"]
         receipt["known_source_catalog"] = {

@@ -1,8 +1,10 @@
-"""Staged L4 method-planning pipeline.
+"""Staged L4 method-planning pipeline and historical compatibility boundary.
 
 L4A performs metadata-only discovery. L4B delegates to the existing strict
 method-evidence runtime. L4C remains the existing ``L4_fisher`` node. L4.5 is
-a deterministic commit gate and never calls a model.
+a deterministic commit gate and never calls a model. Native catalog runs enter
+through the Curie-owned inventory/evidence-bundle wrappers; the ARS launcher
+functions in this module are retained only for explicitly historical profiles.
 """
 from __future__ import annotations
 
@@ -515,7 +517,8 @@ def frozen_l4a_catalog(manifest: dict) -> str:
 
 
 def build_l4a_prompt(question: str, claim: str) -> str:
-    return f"""Use the installed Academic Research Skills literature-search capability.
+    """Build the historical L4A prompt used only by compatibility profiles."""
+    return f"""Use the configured historical Academic Research Skills compatibility capability.
 
 RLR stage: L4A Literature Discovery
 Scientific question: {question}
@@ -541,6 +544,7 @@ def run_l4a_discovery(
     skill_version: str = "unknown", *, project_id: str = "",
     round_id: str = "", profile_id: str = "",
 ) -> dict:
+    """Run the historical ARS L4A path; native profiles use Curie multisource."""
     work = Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
     (work / "deep_research_output.schema.json").write_text(

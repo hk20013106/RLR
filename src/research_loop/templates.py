@@ -86,9 +86,12 @@ checked). Example for R at L7:_  `- command: Rscript`
 
 - R packages (WGCNA, clusterProfiler, ...) are verified by the R scripts at L7
   (.libPaths + requireNamespace), not by L0.
-- Academic Research is verified from `deep_research_runtime.json` by checking
-  the configured CLI plus its Codex skill or Claude plugin manifest; it has no
-  environment-variable attestation path.
+- Native catalog projects verify the generic structured provider from
+  `deep_research_runtime.json` by checking the configured backend and CLI.
+  Curie owns native literature acquisition, retrieval, and verification;
+  Codex skills or Claude plugins are not PROJECT_READY dependencies. Historical
+  profiles may still use their explicitly configured Academic Research
+  compatibility launcher.
 - Attestation env vars: RLR_ZOTERO, RLR_OBSIDIAN (set to 1 to attest), and
   OBSIDIAN_VAULT (path to your vault).
 """
@@ -360,7 +363,12 @@ _List local/project skills discovered (AGENTS.md, skills inventory, plugins)._
 
 ## Skill-use plan per layer
 
-- **L1 Idea (Einstein):** academic/deep-research skills if available.
+- **Native L0.5/L1 (Curie → Einstein):** use the frozen Curie EvidencePack;
+  do not add a second literature retriever or invoke the historical Academic
+  Research Skill.
+- **Native L4/L8.5 (Curie):** use the canonical multisource, PaperQA2, and
+  independent verifier owners; historical profiles may use their compatibility
+  runtime.
 - **L4 Method (Fisher):** reuse existing analysis skills/code patterns.
 - **L7 Execution (Turing):** which skill/code pattern executes the plan.
 - **L9 Biology (Darwin):** biological database skills.

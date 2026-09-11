@@ -26,7 +26,12 @@ from research_loop.hypothesis_contracts import (
     validate_persisted,
     validate_submission,
 )
-from research_loop.compatibility import PROFILE_V20, PROFILE_V21, get_profile
+from research_loop.compatibility import (
+    PROFILE_V20,
+    PROFILE_V21,
+    PROFILE_V21_CATALOG_1,
+    get_profile,
+)
 from research_loop.constraint_validation import ConstraintViolation, validate_finalized_upstream
 
 
@@ -1146,56 +1151,270 @@ class HypothesisLedger:
                                 event = add(f"EVIDENCE_{relation['outcome']}", hypothesis_id=relation["hypothesis_id"], occurrence_id=existing[relation["hypothesis_id"]], evidence_id=item["evidence_id"], outcome=relation["outcome"], reason=relation["reason"])
                                 self._set_workflow(con, existing[relation["hypothesis_id"]], "AUDITED", event)
                 elif node == "L8.5":
-                    from research_loop import deep_research
-                    try:
-                        pack = deep_research.evidence_pack_details(
-                            project_dir, candidate_id, "L8.5",
-                            run_id=normalized["deep_research_run_id"],
+                    if transaction_profile.profile_id == PROFILE_V21_CATALOG_1:
+                        from research_loop import l85_literature_verification
+                        from research_loop.l05_curie.semantic_verifier import (
+                            reasoning_authorized,
                         )
-                    except deep_research.DeepResearchError as exc:
-                        raise LedgerError(f"L8.5 deep-research evidence rejected: {exc}") from exc
-                    if normalized["deep_research_run_id"] != pack["run_id"]:
-                        raise LedgerError("L8.5 deep-research run ID mismatch")
-                    if normalized["deep_research_receipt_hash"] != pack["receipt_hash"]:
-                        raise LedgerError("L8.5 deep-research receipt hash mismatch")
-                    assessment_ids = [item["hypothesis_id"] for item in normalized["assessments"]]
-                    self._require_exhaustive(
-                        "L8.5 assessments", assessment_ids,
-                        self._active_occurrences(con, existing),
-                    )
-                    imported: set[str] = set()
-                    for assessment in normalized["assessments"]:
-                        hid = assessment["hypothesis_id"]
-                        for evidence_id in assessment["evidence_ids"]:
-                            record = pack["records"].get(evidence_id)
-                            if record is None:
-                                raise LedgerError(
-                                    f"L8.5 references unknown deep-research evidence: {evidence_id}"
+
+                        try:
+                            run = l85_literature_verification.load_run_manifest(
+                                project_dir,
+                                candidate_id,
+                                normalized["literature_run_id"],
+                            )
+                        except l85_literature_verification.L85VerificationError as exc:
+                            raise LedgerError(
+                                f"L8.5 canonical literature evidence rejected: {exc}"
+                            ) from exc
+                        if normalized["literature_receipt_hash"] != str(
+                            run.get("run_sha256") or ""
+                        ):
+                            raise LedgerError(
+                                "L8.5 canonical literature receipt hash mismatch"
+                            )
+
+                        located = [
+                            item for item in run.get("located_evidence") or []
+                            if isinstance(item, dict)
+                        ]
+                        located_by_id = {
+                            str(item.get("evidence_id") or ""): item
+                            for item in located
+                            if str(item.get("evidence_id") or "")
+                        }
+                        try:
+                            canonical_verdicts = (
+                                l85_literature_verification.validate_finding_verdicts(
+                                    list(run.get("findings") or []),
+                                    list(run.get("verdicts") or []),
+                                    known_evidence_ids=set(located_by_id),
                                 )
+                            )
+                        except (TypeError, ValueError) as exc:
+                            raise LedgerError(
+                                f"L8.5 canonical finding verdicts are invalid: {exc}"
+                            ) from exc
+                        verdict_by_finding = {
+                            item["finding_id"]: item for item in canonical_verdicts
+                        }
+                        active = self._active_occurrences(con, existing)
+                        assessment_ids = [
+                            item["hypothesis_id"]
+                            for item in normalized["assessments"]
+                        ]
+                        self._require_exhaustive(
+                            "L8.5 assessments", assessment_ids, active
+                        )
+                        if set(verdict_by_finding) != active:
+                            raise LedgerError(
+                                "L8.5 canonical run must contain one finding for every "
+                                "active hypothesis occurrence"
+                            )
+
+                        semantic_by_evidence = {
+                            str(item.get("evidence_id") or ""): item
+                            for item in run.get("semantic_verifications") or []
+                            if isinstance(item, dict)
+                            and str(item.get("evidence_id") or "")
+                        }
+                        imported_located: set[str] = set()
+                        for evidence_id, record in located_by_id.items():
+                            if record.get("verification_status") != "LOCATED":
+                                raise LedgerError(
+                                    f"L8.5 evidence is not source-located: {evidence_id}"
+                                )
+                            retrieval = record.get("retrieval")
+                            if not isinstance(retrieval, dict):
+                                raise LedgerError(
+                                    f"L8.5 located evidence has no retrieval receipt: {evidence_id}"
+                                )
+                            source_path = str(
+                                retrieval.get("snapshot_path")
+                                or retrieval.get("artifact_path")
+                                or ""
+                            )
+                            source_sha = str(
+                                retrieval.get("source_sha256")
+                                or retrieval.get("artifact_sha256")
+                                or ""
+                            )
+                            if not source_path or len(source_sha) != 64:
+                                raise LedgerError(
+                                    f"L8.5 located evidence has incomplete source receipt: {evidence_id}"
+                                )
+                            source_file = (Path(project_dir) / source_path).resolve()
+                            try:
+                                source_file.relative_to(Path(project_dir).resolve())
+                            except ValueError as exc:
+                                raise LedgerError(
+                                    f"L8.5 source receipt escapes the project: {evidence_id}"
+                                ) from exc
+                            if not source_file.is_file():
+                                raise LedgerError(
+                                    f"L8.5 source snapshot is missing: {source_path}"
+                                )
+                            if hashlib.sha256(source_file.read_bytes()).hexdigest() != source_sha:
+                                raise LedgerError(
+                                    f"L8.5 source snapshot hash mismatch: {source_path}"
+                                )
+                            artifact_ref = {
+                                "project_id": project_id,
+                                "path": source_path.replace("\\", "/"),
+                                "sha256": source_sha,
+                                "json_pointer": "",
+                            }
                             evidence_body = {
-                                "source_kind": "DEEP_RESEARCH", "summary": record["summary"],
-                                "artifact_refs": [record["artifact_ref"]],
+                                "source_kind": "L85_CANONICAL",
+                                "summary": str(record.get("text") or ""),
+                                "artifact_refs": [artifact_ref],
                             }
                             con.execute(
-                                "INSERT OR IGNORE INTO evidence_records(evidence_id,source_kind,summary,artifact_refs_json,content_hash,created_at) VALUES (?,?,?,?,?,?)",
-                                (evidence_id, "DEEP_RESEARCH", record["summary"],
-                                 canonical_json([record["artifact_ref"]]),
-                                 content_hash(evidence_body), _now()),
+                                "INSERT OR IGNORE INTO evidence_records"
+                                "(evidence_id,source_kind,summary,artifact_refs_json,content_hash,created_at) "
+                                "VALUES (?,?,?,?,?,?)",
+                                (
+                                    evidence_id,
+                                    "L85_CANONICAL",
+                                    str(record.get("text") or ""),
+                                    canonical_json([artifact_ref]),
+                                    content_hash(evidence_body),
+                                    _now(),
+                                ),
                             )
-                            if evidence_id not in imported:
-                                add("EVIDENCE_VERIFIED", evidence_id=evidence_id,
-                                    outcome="VERIFIED", reason="verified deep-research receipt",
-                                    artifact_ref=record["artifact_ref"],
-                                    payload={"run_id": pack["run_id"]})
-                                imported.add(evidence_id)
-                            add(f"EVIDENCE_{assessment['outcome']}", hypothesis_id=hid,
-                                occurrence_id=existing[hid], evidence_id=evidence_id,
-                                outcome=assessment["outcome"],
-                                reason=assessment["comparison"],
-                                artifact_ref=record["artifact_ref"])
-                        self._set_workflow(
-                            con, existing[hid], "AUDITED", events[-1]
+                            add(
+                                "EVIDENCE_LOCATED",
+                                evidence_id=evidence_id,
+                                outcome="LOCATED",
+                                reason="canonical L8.5 source verification",
+                                artifact_ref=artifact_ref,
+                                payload={"run_id": run["run_id"]},
+                            )
+                            imported_located.add(evidence_id)
+
+                        for assessment in normalized["assessments"]:
+                            hid = assessment["hypothesis_id"]
+                            expected = verdict_by_finding.get(hid)
+                            if expected is None:
+                                raise LedgerError(
+                                    f"L8.5 canonical run has no verdict for {hid}"
+                                )
+                            expected_outcome = {
+                                "supports": "SUPPORTS",
+                                "contradicts": "CONTRADICTS",
+                                "unresolved": "INCONCLUSIVE",
+                            }[expected["verdict"]]
+                            if assessment["outcome"] != expected_outcome:
+                                raise LedgerError(
+                                    f"L8.5 outcome for {hid} does not match the canonical run"
+                                )
+                            submitted_evidence = list(assessment["evidence_ids"])
+                            if set(submitted_evidence) != set(expected["evidence_ids"]):
+                                raise LedgerError(
+                                    f"L8.5 evidence binding for {hid} does not match the canonical run"
+                                )
+                            for evidence_id in submitted_evidence:
+                                if evidence_id not in imported_located:
+                                    raise LedgerError(
+                                        f"L8.5 references unknown source-located evidence: {evidence_id}"
+                                    )
+                                if assessment["outcome"] in {"SUPPORTS", "CONTRADICTS"}:
+                                    semantic = semantic_by_evidence.get(evidence_id)
+                                    try:
+                                        authorized = bool(
+                                            semantic is not None
+                                            and reasoning_authorized(semantic)
+                                        )
+                                    except Exception:
+                                        authorized = False
+                                    if not authorized:
+                                        raise LedgerError(
+                                            f"L8.5 evidence is not semantically authorized: {evidence_id}"
+                                        )
+                                add(
+                                    "EVIDENCE_VERIFIED",
+                                    evidence_id=evidence_id,
+                                    outcome="VERIFIED",
+                                    reason="canonical L8.5 semantic adjudication",
+                                    artifact_ref=next(
+                                        event["artifact_ref"]
+                                        for event in events
+                                        if event.get("evidence_id") == evidence_id
+                                        and event["event_type"] == "EVIDENCE_LOCATED"
+                                    ),
+                                    payload={"run_id": run["run_id"]},
+                                )
+                                add(
+                                    f"EVIDENCE_{assessment['outcome']}",
+                                    hypothesis_id=hid,
+                                    occurrence_id=existing[hid],
+                                    evidence_id=evidence_id,
+                                    outcome=assessment["outcome"],
+                                    reason=assessment["comparison"],
+                                )
+                            if not submitted_evidence:
+                                add(
+                                    "EVIDENCE_INCONCLUSIVE",
+                                    hypothesis_id=hid,
+                                    occurrence_id=existing[hid],
+                                    outcome=assessment["outcome"],
+                                    reason=assessment["comparison"],
+                                    payload={"run_id": run["run_id"]},
+                                )
+                            self._set_workflow(
+                                con, existing[hid], "AUDITED", events[-1]
+                            )
+                    else:
+                        from research_loop import deep_research
+                        try:
+                            pack = deep_research.evidence_pack_details(
+                                project_dir, candidate_id, "L8.5",
+                                run_id=normalized["deep_research_run_id"],
+                            )
+                        except deep_research.DeepResearchError as exc:
+                            raise LedgerError(f"L8.5 deep-research evidence rejected: {exc}") from exc
+                        if normalized["deep_research_run_id"] != pack["run_id"]:
+                            raise LedgerError("L8.5 deep-research run ID mismatch")
+                        if normalized["deep_research_receipt_hash"] != pack["receipt_hash"]:
+                            raise LedgerError("L8.5 deep-research receipt hash mismatch")
+                        assessment_ids = [item["hypothesis_id"] for item in normalized["assessments"]]
+                        self._require_exhaustive(
+                            "L8.5 assessments", assessment_ids,
+                            self._active_occurrences(con, existing),
                         )
+                        imported: set[str] = set()
+                        for assessment in normalized["assessments"]:
+                            hid = assessment["hypothesis_id"]
+                            for evidence_id in assessment["evidence_ids"]:
+                                record = pack["records"].get(evidence_id)
+                                if record is None:
+                                    raise LedgerError(
+                                        f"L8.5 references unknown deep-research evidence: {evidence_id}"
+                                    )
+                                evidence_body = {
+                                    "source_kind": "DEEP_RESEARCH", "summary": record["summary"],
+                                    "artifact_refs": [record["artifact_ref"]],
+                                }
+                                con.execute(
+                                    "INSERT OR IGNORE INTO evidence_records(evidence_id,source_kind,summary,artifact_refs_json,content_hash,created_at) VALUES (?,?,?,?,?,?)",
+                                    (evidence_id, "DEEP_RESEARCH", record["summary"],
+                                     canonical_json([record["artifact_ref"]]),
+                                     content_hash(evidence_body), _now()),
+                                )
+                                if evidence_id not in imported:
+                                    add("EVIDENCE_VERIFIED", evidence_id=evidence_id,
+                                        outcome="VERIFIED", reason="verified deep-research receipt",
+                                        artifact_ref=record["artifact_ref"],
+                                        payload={"run_id": pack["run_id"]})
+                                    imported.add(evidence_id)
+                                add(f"EVIDENCE_{assessment['outcome']}", hypothesis_id=hid,
+                                    occurrence_id=existing[hid], evidence_id=evidence_id,
+                                    outcome=assessment["outcome"],
+                                    reason=assessment["comparison"],
+                                    artifact_ref=record["artifact_ref"])
+                            self._set_workflow(
+                                con, existing[hid], "AUDITED", events[-1]
+                            )
                 elif node == "L9b":
                     assessment_ids = [item["hypothesis_id"] for item in normalized["assessments"]]
                     self._require_exhaustive(

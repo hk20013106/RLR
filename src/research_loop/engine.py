@@ -3,10 +3,9 @@
 
 This is the v0.9.2 runtime. The filename `research_loop_v04.py` is retained only
 for import/CLI stability (run_loop.py and the main-agent protocol import it);
-it is not a legacy engine. As of v0.9.2, `assemble-context` enforces the
-Deep Research gate (`_audit_pre_research`) on L1, L4, and L8.5: it fails closed
-(rc=3) unless a successful Academic Research Skills receipt and source-located
-evidence pack are persisted. A handwritten prose digest or an environment
+it is not a legacy engine. Native catalog projects assemble Curie-owned L0.5,
+L4, and L8.5 evidence; historical profiles retain the `_audit_pre_research`
+Deep Research compatibility gate. A handwritten prose digest or an environment
 variable attestation is not proof of retrieval.
 
 Each persona is an independent subagent with physical context isolation via DAG

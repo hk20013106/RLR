@@ -60,13 +60,26 @@ def _add_deep_research_run_arguments(parser):
                               "(spends that provider's quota on purpose)"))
     parser.add_argument("--executable", help="override configured CLI executable")
     parser.add_argument("--plugin-dir",
-                        help="required Academic Research Skills plugin path for Claude")
+                        help="legacy Academic Research Skills plugin path for Claude")
     parser.add_argument("--skill-path",
-                        help="Codex academic-research-suite installation path")
+                        help="legacy Codex academic-research-suite installation path")
     parser.add_argument("--skill-version",
-                        help="override configured ARS package version")
+                        help="override configured legacy ARS package version")
     parser.add_argument("--model")
     parser.add_argument("--timeout", type=int)
+    parser.add_argument(
+        "--semantic-assessor-command",
+        help=(
+            "native L8.5 only: explicit headless command for semantic evidence "
+            "adjudication; it cannot set evidence identity or source status"
+        ),
+    )
+    parser.add_argument(
+        "--semantic-assessor-timeout",
+        type=int,
+        default=300,
+        help="native L8.5 semantic-assessor timeout in seconds",
+    )
     parser.add_argument(
         "--l4a-manifest",
         help="resume native L4B from an existing project-relative L4A manifest",
@@ -440,8 +453,10 @@ def build_parser():
                     help="silence the repoint NOTE when the shared FINAL_REPORT changes owner")
     sp.set_defaults(func=cmd_aggregate_report)
 
-    pr = sub.add_parser("pre-research",
-                        help="prepare deep research / literature review / code search context for a node")
+    pr = sub.add_parser(
+        "pre-research",
+        help="prepare historical pre-research or native L7 code-search context",
+    )
     pr.add_argument("project_dir")
     pr.add_argument("cand_id")
     pr.add_argument("--node", required=True,
@@ -455,8 +470,10 @@ def build_parser():
                     help="[TEST-ONLY] write completed/synthetic valid pre-research artifact to output file")
     pr.set_defaults(func=cmd_pre_research)
 
-    sp = sub.add_parser("deep-research-run",
-                        help="invoke Academic Research Skills and persist verified paper evidence")
+    sp = sub.add_parser(
+        "deep-research-run",
+        help="run historical Deep Research or a native canonical Curie stage",
+    )
     _add_deep_research_run_arguments(sp)
     sp.set_defaults(func=cmd_deep_research_run)
 
@@ -485,13 +502,19 @@ def build_parser():
     sp.set_defaults(func=cmd_deep_research_worker)
 
     sp = sub.add_parser("audit-literature-evidence",
-                        help="fail closed unless a node has a valid Academic Research evidence pack")
+                        help=(
+                            "audit historical evidence packs or native canonical "
+                            "L4/L8.5 Curie evidence"
+                        ))
     sp.add_argument("project_dir")
     sp.add_argument("cand_id")
     sp.add_argument("--node", required=True, choices=["L1", "L4", "L8.5"])
     sp.set_defaults(func=cmd_audit_literature_evidence)
 
-    sp = sub.add_parser("literature-report", help="render source-located evidence for a candidate")
+    sp = sub.add_parser(
+        "literature-report",
+        help="render canonical or historical source-located evidence",
+    )
     sp.add_argument("project_dir")
     sp.add_argument("cand_id")
     sp.add_argument("--node", action="append", choices=["L1", "L4", "L8.5"])

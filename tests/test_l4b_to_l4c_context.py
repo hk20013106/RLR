@@ -15,7 +15,6 @@ from research_loop.context import cmd_assemble_context
 from research_loop.engine import main as engine_main
 from research_loop.hypothesis_ledger import HypothesisLedger
 from research_loop.hypothesis_contracts import validate_provider_submission
-from research_loop.preresearch import PRE_RESEARCH_MAP, _validate_pre_research_content
 from research_loop.providers.base import RunReceipt
 
 
@@ -185,18 +184,23 @@ def test_staged_l4b_passes_real_l4_context_boundary(
     assert bundle.audit_bundle(l4p, dr, project, "C1", artifact) == (True, "")
 
     summary = (project / artifact["summary_path"]).read_text(encoding="utf-8")
-    assert _validate_pre_research_content(summary, PRE_RESEARCH_MAP["L4"]) == (
-        True,
-        "",
-    )
+    catalog = bundle.l4c_reference_catalog(artifact)
     assert "10.1186/s13059-014-0550-8" in summary
     assert "## Query log" in summary
     assert "## Tool receipt" in summary
     assert "### L4C reference handles" in summary
-    assert "E1 method=deseq2 evidence card" in summary
-    assert "G1 method=combat evidence gap" in summary
-    assert artifact["evidence_cards"][0]["evidence_card_id"] not in summary
-    assert artifact["evidence_gaps"][0]["evidence_gap_id"] not in summary
+    assert (
+        f"- {catalog['evidence_cards'][0]['handle']} method=deseq2 evidence card"
+        in summary
+    )
+    assert (
+        f"- {catalog['evidence_gaps'][0]['handle']} method=combat evidence gap"
+        in summary
+    )
+    assert "skill_receipt" not in artifact
+    assert not (
+        project / "02_Agent_Notes" / "_pre_research" / "L4_research.md"
+    ).exists()
 
     evidence_manifest = dr.evidence_artifact_manifest(
         project, "C1", "L4", artifact["run_id"]
@@ -218,19 +222,19 @@ def test_staged_l4b_passes_real_l4_context_boundary(
     assert cmd_assemble_context(args) == 0
     output = capsys.readouterr().out
     assert artifact["run_id"] in output
-    assert "E1 method=deseq2 evidence card" in output
-    assert "G1 method=combat evidence gap" in output
-    assert artifact["evidence_cards"][0]["evidence_card_id"] not in output
-    assert artifact["evidence_gaps"][0]["evidence_gap_id"] not in output
-    assert "L4B retrieves exact registered sources" in output
+    assert "=== NATIVE L4 CANONICAL EVIDENCE ===" in output
+    assert artifact["evidence_cards"][0]["evidence_card_id"] in output
+    assert artifact["evidence_gaps"][0]["evidence_gap_id"] in output
+    assert "=== PRE-RESEARCH" not in output
 
     manifests = sorted((project / "08_Audit").glob("context_manifest_L4_*.json"))
     assert manifests
     context_manifest = json.loads(manifests[-1].read_text(encoding="utf-8"))
-    assert context_manifest["pre_research"]["evidence_run_id"] == artifact["run_id"]
-    assert context_manifest["pre_research"]["evidence_artifacts"][
-        "receipt_schema"
-    ] == "EvidenceRunReceipt/v1.1"
+    assert context_manifest["pre_research"] is None
+    assert context_manifest["canonical_l4_evidence"]["run_id"] == artifact["run_id"]
+    assert context_manifest["canonical_l4_evidence"]["run_sha256"] == hashlib.sha256(
+        (project / artifact["path"]).read_bytes()
+    ).hexdigest()
 
 
 def test_emit_delta_is_the_l4_handle_binding_boundary(tmp_path, monkeypatch, l4_paperqa2_runtime):
@@ -283,6 +287,11 @@ def test_emit_delta_is_the_l4_handle_binding_boundary(tmp_path, monkeypatch, l4_
         (project / "08_Audit").glob("context_manifest_L4_*.json")
     )[-1]
     manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest_data["pre_research"] is None
+    assert manifest_data["canonical_l4_evidence"]["run_id"] == artifact["run_id"]
+    assert manifest_data["canonical_l4_evidence"]["run_sha256"] == hashlib.sha256(
+        (project / artifact["path"]).read_bytes()
+    ).hexdigest()
     rendered_path = Path(manifest_data["rendered_context_path"])
     prompt_path = tmp_path / "provider-prompt.txt"
     prompt_path.write_text("provider prompt\n", encoding="utf-8")
@@ -389,6 +398,7 @@ def test_emit_delta_is_the_l4_handle_binding_boundary(tmp_path, monkeypatch, l4_
         (project / "08_Audit" / "hypothesis_commits").glob("*C1_L4.json")
     )
     provenance = json.loads(commit_receipt.read_text(encoding="utf-8"))["provenance"]
+    assert provenance["evidence_artifacts"]["run_id"] == artifact["run_id"]
     edge_path = Path(provenance["transformation_receipt_path"])
     edge = json.loads(edge_path.read_text(encoding="utf-8"))
     assert edge["raw_provider_delta_path"] == str(raw_path)
