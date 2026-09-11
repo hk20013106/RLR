@@ -29,7 +29,6 @@ def test_first_mile_wrapper_success_is_inert(monkeypatch, tmp_path):
         adapter,
         "maybe_wake_first_mile_failure",
         lambda **kwargs: wake_calls.append(kwargs),
-        raising=False,
     )
 
     wrapped = adapter.wrap_first_mile_main(
@@ -48,7 +47,6 @@ def test_first_mile_wrapper_is_inert_without_autowake_config(monkeypatch, tmp_pa
         adapter,
         "maybe_wake_first_mile_failure",
         lambda **kwargs: wake_calls.append(kwargs),
-        raising=False,
     )
 
     wrapped = adapter.wrap_first_mile_main(
@@ -78,8 +76,8 @@ def test_first_mile_wrapper_replays_verified_preflight_from_repair_worktree(
         replay_calls.append(kwargs)
         return 0
 
-    monkeypatch.setattr(adapter, "maybe_wake_first_mile_failure", wake, raising=False)
-    monkeypatch.setattr(adapter, "_resume_verified_cli", replay, raising=False)
+    monkeypatch.setattr(adapter, "maybe_wake_first_mile_failure", wake)
+    monkeypatch.setattr(adapter, "_resume_verified_cli", replay)
     monkeypatch.setattr(
         adapter,
         "_first_mile_failure",
@@ -87,7 +85,6 @@ def test_first_mile_wrapper_replays_verified_preflight_from_repair_worktree(
             "code": "PROJECT_READY_BINDING_MISMATCH",
             "reason": "project binding differs from receipt",
         },
-        raising=False,
     )
 
     argv = ["preflight", str(project), "--backend", "codex"]
@@ -112,7 +109,7 @@ def test_first_mile_wrapper_does_not_repair_expected_configuration_failure(
 ):
     project = tmp_path / "project"
     project.mkdir()
-    wake_calls = []
+    replay_calls = []
     monkeypatch.setenv(AUTOWAKE_CONFIG_ENV, "enabled-for-test")
     monkeypatch.setattr(
         adapter,
@@ -121,13 +118,11 @@ def test_first_mile_wrapper_does_not_repair_expected_configuration_failure(
             "code": "PROJECT_READY_HOST_MISMATCH",
             "reason": "declared backend does not match this host",
         },
-        raising=False,
     )
     monkeypatch.setattr(
         adapter,
-        "maybe_wake_first_mile_failure",
-        lambda **kwargs: wake_calls.append(kwargs),
-        raising=False,
+        "_resume_verified_cli",
+        lambda **kwargs: replay_calls.append(kwargs),
     )
 
     wrapped = adapter.wrap_first_mile_main(
@@ -136,7 +131,7 @@ def test_first_mile_wrapper_does_not_repair_expected_configuration_failure(
     )
 
     assert wrapped(["preflight", str(project), "--backend", "codex"]) == 3
-    assert wake_calls == []
+    assert replay_calls == []
 
 
 def test_first_mile_wrapper_covers_canonical_runner_project_ready_failure(
@@ -157,19 +152,16 @@ def test_first_mile_wrapper_covers_canonical_runner_project_ready_failure(
             "code": "PROJECT_READY_BINDING_MISMATCH",
             "reason": "project binding differs from receipt",
         },
-        raising=False,
     )
     monkeypatch.setattr(
         adapter,
         "maybe_wake_first_mile_failure",
         lambda **kwargs: (wake_calls.append(kwargs) or handoff),
-        raising=False,
     )
     monkeypatch.setattr(
         adapter,
         "_resume_verified_cli",
         lambda **kwargs: (replay_calls.append(kwargs) or 0),
-        raising=False,
     )
 
     argv = ["run", str(project), "C001"]
