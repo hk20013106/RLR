@@ -154,8 +154,8 @@ def test_first_mile_wrapper_covers_canonical_runner_project_ready_failure(
         adapter,
         "_first_mile_failure",
         lambda **_kwargs: {
-            "code": "PROJECT_READY_CANDIDATE_BINDING_MISMATCH",
-            "reason": "candidate does not pin the current receipt",
+            "code": "PROJECT_READY_BINDING_MISMATCH",
+            "reason": "project binding differs from receipt",
         },
         raising=False,
     )
