@@ -101,11 +101,10 @@ def test_required_and_optional_inputs_cannot_overlap():
         validate_input_requirements(candidate)
 
 
-def test_data_gap_cannot_be_disguised_as_source_gap():
+def test_data_gap_can_also_record_an_independent_source_gap():
     candidate = _candidate(status="needs_user_data", missing_inputs=["sample metadata"])
     candidate["missing_source"] = "Provide a method PDF"
-    with pytest.raises(ValueError, match="needs_user_data.*missing_source"):
-        validate_input_requirements(candidate)
+    validate_input_requirements(candidate)
 
 
 def test_reference_binding_rejects_overlapping_input_classification():
@@ -118,6 +117,35 @@ def test_reference_binding_rejects_overlapping_input_classification():
             _evidence_artifact(),
             _delta(candidate),
         )
+
+
+def test_reference_binding_preserves_independent_source_and_data_blockers():
+    candidate = _candidate(
+        status="needs_user_data",
+        missing_inputs=["validated orthology map"],
+    )
+    candidate["missing_source"] = "Provide a method PDF"
+    candidate["evidence_gap_handles"] = ["G1"]
+    evidence = {
+        "run_id": "RUN1",
+        "evidence_cards": [],
+        "evidence_gaps": [{
+            "evidence_gap_id": "GAP1",
+            "method_id": "M1",
+            "status": "unresolved",
+        }],
+    }
+
+    resolved, binding = bundle.resolve_l4c_reference_handles(
+        evidence,
+        _delta(candidate),
+    )
+
+    bound = resolved["method_candidates"][0]
+    assert bound["evidence_gap_ids"] == ["GAP1"]
+    assert bound["missing_inputs"] == ["validated orthology map"]
+    assert bound["missing_source"] == "Provide a method PDF"
+    assert binding["resolved_handles"][0]["evidence_gap_handles"] == {"G1": "GAP1"}
 
 
 def test_required_path_does_not_accept_needs_user_data_candidate():
