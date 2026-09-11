@@ -881,6 +881,11 @@ def test_deep_research_cli_executes_a_local_fake_claude_plugin(tmp_path):
                           "--question", "Q", "--claim", "C", "--input", "data"],
                          capture_output=True, text=True)
     cand_id = new.stdout.splitlines()[0]
+    # This fixture exercises an explicitly supplied local Claude runtime, not
+    # the native Codex PROJECT_READY binding created by the shared bootstrap.
+    # Keep it on the historical unbound contract so the runtime override is
+    # tested without weakening the native readiness validator.
+    hypothesis_binding_path(project).unlink()
     plugin = tmp_path / "academic-research-skills" / ".claude-plugin"
     plugin.mkdir(parents=True)
     (plugin / "plugin.json").write_text("{}", encoding="utf-8")

@@ -43,7 +43,7 @@ from research_loop.api import (  # noqa: E402
 from research_loop.context import DEFAULT_CONTEXT_TOKEN_BUDGET
 from research_loop.compatibility import PROFILE_V20, get_profile
 from research_loop.code_state import capture_code_state
-from research_loop import deep_research, runtime_preflight
+from research_loop import deep_research, l0_preflight, runtime_preflight
 from research_loop.loopx_policy import LoopXRetryPolicy
 from research_loop.deep_research import SUPPORTED_BACKENDS
 from research_loop.delta import artifact_for_node
@@ -1368,6 +1368,19 @@ def cmd_run(args):
             and not (Path(project) / "99_Archive" / f"{cand}.md").exists():
         log(f"ERROR: no candidate {cand} in {project}")
         return 2
+
+    if not getattr(args, "dry_run", False):
+        candidate_path = rl._candidate_file(Path(project), cand)
+        ready = l0_preflight.validate_project_ready(
+            project, candidate_path=candidate_path
+        )
+        if ready.get("status") != "PASS":
+            log(
+                "PROJECT_NOT_READY -- "
+                f"{ready.get('code', 'PROJECT_NOT_READY')}: "
+                f"{ready.get('reason', 'PROJECT_READY validation failed')}"
+            )
+            return 3
 
     if not getattr(args, "dry_run", False) and not _formal_runtime_preflight():
         return 3

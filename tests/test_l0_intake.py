@@ -18,16 +18,27 @@ from research_loop.providers.command import CommandProvider
 
 ROOT = Path(__file__).resolve().parents[1]
 RL = str(ROOT / "research_loop_v04.py")
-def _run(*args):
-    env = {**os.environ, "PYTHONPATH": str(ROOT)}
+def _run(*args, env=None):
+    child_env = {**os.environ, "PYTHONPATH": str(ROOT)}
+    if env:
+        child_env.update(env)
     return subprocess.run([sys.executable, RL, *args], capture_output=True,
-                          text=True, encoding="utf-8", env=env)
+                          text=True, encoding="utf-8", env=child_env)
 
 
 def _new_project(tmp_path):
     project = tmp_path / "P"
-    result = _run("new-project", str(project), "L0 intake test")
+    vault = tmp_path / "vault"
+    (vault / ".obsidian").mkdir(parents=True)
+    env = {"RLR_HOST_BACKEND": "codex", "OBSIDIAN_VAULT": str(vault)}
+    result = _run("new-project", str(project), "L0 intake test", env=env)
     assert result.returncode == 0, result.stderr
+    preflight = project / "00_Preflight"
+    (preflight / "pubmed_mcp.json").write_text(
+        json.dumps({"command": "__missing_pubmed_mcp__"}), encoding="utf-8"
+    )
+    ready = _run("preflight", str(project), "--backend", "codex", env=env)
+    assert ready.returncode == 0, ready.stderr
     return project
 
 

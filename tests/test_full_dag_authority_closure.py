@@ -261,6 +261,9 @@ def test_runner_blocks_before_provider_when_static_closure_is_open(
         return True
 
     monkeypatch.setattr(run_loop, "preflight_providers", forbidden_provider_preflight)
+    # Isolate static-closure ordering; the formal environment gate is covered
+    # by runtime-plumbing tests and is unavailable in this host interpreter.
+    monkeypatch.setattr(run_loop, "_formal_runtime_preflight", lambda: True)
     args = SimpleNamespace(
         project_dir=str(project),
         cand_id="C1",

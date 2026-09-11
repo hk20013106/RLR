@@ -11,7 +11,9 @@ from pathlib import Path
 
 import pitfall_ledger as pl
 
-from research_loop import deep_research, l0_contract, l0_data, l0_intake, l0_state
+from research_loop import (
+    deep_research, l0_contract, l0_data, l0_intake, l0_preflight, l0_state,
+)
 from research_loop.commands.ledger import _ledger_for
 from research_loop.common import (
     REQUIRED_DEPENDENCIES,
@@ -46,6 +48,20 @@ from research_loop.yamlio import _load_yaml_front, _replace_field
 __file__ = str(Path(__file__).resolve().parents[1] / "engine.py")
 
 FINAL_STATUSES = {"KEEP", "REVISE", "DOWNGRADE", "DROP", "ARCHIVED"}
+
+
+def _require_project_ready(project_dir, *, candidate_path=None):
+    result = l0_preflight.validate_project_ready(
+        project_dir, candidate_path=candidate_path
+    )
+    if result.get("status") != "PASS":
+        print(
+            f"PROJECT_NOT_READY: {result.get('code', 'PROJECT_NOT_READY')}: "
+            f"{result.get('reason', 'preflight readiness is not PASS')}",
+            file=sys.stderr,
+        )
+        return None
+    return result
 
 
 def _candidate_l8_artifact(project_dir, knowledge_store=None):
@@ -492,6 +508,9 @@ def cmd_new_candidate(args):
         print(f"ERROR: not a project dir (no 00_Project_Index.md): {project_dir}",
               file=sys.stderr)
         return 2
+    project_ready = _require_project_ready(project_dir)
+    if project_ready is None:
+        return 3
 
     from_memory = getattr(args, "from_memory", None)
     loop_type = getattr(args, "loop_type", None) or ""
@@ -575,6 +594,11 @@ def cmd_new_candidate(args):
             if round_type == "continuation" else ""
         ),
     })
+    if not project_ready.get("legacy"):
+        mem_fields.update({
+            "project_ready_receipt_path": project_ready["receipt_relative_path"],
+            "project_ready_receipt_sha256": project_ready["receipt_sha256"],
+        })
     try:
         l8_artifact = _candidate_l8_artifact(
             project_dir, getattr(args, "knowledge_store", None)
@@ -892,6 +916,11 @@ def cmd_normalize_l0_input(args):
         print(f"ERROR: not a project dir (no 00_Project_Index.md): {project_dir}",
               file=sys.stderr)
         return 2
+    project_ready = None
+    if not args.dry_run:
+        project_ready = _require_project_ready(project_dir)
+        if project_ready is None:
+            return 3
     request_path = Path(args.input)
     try:
         request_text = request_path.read_text(encoding="utf-8")
@@ -941,6 +970,11 @@ def cmd_normalize_l0_input(args):
     mem_fields["input_contract_path"] = (
         f"01_Candidates/{cand_id}.l0_input.yaml")
     mem_fields["input_contract_hash"] = hashlib.sha256(raw_contract).hexdigest()
+    if project_ready is not None and not project_ready.get("legacy"):
+        mem_fields.update({
+            "project_ready_receipt_path": project_ready["receipt_relative_path"],
+            "project_ready_receipt_sha256": project_ready["receipt_sha256"],
+        })
     errors = l0_contract.validate_l0_input_contract(
         contract, mem_fields, project_dir, cand_id,
         artifact_path=project_dir / mem_fields["input_contract_path"],
@@ -1047,26 +1081,67 @@ def cmd_preflight(args):
         print(f"ERROR: not a project dir (no 00_Project_Index.md): {project_dir}",
               file=sys.stderr)
         return 2
+    backend = str(getattr(args, "backend", None) or "").strip()
+    if not backend:
+        print(
+            "ERROR: preflight requires an explicit startup declaration: "
+            "--backend codex|claude",
+            file=sys.stderr,
+        )
+        return 2
     name = _load_yaml_front(idx).get("project_name", project_dir.name)
     pf = project_dir / "00_Preflight"
     pf.mkdir(parents=True, exist_ok=True)
     created, skipped = [], []
     runtime_file = deep_research.runtime_config_path(project_dir)
-    if not runtime_file.exists() or args.force:
+    receipt_file = pf / "preflight_receipt.json"
+    existing_receipt = receipt_file.is_file()
+    existing_candidates = list((project_dir / "01_Candidates").glob("C*.md"))
+    if existing_receipt and existing_candidates:
+        print(
+            "ERROR: PROJECT_READY is already consumed by candidate artifacts; "
+            "refusing to rebind the readiness authority",
+            file=sys.stderr,
+        )
+        return 3
+    if runtime_file.exists() and not getattr(args, "force", False):
         try:
-            runtime_config = deep_research.default_runtime_config(
-                getattr(args, "backend", None))
+            existing_runtime = json.loads(runtime_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"ERROR: runtime config is invalid: {exc}", file=sys.stderr)
+            return 2
+        existing_backend = str(existing_runtime.get("backend") or "")
+        if existing_backend != backend:
+            print(
+                f"ERROR: backend declaration {backend!r} does not match the "
+                f"existing runtime binding {existing_backend!r}",
+                file=sys.stderr,
+            )
+            return 3
+        skipped.append(runtime_file.name)
+    else:
+        try:
+            runtime_config = deep_research.default_runtime_config(backend)
         except deep_research.DeepResearchError as exc:
             print(f"ERROR: cannot pick a Deep Research backend: {exc}", file=sys.stderr)
             return 2
-        runtime_file.write_text(json.dumps(runtime_config, indent=2), encoding="utf-8")
+        if existing_receipt:
+            print(
+                "ERROR: refusing to regenerate runtime config after a readiness "
+                "receipt exists",
+                file=sys.stderr,
+            )
+            return 3
+        runtime_file.write_text(
+            json.dumps(runtime_config, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
         created.append(runtime_file.name)
         if runtime_config["backend"] == "claude":
             print("NOTE: set plugin_dir in "
                   f"{runtime_file.name} to the academic-research-skills plugin path; "
                   "deep-research-run stays blocked until it is set.", file=sys.stderr)
-    else:
-        skipped.append(runtime_file.name)
     for fname in PREFLIGHT_FILES:
         target = pf / fname
         if target.exists() and not args.force:
@@ -1093,9 +1168,11 @@ def cmd_preflight(args):
         print(f"  skipped  00_Preflight/{f} (exists; use --force to overwrite)")
 
     # Single component-level authority: _check_dependencies delegates framework
-    # probes to l0_preflight and persists preflight_receipt.json. Lifecycle only
-    # formats/enforces those results; it never repeats an ARS/service probe.
-    ok, missing, advisory = _check_dependencies(project_dir)
+    # probes to l0_preflight. The final receipt is written only after every
+    # blocking dependency and the hard-stop gate have been evaluated.
+    ok, missing, advisory, probe_results = _check_dependencies(
+        project_dir, backend=backend, return_results=True
+    )
     print("\nL0 dependency gate:")
     for d in ok:
         print(f"  OK       {d['kind']}:{d['name']}")
@@ -1113,8 +1190,7 @@ def cmd_preflight(args):
               "`preflight` (or `check-deps`):", file=sys.stderr)
         for d in missing:
             print(f"  {d['name']}: {_dep_fix_hint(d)}", file=sys.stderr)
-        return 3
-    if advisory:
+    elif advisory:
         print("\nPREFLIGHT GATE: PASS WITH WARNINGS -- blocking dependencies present; "
               "future literature-transport readiness is incomplete.")
     else:
@@ -1125,13 +1201,52 @@ def cmd_preflight(args):
         print("\nL0 PITFALL GATE: STOP -- confirmed hard_stop pitfall(s) "
               "apply at L0:", file=sys.stderr)
         for r in blocking:
-            print(f"  [{r['id']}] {r['category']}: {r['rule']}", file=sys.stderr)
-            print(f"           root cause: {r['root_cause']}", file=sys.stderr)
+            print(
+                f"  [{r.get('id', '?')}] {r.get('category', '?')}: "
+                f"{r.get('rule', '')}", file=sys.stderr,
+            )
+            if r.get("root_cause"):
+                print(f"           root cause: {r['root_cause']}", file=sys.stderr)
         print("Resolve each, then retire it (`pitfall-status ... --status "
               "obsolete`) or fix the cause, before re-running preflight.",
               file=sys.stderr)
+    else:
+        print("L0 PITFALL GATE: PASS -- no blocking confirmed pitfalls.")
+
+    declared_missing = [
+        {
+            "kind": item.get("kind", "unknown"),
+            "name": item.get("name", ""),
+            "label": item.get("label", item.get("name", "")),
+            "needed_for": item.get("needed_for", "declared dependency"),
+            "present": False,
+            "enforcement": "blocking",
+            "error_code": item.get("error_code", "L0_DECLARED_DEPENDENCY_MISSING"),
+            "detail": item.get("detail", "declared dependency is missing"),
+        }
+        for item in missing
+        if item.get("kind") != "probe"
+    ]
+    metadata = l0_preflight.build_project_ready_metadata(
+        project_dir,
+        probe_results,
+        backend=backend,
+        declaration_source="--backend",
+        hard_stop_passed=passed,
+        hard_stop_blocking=blocking,
+        additional_blocking=declared_missing,
+    )
+    receipt = l0_preflight.write_preflight_receipt(
+        project_dir, probe_results, metadata=metadata
+    )
+    print(f"PROJECT_READY receipt: {receipt}")
+    if missing or not passed or metadata["readiness"]["status"] != "PASS":
+        if metadata["readiness"]["status"] != "PASS":
+            print(
+                f"PROJECT_READY: FAIL -- {metadata['readiness']['reason']}",
+                file=sys.stderr,
+            )
         return 3
-    print("L0 PITFALL GATE: PASS -- no blocking confirmed pitfalls.")
     return 0
 
 def cmd_check_deps(args):

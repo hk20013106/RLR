@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from research_loop.l0_preflight import (
+    PREFLIGHT_RECEIPT_SCHEMA,
     ProbeResult,
     required_pubmed_tools,
     run_preflight_probes,
@@ -120,6 +121,6 @@ def test_preflight_receipt_persists_each_component_result(tmp_path):
     path = write_preflight_receipt(project, results)
     payload = json.loads(path.read_text(encoding="utf-8"))
 
-    assert payload["schema_version"] == "L0PreflightReceipt/v1"
+    assert payload["schema_version"] == PREFLIGHT_RECEIPT_SCHEMA
     assert payload["overall_status"] == "FAIL"
     assert payload["results"] == [item.to_dict() for item in results]

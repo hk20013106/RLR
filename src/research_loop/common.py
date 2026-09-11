@@ -146,7 +146,8 @@ def _probe_as_dep(result):
     }
 
 
-def _check_dependencies(project_dir=None):
+def _check_dependencies(project_dir=None, *, backend=None,
+                        persist_receipt=False, return_results=False):
     """Return `(ok, missing, advisory)` for the single L0 readiness authority.
 
     `missing` contains only blocking failures. `advisory` contains failed
@@ -160,8 +161,9 @@ def _check_dependencies(project_dir=None):
             write_preflight_receipt,
         )
 
-        results = run_preflight_probes(Path(project_dir))
-        write_preflight_receipt(Path(project_dir), results)
+        results = run_preflight_probes(Path(project_dir), backend=backend)
+        if persist_receipt:
+            write_preflight_receipt(Path(project_dir), results)
         ok, missing, advisory = [], [], []
         for result in results:
             dep = _probe_as_dep(result)
@@ -183,7 +185,8 @@ def _check_dependencies(project_dir=None):
             dep["present"] = _dep_present(dep)
             dep["enforcement"] = "blocking"
             (ok if dep["present"] else missing).append(dep)
-        return ok, missing, advisory
+        result = (ok, missing, advisory)
+        return (*result, results) if return_results else result
 
     items = [dict(d) for d in REQUIRED_DEPENDENCIES]
     ok, missing = [], []

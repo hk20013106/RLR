@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as _dt
+import hashlib
 import importlib.util
 import json
 import os
@@ -19,9 +20,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from research_loop import deep_research
+from research_loop.compatibility import get_profile
 from research_loop.hypothesis_ledger import HypothesisLedger, LedgerError, binding_path
 
-PREFLIGHT_RECEIPT_SCHEMA = "L0PreflightReceipt/v1"
+PREFLIGHT_RECEIPT_SCHEMA = "L0PreflightReceipt/v2"
 ENFORCEMENT_BLOCKING = "blocking"
 ENFORCEMENT_READINESS_ONLY = "readiness_only"
 _PUBMED_REQUIRED_TOOLS = {
@@ -112,6 +114,89 @@ def _academic_research_probe(project_dir: Path) -> ProbeResult:
     return _pass(
         "research.academic_research", "Academic Research runtime ready",
         "L1/L4/L8.5 research reasoning",
+    )
+
+
+def _runtime_binding_report(project_dir: Path, backend: str | None) -> dict:
+    """Validate the explicit bootstrap backend against the persisted RuntimeSpec.
+
+    RuntimeSpec remains owned by ``deep_research``.  This function only
+    assembles the one preflight report consumed by the receipt and validator;
+    it never writes or repairs the runtime configuration.
+    """
+    project = Path(project_dir)
+    checks = []
+    path = deep_research.runtime_config_path(project)
+    report = {
+        "status": "FAIL",
+        "backend": backend or "",
+        "runtime_config": {
+            "absolute_path": str(path.resolve()),
+            "relative_path": "00_Preflight/deep_research_runtime.json",
+            "sha256": "",
+            "bytes": 0,
+        },
+        "checks": checks,
+    }
+
+    def add(name: str, status: str, detail: str):
+        checks.append({"name": name, "status": status, "detail": detail})
+
+    if not backend:
+        add("backend_declaration", "FAIL", "preflight requires --backend")
+        return report
+    if not path.is_file():
+        add("runtime_config", "FAIL", f"runtime config missing: {path}")
+        return report
+    try:
+        raw = path.read_bytes()
+        report["runtime_config"].update({
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "bytes": len(raw),
+        })
+        spec, _version = deep_research.load_runtime_spec(project)
+    except (OSError, deep_research.DeepResearchError) as exc:
+        add("runtime_config", "FAIL", str(exc))
+        return report
+
+    if spec.backend != backend:
+        add(
+            "backend_binding", "FAIL",
+            f"requested backend {backend!r} does not match runtime backend {spec.backend!r}",
+        )
+    else:
+        add("backend_binding", "PASS", f"runtime backend is {spec.backend!r}")
+
+    consistent, reason = deep_research.validate_spec_consistency(spec)
+    add("runtime_spec_consistency", "PASS" if consistent else "FAIL",
+        reason or "runtime spec is internally consistent")
+
+    try:
+        same_host, host_reason = deep_research.host_matches(
+            spec, explicit=True
+        )
+    except deep_research.DeepResearchError as exc:
+        same_host, host_reason = False, str(exc)
+    add("host_backend_authorization", "PASS" if same_host else "FAIL",
+        host_reason or "host is authorized for the declared backend")
+
+    report["status"] = "PASS" if all(
+        item["status"] == "PASS" for item in checks
+    ) else "FAIL"
+    return report
+
+
+def _runtime_binding_probe(project_dir: Path, backend: str) -> ProbeResult:
+    report = _runtime_binding_report(project_dir, backend)
+    if report["status"] != "PASS":
+        failed = next(item for item in report["checks"] if item["status"] != "PASS")
+        return _fail(
+            "runtime.binding", "L0_RUNTIME_BINDING_INVALID", failed["detail"],
+            "PROJECT_READY runtime/backend authority",
+        )
+    return _pass(
+        "runtime.binding", "explicit backend/runtime binding authorized",
+        "PROJECT_READY runtime/backend authority",
     )
 
 
@@ -329,18 +414,23 @@ def _obsidian_probe() -> ProbeResult:
     return _pass("state.obsidian", detail, consumer)
 
 
-def run_preflight_probes(project_dir) -> list[ProbeResult]:
+def run_preflight_probes(project_dir, *, backend: str | None = None) -> list[ProbeResult]:
     project = Path(project_dir)
-    return [
+    results = [
         _python_packages_probe(),
         _filesystem_probe(project),
+    ]
+    if backend:
+        results.append(_runtime_binding_probe(project, backend))
+    results.extend([
         _academic_research_probe(project),
         _pubmed_mcp_probe(project),
         _zotero_probe(),
         _hypothesis_ledger_probe(project),
         _evidence_store_probe(project),
         _obsidian_probe(),
-    ]
+    ])
+    return results
 
 
 def preflight_overall_status(results: list[ProbeResult]) -> str:
@@ -351,7 +441,149 @@ def preflight_overall_status(results: list[ProbeResult]) -> str:
     return "PASS"
 
 
-def write_preflight_receipt(project_dir, results: list[ProbeResult]) -> Path:
+def _load_project_binding(project: Path) -> tuple[dict, str]:
+    target = binding_path(project)
+    if not target.is_file():
+        raise LedgerError(f"hypothesis ledger binding missing: {target}")
+    try:
+        raw = target.read_bytes()
+        binding = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LedgerError(f"invalid hypothesis ledger binding: {target}") from exc
+    if not isinstance(binding, dict):
+        raise LedgerError(f"hypothesis ledger binding must be an object: {target}")
+    store_raw = str(os.environ.get("RLR_HYPOTHESIS_STORE") or "").strip()
+    if not store_raw:
+        raise LedgerError("RLR_HYPOTHESIS_STORE is not configured")
+    store_path = Path(store_raw).expanduser().resolve()
+    ledger = HypothesisLedger.open_readonly(store_path)
+    verified = ledger.require_activated_project(project)
+    return verified, str(store_path)
+
+
+def build_project_ready_metadata(
+    project_dir,
+    results: list[ProbeResult],
+    *,
+    backend: str,
+    declaration_source: str,
+    hard_stop_passed: bool,
+    hard_stop_blocking: list[dict],
+    additional_blocking: list[dict] | None = None,
+) -> dict:
+    """Build the complete final receipt payload before it is written."""
+    project = Path(project_dir)
+    runtime_path = deep_research.runtime_config_path(project)
+    runtime_report = _runtime_binding_report(project, backend)
+    runtime_bytes = b""
+    if runtime_path.is_file():
+        try:
+            runtime_bytes = runtime_path.read_bytes()
+        except OSError:
+            runtime_bytes = b""
+    runtime_sha = hashlib.sha256(runtime_bytes).hexdigest() if runtime_bytes else ""
+
+    try:
+        binding, store_path = _load_project_binding(project)
+        profile = get_profile(str(binding.get("profile_id") or ""))
+        project_identity = {
+            "project_id": str(binding["project_id"]),
+            "project_path": str(project.resolve()),
+            "project_name": project.name,
+        }
+        store_identity = {
+            "store_id": str(binding["store_id"]),
+            "store_path": store_path,
+        }
+        profile_identity = {
+            "profile_id": profile.profile_id,
+            "delta_schema_version": profile.delta_schema_version,
+            "topology_version": profile.topology_version,
+        }
+    except (LedgerError, KeyError, ValueError) as exc:
+        project_identity = {"project_path": str(project.resolve())}
+        store_identity = {"store_path": str(
+            Path(os.environ.get("RLR_HYPOTHESIS_STORE", "")).expanduser().resolve()
+        ) if os.environ.get("RLR_HYPOTHESIS_STORE") else ""}
+        profile_identity = {"profile_id": "", "error": str(exc)}
+
+    blocking = [item.to_dict() for item in results
+                if item.enforcement == ENFORCEMENT_BLOCKING]
+    blocking.extend(dict(item) for item in (additional_blocking or []))
+    readiness_only = [item.to_dict() for item in results
+                      if item.enforcement == ENFORCEMENT_READINESS_ONLY]
+    blocking_failed = [item for item in blocking if item["status"] != "PASS"]
+    formal_checks = list(runtime_report.get("checks") or [])
+    academic = next((item for item in results
+                     if item.component == "research.academic_research"), None)
+    formal_checks.append({
+        "name": "runtime_ready",
+        "status": "PASS" if academic and academic.status == "PASS" else "FAIL",
+        "detail": (academic.detail if academic else "academic runtime probe missing"),
+    })
+    formal_status = "PASS" if all(
+        item["status"] == "PASS" for item in formal_checks
+    ) else "FAIL"
+    ready = (
+        not blocking_failed
+        and hard_stop_passed
+        and formal_status == "PASS"
+        and bool(project_identity.get("project_id"))
+        and bool(store_identity.get("store_id"))
+        and bool(profile_identity.get("profile_id"))
+    )
+    reason = "" if ready else (
+        "blocking preflight failure" if blocking_failed else
+        "hard-stop pitfall applies" if not hard_stop_passed else
+        "formal runtime preflight failed" if formal_status != "PASS" else
+        "project/store/profile identity is incomplete"
+    )
+    return {
+        "project_identity": project_identity,
+        "hypothesis_store_identity": store_identity,
+        "profile_identity": profile_identity,
+        "backend": {
+            "name": backend,
+            "declaration_source": declaration_source,
+        },
+        "runtime_config": {
+            **runtime_report["runtime_config"],
+            "sha256": runtime_sha or runtime_report["runtime_config"].get("sha256", ""),
+            "consistency": next(
+                (item for item in formal_checks
+                 if item["name"] == "runtime_spec_consistency"),
+                {"status": "FAIL", "detail": "runtime consistency check missing"},
+            ),
+            "host_backend_authorization": next(
+                (item for item in formal_checks
+                 if item["name"] == "host_backend_authorization"),
+                {"status": "FAIL", "detail": "host authorization check missing"},
+            ),
+        },
+        "formal_runtime_preflight": {
+            "status": formal_status,
+            "checks": formal_checks,
+        },
+        "blocking_dependencies": blocking,
+        "readiness_only": readiness_only,
+        "hard_stop": {
+            "status": "PASS" if hard_stop_passed else "FAIL",
+            "blocking": list(hard_stop_blocking or []),
+        },
+        "readiness": {
+            "status": "PASS" if ready else "FAIL",
+            "code": "PROJECT_READY" if ready else "PROJECT_NOT_READY",
+            "reason": reason,
+        },
+    }
+
+
+def write_preflight_receipt(
+    project_dir,
+    results: list[ProbeResult],
+    *,
+    metadata: dict | None = None,
+) -> Path:
     project = Path(project_dir)
     path = project / "00_Preflight" / "preflight_receipt.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -361,6 +593,125 @@ def write_preflight_receipt(project_dir, results: list[ProbeResult]) -> Path:
         "overall_status": preflight_overall_status(results),
         "results": [r.to_dict() for r in results],
     }
+    if metadata:
+        payload.update(metadata)
+        if metadata.get("readiness", {}).get("status") != "PASS":
+            payload["overall_status"] = "FAIL"
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8")
     return path
+
+
+def _project_not_ready(code: str, reason: str) -> dict:
+    return {"status": "FAIL", "code": code, "reason": reason}
+
+
+def validate_project_ready(
+    project_dir,
+    *,
+    candidate_path: str | Path | None = None,
+    expected_backend: str | None = None,
+) -> dict:
+    """Validate the sole PROJECT_READY authority without repairing anything."""
+    project = Path(project_dir)
+    binding_file = binding_path(project)
+    # Hand-built legacy fixtures without a native store binding remain outside
+    # the v0.9.7 first-mile contract. New-project always creates this binding.
+    if not binding_file.is_file():
+        return {"status": "PASS", "code": "LEGACY_UNBOUND_PROJECT", "legacy": True}
+    receipt_path = project / "00_Preflight" / "preflight_receipt.json"
+    if not receipt_path.is_file():
+        return _project_not_ready("PROJECT_NOT_READY", f"preflight receipt missing: {receipt_path}")
+    try:
+        receipt_bytes = receipt_path.read_bytes()
+        receipt = json.loads(receipt_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return _project_not_ready("PROJECT_NOT_READY", f"preflight receipt invalid: {exc}")
+    if not isinstance(receipt, dict) or receipt.get("schema_version") != PREFLIGHT_RECEIPT_SCHEMA:
+        return _project_not_ready(
+            "PROJECT_NOT_READY",
+            f"preflight receipt schema is not {PREFLIGHT_RECEIPT_SCHEMA}",
+        )
+    readiness = receipt.get("readiness")
+    if not isinstance(readiness, dict) or readiness.get("status") != "PASS" \
+            or readiness.get("code") != "PROJECT_READY":
+        return _project_not_ready(
+            "PROJECT_NOT_READY",
+            str((readiness or {}).get("reason") or "preflight readiness is not PASS"),
+        )
+
+    try:
+        binding, store_path = _load_project_binding(project)
+        if receipt.get("project_identity", {}).get("project_id") != binding["project_id"]:
+            return _project_not_ready("PROJECT_READY_BINDING_MISMATCH", "project identity differs from receipt")
+        if receipt.get("hypothesis_store_identity", {}).get("store_id") != binding["store_id"]:
+            return _project_not_ready("PROJECT_READY_BINDING_MISMATCH", "hypothesis store identity differs from receipt")
+        if receipt.get("profile_identity", {}).get("profile_id") != binding.get("profile_id"):
+            return _project_not_ready("PROJECT_READY_BINDING_MISMATCH", "profile identity differs from receipt")
+    except (LedgerError, KeyError, ValueError) as exc:
+        return _project_not_ready("PROJECT_READY_BINDING_MISMATCH", str(exc))
+
+    backend_record = receipt.get("backend") or {}
+    backend = str(backend_record.get("name") or "")
+    if expected_backend and backend != expected_backend:
+        return _project_not_ready(
+            "PROJECT_READY_BACKEND_MISMATCH",
+            f"project is bound to backend {backend!r}, not {expected_backend!r}",
+        )
+    runtime_record = receipt.get("runtime_config") or {}
+    runtime_path = deep_research.runtime_config_path(project)
+    expected_runtime_relative = runtime_record.get("relative_path")
+    expected_receipt_relative = receipt_path.relative_to(project).as_posix()
+    expected_absolute = runtime_record.get("absolute_path")
+    if expected_runtime_relative != "00_Preflight/deep_research_runtime.json" \
+            or (expected_absolute and Path(expected_absolute).resolve() != runtime_path.resolve()):
+        return _project_not_ready("PROJECT_READY_BINDING_MISMATCH", "runtime config identity differs from receipt")
+    if not runtime_path.is_file():
+        return _project_not_ready("PROJECT_NOT_READY", f"runtime config missing: {runtime_path}")
+    runtime_bytes = runtime_path.read_bytes()
+    runtime_sha = hashlib.sha256(runtime_bytes).hexdigest()
+    if runtime_sha != runtime_record.get("sha256"):
+        return _project_not_ready(
+            "PROJECT_READY_RUNTIME_TAMPERED",
+            "runtime config bytes differ from the PROJECT_READY receipt",
+        )
+    try:
+        spec, _version = deep_research.load_runtime_spec(project)
+    except deep_research.DeepResearchError as exc:
+        return _project_not_ready("PROJECT_READY_RUNTIME_INVALID", str(exc))
+    if spec.backend != backend:
+        return _project_not_ready("PROJECT_READY_BACKEND_MISMATCH", "runtime backend differs from receipt")
+    consistent, reason = deep_research.validate_spec_consistency(spec)
+    if not consistent:
+        return _project_not_ready("PROJECT_READY_RUNTIME_INVALID", reason)
+    same_host, host_reason = deep_research.host_matches(spec, explicit=True)
+    if not same_host:
+        return _project_not_ready("PROJECT_READY_HOST_MISMATCH", host_reason)
+
+    receipt_sha = hashlib.sha256(receipt_bytes).hexdigest()
+    if candidate_path is not None:
+        try:
+            from research_loop.yamlio import _load_yaml_front
+            fm = _load_yaml_front(Path(candidate_path))
+        except (OSError, ValueError) as exc:
+            return _project_not_ready("PROJECT_READY_CANDIDATE_INVALID", str(exc))
+        if fm.get("project_ready_receipt_path") != expected_receipt_relative \
+                or fm.get("project_ready_receipt_sha256") != receipt_sha:
+            return _project_not_ready(
+                "PROJECT_READY_CANDIDATE_BINDING_MISMATCH",
+                "candidate does not pin the current PROJECT_READY receipt bytes",
+            )
+    return {
+        "status": "PASS",
+        "code": "PROJECT_READY",
+        "receipt_path": receipt_path,
+        "receipt_relative_path": expected_receipt_relative,
+        "receipt_sha256": receipt_sha,
+        "receipt_bytes": receipt_bytes,
+        "runtime_config_path": runtime_path,
+        "runtime_config_sha256": runtime_sha,
+        "backend": backend,
+        "store_path": store_path,
+        "project_id": binding["project_id"],
+        "profile_id": binding.get("profile_id"),
+    }

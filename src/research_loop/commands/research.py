@@ -4,7 +4,7 @@ import json
 import sys
 from pathlib import Path
 
-from research_loop import deep_research, deep_research_task
+from research_loop import deep_research, deep_research_task, l0_preflight
 from research_loop import l4_evidence_bundle, l4_pipeline, research_seed
 from research_loop.common import _now
 from research_loop.compatibility import PROFILE_V20, get_profile
@@ -518,6 +518,25 @@ def cmd_deep_research_run(args):
     if not cf.exists():
         print(f"ERROR: candidate not found: {args.cand_id}", file=sys.stderr)
         return 2
+    project_ready = l0_preflight.validate_project_ready(
+        project_dir, candidate_path=cf
+    )
+    if not project_ready.get("legacy"):
+        if project_ready.get("status") != "PASS":
+            print(
+                f"ERROR: PROJECT_NOT_READY: {project_ready.get('code')}: "
+                f"{project_ready.get('reason')}",
+                file=sys.stderr,
+            )
+            return 3
+        requested_backend = str(getattr(args, "backend", None) or "").strip()
+        if requested_backend and requested_backend != project_ready["backend"]:
+            print(
+                f"ERROR: backend override {requested_backend!r} does not match "
+                f"the PROJECT_READY backend {project_ready['backend']!r}",
+                file=sys.stderr,
+            )
+            return 3
     l4a_manifest = str(getattr(args, "l4a_manifest", "") or "").strip()
     if l4a_manifest and args.node != "L4":
         print("ERROR: --l4a-manifest is valid only for --node L4", file=sys.stderr)

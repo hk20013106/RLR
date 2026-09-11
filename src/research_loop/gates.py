@@ -20,7 +20,7 @@ from research_loop.preresearch import (
     _validate_pre_research_content, _parse_pre_research_provenance,
     _query_family_key, _load_query_family_cache,
 )
-from research_loop import deep_research
+from research_loop import deep_research, l0_preflight
 
 
 def _audit_pre_research(project_dir, node_id, pr_cfg, cand_id=None, *, evidence_run_id=None):
@@ -273,6 +273,14 @@ def _audit_l0_contract(project_dir, cand_id):
     """Validate declaration, restore prior evidence, then freeze one data authority."""
     cf = _candidate_file(project_dir, cand_id)
     fm = _load_yaml_front(cf) if cf and cf.exists() else {}
+    project_ready = l0_preflight.validate_project_ready(
+        project_dir, candidate_path=cf
+    )
+    if project_ready.get("status") != "PASS":
+        return False, (
+            f"{project_ready.get('code', 'PROJECT_NOT_READY')}: "
+            f"{project_ready.get('reason', 'PROJECT_READY validation failed')}"
+        )
     contract, ap, raw = l0_contract.load_contract(project_dir, cand_id)
     errs = l0_contract.validate_l0_input_contract(
         contract, fm, project_dir, cand_id, artifact_path=ap, raw_bytes=raw)
