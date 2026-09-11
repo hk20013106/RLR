@@ -61,12 +61,19 @@ _PROFILES = {
             "round_manifest_hash_integrity",
             "continuation_manifest_binding_integrity",
             "runner_nonzero_propagation",
+            "first_mile_project_ready_integrity",
         ),
         required_validation=(
             _pytest_step(
                 "meta_contract",
                 "tests/test_meta_rlr_contracts.py",
                 "tests/test_meta_rlr_observer.py",
+                "-q",
+            ),
+            _pytest_step(
+                "first_mile_autowake",
+                "tests/test_first_mile_maintenance_autowake.py",
+                "tests/test_first_mile_bootstrap.py",
                 "-q",
             ),
             _pytest_step(
@@ -226,11 +233,7 @@ def all_profiles() -> tuple[VerificationProfile, ...]:
 
 
 def profile_for_event(event: Mapping[str, Any]) -> VerificationProfile:
-    """Route one validated event through the profile-owned contract catalog.
-
-    ``protected_contracts`` is the sole contract-to-profile registry.  Invalid,
-    unowned, or ambiguously owned events fail closed before verification work.
-    """
+    """Route one validated event through the profile-owned contract catalog."""
     normalized = validate_maintenance_event(event)
     contract = normalized["expected_contract"]
     matches = [
