@@ -73,6 +73,7 @@ _PROFILES = {
             _pytest_step(
                 "first_mile_autowake",
                 "tests/test_first_mile_maintenance_autowake.py",
+                "tests/test_first_mile_unhandled_autowake.py",
                 "tests/test_first_mile_bootstrap.py",
                 "-q",
             ),
@@ -140,7 +141,7 @@ _PROFILES = {
                 "-k",
                 "l85_provider or l85_evidence_id_binding",
             ),
-             _pytest_step("full_regression", "-q"),
+            _pytest_step("full_regression", "-q"),
         ),
         forbidden_success_shortcuts=_FORBIDDEN_SHORTCUTS,
     ),
