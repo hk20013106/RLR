@@ -16,6 +16,10 @@ def test_l0_profile_protects_durable_architecture_not_historical_incident():
     assert "l0_restore_fail_closed" in profile.protected_contracts
     assert "provider_after_restore_only" in profile.protected_contracts
     assert "round_manifest_hash_integrity" in profile.protected_contracts
+    assert "first_mile_project_ready_integrity" in profile.protected_contracts
+    assert any(
+        step.step_id == "first_mile_autowake" for step in profile.required_validation
+    )
     assert all("PR15" not in item for item in profile.protected_contracts)
     assert {
         "weaken_validator",
@@ -98,6 +102,9 @@ def _event(expected_contract="runner_nonzero_propagation"):
 def test_profile_routing_requires_a_valid_maintenance_event():
     event = _event()
     assert profile_for_event(event).profile_id == "l0_state_integrity"
+    assert profile_for_event(
+        _event("first_mile_project_ready_integrity")
+    ).profile_id == "l0_state_integrity"
 
     with pytest.raises(MaintenanceContractError):
         profile_for_event({"expected_contract": "runner_nonzero_propagation"})

@@ -12,11 +12,11 @@ from research_loop import deep_research_task as _deep_research_task  # noqa: E40
 from research_loop import engine as _engine  # noqa: E402
 from rlr_maintenance.autowake_adapter import (  # noqa: E402
     install as _install_maintenance_autowake,
+    wrap_first_mile_main as _wrap_first_mile_main,
 )
 
-# Phase 3 is an outer composition concern. The RLR scientific package remains
-# unaware of Meta-RLR/LoopX; this entry point attaches the optional maintenance
-# reconcile hook only after RLR has installed its own provider observability.
+# Maintenance remains an outer composition concern. The RLR scientific package
+# is unaware of Meta-RLR/LoopX; repository execution attaches optional bridges.
 _install_maintenance_autowake(_deep_research_task)
 del _install_maintenance_autowake, _deep_research_task
 
@@ -26,4 +26,7 @@ def __getattr__(name):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _entry_main = _wrap_first_mile_main(
+        main, entrypoint_name="research_loop_v04.py"
+    )
+    sys.exit(_entry_main())
