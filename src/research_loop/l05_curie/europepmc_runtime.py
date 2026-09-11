@@ -212,6 +212,48 @@ def _selected_europepmc_papers(discovery: dict, selection: dict) -> list[dict]:
     return selected
 
 
+def _reserve_europepmc_papers(discovery: dict, selection: dict) -> list[dict]:
+    decisions = {
+        str(item["paper_id"]): item
+        for item in selection["decisions"]
+        if item["decision"] == "RESERVE"
+    }
+    reserves = []
+    for record in discovery["records"]:
+        decision = decisions.get(str(record.get("paper_id") or ""))
+        if decision is None:
+            continue
+        reserves.append({
+            "paper_id": record["paper_id"],
+            "title": record["title"],
+            "identifiers": dict(record.get("identifiers") or {}),
+            "metadata": dict(record.get("metadata") or {}),
+            "provenance": dict(record.get("provenance") or {}),
+            "selection": {
+                "decision": "RESERVE",
+                "reason": decision["reason"],
+                "reason_code": decision.get("reason_code"),
+            },
+        })
+    return reserves
+
+
+def _promote_reserve_after_no_target_sections(reserve: dict, failed_paper_id: str) -> dict:
+    """Make one selector-approved reserve eligible for the same acquisition slot."""
+    return {
+        **reserve,
+        "selection": {
+            "decision": "INCLUDE",
+            "reason": (
+                "Promoted from selector-approved RESERVE after "
+                f"{failed_paper_id} produced NO_TARGET_SECTIONS."
+            ),
+            "reason_code": "PROMOTED_AFTER_NO_TARGET_SECTIONS",
+            "original_decision": "RESERVE",
+        },
+    }
+
+
 def _prepare_europepmc_acquisition(
     project: Path,
     candidate_id: str,
@@ -275,6 +317,7 @@ def _prepare_europepmc_acquisition(
         "query_plan": query_plan,
         "transport_handshake": transport.handshake(),
         "discovery_batches": discovery["batches"],
+        "discovery": discovery,
         "selection": {
             "provider": "europe-pmc",
             "selected": selected,
@@ -433,6 +476,9 @@ def run_europepmc_acquisition(
 
     source_snapshots: list[dict] = []
     verified_evidence: list[dict] = []
+    acquired_papers: list[dict] = []
+    paper_failures: list[dict] = []
+    reserve_promotions: list[dict] = []
     if selection["selected"]:
         retriever = EuropePmcEvidenceRetriever(
             project,
@@ -442,12 +488,49 @@ def run_europepmc_acquisition(
             timeout=timeout,
         )
         verifier = EuropePmcEvidenceVerifier(project, candidate_id=candidate_id)
-        for paper in selection["selected"]:
+
+        def retrieve_one(paper: dict) -> bool:
             retrieval = retriever.retrieve(paper, seed=seed)
             source_snapshots.append(retrieval["snapshot"])
+            failure = retrieval.get("paper_failure")
+            if failure is not None:
+                if (
+                    not isinstance(failure, dict)
+                    or failure.get("paper_id") != paper.get("paper_id")
+                    or failure.get("pmcid") != (paper.get("identifiers") or {}).get("pmcid")
+                    or failure.get("reason_code") != "NO_TARGET_SECTIONS"
+                ):
+                    raise CurieContractError(
+                        "Europe PMC retriever returned an invalid paper-level insufficiency"
+                    )
+                paper_failures.append({
+                    "paper_id": failure["paper_id"],
+                    "pmcid": failure["pmcid"],
+                    "reason_code": failure["reason_code"],
+                })
+                return False
             verified_evidence.extend(
                 verifier.verify(retrieval["snapshot"], retrieval["candidates"])
             )
+            acquired_papers.append(paper)
+            return True
+
+        reserves = iter(_reserve_europepmc_papers(prepared["discovery"], selection))
+        for paper in selection["selected"]:
+            if retrieve_one(paper):
+                continue
+            while (reserve := next(reserves, None)) is not None:
+                promoted = _promote_reserve_after_no_target_sections(
+                    reserve, str(paper["paper_id"])
+                )
+                reserve_promotions.append({
+                    "replaced_paper_id": paper["paper_id"],
+                    "promoted_paper_id": promoted["paper_id"],
+                    "promoted_pmcid": promoted["identifiers"].get("pmcid"),
+                    "reason_code": "PROMOTED_AFTER_NO_TARGET_SECTIONS",
+                })
+                if retrieve_one(promoted):
+                    break
 
     coverage = _coverage_for(
         source_snapshots,
@@ -465,7 +548,7 @@ def run_europepmc_acquisition(
             version=1,
             query_plans=[query_plan],
             discovery_receipts=discovery_batches,
-            selected_papers=selection["selected"],
+            selected_papers=acquired_papers,
             evidence=verified_evidence,
             coverage=coverage,
             gaps=coverage["gaps"],
@@ -485,6 +568,8 @@ def run_europepmc_acquisition(
         "discovery_batches": discovery_batches,
         "selection": selection,
         "source_snapshots": source_snapshots,
+        "paper_failures": paper_failures,
+        "reserve_promotions": reserve_promotions,
         "verified_evidence_ids": [item["evidence_id"] for item in verified_evidence],
         "coverage": coverage,
         "evidence_pack": evidence_pack_manifest,
