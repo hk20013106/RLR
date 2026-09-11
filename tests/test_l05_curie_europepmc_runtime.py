@@ -23,6 +23,12 @@ XML = b'''<?xml version="1.0" encoding="UTF-8"?>
 <sec><title>Conclusion</title><p>Rca1p links carbon dioxide exposure to downstream transcriptional regulation.</p></sec>
 </body></article>'''
 
+XML_WITHOUT_TARGET_SECTIONS = b'''<?xml version="1.0" encoding="UTF-8"?>
+<article><body>
+<sec><title>Introduction</title><p>Background only; no located interpretive evidence.</p></sec>
+<sec><title>Methods</title><p>A methods-only record is not Results, Discussion, or Conclusion evidence.</p></sec>
+</body></article>'''
+
 
 def _project(tmp_path: Path):
     project = tmp_path / "project"
@@ -61,14 +67,17 @@ def _project(tmp_path: Path):
     return project, research_seed.load_l1_research_seed(project, "C001")
 
 
-def _search_payload(*, open_access=True):
-    result = {
-        "id": "22253597",
+def _search_record(
+    *, pmid="22253597", pmcid="PMC3257301", doi="10.1371/journal.ppat.1002485",
+    title=None, open_access=True,
+):
+    return {
+        "id": pmid,
         "source": "MED",
-        "pmid": "22253597",
-        "pmcid": "PMC3257301" if open_access else "",
-        "doi": "10.1371/journal.ppat.1002485",
-        "title": "The bZIP Transcription Factor Rca1p Is a Central Regulator of a Novel CO2 Sensing Pathway in Yeast",
+        "pmid": pmid,
+        "pmcid": pmcid if open_access else "",
+        "doi": doi,
+        "title": title or "The bZIP Transcription Factor Rca1p Is a Central Regulator of a Novel CO2 Sensing Pathway in Yeast",
         "authorString": "Cottier F, et al.",
         "pubYear": "2012",
         "journalTitle": "PLoS Pathog",
@@ -77,8 +86,12 @@ def _search_payload(*, open_access=True):
         "abstractText": "Rca1p regulates the response to carbon dioxide.",
         "pubTypeList": {"pubType": ["research-article"]},
     }
+
+
+def _search_payload(*, open_access=True, records=None):
+    records = records or [_search_record(open_access=open_access)]
     return json.dumps(
-        {"hitCount": 1, "resultList": {"result": [result]}}, sort_keys=True
+        {"hitCount": len(records), "resultList": {"result": records}}, sort_keys=True
     ).encode("utf-8")
 
 
@@ -182,6 +195,82 @@ def test_runtime_does_not_freeze_when_no_oa_full_text_is_available(tmp_path):
     assert result["coverage"]["verdict"] == "INSUFFICIENT_RETRY"
     assert result["coverage"]["gaps"][0]["gap_id"] == "NO_VERIFIED_FULL_TEXT"
     assert not list((project / "09_Literature_Database" / "evidence_packs" / "l05").rglob("*.json"))
+
+
+def test_runtime_promotes_reserve_after_include_has_no_target_sections(tmp_path):
+    project, seed = _project(tmp_path)
+    include = _search_record(pmid="11111111", pmcid="PMC1111111", doi="10.1000/include", title="First selected paper")
+    reserve = _search_record(pmid="22222222", pmcid="PMC2222222", doi="10.1000/reserve", title="Reserve paper with Results")
+
+    def http_get(url, _timeout):
+        if "/search?" in url:
+            return _search_payload(records=[include, reserve])
+        if url.endswith("/PMC1111111/fullTextXML"):
+            return XML_WITHOUT_TARGET_SECTIONS
+        if url.endswith("/PMC2222222/fullTextXML"):
+            return XML
+        raise AssertionError(url)
+
+    result = run_europepmc_acquisition(
+        project,
+        "C001",
+        explicit_queries=["reserve regression"],
+        max_papers=1,
+        run_id="RUN_RESERVE_PROMOTION",
+        http_get=http_get,
+    )
+
+    assert result["status"] == "FROZEN"
+    frozen = load_frozen_evidence_pack(
+        project,
+        result["evidence_pack"],
+        candidate_id="C001",
+        round_id="1",
+        seed_sha256=research_seed.seed_sha256(seed),
+    )
+    assert [paper["identifiers"]["pmcid"] for paper in frozen["selected_papers"]] == ["PMC2222222"]
+    assert {item["section"] for item in frozen["evidence"]} == {"Results", "Discussion", "Conclusion"}
+
+    audit = json.loads((project / result["acquisition_manifest_path"]).read_text(encoding="utf-8"))
+    assert audit["paper_failures"][0]["pmcid"] == "PMC1111111"
+    assert audit["paper_failures"][0]["reason_code"] == "NO_TARGET_SECTIONS"
+    assert audit["reserve_promotions"][0]["promoted_pmcid"] == "PMC2222222"
+    assert audit["coverage"]["verdict"] == "PASS"
+
+
+def test_runtime_routes_all_no_target_sections_through_coverage_gap(tmp_path):
+    project, _seed = _project(tmp_path)
+    include = _search_record(pmid="11111111", pmcid="PMC1111111", doi="10.1000/include", title="First selected paper")
+    reserve = _search_record(pmid="22222222", pmcid="PMC2222222", doi="10.1000/reserve", title="Reserve paper")
+
+    def http_get(url, _timeout):
+        if "/search?" in url:
+            return _search_payload(records=[include, reserve])
+        if url.endswith(("/PMC1111111/fullTextXML", "/PMC2222222/fullTextXML")):
+            return XML_WITHOUT_TARGET_SECTIONS
+        raise AssertionError(url)
+
+    result = run_europepmc_acquisition(
+        project,
+        "C001",
+        explicit_queries=["all no-target regression"],
+        max_papers=1,
+        run_id="RUN_ALL_NO_TARGET",
+        http_get=http_get,
+    )
+
+    assert result["status"] == "INSUFFICIENT_RETRY"
+    assert result["evidence_pack"] is None
+    assert result["coverage"]["verdict"] == "INSUFFICIENT_RETRY"
+    assert {gap["gap_id"] for gap in result["coverage"]["gaps"]} == {
+        "NO_VERIFIED_FULL_TEXT",
+        "NO_LOCATED_INTERPRETIVE_EVIDENCE",
+    }
+    audit = json.loads((project / result["acquisition_manifest_path"]).read_text(encoding="utf-8"))
+    assert [failure["reason_code"] for failure in audit["paper_failures"]] == [
+        "NO_TARGET_SECTIONS",
+        "NO_TARGET_SECTIONS",
+    ]
 
 
 def test_paperqa2_production_runtime_requires_explicit_semantic_assessor(tmp_path):
