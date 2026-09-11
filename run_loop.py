@@ -16,6 +16,11 @@ _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 main = _MODULE.main
 
+from rlr_maintenance.autowake_adapter import (  # noqa: E402
+    wrap_first_mile_main as _wrap_first_mile_main,
+)
+
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _entry_main = _wrap_first_mile_main(main, entrypoint_name="run_loop.py")
+    sys.exit(_entry_main())
