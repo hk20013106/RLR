@@ -16,7 +16,8 @@ from research_loop.commands.ledger import _ledger_for
 from research_loop.common import (
     REQUIRED_DEPENDENCIES,
     _append_decision, _check_dependencies, _dep_fix_hint, _empty_value_for_schema,
-    _everos_scopes_for, _load_loop_memory, _mkdirs, _now, _require_status,
+    _everos_scopes_for, _is_pristine_project_scaffolding, _load_loop_memory,
+    _mkdirs, _now, _require_status,
     _set_status, _sha256_file, _stamp,
 )
 from research_loop.delta import (
@@ -284,7 +285,7 @@ def cmd_new_project(args):
         print("ERROR: new-project requires --knowledge-store or "
               "RLR_HYPOTHESIS_STORE", file=sys.stderr)
         return 2
-    if project_dir.exists():
+    if project_dir.exists() and not _is_pristine_project_scaffolding(project_dir):
         print(f"ERROR: {project_dir} already exists; refusing to overwrite.",
               file=sys.stderr)
         return 2

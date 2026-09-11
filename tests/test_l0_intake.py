@@ -11,6 +11,9 @@ from unittest.mock import patch
 import yaml
 
 from research_loop import l0_contract
+from research_loop.common import _mkdirs
+from research_loop.commands.lifecycle import cmd_new_project
+from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
 from research_loop.l0_state import ROUND_MANIFEST_SCHEMA
 from research_loop.hypothesis_ledger import binding_path
 from research_loop.providers.command import CommandProvider
@@ -29,6 +32,21 @@ def _new_project(tmp_path):
     result = _run("new-project", str(project), "L0 intake test")
     assert result.returncode == 0, result.stderr
     return project
+
+
+def test_new_project_recovers_pristine_scaffolding_after_bootstrap_failure(tmp_path):
+    project = tmp_path / "P"
+    ledger = tmp_path / "ledger.sqlite"
+    _mkdirs(project)
+
+    result = cmd_new_project(SimpleNamespace(
+        name=str(project), topic="L0 recovery", profile=DEFAULT_NATIVE_PROFILE,
+        knowledge_store=str(ledger),
+    ))
+
+    assert result == 0
+    assert (project / "00_Project_Index.md").is_file()
+    assert binding_path(project).is_file()
 
 
 def _prompt_via_provider(context, run_dir):
