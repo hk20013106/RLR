@@ -13,6 +13,9 @@ adapters==0.1.0
 # installed in the same interpreter.  transformers 4.35.2 requires
 # tokenizers <0.19; fhlmi 0.45.0 permits litellm >=1.81.10, whose unbounded
 # tokenizers dependency can therefore share the verified SPECTER2 tokenizer.
+# The formal runtime preflight requires this exact distribution; the local
+# editable checkout used by operators must resolve to the same version.
+paper-qa==2026.8.12
 fhaviary==0.36.0
 tokenizers==0.15.2
 huggingface-hub==0.20.3
