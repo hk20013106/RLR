@@ -126,6 +126,28 @@ def _first_mile_failure(
     }
 
 
+def _wake_and_replay_first_mile(
+    *,
+    project_dir: Path,
+    operation: str,
+    failure: dict,
+    entrypoint_name: str,
+    argv: list[str],
+) -> int | None:
+    handoff = maybe_wake_first_mile_failure(
+        project_dir=project_dir,
+        operation=operation,
+        failure=failure,
+    )
+    if handoff is None:
+        return None
+    return _resume_verified_cli(
+        handoff=handoff,
+        entrypoint_name=entrypoint_name,
+        argv=argv,
+    )
+
+
 def wrap_first_mile_main(
     core_main: Callable[[list[str] | None], int],
     *,
@@ -136,15 +158,44 @@ def wrap_first_mile_main(
     @wraps(core_main)
     def wrapped(argv: list[str] | None = None) -> int:
         effective_argv = list(sys.argv[1:] if argv is None else argv)
-        result = int(core_main(argv))
+        target = _first_mile_target(effective_argv, entrypoint_name=entrypoint_name)
+        try:
+            result = int(core_main(argv))
+        except Exception as original_exc:
+            if (
+                target is None
+                or os.environ.get(AUTOWAKE_RETRY_GUARD_ENV)
+                or not os.environ.get(AUTOWAKE_CONFIG_ENV)
+            ):
+                raise
+            operation, project_dir = target
+            failure = {
+                "code": (
+                    "FIRST_MILE_UNHANDLED_EXCEPTION:"
+                    f"{type(original_exc).__name__}"
+                ),
+                "reason": "unexpected RLR exception during First-Mile operation",
+            }
+            try:
+                replayed = _wake_and_replay_first_mile(
+                    project_dir=project_dir,
+                    operation=operation,
+                    failure=failure,
+                    entrypoint_name=entrypoint_name,
+                    argv=effective_argv,
+                )
+                if replayed is not None:
+                    return replayed
+            except Exception:
+                pass
+            raise
+
         if (
             result == 0
+            or target is None
             or os.environ.get(AUTOWAKE_RETRY_GUARD_ENV)
             or not os.environ.get(AUTOWAKE_CONFIG_ENV)
         ):
-            return result
-        target = _first_mile_target(effective_argv, entrypoint_name=entrypoint_name)
-        if target is None:
             return result
         operation, project_dir = target
         try:
@@ -154,15 +205,10 @@ def wrap_first_mile_main(
             )
             if failure is None:
                 return result
-            handoff = maybe_wake_first_mile_failure(
+            replayed = _wake_and_replay_first_mile(
                 project_dir=project_dir,
                 operation=operation,
                 failure=failure,
-            )
-            if handoff is None:
-                return result
-            replayed = _resume_verified_cli(
-                handoff=handoff,
                 entrypoint_name=entrypoint_name,
                 argv=effective_argv,
             )
