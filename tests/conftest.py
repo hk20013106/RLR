@@ -174,6 +174,34 @@ def l4_paperqa2_runtime():
 
 
 @pytest.fixture(autouse=True)
+def canonical_project_ready_provider_presence(request, monkeypatch, tmp_path):
+    """Give the canonical PROJECT_READY test helper a discoverable Codex sentinel.
+
+    ``bootstrap_project_ready`` is explicitly a positive readiness fixture, so
+    CI must satisfy structured-execution presence before the real production
+    preflight can issue its receipt. The sentinel is inert and is never used as
+    a provider process. Tests that do not import the canonical helper, including
+    provider-absence tests, are unaffected.
+    """
+    import native_v2_helpers
+
+    helper = getattr(request.module, "bootstrap_project_ready", None)
+    if helper is not native_v2_helpers.bootstrap_project_ready:
+        return
+    bin_dir = tmp_path / "project-ready-provider-bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    executable = bin_dir / ("codex.exe" if os.name == "nt" else "codex")
+    executable.write_text("test-only project-ready provider sentinel\n", encoding="utf-8")
+    if os.name != "nt":
+        executable.chmod(0o755)
+    current_path = os.environ.get("PATH", "")
+    monkeypatch.setenv(
+        "PATH",
+        str(bin_dir) + (os.pathsep + current_path if current_path else ""),
+    )
+
+
+@pytest.fixture(autouse=True)
 def complete_deep_research_l0_fixture(request, monkeypatch, tmp_path):
     """Migrate old provider-runtime fixtures to current L0/L0.5 preconditions.
 
