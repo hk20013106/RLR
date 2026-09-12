@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import datetime as _dt
 import importlib.util
+import hashlib
 import json
 import os
 import shutil
@@ -18,10 +19,10 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from research_loop import deep_research
+from research_loop import deep_research, structured_execution
 from research_loop.hypothesis_ledger import HypothesisLedger, LedgerError, binding_path
 
-PREFLIGHT_RECEIPT_SCHEMA = "L0PreflightReceipt/v1"
+PREFLIGHT_RECEIPT_SCHEMA = "L0PreflightReceipt/v2"
 ENFORCEMENT_BLOCKING = "blocking"
 ENFORCEMENT_READINESS_ONLY = "readiness_only"
 _PUBMED_REQUIRED_TOOLS = {
@@ -98,21 +99,26 @@ def _filesystem_probe(project_dir: Path) -> ProbeResult:
     return _pass("core.filesystem", detail, "project artifacts and audit receipts")
 
 
-def _academic_research_probe(project_dir: Path) -> ProbeResult:
+def _structured_execution_probe(project_dir: Path) -> ProbeResult:
     try:
         spec, _version = deep_research.load_runtime_spec(project_dir)
-        ready, reason = deep_research.runtime_ready(spec)
+        ready, reason = structured_execution.runtime_ready(spec)
     except deep_research.DeepResearchError as exc:
         ready, reason = False, str(exc)
     if not ready:
         return _fail(
-            "research.academic_research", "L0_RESEARCH_ARS_UNAVAILABLE", reason,
-            "L1/L4/L8.5 research reasoning",
+            "research.structured_execution", "L0_RESEARCH_STRUCTURED_EXECUTION_UNAVAILABLE", reason,
+            "native structured model execution",
         )
     return _pass(
-        "research.academic_research", "Academic Research runtime ready",
-        "L1/L4/L8.5 research reasoning",
+        "research.structured_execution", "generic structured provider runtime ready",
+        "native structured model execution",
     )
+
+
+def _academic_research_probe(project_dir: Path) -> ProbeResult:
+    """Compatibility shim; native readiness has no ARS skill dependency."""
+    return _structured_execution_probe(project_dir)
 
 
 def _pubmed_config(project_dir: Path) -> dict:
@@ -351,7 +357,7 @@ def preflight_overall_status(results: list[ProbeResult]) -> str:
     return "PASS"
 
 
-def write_preflight_receipt(project_dir, results: list[ProbeResult]) -> Path:
+def write_preflight_receipt(project_dir, results: list[ProbeResult], *, metadata: dict | None = None) -> Path:
     project = Path(project_dir)
     path = project / "00_Preflight" / "preflight_receipt.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -361,6 +367,63 @@ def write_preflight_receipt(project_dir, results: list[ProbeResult]) -> Path:
         "overall_status": preflight_overall_status(results),
         "results": [r.to_dict() for r in results],
     }
+    if metadata:
+        payload.update(metadata)
+        if payload.get("readiness", {}).get("status") != "PASS":
+            payload["overall_status"] = "FAIL"
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8")
     return path
+
+
+def build_project_ready_metadata(project_dir, results: list[ProbeResult], *, backend: str, declaration_source: str, hard_stop_passed: bool, hard_stop_blocking: list[dict], additional_blocking: list[dict] | None = None) -> dict:
+    """Build one receipt payload after all blocking checks have been evaluated."""
+    project = Path(project_dir)
+    runtime = deep_research.runtime_config_path(project)
+    runtime_bytes = runtime.read_bytes() if runtime.is_file() else b""
+    blocking = [item.to_dict() for item in results if item.enforcement == ENFORCEMENT_BLOCKING]
+    blocking.extend(additional_blocking or [])
+    failed = [item for item in blocking if item.get("status") != "PASS"]
+    ready = bool(runtime_bytes) and not failed and hard_stop_passed
+    return {
+        "backend": {"name": backend, "declaration_source": declaration_source},
+        "runtime_config": {
+            "relative_path": "00_Preflight/deep_research_runtime.json",
+            "sha256": hashlib.sha256(runtime_bytes).hexdigest() if runtime_bytes else "",
+        },
+        "blocking_dependencies": blocking,
+        "hard_stop": {"status": "PASS" if hard_stop_passed else "FAIL", "blocking": list(hard_stop_blocking or [])},
+        "readiness": {"status": "PASS" if ready else "FAIL", "code": "PROJECT_READY" if ready else "PROJECT_NOT_READY", "reason": "" if ready else "blocking dependency, runtime binding, or hard-stop gate failed"},
+    }
+
+
+def validate_project_ready(project_dir, *, candidate_path: str | Path | None = None, expected_backend: str | None = None) -> dict:
+    """Validate receipt/runtime bytes without repairing or regenerating either."""
+    project = Path(project_dir)
+    # Historical fixture/projects are readable compatibility scope. New native
+    # projects always have a ledger binding and therefore must satisfy v2.
+    if (project / "00_Project_Index.md").is_file() and not binding_path(project).is_file():
+        return {"status": "PASS", "code": "LEGACY_UNBOUND_PROJECT", "legacy": True}
+    receipt_path = project / "00_Preflight" / "preflight_receipt.json"
+    if not receipt_path.is_file():
+        return {"status": "FAIL", "code": "PROJECT_NOT_READY", "reason": "preflight receipt missing"}
+    try:
+        receipt_bytes = receipt_path.read_bytes()
+        receipt = json.loads(receipt_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return {"status": "FAIL", "code": "PROJECT_NOT_READY", "reason": f"preflight receipt invalid: {exc}"}
+    if receipt.get("schema_version") != PREFLIGHT_RECEIPT_SCHEMA or receipt.get("readiness", {}).get("code") != "PROJECT_READY" or receipt["readiness"].get("status") != "PASS":
+        return {"status": "FAIL", "code": "PROJECT_NOT_READY", "reason": "receipt is not a PROJECT_READY v2 authority"}
+    backend = str(receipt.get("backend", {}).get("name") or "")
+    if expected_backend and backend != expected_backend:
+        return {"status": "FAIL", "code": "PROJECT_READY_BACKEND_MISMATCH", "reason": f"bound backend is {backend!r}"}
+    runtime = deep_research.runtime_config_path(project)
+    if not runtime.is_file() or hashlib.sha256(runtime.read_bytes()).hexdigest() != receipt.get("runtime_config", {}).get("sha256"):
+        return {"status": "FAIL", "code": "PROJECT_READY_RUNTIME_TAMPERED", "reason": "runtime config bytes differ from receipt"}
+    receipt_sha = hashlib.sha256(receipt_bytes).hexdigest()
+    if candidate_path is not None:
+        from research_loop.yamlio import _load_yaml_front
+        fm = _load_yaml_front(Path(candidate_path))
+        if fm.get("project_ready_receipt_path") != "00_Preflight/preflight_receipt.json" or fm.get("project_ready_receipt_sha256") != receipt_sha:
+            return {"status": "FAIL", "code": "PROJECT_READY_CANDIDATE_BINDING_MISMATCH", "reason": "candidate does not pin receipt bytes"}
+    return {"status": "PASS", "code": "PROJECT_READY", "receipt_relative_path": "00_Preflight/preflight_receipt.json", "receipt_sha256": receipt_sha, "backend": backend}

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pitfall_ledger as pl
 
-from research_loop import deep_research, l0_contract, l0_data, l0_intake, l0_state
+from research_loop import deep_research, l0_contract, l0_data, l0_intake, l0_preflight, l0_state
 from research_loop.commands.ledger import _ledger_for
 from research_loop.common import (
     REQUIRED_DEPENDENCIES,
@@ -493,6 +493,10 @@ def cmd_new_candidate(args):
         print(f"ERROR: not a project dir (no 00_Project_Index.md): {project_dir}",
               file=sys.stderr)
         return 2
+    project_ready = l0_preflight.validate_project_ready(project_dir)
+    if project_ready.get("status") != "PASS":
+        print(f"PROJECT_NOT_READY: {project_ready.get('code')}: {project_ready.get('reason')}", file=sys.stderr)
+        return 3
 
     from_memory = getattr(args, "from_memory", None)
     loop_type = getattr(args, "loop_type", None) or ""
@@ -576,6 +580,11 @@ def cmd_new_candidate(args):
             if round_type == "continuation" else ""
         ),
     })
+    if not project_ready.get("legacy"):
+        mem_fields.update({
+            "project_ready_receipt_path": project_ready["receipt_relative_path"],
+            "project_ready_receipt_sha256": project_ready["receipt_sha256"],
+        })
     try:
         l8_artifact = _candidate_l8_artifact(
             project_dir, getattr(args, "knowledge_store", None)
@@ -942,6 +951,12 @@ def cmd_normalize_l0_input(args):
     mem_fields["input_contract_path"] = (
         f"01_Candidates/{cand_id}.l0_input.yaml")
     mem_fields["input_contract_hash"] = hashlib.sha256(raw_contract).hexdigest()
+    project_ready = l0_preflight.validate_project_ready(project_dir)
+    if project_ready.get("status") == "PASS" and not project_ready.get("legacy"):
+        mem_fields.update({
+            "project_ready_receipt_path": project_ready["receipt_relative_path"],
+            "project_ready_receipt_sha256": project_ready["receipt_sha256"],
+        })
     errors = l0_contract.validate_l0_input_contract(
         contract, mem_fields, project_dir, cand_id,
         artifact_path=project_dir / mem_fields["input_contract_path"],
@@ -1048,6 +1063,10 @@ def cmd_preflight(args):
         print(f"ERROR: not a project dir (no 00_Project_Index.md): {project_dir}",
               file=sys.stderr)
         return 2
+    backend = str(getattr(args, "backend", "") or "").strip()
+    if not backend:
+        print("ERROR: preflight requires --backend codex|claude", file=sys.stderr)
+        return 2
     name = _load_yaml_front(idx).get("project_name", project_dir.name)
     pf = project_dir / "00_Preflight"
     pf.mkdir(parents=True, exist_ok=True)
@@ -1096,7 +1115,9 @@ def cmd_preflight(args):
     # Single component-level authority: _check_dependencies delegates framework
     # probes to l0_preflight and persists preflight_receipt.json. Lifecycle only
     # formats/enforces those results; it never repeats an ARS/service probe.
-    ok, missing, advisory = _check_dependencies(project_dir)
+    ok, missing, advisory, probe_results = _check_dependencies(
+        project_dir, return_results=True
+    )
     print("\nL0 dependency gate:")
     for d in ok:
         print(f"  OK       {d['kind']}:{d['name']}")
@@ -1114,7 +1135,6 @@ def cmd_preflight(args):
               "`preflight` (or `check-deps`):", file=sys.stderr)
         for d in missing:
             print(f"  {d['name']}: {_dep_fix_hint(d)}", file=sys.stderr)
-        return 3
     if advisory:
         print("\nPREFLIGHT GATE: PASS WITH WARNINGS -- blocking dependencies present; "
               "future literature-transport readiness is incomplete.")
@@ -1131,9 +1151,15 @@ def cmd_preflight(args):
         print("Resolve each, then retire it (`pitfall-status ... --status "
               "obsolete`) or fix the cause, before re-running preflight.",
               file=sys.stderr)
-        return 3
-    print("L0 PITFALL GATE: PASS -- no blocking confirmed pitfalls.")
-    return 0
+    else:
+        print("L0 PITFALL GATE: PASS -- no blocking confirmed pitfalls.")
+    metadata = l0_preflight.build_project_ready_metadata(
+        project_dir, probe_results, backend=backend, declaration_source="--backend",
+        hard_stop_passed=passed, hard_stop_blocking=blocking,
+        additional_blocking=[dict(item, status="FAIL") for item in missing if item.get("kind") != "probe"],
+    )
+    l0_preflight.write_preflight_receipt(project_dir, probe_results, metadata=metadata)
+    return 0 if metadata["readiness"]["status"] == "PASS" else 3
 
 def cmd_check_deps(args):
     """Standalone L0 component gate; non-zero means a blocking dependency failed."""
