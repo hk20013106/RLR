@@ -199,25 +199,22 @@ def complete_deep_research_l0_fixture(request, monkeypatch, tmp_path):
         return
 
     codex_presence_fixture_tests = {
-        "test_l10_context_includes_l9b_state",
-        "test_emit_l10b_transition_is_idempotent",
+        "test_l10_context_includes_source_located_l1_evidence",
+        "test_emit_l10b_rejects_missing_literature_evidence_ids",
         "test_detached_deep_research_survives_start_process_exit_and_collects",
         "test_deep_research_cli_executes_a_local_fake_codex",
-        "test_deep_research_execution_rejects_provider_host_mismatch_before_spawn",
-        "test_deep_research_execution_rejects_inconsistent_execution_spec_before_spawn",
-        "test_deep_research_execution_rejects_unknown_host_before_spawn",
-        "test_deep_research_execution_rejects_declared_host_mismatch_before_spawn",
-        "test_deep_research_cli_executes_local_fake_claude_plugin",
+        "test_host_mismatch_never_starts_the_provider_process",
+        "test_inconsistent_spec_never_starts_the_provider_process",
+        "test_unknown_host_never_starts_the_provider_process",
+        "test_declared_host_lets_the_run_proceed",
+        "test_deep_research_cli_executes_a_local_fake_claude_plugin",
     }
     if request.node.name in codex_presence_fixture_tests:
         bin_dir = tmp_path / "fake-provider-bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
-        if os.name == "nt":
-            executable = bin_dir / "codex.cmd"
-            executable.write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
-        else:
-            executable = bin_dir / "codex"
-            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable = bin_dir / ("codex.exe" if os.name == "nt" else "codex")
+        executable.write_text("test-only provider presence sentinel\n", encoding="utf-8")
+        if os.name != "nt":
             executable.chmod(0o755)
         current_path = os.environ.get("PATH", "")
         monkeypatch.setenv(
