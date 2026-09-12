@@ -41,7 +41,7 @@ def test_l0_replay_uses_persisted_context_bytes_before_receipt(tmp_path, monkeyp
     ready_env = bootstrap_project_ready(
         project,
         CONTROLLER,
-        extra_env=env,
+        extra_env={key: value for key, value in env.items() if key != "PATH"},
     )
     env.update({
         "OBSIDIAN_VAULT": ready_env["OBSIDIAN_VAULT"],
