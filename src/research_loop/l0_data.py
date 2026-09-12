@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import csv
 from pathlib import Path
 from typing import Any
 
-from research_loop import l0_contract
+from research_loop import l0_contract, l0_plan_intake
 from research_loop.hypothesis_ledger import binding_path
 from research_loop.l0_state import (
     EVIDENCE_BINDING_SCHEMA,
@@ -255,6 +256,90 @@ def _deduplicate(records: list[dict]) -> list[dict]:
     return [by_path[key] for key in sorted(by_path)]
 
 
+def _upstream_snapshot(project: Path, contract: dict) -> dict | None:
+    """Revalidate the byte-frozen preplan before projecting its typed facts."""
+    if "upstream_completed_inputs" not in contract:
+        return None
+    provenance = contract.get("provenance")
+    if not isinstance(provenance, dict):
+        raise L0DataError("L0_DATA_UPSTREAM_PLAN_INVALID", "typed upstream input requires provenance")
+    raw_path = str(provenance.get("research_plan_snapshot_path") or "")
+    expected_sha = str(provenance.get("research_plan_snapshot_sha256") or "")
+    if not raw_path or not expected_sha:
+        raise L0DataError("L0_DATA_UPSTREAM_PLAN_INVALID", "frozen preplan path/hash is missing")
+    path = _resolve_local(project, raw_path)
+    if not path.is_file():
+        raise L0DataError("L0_DATA_UPSTREAM_PLAN_MISSING", raw_path)
+    raw = path.read_bytes()
+    actual_sha = hashlib.sha256(raw).hexdigest()
+    if actual_sha != expected_sha:
+        raise L0DataError("L0_DATA_UPSTREAM_PLAN_HASH_MISMATCH", raw_path)
+    try:
+        parsed, errors = l0_plan_intake.parse_plan_text_strict(raw.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise L0DataError("L0_DATA_UPSTREAM_PLAN_INVALID", str(exc)) from exc
+    if errors:
+        raise L0DataError("L0_DATA_UPSTREAM_PLAN_INVALID", "; ".join(errors))
+    declared = l0_plan_intake.extract_upstream_completed_inputs(
+        parsed.get("research_plan") if isinstance(parsed, dict) else None
+    )
+    if declared != contract["upstream_completed_inputs"]:
+        raise L0DataError("L0_DATA_UPSTREAM_PLAN_MISMATCH", "snapshot declaration differs from L0 contract")
+    return {"path": _stored_path(project, path), "bytes": len(raw), "sha256": actual_sha}
+
+
+def _feature_ids(path: Path, role: str, key: str) -> list[str]:
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            rows = csv.reader(handle, delimiter="\t")
+            header = next(rows, None)
+            if not header or header[0] != key or len(header) < 2:
+                raise L0DataError("L0_DATA_FEATURE_SPACE_MISMATCH", f"{role}: invalid {key!r} table header")
+            values = [row[0] for row in rows if row and row[0]]
+    except (OSError, UnicodeDecodeError) as exc:
+        raise L0DataError("L0_DATA_FEATURE_SPACE_MISMATCH", f"{role}: {exc}") from exc
+    if not values or len(values) != len(set(values)):
+        raise L0DataError("L0_DATA_FEATURE_SPACE_MISMATCH", f"{role}: empty or duplicate feature identifiers")
+    return values
+
+
+def _bind_upstream_completed_inputs(project: Path, contract: dict, current: list[dict]) -> dict | None:
+    """Add the typed completed-upstream projection to the sole L0 binding."""
+    snapshot = _upstream_snapshot(project, contract)
+    if snapshot is None:
+        return None
+    orthology = contract["upstream_completed_inputs"]["orthology"]
+    feature = orthology["feature_space"]
+    aligned = feature.get("aligned_source_files")
+    if not isinstance(aligned, list):
+        raise L0DataError("L0_DATA_UPSTREAM_SOURCE_NOT_BOUND", "aligned_source_files is missing")
+    by_path_role = {(str(item.get("path")), str(item.get("role"))): item for item in current}
+    sources, observed, orders = [], {}, {}
+    for role in l0_contract.ORTHOLOGY_SOURCE_ROLES:
+        declared = next((item for item in aligned if isinstance(item, dict) and item.get("role") == role), None)
+        if declared is None:
+            raise L0DataError("L0_DATA_UPSTREAM_SOURCE_NOT_BOUND", f"missing declared source role {role}")
+        source_path = _resolve_local(project, str(declared.get("path") or ""))
+        bound = by_path_role.get((_stored_path(project, source_path), role))
+        if bound is None:
+            raise L0DataError("L0_DATA_UPSTREAM_SOURCE_NOT_BOUND", f"{role} is not an authorized current source")
+        if str(declared.get("sha256") or "") != bound["sha256"]:
+            raise L0DataError("L0_DATA_UPSTREAM_SOURCE_HASH_MISMATCH", role)
+        identifiers = _feature_ids(source_path, role, feature["key"])
+        observed[role] = len(identifiers)
+        orders[role] = identifiers
+        sources.append({key: bound[key] for key in ("path", "bytes", "sha256", "role", "origin", "reason") if key in bound})
+    if any(count != feature["rows"] for count in observed.values()):
+        raise L0DataError("L0_DATA_FEATURE_SPACE_MISMATCH", f"declared={feature['rows']} observed={observed}")
+    baseline = orders[l0_contract.ORTHOLOGY_SOURCE_ROLES[0]]
+    if any(order != baseline for order in orders.values()):
+        raise L0DataError("L0_DATA_FEATURE_SPACE_MISMATCH", "feature row order differs across declared sources")
+    return {
+        "orthology": {key: orthology[key] for key in ("status", "method", "policy", "orthogroup_count", "species_tree", "formal_species")} | {"feature_space": {"key": feature["key"], "rows": feature["rows"], "source_files": sources, "validation": {"observed_rows": observed, "row_order_matches": True}}},
+        "source_preplan": snapshot,
+    }
+
+
 def build_current_round_data_binding(project_dir, cand_id, evidence_binding=None) -> dict:
     project = Path(project_dir)
     contract, contract_path, raw, _fm = _validate_contract(project, str(cand_id))
@@ -279,6 +364,9 @@ def build_current_round_data_binding(project_dir, cand_id, evidence_binding=None
         "authorized_inputs": authorized,
         "non_file_inputs": non_files,
     }
+    upstream = _bind_upstream_completed_inputs(project, contract, current)
+    if upstream is not None:
+        payload["upstream_completed_inputs"] = upstream
 
     if inherited:
         evidence_path = (project / "08_Audit" / "l0_restore" /
@@ -368,6 +456,10 @@ def verify_current_round_data_binding(project_dir, cand_id) -> dict:
         raise L0DataError("L0_DATA_BINDING_CONTRACT_MISMATCH", "L0 contract hash changed")
     if str(binding.get("round_id")) != str(contract.get("round_id")):
         raise L0DataError("L0_DATA_BINDING_IDENTITY_MISMATCH", "round_id mismatch")
+    if "upstream_completed_inputs" in contract:
+        rebuilt = _bind_upstream_completed_inputs(project, contract, [item for item in binding.get("authorized_inputs") or [] if item.get("origin") == "current_round"])
+        if binding.get("upstream_completed_inputs") != rebuilt:
+            raise L0DataError("L0_DATA_BINDING_CONTRACT_MISMATCH", "typed upstream authority changed")
 
     evidence_path_value = str(binding.get("previous_evidence_binding_path") or "")
     if evidence_path_value:
