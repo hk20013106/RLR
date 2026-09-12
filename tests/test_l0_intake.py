@@ -31,6 +31,13 @@ def _new_project(tmp_path):
     project = tmp_path / "P"
     result = _run("new-project", str(project), "L0 intake test")
     assert result.returncode == 0, result.stderr
+    vault = tmp_path / "vault"
+    (vault / ".obsidian").mkdir(parents=True, exist_ok=True)
+    result = _run(
+        "preflight", str(project), "--backend", "codex",
+        extra_env={"OBSIDIAN_VAULT": str(vault)},
+    )
+    assert result.returncode == 0, result.stderr
     return project
 
 
@@ -125,7 +132,7 @@ def test_normalize_initial_request_with_local_directory(tmp_path):
 def test_normalize_continuation_uses_verified_memory_and_reaches_l0_prompt(tmp_path):
     project = _new_project(tmp_path)
     vault = tmp_path / "vault"
-    (vault / ".obsidian").mkdir(parents=True)
+    (vault / ".obsidian").mkdir(parents=True, exist_ok=True)
     ready_env = {"OBSIDIAN_VAULT": str(vault)}
     preflight = _run("preflight", str(project), "--backend", "codex", extra_env=ready_env)
     assert preflight.returncode == 0, preflight.stderr

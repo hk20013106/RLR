@@ -1,9 +1,16 @@
 from research_loop import l0_preflight
+from research_loop.hypothesis_ledger import binding_path
 
 
 def test_project_ready_receipt_is_v2_and_rejects_missing_receipt(tmp_path):
     assert l0_preflight.PREFLIGHT_RECEIPT_SCHEMA == "L0PreflightReceipt/v2"
-    result = l0_preflight.validate_project_ready(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "00_Project_Index.md").write_text("# project\n", encoding="utf-8")
+    target = binding_path(project)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("{}\n", encoding="utf-8")
+    result = l0_preflight.validate_project_ready(project)
     assert result["status"] == "FAIL"
     assert result["code"] == "PROJECT_NOT_READY"
 

@@ -41,7 +41,7 @@ from research_loop.api import (  # noqa: E402
     load_rendered_context_artifact,
 )
 from research_loop.context import DEFAULT_CONTEXT_TOKEN_BUDGET
-from research_loop.compatibility import PROFILE_V20, get_profile
+from research_loop.compatibility import PROFILE_V20, PROFILE_V21_CATALOG_1, get_profile
 from research_loop.code_state import capture_code_state
 from research_loop import deep_research, l0_preflight, runtime_preflight
 from research_loop.loopx_policy import LoopXRetryPolicy
@@ -929,6 +929,15 @@ def _native_l1_binding_ready(project, cand):
         return False
 
 
+def _bound_profile_id(project):
+    """Read the immutable profile binding without inferring from runtime data."""
+    try:
+        binding = json.loads(rl.binding_path(project).read_text(encoding="utf-8"))
+        return str(binding.get("profile_id") or "").strip()
+    except (OSError, TypeError, json.JSONDecodeError):
+        return ""
+
+
 def _ensure_native_l1_recall(project, cand):
     """Create the fixed-cursor recall artifact required by native L1 once."""
     project = Path(project)
@@ -964,6 +973,55 @@ def _ensure_native_l1_recall(project, cand):
 
 
 def ensure_pre_research(project, cand, node, cfg, args, run_dir):
+    native_catalog = _bound_profile_id(project) == PROFILE_V21_CATALOG_1
+    if native_catalog and node == "L1":
+        if not _native_l1_binding_root(project, cand).is_dir():
+            log("ERROR: native L1 requires an active frozen L0.5 EvidencePack")
+            return False
+        if not _native_l1_binding_ready(project, cand):
+            log("ERROR: native L1 binding exists but is not valid/active")
+            return False
+        if not _ensure_native_l1_recall(project, cand):
+            return False
+        log("native L1 binding already active; independent literature search is not applicable")
+        return True
+    if native_catalog and node in {"L4", "L8.5"}:
+        existing = _ctl("audit-literature-evidence", project, cand, "--node", node)
+        if existing.returncode == 0:
+            try:
+                run_id = str(json.loads(existing.stdout).get("run_id") or "")
+            except (TypeError, json.JSONDecodeError):
+                run_id = ""
+            if run_id:
+                args.evidence_run_ids = getattr(args, "evidence_run_ids", {})
+                args.evidence_run_ids[node] = run_id
+                log(f"native {node}: valid canonical literature run already present: {run_id}")
+                return True
+        dr_cfg = _deep_research_config(cfg)
+        backend = str(dr_cfg.get("backend", "")).strip()
+        if backend and backend not in SUPPORTED_BACKENDS:
+            log(f"ERROR: native {node} runner override deep_research.backend={backend!r} must be one of {SUPPORTED_BACKENDS}")
+            return False
+        command = ["deep-research-run", project, cand, "--node", node]
+        if backend:
+            command.extend(["--backend", backend])
+        for option, key in (("--executable", "executable"), ("--model", "model"), ("--timeout", "timeout")):
+            value = dr_cfg.get(key)
+            if value not in (None, ""):
+                command.extend([option, str(value)])
+        result = _ctl(*command)
+        if result.returncode != 0:
+            log(f"ERROR: native {node} canonical literature run failed closed: {(result.stderr or result.stdout).strip()}")
+            return False
+        try:
+            run_id = str(json.loads(result.stdout)["run_id"])
+        except (KeyError, TypeError, json.JSONDecodeError):
+            log(f"ERROR: native {node} command did not return a run_id")
+            return False
+        args.evidence_run_ids = getattr(args, "evidence_run_ids", {})
+        args.evidence_run_ids[node] = run_id
+        log(f"native {node}: persisted canonical literature run {run_id}")
+        return True
     if node not in rl.PRE_RESEARCH_MAP:
         return True
     if node == "L1" and _native_l1_binding_root(project, cand).is_dir():

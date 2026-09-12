@@ -112,6 +112,18 @@ def test_cold_start_formal_l0_run_stops_after_receipt(tmp_path):
         capture_output=True, text=True, encoding="utf-8", env=env,
     )
     assert created.returncode == 0, created.stderr
+    vault = tmp_path / "vault"
+    (vault / ".obsidian").mkdir(parents=True)
+    env["OBSIDIAN_VAULT"] = str(vault)
+    runtime_config = project / "00_Preflight" / "deep_research_runtime.json"
+    runtime_config.write_text(json.dumps({
+        "schema_version": "1.0", "backend": "codex", "executable": sys.executable,
+    }), encoding="utf-8")
+    preflight = subprocess.run(
+        [sys.executable, str(CONTROLLER), "preflight", str(project), "--backend", "codex"],
+        capture_output=True, text=True, encoding="utf-8", env=env,
+    )
+    assert preflight.returncode == 0, preflight.stderr
     candidate_result = subprocess.run(
         [sys.executable, str(CONTROLLER), "new-candidate", str(project),
          "--title", "Cold start", "--question", "Which bytes reach L0?",
@@ -130,16 +142,10 @@ def test_cold_start_formal_l0_run_stops_after_receipt(tmp_path):
         "import shutil, sys; shutil.copyfile(sys.argv[1], sys.argv[2])",
         encoding="utf-8",
     )
-    runtime_config = project / "00_Preflight" / "deep_research_runtime.json"
     runtime_config.write_text(json.dumps({
         "schema_version": "1.0",
         "backend": "codex",
         "executable": sys.executable,
-        "skill_path": str(
-            Path.home() / ".codex" / "skill-library" / "sources" /
-            "codex-user" / "academic-research-suite"
-        ),
-        "skill_version": "test-fixture",
     }), encoding="utf-8")
     config = tmp_path / "runner.json"
     config.write_text(json.dumps({
@@ -163,6 +169,13 @@ import run_loop
 from research_loop.providers.main_agent import ProviderConfig
 
 assert os.environ["RLR_HOST_BACKEND"] == "codex"
+
+def pass_formal_runtime_preflight():
+    print("[run_loop] FORMAL RUNTIME PREFLIGHT PASS -- test fixture")
+    return True
+
+run_loop._formal_runtime_preflight = pass_formal_runtime_preflight
+
 project = os.environ["RLR_SMOKE_PROJECT"]
 candidate = os.environ["RLR_SMOKE_CANDIDATE"]
 config = os.environ["RLR_SMOKE_CONFIG"]

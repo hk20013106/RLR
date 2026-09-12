@@ -120,6 +120,6 @@ def test_preflight_receipt_persists_each_component_result(tmp_path):
     path = write_preflight_receipt(project, results)
     payload = json.loads(path.read_text(encoding="utf-8"))
 
-    assert payload["schema_version"] == "L0PreflightReceipt/v1"
+    assert payload["schema_version"] == "L0PreflightReceipt/v2"
     assert payload["overall_status"] == "FAIL"
     assert payload["results"] == [item.to_dict() for item in results]

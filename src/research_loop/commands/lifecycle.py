@@ -902,6 +902,16 @@ def cmd_normalize_l0_input(args):
         print(f"ERROR: not a project dir (no 00_Project_Index.md): {project_dir}",
               file=sys.stderr)
         return 2
+    project_ready = None
+    if not getattr(args, "dry_run", False):
+        project_ready = l0_preflight.validate_project_ready(project_dir)
+        if project_ready.get("status") != "PASS":
+            print(
+                f"PROJECT_NOT_READY: {project_ready.get('code')}: "
+                f"{project_ready.get('reason')}",
+                file=sys.stderr,
+            )
+            return 3
     request_path = Path(args.input)
     try:
         request_text = request_path.read_text(encoding="utf-8")
@@ -951,8 +961,7 @@ def cmd_normalize_l0_input(args):
     mem_fields["input_contract_path"] = (
         f"01_Candidates/{cand_id}.l0_input.yaml")
     mem_fields["input_contract_hash"] = hashlib.sha256(raw_contract).hexdigest()
-    project_ready = l0_preflight.validate_project_ready(project_dir)
-    if project_ready.get("status") == "PASS" and not project_ready.get("legacy"):
+    if project_ready is not None and not project_ready.get("legacy"):
         mem_fields.update({
             "project_ready_receipt_path": project_ready["receipt_relative_path"],
             "project_ready_receipt_sha256": project_ready["receipt_sha256"],
@@ -1072,21 +1081,35 @@ def cmd_preflight(args):
     pf.mkdir(parents=True, exist_ok=True)
     created, skipped = [], []
     runtime_file = deep_research.runtime_config_path(project_dir)
-    if not runtime_file.exists() or args.force:
+    receipt_file = pf / "preflight_receipt.json"
+    existing_receipt = receipt_file.is_file()
+    existing_candidates = list((project_dir / "01_Candidates").glob("C*.md"))
+    if existing_receipt and existing_candidates:
+        print("ERROR: PROJECT_READY is already consumed by candidate artifacts; refusing to rebind readiness authority", file=sys.stderr)
+        return 3
+    if runtime_file.exists() and not args.force:
         try:
-            runtime_config = deep_research.default_runtime_config(
-                getattr(args, "backend", None))
+            existing_backend = str(json.loads(runtime_file.read_text(encoding="utf-8")).get("backend") or "")
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"ERROR: runtime config is invalid: {exc}", file=sys.stderr)
+            return 2
+        if existing_backend != backend:
+            print(f"ERROR: backend declaration {backend!r} does not match existing runtime binding {existing_backend!r}", file=sys.stderr)
+            return 3
+        skipped.append(runtime_file.name)
+    else:
+        if existing_receipt:
+            print("ERROR: refusing to regenerate runtime config after a readiness receipt exists", file=sys.stderr)
+            return 3
+        try:
+            runtime_config = deep_research.default_runtime_config(backend)
         except deep_research.DeepResearchError as exc:
             print(f"ERROR: cannot pick a Deep Research backend: {exc}", file=sys.stderr)
             return 2
-        runtime_file.write_text(json.dumps(runtime_config, indent=2), encoding="utf-8")
+        runtime_file.write_text(json.dumps(runtime_config, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         created.append(runtime_file.name)
         if runtime_config["backend"] == "claude":
-            print("NOTE: set plugin_dir in "
-                  f"{runtime_file.name} to the academic-research-skills plugin path; "
-                  "deep-research-run stays blocked until it is set.", file=sys.stderr)
-    else:
-        skipped.append(runtime_file.name)
+            print("NOTE: native Curie stages use generic structured execution; plugin_dir is historical compatibility only.", file=sys.stderr)
     for fname in PREFLIGHT_FILES:
         target = pf / fname
         if target.exists() and not args.force:
@@ -1116,7 +1139,7 @@ def cmd_preflight(args):
     # probes to l0_preflight and persists preflight_receipt.json. Lifecycle only
     # formats/enforces those results; it never repeats an ARS/service probe.
     ok, missing, advisory, probe_results = _check_dependencies(
-        project_dir, return_results=True
+        project_dir, backend=backend, return_results=True
     )
     print("\nL0 dependency gate:")
     for d in ok:

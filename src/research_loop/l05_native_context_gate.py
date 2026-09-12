@@ -21,11 +21,7 @@ from research_loop.gates import (
 )
 from research_loop.hypothesis_ledger import binding_path
 from research_loop.paths import _candidate_file
-from research_loop.preresearch import (
-    PRE_RESEARCH_MAP,
-    _load_query_family_cache,
-    _query_family_key,
-)
+from research_loop.preresearch import _load_query_family_cache, _query_family_key
 from research_loop.yamlio import _load_yaml_front
 
 _NATIVE_BINDING_ROOT = Path("08_Audit") / "research_seed_bindings" / "native"
@@ -192,15 +188,10 @@ def install(context_module) -> None:
             print(f"ERROR: {breason}", file=sys.stderr)
             return 3
 
-        legacy_l1_config = PRE_RESEARCH_MAP.pop("L1", None)
         stdout = io.StringIO()
         stderr = io.StringIO()
-        try:
-            with redirect_stdout(stdout), redirect_stderr(stderr):
-                rc = original(args)
-        finally:
-            if legacy_l1_config is not None:
-                PRE_RESEARCH_MAP["L1"] = legacy_l1_config
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            rc = original(args)
 
         original_stdout = stdout.getvalue()
         original_stderr = stderr.getvalue()

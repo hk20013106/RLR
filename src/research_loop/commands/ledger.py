@@ -60,6 +60,41 @@ from research_loop.yamlio import _load_yaml_front, _replace_field
 
 FINAL_STATUSES = {"KEEP", "REVISE", "DOWNGRADE", "DROP", "ARCHIVED"}
 
+
+def _native_l85_evidence_manifest(args, reference: dict) -> dict:
+    """Revalidate one immutable native L8.5 literature run for emission."""
+    if not isinstance(reference, dict):
+        raise LedgerError("native L8.5 canonical literature reference is invalid")
+    run_id = str(reference.get("run_id") or "").strip()
+    if not run_id:
+        raise LedgerError("native L8.5 context manifest has no canonical run ID")
+    from research_loop import l85_literature_verification
+
+    ok, reason, run = l85_literature_verification.audit_run_manifest(
+        args.project_dir, str(args.cand_id), run_id=run_id
+    )
+    if not ok or not isinstance(run, dict):
+        raise LedgerError(
+            f"native L8.5 canonical literature run failed revalidation: {reason}"
+        )
+    expected = {
+        "run_id": str(run.get("run_id") or ""),
+        "run_sha256": str(run.get("run_sha256") or ""),
+        "finding_count": len(run.get("findings") or []),
+        "located_evidence_ids": [
+            str(item.get("evidence_id") or "")
+            for item in run.get("located_evidence") or []
+            if isinstance(item, dict) and item.get("evidence_id")
+        ],
+    }
+    for field, value in expected.items():
+        if reference.get(field) != value:
+            raise LedgerError(
+                f"native L8.5 canonical literature {field} changed since context assembly"
+            )
+    return expected
+
+
 def _ledger_for(
     project_dir, configured_path=None, *, require_binding=True, readonly=False
 ):

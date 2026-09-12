@@ -401,11 +401,13 @@ def cmd_assemble_context(args):
                                  project_dir, args.cand_id, evidence_nodes)}
 
     # --- V0.7 deep-research gate + pre-research injection --------------------
-    # L1/L4/L8.5 are mandatory Deep Research stages. assemble-context fails
-    # closed unless their note and persisted evidence pack validate; L7 stays
-    # a separate soft code-search pre-step.
+    # Only profile-topology-declared compatibility stages may consult the old
+    # pre-research map. Native literature nodes have Curie-owned evidence.
     pre_research_meta = None
-    pr_cfg = PRE_RESEARCH_MAP.get(node_id)
+    declared_pre_research = str(node_info.get("pre_research") or "").strip()
+    pr_cfg = PRE_RESEARCH_MAP.get(node_id) if declared_pre_research else None
+    if pr_cfg and str(pr_cfg.get("type") or "") != declared_pre_research:
+        pr_cfg = None
     if pr_cfg:
         prf = _pre_research_file(project_dir, node_id)
         is_lit = pr_cfg.get("type") in _LIT_PRE_RESEARCH_TYPES
