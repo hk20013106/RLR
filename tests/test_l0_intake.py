@@ -11,6 +11,9 @@ from unittest.mock import patch
 import yaml
 
 from research_loop import l0_contract
+from research_loop.common import _mkdirs
+from research_loop.commands.lifecycle import cmd_new_project
+from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
 from research_loop.l0_state import ROUND_MANIFEST_SCHEMA
 from research_loop.hypothesis_ledger import binding_path
 from research_loop.providers.command import CommandProvider
@@ -18,8 +21,8 @@ from research_loop.providers.command import CommandProvider
 
 ROOT = Path(__file__).resolve().parents[1]
 RL = str(ROOT / "research_loop_v04.py")
-def _run(*args):
-    env = {**os.environ, "PYTHONPATH": str(ROOT)}
+def _run(*args, extra_env=None):
+    env = {**os.environ, "PYTHONPATH": str(ROOT), **(extra_env or {})}
     return subprocess.run([sys.executable, RL, *args], capture_output=True,
                           text=True, encoding="utf-8", env=env)
 
@@ -28,7 +31,29 @@ def _new_project(tmp_path):
     project = tmp_path / "P"
     result = _run("new-project", str(project), "L0 intake test")
     assert result.returncode == 0, result.stderr
+    vault = tmp_path / "vault"
+    (vault / ".obsidian").mkdir(parents=True, exist_ok=True)
+    result = _run(
+        "preflight", str(project), "--backend", "codex",
+        extra_env={"OBSIDIAN_VAULT": str(vault)},
+    )
+    assert result.returncode == 0, result.stderr
     return project
+
+
+def test_new_project_recovers_pristine_scaffolding_after_bootstrap_failure(tmp_path):
+    project = tmp_path / "P"
+    ledger = tmp_path / "ledger.sqlite"
+    _mkdirs(project)
+
+    result = cmd_new_project(SimpleNamespace(
+        name=str(project), topic="L0 recovery", profile=DEFAULT_NATIVE_PROFILE,
+        knowledge_store=str(ledger),
+    ))
+
+    assert result == 0
+    assert (project / "00_Project_Index.md").is_file()
+    assert binding_path(project).is_file()
 
 
 def _prompt_via_provider(context, run_dir):
@@ -106,6 +131,11 @@ def test_normalize_initial_request_with_local_directory(tmp_path):
 
 def test_normalize_continuation_uses_verified_memory_and_reaches_l0_prompt(tmp_path):
     project = _new_project(tmp_path)
+    vault = tmp_path / "vault"
+    (vault / ".obsidian").mkdir(parents=True, exist_ok=True)
+    ready_env = {"OBSIDIAN_VAULT": str(vault)}
+    preflight = _run("preflight", str(project), "--backend", "codex", extra_env=ready_env)
+    assert preflight.returncode == 0, preflight.stderr
     data_file = project / "data.tsv"
     data_file.write_text("sample\tvalue\nA\t1\n", encoding="utf-8")
     seed = tmp_path / "seed.json"
@@ -138,7 +168,7 @@ def test_normalize_continuation_uses_verified_memory_and_reaches_l0_prompt(tmp_p
     assert contract["previous_round"]["candidate_id"] == "C_PARENT_0001"
     assert contract["previous_round"]["memory_hash"] == hashlib.sha256(seed.read_bytes()).hexdigest()
     candidate_id = contract["candidate_id"]
-    assembled = _run("assemble-context", str(project), candidate_id, "--node", "L0")
+    assembled = _run("assemble-context", str(project), candidate_id, "--node", "L0", extra_env=ready_env)
     assert assembled.returncode == 0, assembled.stderr
     for sentinel in ("prior hypothesis", "prior conclusion", "REVISE",
                      "Ancient introgression remains after re-analysis."):
@@ -311,5 +341,6 @@ def test_run_l0_invokes_canonical_runner_with_l0_stop(tmp_path):
         assert engine.cmd_normalize_l0_input(args) == 0
 
     command = run.call_args.args[0]
+    assert command[:5] == ["micromamba", "run", "-n", "rlr", "python"]
     assert command[-2:] == ["--stop-after-node", "L0"]
-    assert Path(command[1]).name == "run_loop.py"
+    assert Path(command[5]).name == "run_loop.py"

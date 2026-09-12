@@ -4,7 +4,8 @@ from research_loop.common import (
     PERSONA_TITLE, REQUIRED_DEPENDENCIES, _dep_fix_hint, _input_alias, _now,
     _render_extra_front,
 )
-from research_loop.topology import AGENTS, DAG_NODES
+from research_loop.topology import AGENTS, DAG_NODES, VALID_STATUSES
+from research_loop.version import VERSION
 from research_loop.yamlio import _yaml_value
 
 
@@ -199,12 +200,12 @@ def _index_template(name, topic):
     return f"""---
 project_name: {_yaml_value(name)}
 topic: {_yaml_value(topic)}
-version: {_yaml_value(__version__)}
+version: {_yaml_value(VERSION)}
 framework: gated-multi-loop-council-v07
 created_at: {_yaml_value(_now())}
 ---
 
-# {name} - Research Loop v0.9.2 Index
+# {name} - Research Loop v{VERSION} Index
 
 Topic: {topic}
 

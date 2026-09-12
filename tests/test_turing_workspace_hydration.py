@@ -7,7 +7,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-from native_v2_helpers import activate_native_project, commit_v2, seed_selected_hypothesis
+from native_v2_helpers import (
+    activate_native_project,
+    bootstrap_project_ready,
+    commit_v2,
+    seed_selected_hypothesis,
+)
 from research_loop import l0_contract
 from research_loop.gates import _audit_l0_contract
 
@@ -72,11 +77,13 @@ def _fixture(missing_input=False, missing_script=False):
         encoding="utf-8",
     )
 
+    bootstrap_project_ready(project, Path(__file__).resolve().parents[1] / "research_loop_v04.py")
+
     ok, reason = _audit_l0_contract(project, "C1")
     assert ok, reason
 
     scripts = project / "04_Analysis_Outputs"
-    scripts.mkdir()
+    scripts.mkdir(exist_ok=True)
     if not missing_script:
         (scripts / "analysis.py").write_text(
             "from pathlib import Path\n"

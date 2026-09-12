@@ -1,4 +1,5 @@
 """Structured-frontmatter preplan compatibility adapter for L0 intake."""
+import copy
 import hashlib
 import os
 import re
@@ -85,6 +86,16 @@ def parse_frontmatter_strict(frontmatter_text: str):
     if not isinstance(parsed, dict):
         return None, ["frontmatter must be a YAML mapping/dictionary"]
     return parsed, []
+
+
+def parse_plan_text_strict(plan_text: str):
+    """Parse a byte-frozen structured-plan snapshot with the intake parser."""
+    if not isinstance(plan_text, str) or not plan_text.startswith("---"):
+        return None, ["structured plan snapshot must start with YAML frontmatter"]
+    end = plan_text.find("\n---", 4)
+    if end < 0:
+        return None, ["structured plan snapshot frontmatter is unclosed"]
+    return parse_frontmatter_strict(plan_text[:end + 4])
 
 
 def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
@@ -211,6 +222,16 @@ def _current_contract(contract, inherited_inputs):
     )
 
 
+def extract_upstream_completed_inputs(research_plan):
+    """Copy only an explicitly declared upstream input authority from a plan."""
+    if not isinstance(research_plan, dict):
+        return None
+    provenance = research_plan.get("scientific_provenance")
+    if not isinstance(provenance, dict) or "upstream_completed_inputs" not in provenance:
+        return None
+    return copy.deepcopy(provenance["upstream_completed_inputs"])
+
+
 def normalize_frontmatter(
     frontmatter_text,
     body_text,
@@ -294,6 +315,12 @@ def normalize_frontmatter(
     research_plan = parsed.get("research_plan")
     if not isinstance(research_plan, dict) or len(research_plan) == 0:
         missing_fields.append("research_plan")
+    upstream_declared = (
+        isinstance(research_plan, dict)
+        and isinstance(research_plan.get("scientific_provenance"), dict)
+        and "upstream_completed_inputs" in research_plan["scientific_provenance"]
+    )
+    upstream_completed_inputs = extract_upstream_completed_inputs(research_plan)
 
     if isinstance(sq_val, str) and not _is_placeholder(sq_val):
         body_sq = (body_fields or {}).get("scientific_question", "").strip()
@@ -381,6 +408,8 @@ def normalize_frontmatter(
             new_hypothesis=current_round["hypothesis"].strip(),
         )
     contract = _current_contract(contract, inherited_inputs)
+    if upstream_declared:
+        contract["upstream_completed_inputs"] = upstream_completed_inputs
 
     data_inventory = []
     for entry in clean_manifest:

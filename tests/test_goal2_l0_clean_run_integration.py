@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import run_loop
+from native_v2_helpers import bootstrap_project_ready
 from research_loop.providers.command import CommandProvider
 
 
@@ -37,6 +38,15 @@ def test_l0_replay_uses_persisted_context_bytes_before_receipt(tmp_path, monkeyp
         env=env,
     )
     assert created.returncode == 0, created.stderr
+    ready_env = bootstrap_project_ready(
+        project,
+        CONTROLLER,
+        extra_env={key: value for key, value in env.items() if key != "PATH"},
+    )
+    env.update({
+        "OBSIDIAN_VAULT": ready_env["OBSIDIAN_VAULT"],
+        "RLR_HOST_BACKEND": "codex",
+    })
     candidate_result = _run_controller(
         "new-candidate", str(project), "--title", "Replay", "--question",
         "Which context bytes reach the provider?", "--claim", "The bytes bind",

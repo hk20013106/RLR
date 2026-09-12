@@ -21,6 +21,12 @@ from .contracts import (
     validate_transport_handshake,
 )
 from .interfaces import DiscoveryTransport, EvidenceRetriever
+from .query_planner import (
+    MAX_QUERY_CANDIDATES, MAX_REFORMULATION_INDEX, MIN_QUERY_CANDIDATES,
+    SCIENTIFIC_QUERY_PLAN_SCHEMA_VERSION, SCIENTIFIC_QUERY_PLANNER_VERSION,
+    build_scientific_query_plan, reformulate_scientific_query_plan,
+    validate_scientific_query_plan,
+)
 
 from .store import (
     build_evidence_pack,
@@ -54,7 +60,12 @@ __all__ = [
     "EVIDENCE_PACK_SCHEMA_VERSION",
     "GAP_REQUEST_SCHEMA_VERSION",
     "MAX_ACQUISITION_ROUNDS",
+    "MAX_QUERY_CANDIDATES",
+    "MAX_REFORMULATION_INDEX",
+    "MIN_QUERY_CANDIDATES",
     "QUERY_PLAN_SCHEMA_VERSION",
+    "SCIENTIFIC_QUERY_PLAN_SCHEMA_VERSION",
+    "SCIENTIFIC_QUERY_PLANNER_VERSION",
     "CurieContractError",
     "DiscoveryTransport",
     "EvidenceRetriever",
@@ -62,6 +73,7 @@ __all__ = [
     "build_gap_retry_consumption",
     "build_evidence_pack",
     "build_gap_request",
+    "build_scientific_query_plan",
     "consume_gap_retry_authorization",
     "freeze_evidence_pack",
     "freeze_l1_deep_research_run",
@@ -72,12 +84,14 @@ __all__ = [
     "next_pack_version",
     "open_gap_request",
     "render_evidence_context",
+    "reformulate_scientific_query_plan",
     "validate_coverage_decision",
     "validate_discovery_batch",
     "validate_evidence_extract",
     "validate_gap_request",
     "validate_gap_retry_authorization",
     "validate_query_plan",
+    "validate_scientific_query_plan",
     "validate_record_query_provenance",
     "validate_transport_handshake",
 ]

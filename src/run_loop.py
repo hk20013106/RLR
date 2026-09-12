@@ -40,9 +40,10 @@ from research_loop.api import (  # noqa: E402
     EngineAPI,
     load_rendered_context_artifact,
 )
-from research_loop.compatibility import PROFILE_V20, get_profile
+from research_loop.context import DEFAULT_CONTEXT_TOKEN_BUDGET
+from research_loop.compatibility import PROFILE_V20, PROFILE_V21_CATALOG_1, get_profile
 from research_loop.code_state import capture_code_state
-from research_loop import deep_research
+from research_loop import deep_research, l0_preflight, runtime_preflight
 from research_loop.loopx_policy import LoopXRetryPolicy
 from research_loop.deep_research import SUPPORTED_BACKENDS
 from research_loop.delta import artifact_for_node
@@ -119,6 +120,21 @@ _POLISH_KW = ("literature", "文献", "rephrase", "reword", "wording", "说法",
 
 def log(msg):
     print(f"[run_loop] {msg}")
+
+
+def _formal_runtime_preflight():
+    """Require the pinned production environment before a formal run starts."""
+    try:
+        report = runtime_preflight.require_ready()
+    except runtime_preflight.RuntimePreflightError as exc:
+        log(f"FORMAL RUNTIME PREFLIGHT FAILED -- {exc}")
+        return False
+    log(
+        "FORMAL RUNTIME PREFLIGHT PASS -- "
+        f"environment={report.get('environment')}; "
+        f"executable={report.get('sys_executable')}"
+    )
+    return True
 
 
 def _ctl(*args):
@@ -310,7 +326,11 @@ def provider_for(node, cfg, args):
 
 
 def _context_token_budget(cfg):
-    value = (getattr(cfg, "data", {}) or {}).get("context_token_budget", 8000)
+    value = (getattr(cfg, "data", {}) or {}).get(
+        "context_token_budget", DEFAULT_CONTEXT_TOKEN_BUDGET
+    )
+    if value is None:
+        value = DEFAULT_CONTEXT_TOKEN_BUDGET
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError("context_token_budget must be a non-negative integer")
     return value
@@ -909,6 +929,15 @@ def _native_l1_binding_ready(project, cand):
         return False
 
 
+def _bound_profile_id(project):
+    """Read the immutable profile binding without inferring from runtime data."""
+    try:
+        binding = json.loads(rl.binding_path(project).read_text(encoding="utf-8"))
+        return str(binding.get("profile_id") or "").strip()
+    except (OSError, TypeError, json.JSONDecodeError):
+        return ""
+
+
 def _ensure_native_l1_recall(project, cand):
     """Create the fixed-cursor recall artifact required by native L1 once."""
     project = Path(project)
@@ -944,6 +973,55 @@ def _ensure_native_l1_recall(project, cand):
 
 
 def ensure_pre_research(project, cand, node, cfg, args, run_dir):
+    native_catalog = _bound_profile_id(project) == PROFILE_V21_CATALOG_1
+    if native_catalog and node == "L1":
+        if not _native_l1_binding_root(project, cand).is_dir():
+            log("ERROR: native L1 requires an active frozen L0.5 EvidencePack")
+            return False
+        if not _native_l1_binding_ready(project, cand):
+            log("ERROR: native L1 binding exists but is not valid/active")
+            return False
+        if not _ensure_native_l1_recall(project, cand):
+            return False
+        log("native L1 binding already active; independent literature search is not applicable")
+        return True
+    if native_catalog and node in {"L4", "L8.5"}:
+        existing = _ctl("audit-literature-evidence", project, cand, "--node", node)
+        if existing.returncode == 0:
+            try:
+                run_id = str(json.loads(existing.stdout).get("run_id") or "")
+            except (TypeError, json.JSONDecodeError):
+                run_id = ""
+            if run_id:
+                args.evidence_run_ids = getattr(args, "evidence_run_ids", {})
+                args.evidence_run_ids[node] = run_id
+                log(f"native {node}: valid canonical literature run already present: {run_id}")
+                return True
+        dr_cfg = _deep_research_config(cfg)
+        backend = str(dr_cfg.get("backend", "")).strip()
+        if backend and backend not in SUPPORTED_BACKENDS:
+            log(f"ERROR: native {node} runner override deep_research.backend={backend!r} must be one of {SUPPORTED_BACKENDS}")
+            return False
+        command = ["deep-research-run", project, cand, "--node", node]
+        if backend:
+            command.extend(["--backend", backend])
+        for option, key in (("--executable", "executable"), ("--model", "model"), ("--timeout", "timeout")):
+            value = dr_cfg.get(key)
+            if value not in (None, ""):
+                command.extend([option, str(value)])
+        result = _ctl(*command)
+        if result.returncode != 0:
+            log(f"ERROR: native {node} canonical literature run failed closed: {(result.stderr or result.stdout).strip()}")
+            return False
+        try:
+            run_id = str(json.loads(result.stdout)["run_id"])
+        except (KeyError, TypeError, json.JSONDecodeError):
+            log(f"ERROR: native {node} command did not return a run_id")
+            return False
+        args.evidence_run_ids = getattr(args, "evidence_run_ids", {})
+        args.evidence_run_ids[node] = run_id
+        log(f"native {node}: persisted canonical literature run {run_id}")
+        return True
     if node not in rl.PRE_RESEARCH_MAP:
         return True
     if node == "L1" and _native_l1_binding_root(project, cand).is_dir():
@@ -1067,9 +1145,6 @@ def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
                     return f"node_failed:{sub['node']}"
             continue
         node = step["node"]
-        if args.stop_after_node and node == args.stop_after_node:
-            log(f"--stop-after-node {node}: halting round")
-            return "stopped_after_node"
         if node == "L0.5":
             log("node L0.5 (Curie) [research acquisition / FREEZE]")
             if not exec_l05(project, cand, step, cfg, args, run_dir, round_id):
@@ -1118,6 +1193,9 @@ def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
             log(f"node {node} failed emit {exec_state['node_failures'][node]}x -- "
                 f"aborting round (no further retries)")
             return f"node_failed:{node}"
+        if ok and args.stop_after_node and node == args.stop_after_node:
+            log(f"--stop-after-node {node}: halting round")
+            return "stopped_after_node"
 
 
 def run_review_gate(project, cand, cfg, args, run_dir):
@@ -1348,6 +1426,16 @@ def cmd_run(args):
             and not (Path(project) / "99_Archive" / f"{cand}.md").exists():
         log(f"ERROR: no candidate {cand} in {project}")
         return 2
+    if not getattr(args, "dry_run", False):
+        ready = l0_preflight.validate_project_ready(
+            project, candidate_path=rl._candidate_file(Path(project), cand)
+        )
+        if ready.get("status") != "PASS":
+            log(f"PROJECT_NOT_READY -- {ready.get('code')}: {ready.get('reason')}")
+            return 3
+
+    if not getattr(args, "dry_run", False) and not _formal_runtime_preflight():
+        return 3
 
     dep = _ctl("check-deps", project)
     if dep.returncode != 0:
@@ -1469,21 +1557,27 @@ Project: {project}
 Candidate: {cand_id}
 
 Instructions:
-1. Run:  python research_loop_v04.py next-step {project} {cand_id}
+0. Runtime boundary: on a Codex host, first run `$env:RLR_HOST_BACKEND='codex'`
+   in the launching PowerShell. Do not set it to codex on non-Codex hosts.
+   Run every RLR command with `micromamba run -n rlr python`.
+   Before a formal run, verify the environment with:
+     micromamba run -n rlr python -m research_loop.runtime_preflight
+   If that gate fails, stop and report it.
+1. Run:  micromamba run -n rlr python research_loop_v04.py next-step {project} {cand_id}
 2. Read the JSON output to get the current DAG node, persona, and context_files.
 3. DEEP RESEARCH (mandatory): before L1, L4, or L8.5, run the configured
    Academic Research runtime; it invokes `$academic-research-suite` for Codex
    or the installed ARS plugin for Claude and persists located paper evidence:
-     python research_loop_v04.py deep-research-run {project} {cand_id} --node NODE
+     micromamba run -n rlr python research_loop_v04.py deep-research-run {project} {cand_id} --node NODE
    L1 requires Results/Discussion/Conclusion evidence; L4 requires Methods plus
    a review-search receipt; L8.5 requires paper-based result verification. Do
    not hand-write a pre-research note. L7 remains the separate code-search step.
-4. Run:  python research_loop_v04.py assemble-context {project} {cand_id} --node NODE
+4. Run:  micromamba run -n rlr python research_loop_v04.py assemble-context {project} {cand_id} --node NODE
 5. The assemble-context output is your ONLY input for this node (it now includes the
    pre-research summary when present). Do NOT read other delta files.
 6. Act as the specified persona. Generate a strict JSON delta matching the schema.
 7. Write the delta to a temp file, then run:
-   python research_loop_v04.py emit-delta {project} {cand_id} --node NODE --persona PERSONA --file TEMP_DELTA.json
+   micromamba run -n rlr python research_loop_v04.py emit-delta {project} {cand_id} --node NODE --persona PERSONA --file TEMP_DELTA.json
 8. If emit-delta says VALIDATION: PASS, run the advance_command.
 9. Repeat from step 1 until next-step returns L10c (aggregate-report).
 10. After L10c, evaluate StopPolicy: if KEEP + review accept, stop. If REVISE with
@@ -1525,7 +1619,12 @@ def cmd_print_main_agent_prompt(args):
         project=project, cand_id=cand, max_rounds=max_rounds,
         l9_rule=l9_rule)
     prompt, meta = rl._caveman_lite(
-        prompt, required_literals=[project, cand, "main-agent", "Do NOT"])
+        prompt,
+        required_literals=[
+            project, cand, "main-agent", "Do NOT", "RLR_HOST_BACKEND",
+            "micromamba run -n rlr python",
+        ],
+    )
     print(prompt)
     log("caveman-lite: " + json.dumps(meta, sort_keys=True))
     return 0

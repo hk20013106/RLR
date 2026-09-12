@@ -43,7 +43,13 @@ def _string_array(*, min_items=0):
 
 
 def validate_input_requirements(candidate: dict) -> None:
-    """Keep executable inputs, optional diagnostics, and source gaps separate."""
+    """Keep input classes separate while preserving independent blockers.
+
+    A method can lack both exact method evidence and executable user data.
+    ``missing_source`` and ``missing_inputs`` therefore describe orthogonal
+    blockers for ``needs_user_data``; only the input/diagnostic overlap and the
+    source-status/data-status conflation remain invalid.
+    """
     required = {
         str(value).strip().casefold()
         for value in candidate.get("required_inputs", [])
@@ -64,10 +70,6 @@ def validate_input_requirements(candidate: dict) -> None:
     if status == "needs_user_source" and candidate.get("missing_inputs"):
         raise ValueError(
             "L4C needs_user_source cannot carry missing_inputs; use needs_user_data"
-        )
-    if status == "needs_user_data" and str(candidate.get("missing_source") or "").strip():
-        raise ValueError(
-            "L4C needs_user_data cannot carry missing_source; reserve it for evidence"
         )
 
 

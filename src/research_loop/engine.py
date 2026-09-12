@@ -198,9 +198,6 @@ from research_loop.templates import (  # inward shim (Phase 7a)
     _index_template, _handoff_template, _decision_log_template,
     _note_template, _preflight_template,
 )
-_templates.VALID_STATUSES = VALID_STATUSES
-_templates.__version__ = __version__
-
 # --- small helpers ----------------------------------------------------------
 
 

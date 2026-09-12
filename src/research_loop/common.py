@@ -28,6 +28,28 @@ PERSONA_TITLE = {
     "Jobs": "Story Strategist",
 }
 
+PROJECT_LAYOUT_DIRS = (
+    "00_Preflight", "01_Candidates", "03_Handoffs", "04_Analysis_Outputs",
+    "05_Decision_Log", "06_Manuscript_Direction", "07_Obsidian_Sync",
+    "08_Audit", "10_Pitfall_Ledger", "99_Archive",
+)
+
+
+def _project_scaffolding_dirs():
+    return [*PROJECT_LAYOUT_DIRS, "02_Agent_Notes",
+            *(f"02_Agent_Notes/{agent}" for agent in AGENTS)]
+
+
+def _is_pristine_project_scaffolding(project_dir):
+    """Recognize the exact empty tree left by an interrupted project bootstrap."""
+    project = Path(project_dir)
+    if not project.is_dir():
+        return False
+    entries = list(project.rglob("*"))
+    return (all(entry.is_dir() for entry in entries)
+            and {entry.relative_to(project).as_posix() for entry in entries}
+            == set(_project_scaffolding_dirs()))
+
 def _now():
     return _dt.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -146,7 +168,8 @@ def _probe_as_dep(result):
     }
 
 
-def _check_dependencies(project_dir=None):
+def _check_dependencies(project_dir=None, *, backend: str | None = None,
+                        return_results: bool = False):
     """Return `(ok, missing, advisory)` for the single L0 readiness authority.
 
     `missing` contains only blocking failures. `advisory` contains failed
@@ -157,11 +180,9 @@ def _check_dependencies(project_dir=None):
         from research_loop.l0_preflight import (
             ENFORCEMENT_READINESS_ONLY,
             run_preflight_probes,
-            write_preflight_receipt,
         )
 
-        results = run_preflight_probes(Path(project_dir))
-        write_preflight_receipt(Path(project_dir), results)
+        results = run_preflight_probes(Path(project_dir), backend=backend)
         ok, missing, advisory = [], [], []
         for result in results:
             dep = _probe_as_dep(result)
@@ -183,7 +204,7 @@ def _check_dependencies(project_dir=None):
             dep["present"] = _dep_present(dep)
             dep["enforcement"] = "blocking"
             (ok if dep["present"] else missing).append(dep)
-        return ok, missing, advisory
+        return (ok, missing, advisory, results) if return_results else (ok, missing, advisory)
 
     items = [dict(d) for d in REQUIRED_DEPENDENCIES]
     ok, missing = [], []
@@ -254,10 +275,7 @@ def _append_decision(project_dir, cand_id, frm, to, reason, route_to="",
 def _mkdirs(project_dir):
     """v0.4 directory layout (same structure as v0.2)."""
     p = Path(project_dir)
-    for sub in ["00_Preflight", "01_Candidates", "03_Handoffs",
-                "04_Analysis_Outputs", "05_Decision_Log",
-                "06_Manuscript_Direction", "07_Obsidian_Sync",
-                "08_Audit", "10_Pitfall_Ledger", "99_Archive"]:
+    for sub in PROJECT_LAYOUT_DIRS:
         (p / sub).mkdir(parents=True, exist_ok=True)
     for agent in AGENTS:
         (p / "02_Agent_Notes" / agent).mkdir(parents=True, exist_ok=True)

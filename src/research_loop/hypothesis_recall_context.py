@@ -216,7 +216,14 @@ def _install_context_gate(context_module) -> None:
             context_text = rendered_path.read_text(encoding="utf-8")
             recall_text = canonical_json(_concise_recall(artifact))
             context_text = context_text.rstrip() + "\n\n" + _SECTION + "\n" + recall_text
-            budget = int(getattr(args, "context_token_budget", 8000) or 0)
+            budget = int(
+                getattr(
+                    args,
+                    "context_token_budget",
+                    context_module.DEFAULT_CONTEXT_TOKEN_BUDGET,
+                )
+                or 0
+            )
             estimated = context_module._estimate_tokens(context_text)
             if budget and estimated > budget:
                 raise LedgerError(

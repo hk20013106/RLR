@@ -212,6 +212,48 @@ def _selected_europepmc_papers(discovery: dict, selection: dict) -> list[dict]:
     return selected
 
 
+def _reserve_europepmc_papers(discovery: dict, selection: dict) -> list[dict]:
+    decisions = {
+        str(item["paper_id"]): item
+        for item in selection["decisions"]
+        if item["decision"] == "RESERVE"
+    }
+    reserves = []
+    for record in discovery["records"]:
+        decision = decisions.get(str(record.get("paper_id") or ""))
+        if decision is None:
+            continue
+        reserves.append({
+            "paper_id": record["paper_id"],
+            "title": record["title"],
+            "identifiers": dict(record.get("identifiers") or {}),
+            "metadata": dict(record.get("metadata") or {}),
+            "provenance": dict(record.get("provenance") or {}),
+            "selection": {
+                "decision": "RESERVE",
+                "reason": decision["reason"],
+                "reason_code": decision.get("reason_code"),
+            },
+        })
+    return reserves
+
+
+def _promote_reserve_after_no_target_sections(reserve: dict, failed_paper_id: str) -> dict:
+    """Make one selector-approved reserve eligible for the same acquisition slot."""
+    return {
+        **reserve,
+        "selection": {
+            "decision": "INCLUDE",
+            "reason": (
+                "Promoted from selector-approved RESERVE after "
+                f"{failed_paper_id} produced NO_TARGET_SECTIONS."
+            ),
+            "reason_code": "PROMOTED_AFTER_NO_TARGET_SECTIONS",
+            "original_decision": "RESERVE",
+        },
+    }
+
+
 def _prepare_europepmc_acquisition(
     project: Path,
     candidate_id: str,
@@ -223,6 +265,8 @@ def _prepare_europepmc_acquisition(
     http_get: Callable[[str, int], bytes] | None,
     timeout: int,
     round_index: int,
+    reformulation_index: int = 0,
+    query_id_prefix: str = "Q",
 ) -> dict:
     """Discover and select Europe PMC records once for each acquisition mode."""
     try:
@@ -241,6 +285,8 @@ def _prepare_europepmc_acquisition(
         round_index=round_index,
         explicit_queries=explicit_queries,
         providers=["europe-pmc"],
+        reformulation_index=reformulation_index,
+        query_id_prefix=query_id_prefix,
     )
     validate_query_plan(query_plan, seed_sha256=seed_digest)
     transport = EuropePmcTransport(
@@ -275,6 +321,7 @@ def _prepare_europepmc_acquisition(
         "query_plan": query_plan,
         "transport_handshake": transport.handshake(),
         "discovery_batches": discovery["batches"],
+        "discovery": discovery,
         "selection": {
             "provider": "europe-pmc",
             "selected": selected,
@@ -284,6 +331,16 @@ def _prepare_europepmc_acquisition(
             "selector_artifact_sha256": generic_selection.get("artifact_sha256"),
         },
     }
+
+
+def _initial_acquisition_outcome(prepared: dict) -> tuple[bool, str | None]:
+    """Classify only the bounded first-attempt outcomes eligible to reformulate."""
+    records = prepared["discovery"]["records"]
+    if not records:
+        return True, "zero_discovery_records"
+    if not prepared["selection"]["selected"]:
+        return True, "no_source_qualified_records"
+    return False, None
 
 
 def _paperqa_pdf_path(pdf_paths: object, paper_id: str) -> tuple[Path, str]:
@@ -423,16 +480,56 @@ def run_europepmc_acquisition(
         timeout=timeout,
         round_index=round_index,
     )
+    query_plans = [prepared["query_plan"]]
+    discovery_batches = list(prepared["discovery_batches"])
+    initial_attempts = [{
+        "attempt_index": 0,
+        "query_plan_id": prepared["query_plan"]["plan_id"],
+        "discovery_outcome": {
+            "record_count": len(prepared["discovery"]["records"]),
+            "source_qualified_record_count": len(prepared["selection"]["selected"]),
+        },
+    }]
+    needs_reformulation, reformulation_reason = _initial_acquisition_outcome(prepared)
+    if explicit_queries is None and needs_reformulation:
+        prepared = _prepare_europepmc_acquisition(
+            project,
+            candidate_id,
+            explicit_queries=None,
+            max_papers=max_papers,
+            page_size=page_size,
+            # Each bounded attempt persists its own immutable discovery and
+            # selector receipts; reusing the first attempt's path would turn a
+            # truthful reformulation into an overwrite attempt.
+            run_id=f"{prepared['run_id']}_reformulated",
+            http_get=http_get,
+            timeout=timeout,
+            round_index=round_index,
+            reformulation_index=1,
+            query_id_prefix="R",
+        )
+        query_plans.append(prepared["query_plan"])
+        discovery_batches.extend(prepared["discovery_batches"])
+        initial_attempts.append({
+            "attempt_index": 1,
+            "query_plan_id": prepared["query_plan"]["plan_id"],
+            "discovery_outcome": {
+                "record_count": len(prepared["discovery"]["records"]),
+                "source_qualified_record_count": len(prepared["selection"]["selected"]),
+            },
+        })
     seed = prepared["seed"]
     seed_digest = prepared["seed_sha256"]
     run_id = prepared["run_id"]
     query_plan = prepared["query_plan"]
     handshake = prepared["transport_handshake"]
-    discovery_batches = prepared["discovery_batches"]
     selection = prepared["selection"]
 
     source_snapshots: list[dict] = []
     verified_evidence: list[dict] = []
+    acquired_papers: list[dict] = []
+    paper_failures: list[dict] = []
+    reserve_promotions: list[dict] = []
     if selection["selected"]:
         retriever = EuropePmcEvidenceRetriever(
             project,
@@ -442,12 +539,49 @@ def run_europepmc_acquisition(
             timeout=timeout,
         )
         verifier = EuropePmcEvidenceVerifier(project, candidate_id=candidate_id)
-        for paper in selection["selected"]:
+
+        def retrieve_one(paper: dict) -> bool:
             retrieval = retriever.retrieve(paper, seed=seed)
             source_snapshots.append(retrieval["snapshot"])
+            failure = retrieval.get("paper_failure")
+            if failure is not None:
+                if (
+                    not isinstance(failure, dict)
+                    or failure.get("paper_id") != paper.get("paper_id")
+                    or failure.get("pmcid") != (paper.get("identifiers") or {}).get("pmcid")
+                    or failure.get("reason_code") != "NO_TARGET_SECTIONS"
+                ):
+                    raise CurieContractError(
+                        "Europe PMC retriever returned an invalid paper-level insufficiency"
+                    )
+                paper_failures.append({
+                    "paper_id": failure["paper_id"],
+                    "pmcid": failure["pmcid"],
+                    "reason_code": failure["reason_code"],
+                })
+                return False
             verified_evidence.extend(
                 verifier.verify(retrieval["snapshot"], retrieval["candidates"])
             )
+            acquired_papers.append(paper)
+            return True
+
+        reserves = iter(_reserve_europepmc_papers(prepared["discovery"], selection))
+        for paper in selection["selected"]:
+            if retrieve_one(paper):
+                continue
+            while (reserve := next(reserves, None)) is not None:
+                promoted = _promote_reserve_after_no_target_sections(
+                    reserve, str(paper["paper_id"])
+                )
+                reserve_promotions.append({
+                    "replaced_paper_id": paper["paper_id"],
+                    "promoted_paper_id": promoted["paper_id"],
+                    "promoted_pmcid": promoted["identifiers"].get("pmcid"),
+                    "reason_code": "PROMOTED_AFTER_NO_TARGET_SECTIONS",
+                })
+                if retrieve_one(promoted):
+                    break
 
     coverage = _coverage_for(
         source_snapshots,
@@ -463,9 +597,9 @@ def run_europepmc_acquisition(
             round_id=str(seed["round_id"]),
             seed_sha256=seed_digest,
             version=1,
-            query_plans=[query_plan],
+            query_plans=query_plans,
             discovery_receipts=discovery_batches,
-            selected_papers=selection["selected"],
+            selected_papers=acquired_papers,
             evidence=verified_evidence,
             coverage=coverage,
             gaps=coverage["gaps"],
@@ -482,9 +616,19 @@ def run_europepmc_acquisition(
         "seed_sha256": seed_digest,
         "transport_handshake": handshake,
         "query_plan": query_plan,
+        "query_plans": query_plans,
+        "queries_executed": [item for plan in query_plans for item in plan["queries"]],
+        "final_executed_queries": list(query_plan["queries"]),
+        "initial_acquisition": {
+            "reformulated": len(initial_attempts) > 1,
+            "reformulation_reason": reformulation_reason if len(initial_attempts) > 1 else None,
+            "attempts": initial_attempts,
+        },
         "discovery_batches": discovery_batches,
         "selection": selection,
         "source_snapshots": source_snapshots,
+        "paper_failures": paper_failures,
+        "reserve_promotions": reserve_promotions,
         "verified_evidence_ids": [item["evidence_id"] for item in verified_evidence],
         "coverage": coverage,
         "evidence_pack": evidence_pack_manifest,

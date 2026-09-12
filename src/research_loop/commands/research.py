@@ -4,10 +4,11 @@ import json
 import sys
 from pathlib import Path
 
-from research_loop import deep_research, deep_research_task
+from research_loop import deep_research, deep_research_task, l0_preflight, structured_execution
+from research_loop import l85_literature_verification
 from research_loop import l4_evidence_bundle, l4_pipeline, research_seed
 from research_loop.common import _now
-from research_loop.compatibility import PROFILE_V20, get_profile
+from research_loop.compatibility import PROFILE_V20, PROFILE_V21_CATALOG_1, get_profile
 from research_loop.delta import _delta_for_candidate, artifact_for_node
 from research_loop.hypothesis_ledger import binding_path
 from research_loop.paths import _candidate_file, _pre_research_file
@@ -512,12 +513,32 @@ def _deep_research_spec_from_args(args):
     return deep_research.load_runtime_spec(args.project_dir, overrides)
 
 def cmd_deep_research_run(args):
-    """Execute an explicit Academic Research Skills CLI run and persist evidence."""
+    """Run historical research or the profile-owned native evidence stage."""
     project_dir = Path(args.project_dir)
     cf = _candidate_file(project_dir, args.cand_id)
     if not cf.exists():
         print(f"ERROR: candidate not found: {args.cand_id}", file=sys.stderr)
         return 2
+    try:
+        bound_profile, _bound_binding = _bound_profile(project_dir)
+    except deep_research.DeepResearchError as exc:
+        print(f"ERROR: project profile is invalid: {exc}", file=sys.stderr)
+        return 3
+    project_ready = l0_preflight.validate_project_ready(project_dir, candidate_path=cf)
+    if not project_ready.get("legacy") and project_ready.get("status") != "PASS":
+        print(f"ERROR: PROJECT_NOT_READY: {project_ready.get('code')}: {project_ready.get('reason')}", file=sys.stderr)
+        return 3
+    if args.node == "L8.5" and bound_profile.profile_id == PROFILE_V21_CATALOG_1:
+        try:
+            artifact = l85_literature_verification.run_native_l85(
+                project_dir, args.cand_id,
+                timeout=max(1, min(int(getattr(args, "timeout", 20) or 20), 120)),
+            )
+        except (l85_literature_verification.L85VerificationError, research_seed.ResearchSeedError, OSError, TypeError, ValueError) as exc:
+            print(f"ERROR: canonical L8.5 verification failed: {exc}", file=sys.stderr)
+            return 3
+        print(json.dumps(artifact, ensure_ascii=False, indent=2))
+        return 0
     l4a_manifest = str(getattr(args, "l4a_manifest", "") or "").strip()
     if l4a_manifest and args.node != "L4":
         print("ERROR: --l4a-manifest is valid only for --node L4", file=sys.stderr)
@@ -578,7 +599,11 @@ def cmd_deep_research_run(args):
         print(f"ERROR: Deep Research runtime spec is inconsistent: {consistency_reason}",
               file=sys.stderr)
         return 3
-    ready, reason = deep_research.runtime_ready(spec)
+    ready, reason = (
+        structured_execution.runtime_ready(spec)
+        if bound_profile.profile_id == PROFILE_V21_CATALOG_1 and args.node == "L4"
+        else deep_research.runtime_ready(spec)
+    )
     if not ready:
         print(f"ERROR: Deep Research runtime is not ready: {reason}", file=sys.stderr)
         return 3
@@ -714,6 +739,20 @@ def cmd_deep_research_worker(args):
     )
 
 def cmd_audit_literature_evidence(args):
+    profile, _binding = _bound_profile(args.project_dir)
+    if profile.profile_id == PROFILE_V21_CATALOG_1 and args.node == "L8.5":
+        root = Path(args.project_dir) / "08_Audit" / "l85_literature_verification" / str(args.cand_id)
+        runs = sorted(root.glob("*.json")) if root.is_dir() else []
+        if len(runs) != 1:
+            reason = "native L8.5 canonical literature run is missing or ambiguous"
+            print(json.dumps({"candidate_id": args.cand_id, "node": args.node, "run_id": "", "status": "FAIL", "reason": reason}, indent=2))
+            return 3
+        run_id = runs[0].stem
+        ok, reason, _run = l85_literature_verification.audit_run_manifest(
+            args.project_dir, args.cand_id, run_id=run_id
+        )
+        print(json.dumps({"candidate_id": args.cand_id, "node": args.node, "run_id": run_id, "status": "PASS" if ok else "FAIL", "reason": reason}, indent=2))
+        return 0 if ok else 3
     ok, reason = deep_research.audit_evidence_pack(args.project_dir, args.cand_id, args.node)
     print(json.dumps({"candidate_id": args.cand_id, "node": args.node,
                       "status": "PASS" if ok else "FAIL", "reason": reason}, indent=2))

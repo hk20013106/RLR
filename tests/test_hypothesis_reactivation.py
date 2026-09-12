@@ -2,18 +2,26 @@ import json
 import sqlite3
 from pathlib import Path
 
-from native_v2_helpers import write_catalog_emission_receipts
+from native_v2_helpers import bootstrap_project_ready, write_catalog_emission_receipts
 from research_loop.cli import main
 from research_loop.hypothesis_ledger import HypothesisLedger
 from research_loop.hypothesis_recall import create_recall
 
 
-def _native_l1_boundary(tmp_path, *, include_recall=True):
+def _native_l1_boundary(tmp_path, monkeypatch, *, include_recall=True):
     project = tmp_path / "P"
     store = tmp_path / "ledger.sqlite"
+    monkeypatch.setenv("RLR_HYPOTHESIS_STORE", str(store))
     assert main([
         "new-project", str(project), "topic", "--knowledge-store", str(store)
     ]) == 0
+    env = bootstrap_project_ready(
+        project,
+        Path(__file__).resolve().parents[1] / "research_loop_v04.py",
+        extra_env={"RLR_HYPOTHESIS_STORE": str(store)},
+    )
+    monkeypatch.setenv("OBSIDIAN_VAULT", env["OBSIDIAN_VAULT"])
+    monkeypatch.setenv("RLR_HOST_BACKEND", "codex")
     assert main([
         "new-candidate", str(project), "--title", "t", "--question", "q",
         "--claim", "c", "--input", "inline", "--knowledge-store", str(store),
@@ -69,7 +77,7 @@ def _assert_zero_native_writes(project, store, candidate):
 
 def test_native_l1_context_requires_recall(tmp_path, capsys, monkeypatch):
     project, store, candidate, *_ = _native_l1_boundary(
-        tmp_path, include_recall=False
+        tmp_path, monkeypatch, include_recall=False
     )
     monkeypatch.delenv("RLR_AUTO_HYPOTHESIS_RECALL", raising=False)
     capsys.readouterr()
@@ -85,9 +93,9 @@ def test_native_l1_context_requires_recall(tmp_path, capsys, monkeypatch):
     assert captured.out == ""
 
 
-def test_native_l1_context_binds_zero_result_recall(tmp_path, capsys):
+def test_native_l1_context_binds_zero_result_recall(tmp_path, capsys, monkeypatch):
     project, store, candidate, *_ = _native_l1_boundary(
-        tmp_path, include_recall=False
+        tmp_path, monkeypatch, include_recall=False
     )
     ledger = HypothesisLedger(store)
     create_recall(
@@ -118,9 +126,9 @@ def test_native_l1_context_binds_zero_result_recall(tmp_path, capsys):
     assert manifest["hypothesis_recall"]["artifact_sha256"]
 
 
-def test_native_l1_receipt_without_recall_rejects_before_any_write(tmp_path):
+def test_native_l1_receipt_without_recall_rejects_before_any_write(tmp_path, monkeypatch):
     project, store, candidate, source, manifest, receipt = _native_l1_boundary(
-        tmp_path, include_recall=False
+        tmp_path, monkeypatch, include_recall=False
     )
 
     assert _emit_l1(project, store, candidate, source, manifest, receipt) == 1

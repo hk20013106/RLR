@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
+from native_v2_helpers import bootstrap_project_ready
 from research_loop import l0_contract
+from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
 from research_loop.gates import _audit_l0_contract
-from research_loop.hypothesis_ledger import binding_path
+from research_loop.hypothesis_ledger import HypothesisLedger
 from research_loop.l0_data import current_round_data_binding_path
 
 
@@ -19,9 +22,8 @@ def _project(tmp_path: Path) -> Path:
     project = tmp_path / "P"
     (project / "00_Preflight").mkdir(parents=True)
     (project / "01_Candidates").mkdir(parents=True)
-    binding_path(project).write_text(
-        json.dumps({"project_id": "P1", "profile_id": "v2.1-native"}),
-        encoding="utf-8",
+    HypothesisLedger(os.environ["RLR_HYPOTHESIS_STORE"]).bind_project(
+        project, profile_id=DEFAULT_NATIVE_PROFILE,
     )
     return project
 
@@ -49,6 +51,10 @@ def _candidate(project: Path, cand_id: str, data: Path) -> Path:
         f"input_contract_hash: {hashlib.sha256(raw).hexdigest()}\n"
         "---\n",
         encoding="utf-8",
+    )
+    bootstrap_project_ready(
+        project,
+        Path(__file__).resolve().parents[1] / "research_loop_v04.py",
     )
     return candidate
 

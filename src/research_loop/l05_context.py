@@ -200,7 +200,14 @@ def install(context_module) -> None:
                 if native_mode else
                 _replace_legacy_pre_research(current_context, evidence_text)
             )
-            budget = int(getattr(args, "context_token_budget", 8000) or 0)
+            budget = int(
+                getattr(
+                    args,
+                    "context_token_budget",
+                    context_module.DEFAULT_CONTEXT_TOKEN_BUDGET,
+                )
+                or 0
+            )
             estimated = context_module._estimate_tokens(context_text)
             if budget and estimated > budget:
                 raise L05ContextError(

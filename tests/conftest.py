@@ -174,13 +174,62 @@ def l4_paperqa2_runtime():
 
 
 @pytest.fixture(autouse=True)
-def complete_deep_research_l0_fixture(request, monkeypatch):
+def canonical_project_ready_provider_presence(request, monkeypatch, tmp_path):
+    """Scope Codex presence to the canonical PROJECT_READY helper call itself.
+
+    ``bootstrap_project_ready`` is a positive readiness fixture and therefore
+    needs structured-execution discovery on CI.  Temporarily prepend an inert
+    sentinel only while that helper performs the real production preflight,
+    then restore PATH immediately so unrelated provider tests keep their own
+    executable resolution semantics.
+    """
+    import native_v2_helpers
+
+    helper = getattr(request.module, "bootstrap_project_ready", None)
+    if helper is not native_v2_helpers.bootstrap_project_ready:
+        return
+    original = helper
+
+    def ready_with_provider_presence(*args, **kwargs):
+        bin_dir = tmp_path / "project-ready-provider-bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        executable = bin_dir / ("codex.exe" if os.name == "nt" else "codex")
+        executable.write_text(
+            "test-only project-ready provider sentinel\n", encoding="utf-8"
+        )
+        if os.name != "nt":
+            executable.chmod(0o755)
+        old_path = os.environ.get("PATH")
+        os.environ["PATH"] = str(bin_dir) + (
+            os.pathsep + old_path if old_path else ""
+        )
+        try:
+            return original(*args, **kwargs)
+        finally:
+            if old_path is None:
+                os.environ.pop("PATH", None)
+            else:
+                os.environ["PATH"] = old_path
+
+    monkeypatch.setattr(
+        request.module, "bootstrap_project_ready", ready_with_provider_presence
+    )
+
+
+@pytest.fixture(autouse=True)
+def complete_deep_research_l0_fixture(request, monkeypatch, tmp_path):
     """Migrate old provider-runtime fixtures to current L0/L0.5 preconditions.
 
     The shared ``test_deep_research`` factory predates strict L0 and invokes
     ``new-candidate --input data``. The literal ``data`` is intentionally a
     production placeholder, so keep the validator strict and rewrite only that
     exact test-fixture command to a descriptive synthetic input.
+
+    Selected provider-runtime tests also require formal Codex preflight to pass
+    before they exercise their actual host/process behavior. CI intentionally
+    has no real Codex install, so expose a PATH-visible test sentinel only to
+    those named tests. The sentinel is never a scientific provider and is never
+    launched; tests that exercise provider absence remain untouched.
 
     Two historical positive provider-lifecycle tests also predate native Curie
     authority and finish by assembling native L1 context. Their scope is the
@@ -191,6 +240,30 @@ def complete_deep_research_l0_fixture(request, monkeypatch):
     """
     if not request.module.__name__.endswith("test_deep_research"):
         return
+
+    codex_presence_fixture_tests = {
+        "test_l10_context_includes_source_located_l1_evidence",
+        "test_emit_l10b_rejects_missing_literature_evidence_ids",
+        "test_detached_deep_research_survives_start_process_exit_and_collects",
+        "test_deep_research_cli_executes_a_local_fake_codex",
+        "test_host_mismatch_never_starts_the_provider_process",
+        "test_inconsistent_spec_never_starts_the_provider_process",
+        "test_unknown_host_never_starts_the_provider_process",
+        "test_declared_host_lets_the_run_proceed",
+        "test_deep_research_cli_executes_a_local_fake_claude_plugin",
+    }
+    if request.node.name in codex_presence_fixture_tests:
+        bin_dir = tmp_path / "fake-provider-bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        executable = bin_dir / ("codex.exe" if os.name == "nt" else "codex")
+        executable.write_text("test-only provider presence sentinel\n", encoding="utf-8")
+        if os.name != "nt":
+            executable.chmod(0o755)
+        current_path = os.environ.get("PATH", "")
+        monkeypatch.setenv(
+            "PATH",
+            str(bin_dir) + (os.pathsep + current_path if current_path else ""),
+        )
 
     native_context_fixture_tests = {
         "test_detached_deep_research_survives_start_process_exit_and_collects",

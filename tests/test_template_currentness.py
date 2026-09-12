@@ -2,6 +2,7 @@ from pathlib import Path
 import subprocess
 import sys
 
+from native_v2_helpers import bootstrap_project_ready
 from research_loop.paths import _layer_template_path, _persona_template_path
 
 
@@ -28,6 +29,7 @@ def test_full_mode_injects_current_persona_and_layer_for_key_nodes(tmp_path):
     created = subprocess.run([sys.executable, str(CLI), "new-project", str(project), "Topic"],
                              capture_output=True, text=True, encoding="utf-8")
     assert created.returncode == 0, created.stderr
+    bootstrap_project_ready(project, CLI)
     request = tmp_path / "request.md"
     data = tmp_path / "data.tsv"
     request.write_text("Scientific question: Q?\nCurrent hypothesis: H.\n", encoding="utf-8")

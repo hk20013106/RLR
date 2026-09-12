@@ -539,18 +539,24 @@ def test_runner_refuses_literature_stage_without_explicit_research_runtime(tmp_p
 def test_l10_context_includes_source_located_l1_evidence(tmp_path):
     project = tmp_path / "P"
     cli = ROOT / "research_loop_v04.py"
+    vault = tmp_path / "vault"
+    (vault / ".obsidian").mkdir(parents=True)
+    env = {**_os.environ, "OBSIDIAN_VAULT": str(vault)}
     created = subprocess.run([sys.executable, str(cli), "new-project", str(project), "Topic"],
-                             capture_output=True, text=True)
+                             capture_output=True, text=True, env=env)
     assert created.returncode == 0, created.stderr
+    preflight = subprocess.run([sys.executable, str(cli), "preflight", str(project), "--backend", "codex"],
+                               capture_output=True, text=True, env=env)
+    assert preflight.returncode == 0, preflight.stderr
     candidate = subprocess.run([sys.executable, str(cli), "new-candidate", str(project),
                                 "--title", "T", "--question", "Q", "--claim", "C", "--input", "data"],
-                               capture_output=True, text=True)
+                               capture_output=True, text=True, env=env)
     assert candidate.returncode == 0, candidate.stderr
     cand_id = candidate.stdout.splitlines()[0]
     dr.persist_run(project, cand_id, "L1", _payload(),
                    dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"))
     context = subprocess.run([sys.executable, str(cli), "assemble-context", str(project), cand_id,
-                              "--node", "L10a"], capture_output=True, text=True)
+                              "--node", "L10a"], capture_output=True, text=True, env=env)
     assert context.returncode == 0, context.stderr
     assert "=== DEEP RESEARCH EVIDENCE ===" in context.stdout
     assert "Results paragraph 2" in context.stdout
@@ -583,11 +589,17 @@ def test_codex_runtime_preflight_requires_a_skill_manifest(tmp_path):
 def test_emit_l10b_rejects_missing_literature_evidence_ids(tmp_path):
     project = tmp_path / "P"
     cli = ROOT / "research_loop_v04.py"
+    vault = tmp_path / "vault"
+    (vault / ".obsidian").mkdir(parents=True)
+    env = {**_os.environ, "OBSIDIAN_VAULT": str(vault)}
     assert subprocess.run([sys.executable, str(cli), "new-project", str(project), "Topic"],
-                          capture_output=True, text=True).returncode == 0
+                          capture_output=True, text=True, env=env).returncode == 0
+    assert subprocess.run([sys.executable, str(cli), "preflight", str(project), "--backend", "codex"],
+                          capture_output=True, text=True, env=env).returncode == 0
     new = subprocess.run([sys.executable, str(cli), "new-candidate", str(project), "--title", "T",
                           "--question", "Q", "--claim", "C", "--input", "data"],
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, env=env)
+    assert new.returncode == 0, new.stderr
     cand_id = new.stdout.splitlines()[0]
     dr.persist_run(project, cand_id, "L1", _payload(),
                    dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"))
@@ -626,15 +638,18 @@ def _sentinel_codex_project(tmp_path, monkeypatch, runtime_extra=None):
     monkeypatch.chdir(tmp_path)
     cli = ROOT / "research_loop_v04.py"
     project = tmp_path / "P"
+    vault = tmp_path / "vault"
+    (vault / ".obsidian").mkdir(parents=True)
+    monkeypatch.setenv("OBSIDIAN_VAULT", str(vault))
     assert subprocess.run([sys.executable, str(cli), "new-project", str(project), "Topic"],
+                          capture_output=True, text=True).returncode == 0
+    assert subprocess.run([sys.executable, str(cli), "preflight", str(project), "--backend", "codex"],
                           capture_output=True, text=True).returncode == 0
     new = subprocess.run([sys.executable, str(cli), "new-candidate", str(project), "--title", "T",
                           "--question", "Q", "--claim", "C", "--input", "data"],
                          capture_output=True, text=True)
     cand_id = new.stdout.splitlines()[0]
-    # This fixture tests the historical Deep Research process/host runtime,
-    # not native v2.1 L0.5. Remove the profile binding so L1 retains the
-    # legacy research contract without weakening native L0.5 authority.
+    # This fixture tests the historical Deep Research process/host runtime.
     hypothesis_binding_path(project).unlink()
     skill = tmp_path / "academic-research-suite"
     skill.mkdir()
@@ -875,12 +890,18 @@ def test_declared_host_lets_the_run_proceed(tmp_path, monkeypatch):
 def test_deep_research_cli_executes_a_local_fake_claude_plugin(tmp_path):
     project = tmp_path / "P"
     cli = ROOT / "research_loop_v04.py"
+    vault = tmp_path / "vault"
+    (vault / ".obsidian").mkdir(parents=True)
+    env = {**_os.environ, "OBSIDIAN_VAULT": str(vault)}
     assert subprocess.run([sys.executable, str(cli), "new-project", str(project), "Topic"],
-                          capture_output=True, text=True).returncode == 0
+                          capture_output=True, text=True, env=env).returncode == 0
+    assert subprocess.run([sys.executable, str(cli), "preflight", str(project), "--backend", "codex"],
+                          capture_output=True, text=True, env=env).returncode == 0
     new = subprocess.run([sys.executable, str(cli), "new-candidate", str(project), "--title", "T",
                           "--question", "Q", "--claim", "C", "--input", "data"],
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, env=env)
     cand_id = new.stdout.splitlines()[0]
+    hypothesis_binding_path(project).unlink()
     plugin = tmp_path / "academic-research-skills" / ".claude-plugin"
     plugin.mkdir(parents=True)
     (plugin / "plugin.json").write_text("{}", encoding="utf-8")
@@ -899,7 +920,7 @@ def test_deep_research_cli_executes_a_local_fake_claude_plugin(tmp_path):
     # Claude plugin invocation, not about host detection.
     result = subprocess.run([sys.executable, str(cli), "deep-research-run", str(project), cand_id,
                              "--node", "L4", "--backend", "claude"],
-                            capture_output=True, text=True, env=_deep_research_env())
+                            capture_output=True, text=True, env={**_deep_research_env(), "OBSIDIAN_VAULT": str(vault)})
     assert result.returncode == 0, result.stderr
     assert "deep_research_run" in result.stdout
 
@@ -1048,6 +1069,9 @@ def _mismatch_project(tmp_path):
 
 def test_deep_research_run_refuses_a_host_backend_mismatch(tmp_path, monkeypatch, capsys):
     from research_loop.commands.research import cmd_deep_research_run
+    # The formal Codex smoke environment sets the explicit backend marker.
+    # This test isolates the Claude-marker mismatch path instead.
+    monkeypatch.delenv("RLR_HOST_BACKEND", raising=False)
     monkeypatch.setenv("CLAUDECODE", "1")
     args = _mismatch_project(tmp_path)
     assert cmd_deep_research_run(args) == 3

@@ -40,6 +40,12 @@ INHERITED_INPUT_FIELDS = ("path", "sha256", "role", "reuse_reason")
 # carry an explicit verification status + reason. There is NO verified:false
 # escape for local file/directory inputs (those hard-fail when missing).
 DATASET_VERIFICATION_STATUS = ("verified", "unverifiable", "pending")
+ORTHOLOGY_METHOD = "FastOMA v0.5.1 + OMAmer"
+ORTHOLOGY_POLICY = "strict_one_to_one_single_copy"
+ORTHOLOGY_SPECIES_TREE = "((Mmus,Rnor)Rodentia,(Skuh,Smur)Eulipotyphla)Boreoeutheria"
+ORTHOLOGY_FORMAL_SPECIES = ("Mmus", "Rn", "Sk", "Sm")
+ORTHOLOGY_FEATURE_KEY = "Mmus_symbol"
+ORTHOLOGY_SOURCE_ROLES = ("gene_length", "raw_counts", "length_scaled_expression")
 
 # Reuse the repo's terminal decision enum (do NOT invent one). The L10b final
 # decision is exactly the set of terminal transitions out of UNDER_REVIEW.
@@ -202,6 +208,27 @@ def validate_l0_input_contract(contract, fm, project_dir, cand_id,
 
     def err(msg):
         e.append(f"[artifact={ap}] {msg}")
+
+    upstream = contract.get("upstream_completed_inputs")
+    if upstream is not None:
+        prefix = "upstream_completed_inputs.orthology"
+        orthology = upstream.get("orthology") if isinstance(upstream, dict) else None
+        if not isinstance(orthology, dict):
+            err(f"{prefix} must be a mapping")
+        else:
+            for field, expected in {
+                "status": "completed_upstream", "method": ORTHOLOGY_METHOD,
+                "policy": ORTHOLOGY_POLICY, "species_tree": ORTHOLOGY_SPECIES_TREE,
+            }.items():
+                if orthology.get(field) != expected:
+                    err(f"{prefix}.{field} must be {expected!r}; got {orthology.get(field)!r}")
+            if not isinstance(orthology.get("orthogroup_count"), int) or isinstance(orthology.get("orthogroup_count"), bool) or orthology["orthogroup_count"] <= 0:
+                err(f"{prefix}.orthogroup_count must be a positive integer")
+            if orthology.get("formal_species") != list(ORTHOLOGY_FORMAL_SPECIES):
+                err(f"{prefix}.formal_species must be {list(ORTHOLOGY_FORMAL_SPECIES)!r}")
+            feature = orthology.get("feature_space")
+            if not isinstance(feature, dict) or feature.get("key") != ORTHOLOGY_FEATURE_KEY:
+                err(f"{prefix}.feature_space.key must be {ORTHOLOGY_FEATURE_KEY!r}")
 
     # 0. schema version
     sv = str(contract.get("schema_version") or "")

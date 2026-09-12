@@ -17,6 +17,23 @@ def _text(value, name: str) -> str:
     return value
 
 
+def _utf8_transport_text(value: object) -> str | None:
+    """Return text safe for the strict JSON/UTF-8 transport, or ``None``.
+
+    A lone surrogate is not valid UTF-8.  It must not be replaced in a
+    retrieval hit because doing so would change the text used by the
+    independent source verifier.  Such a hit is therefore omitted and the
+    verifier may truthfully report an unresolved evidence gap.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return value
+
+
 def _git(repo: pathlib.Path, *args: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(repo), *args],
@@ -80,16 +97,21 @@ async def _run(request: dict) -> dict:
         fetch_k=2 * settings.answer.evidence_k,
         embedding_model=embedding_model,
     )
-    session = await docs.aget_evidence(
-        question,
-        settings=settings,
-        embedding_model=embedding_model,
-    )
-    context_scores = {context.text.name: context.score for context in session.contexts}
+    # This bridge is retrieval-only.  Calling ``aget_evidence`` here would
+    # enter PaperQA2's answer-summary path even though summaries are disabled
+    # above.  Some otherwise valid JATS payloads contain lone surrogate code
+    # points; the summary model's Pydantic context validator rejects those
+    # characters before the retrieved chunks can be returned.  The independent
+    # JATS verifier downstream does the evidence-location work, so no summary
+    # score is required at this boundary.
+    context_scores = {}
     hits = []
     for text, score in zip(ranked, scores, strict=True):
+        transport_text = _utf8_transport_text(text.text)
+        if transport_text is None:
+            continue
         hits.append({
-            "text": text.text,
+            "text": transport_text,
             "locator": text.name,
             "section": "PaperQA2",
             "score": float(score),

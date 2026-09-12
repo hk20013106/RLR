@@ -26,7 +26,7 @@ import pytest  # noqa: E402
 
 from research_loop import l0_contract  # noqa: E402
 from research_loop.providers.command import CommandProvider  # noqa: E402
-from native_v2_helpers import seed_revise_continuation  # noqa: E402
+from native_v2_helpers import bootstrap_project_ready, seed_revise_continuation  # noqa: E402
 
 RL = str(HERE / "research_loop_v04.py")
 def _run(*args):
@@ -43,6 +43,7 @@ def _assemble(proj, cand, node, *extra):
 def _new_project(tmp_path):
     r = _run("new-project", str(tmp_path / "P"), "T", "--profile", "v2.1")
     assert r.returncode == 0, r.stderr
+    bootstrap_project_ready(tmp_path / "P", HERE / "research_loop_v04.py")
     return tmp_path / "P"
 
 

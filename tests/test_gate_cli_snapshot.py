@@ -19,15 +19,19 @@ from pathlib import Path
 import pytest
 
 from research_loop import l0_data
+from native_v2_helpers import bootstrap_project_ready
 
 HERE = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
-def gate_project(tmp_path):
+def gate_project(tmp_path, monkeypatch):
     project = tmp_path / "gate-snapshot"
     created = _cli("new-project", str(project), "Topic")
     assert created[0] == 0, created[2]
+    env = bootstrap_project_ready(project, HERE / "research_loop_v04.py", cwd=str(HERE))
+    monkeypatch.setenv("OBSIDIAN_VAULT", env["OBSIDIAN_VAULT"])
+    monkeypatch.setenv("RLR_HOST_BACKEND", "codex")
     source_input = tmp_path / "input.txt"
     source_input.write_text("synthetic input", encoding="utf-8")
     candidate = _cli(
@@ -76,12 +80,12 @@ def test_l1_native_evidence_gate_fails_closed_rc3(gate_project):
     assert out.strip() == "", "fail-closed gate must not emit usable context on stdout"
 
 
-def test_l4_pre_research_gate_fails_closed_rc3(gate_project):
-    """L4 method literature gate shares the fail-closed rc=3 contract."""
+def test_native_l4_does_not_require_legacy_pre_research(gate_project):
+    """Native L4 is dispatched by the canonical Curie evidence owner."""
     project, cand = gate_project
     rc, out, err = _cli("assemble-context", str(project), cand, "--node", "L4")
-    assert rc == 3, f"L4 pre-research gate must fail closed with rc=3, got {rc}"
-    assert out.strip() == "", "fail-closed gate must not emit usable context on stdout"
+    assert rc == 0, f"native L4 context must not require legacy pre-research: {err}"
+    assert out.strip()
 
 
 def test_l5_assemble_passes_rc0(gate_project):

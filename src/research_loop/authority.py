@@ -205,7 +205,7 @@ def _context_projection(resolved: ResolvedAuthority, project: Path) -> dict[str,
         if semantics is not None:
             row["semantic_projection"] = semantics
         authorized.append(row)
-    return {
+    projection = {
         "authority": resolved.spec.name,
         "producer": resolved.spec.producer,
         "schema_version": resolved.spec.schema_version,
@@ -216,6 +216,9 @@ def _context_projection(resolved: ResolvedAuthority, project: Path) -> dict[str,
         "authorized_inputs": authorized,
         "non_file_inputs": _bounded_semantics(payload.get("non_file_inputs") or []),
     }
+    if "upstream_completed_inputs" in payload:
+        projection["upstream_completed_inputs"] = payload["upstream_completed_inputs"]
+    return projection
 
 
 def project_context_authorities(

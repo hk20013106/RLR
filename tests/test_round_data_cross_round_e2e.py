@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +13,8 @@ from research_loop import l0_contract
 from research_loop.commands import execution
 from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
 from research_loop.gates import _audit_l0_contract
-from research_loop.hypothesis_ledger import binding_path
+from native_v2_helpers import bootstrap_project_ready
+from research_loop.hypothesis_ledger import HypothesisLedger
 from research_loop.l0_data import current_round_data_binding_path
 from research_loop.l0_state import write_round_manifest
 
@@ -25,9 +27,8 @@ def _project(tmp_path: Path) -> Path:
     project = tmp_path / "P"
     (project / "00_Preflight").mkdir(parents=True)
     (project / "01_Candidates").mkdir(parents=True)
-    binding_path(project).write_text(
-        json.dumps({"project_id": "P1", "profile_id": DEFAULT_NATIVE_PROFILE}),
-        encoding="utf-8",
+    HypothesisLedger(os.environ["RLR_HYPOTHESIS_STORE"]).bind_project(
+        project, profile_id=DEFAULT_NATIVE_PROFILE,
     )
     for name in ("skill_use_plan.md", "output_manifest.md", "forbidden_shortcuts.md"):
         (project / "00_Preflight" / name).write_text(name, encoding="utf-8")
@@ -198,6 +199,7 @@ def test_round_n_manifest_to_n_plus_1_turing_workspace(
     child, new_data = _write_child_round(
         project, parent, prior_result, manifest_path, manifest_sha,
         include_inherited=include_inherited, include_new=include_new)
+    bootstrap_project_ready(project, Path(__file__).resolve().parents[1] / "research_loop_v04.py")
 
     ok, reason = _audit_l0_contract(project, child)
     assert ok, f"{mode}: {reason}"
@@ -241,6 +243,7 @@ def test_selected_prior_artifact_tamper_fails_at_n_plus_1_l0(tmp_path):
     child, _new_data = _write_child_round(
         project, parent, prior_result, manifest_path, manifest_sha,
         include_inherited=True, include_new=False)
+    bootstrap_project_ready(project, Path(__file__).resolve().parents[1] / "research_loop_v04.py")
     prior_result.write_text("tampered\n", encoding="utf-8")
 
     ok, reason = _audit_l0_contract(project, child)
@@ -256,6 +259,7 @@ def test_current_n_plus_1_file_tamper_fails_before_l7_workspace(tmp_path, monkey
     child, new_data = _write_child_round(
         project, parent, prior_result, manifest_path, manifest_sha,
         include_inherited=False, include_new=True)
+    bootstrap_project_ready(project, Path(__file__).resolve().parents[1] / "research_loop_v04.py")
     ok, reason = _audit_l0_contract(project, child)
     assert ok, reason
     assert new_data is not None

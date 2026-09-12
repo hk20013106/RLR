@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 
 from deep_research_fixtures import persist_synthetic_evidence
-from native_v2_helpers import write_catalog_emission_receipts
+from native_v2_helpers import bootstrap_project_ready, write_catalog_emission_receipts
 from research_loop import deep_research
 from research_loop.l0_state import write_round_manifest
 from research_loop import l0_contract, l0_data, l0_state
@@ -57,6 +57,7 @@ def _rl_module():
 def _new_project(tmp_path):
     r = _run("new-project", str(tmp_path / "P"), "Test")
     assert r.returncode == 0, r.stderr
+    bootstrap_project_ready(tmp_path / "P", RL)
     return tmp_path / "P"
 
 

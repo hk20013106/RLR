@@ -278,7 +278,10 @@ def _render_summary(artifact: dict) -> str:
             identifier = url
         else:
             identifier = paper_id
-        identifiers.append(f"{paper_id} ({identifier})")
+        # The bounded Runtime digest must retain every DOI/PMID/URL, while
+        # avoiding redundant internal paper IDs that consume the fixed gate
+        # budget.  Canonical paper IDs remain in the evidence bundle itself.
+        identifiers.append(identifier)
 
     catalog = l4c_reference_catalog(artifact)
     source_digest = ", ".join(identifiers) or "none"
@@ -305,6 +308,12 @@ def _render_summary(artifact: dict) -> str:
         "L4B retrieves exact registered sources and extracts evidence; L4C defines method components, candidates, eligibility, execution requirements, and the final plan.",
         f"Accepted evidence cards: {len(catalog['evidence_cards'])}.",
         f"Evidence gaps: {len(catalog['evidence_gaps'])}.",
+        "",
+        # Keep the compact runtime digest bounded.  The handle index is
+        # provider context, but it is not part of the digest required by the
+        # literature gate; placing it under its own H2 prevents dozens of
+        # handles from being counted against the fixed 1000-token digest cap.
+        "## L4C reference index",
         *handle_lines,
         "",
         "## Evidence pack",

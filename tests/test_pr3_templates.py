@@ -21,6 +21,7 @@ from research_loop import deep_research, l0_contract, l0_data, research_seed
 import research_loop.l05_curie as curie
 from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
 from research_loop.hypothesis_ledger import HypothesisLedger
+from native_v2_helpers import bootstrap_project_ready
 from research_loop.yamlio import _replace_field
 
 HERE = Path(__file__).resolve().parent
@@ -124,6 +125,13 @@ def test_l1_placeholder_fails_gate():
 #    and fails closed with rc=3.
 def test_l4_placeholder_fails_gate():
     d = _mkproj()
+    # The current native L4 boundary is an explicit L4A manifest consumed by
+    # Curie/PaperQA2 L4B.  Complete the same ProjectReady precondition used by
+    # the production CLI before exercising that boundary.
+    bootstrap_project_ready(
+        Path(d), Path(__file__).resolve().parents[1] / "research_loop_v04.py",
+        profile_id=DEFAULT_NATIVE_PROFILE,
+    )
     # Execute pre-research to write placeholder
     r = _run("pre-research", d, "C1", "--node", "L4")
     assert r.returncode == 0, f"expected rc=0 for pre-research, got {r.returncode}: {r.stderr}"
@@ -137,15 +145,18 @@ def test_l4_placeholder_fails_gate():
     assert "## Source count" in text
     assert "NOT YET RUN" in text
 
-    # Assemble context on L4 must fail closed with rc=3. Exact-run ambiguity is
-    # also an intentional fail-closed outcome and is not a production failure.
-    r_assem = _run("assemble-context", d, "C1", "--node", "L4")
+    # The legacy placeholder is not an L4A manifest.  The current native
+    # L4B resume boundary must reject it before any provider or context work.
+    r_assem = _run(
+        "deep-research-run", d, "C1", "--node", "L4",
+        "--l4a-manifest", str(target),
+    )
     assert r_assem.returncode == 3, f"expected rc=3, got {r_assem.returncode}: {r_assem.stderr}"
     error = r_assem.stderr.lower()
     assert (
-        "gate" in error
-        or "not yet run" in error
-        or "requires --evidence-run-id" in error
+        "l4a manifest" in error
+        or "unreadable" in error
+        or "json" in error
     )
 
 

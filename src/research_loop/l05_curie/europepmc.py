@@ -444,11 +444,6 @@ class EuropePmcEvidenceRetriever:
             raise CurieContractError("Europe PMC http_get must return bytes")
         raw = bytes(raw)
         paragraphs = _parse_target_paragraphs(raw)
-        if not paragraphs:
-            raise CurieContractError(
-                "Europe PMC fullTextXML contains no Results/Discussion/Conclusion paragraphs"
-            )
-
         relative, path = self._snapshot_path(paper_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
@@ -471,6 +466,16 @@ class EuropePmcEvidenceRetriever:
             "content_type": "application/xml",
             "source_endpoint": f"/{pmcid}/fullTextXML",
         }
+        if not paragraphs:
+            return {
+                "snapshot": snapshot,
+                "candidates": [],
+                "paper_failure": {
+                    "paper_id": paper_id,
+                    "pmcid": pmcid,
+                    "reason_code": "NO_TARGET_SECTIONS",
+                },
+            }
         candidates = [
             {
                 "schema_version": EVIDENCE_CANDIDATE_SCHEMA_VERSION,

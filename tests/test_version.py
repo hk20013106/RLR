@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 from research_loop.commands.reporting import __version__ as reporting_version
+from research_loop.templates import _index_template
 from research_loop.version import VERSION
 
 
@@ -26,3 +27,10 @@ def test_public_cli_reports_the_single_runtime_version_source():
 
 def test_reporting_uses_the_single_runtime_version_source():
     assert reporting_version == VERSION
+
+
+def test_project_index_template_uses_the_single_runtime_version_source():
+    template = _index_template("project", "topic")
+
+    assert f"version: {VERSION}" in template
+    assert f"Research Loop v{VERSION} Index" in template

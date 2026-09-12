@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from native_v2_helpers import seed_selected_hypothesis
+from native_v2_helpers import bootstrap_project_ready, seed_selected_hypothesis
 from test_l4b_to_l4c_context import _fetcher, _manifest
 
 from research_loop import deep_research as dr
@@ -204,7 +204,7 @@ def test_native_contract_and_execution_closure_are_systematic():
 
 
 @pytest.mark.parametrize("provider_override", [None, "manual"])
-def test_runner_blocks_before_provider_when_static_closure_is_open(
+def test_runner_blocks_before_provider_when_formal_runtime_is_unavailable(
     tmp_path, monkeypatch, provider_override
 ):
     import run_loop
@@ -221,6 +221,11 @@ def test_runner_blocks_before_provider_when_static_closure_is_open(
     candidate.write_text(
         "---\ncandidate_id: C1\ncurrent_status: NEW\nround_id: 1\n---\n",
         encoding="utf-8",
+    )
+    bootstrap_project_ready(
+        project,
+        Path(__file__).resolve().parents[1] / "research_loop_v04.py",
+        extra_env={"RLR_HYPOTHESIS_STORE": str(store)},
     )
     config = tmp_path / "rlr_runner.yaml"
     config.write_text(run_loop.DEFAULT_CONFIG, encoding="utf-8")
@@ -242,18 +247,16 @@ def test_runner_blocks_before_provider_when_static_closure_is_open(
         return {"profile_id": PROFILE_V21_CATALOG_1}
 
     monkeypatch.setattr(run_loop, "next_step", forbidden_next_step)
+    # Use the actual formal runtime gate.  This environment intentionally does
+    # not provide the pinned `rlr` interpreter, so the runner must stop before
+    # static-closure inspection or any provider startup.
     audit_calls = []
 
-    def open_closure(profile_id):
+    def forbidden_static_audit(profile_id):
         audit_calls.append(profile_id)
-        return {
-            "e2e_start_allowed": False,
-            "unresolved_required_paths": [
-                {"node": "L4", "status": "UNREACHABLE"}
-            ],
-        }
+        raise AssertionError("static closure must follow formal runtime preflight")
 
-    monkeypatch.setattr(pre_e2e_closure, "audit_static_closure", open_closure)
+    monkeypatch.setattr(pre_e2e_closure, "audit_static_closure", forbidden_static_audit)
     provider_started = []
 
     def forbidden_provider_preflight(*_args, **_kwargs):
@@ -274,7 +277,7 @@ def test_runner_blocks_before_provider_when_static_closure_is_open(
 
     assert run_loop.cmd_run(args) == 3
     assert next_step_calls == []
-    assert audit_calls == [PROFILE_V21_CATALOG_1]
+    assert audit_calls == []
     assert provider_started == []
 
 

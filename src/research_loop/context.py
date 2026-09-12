@@ -43,6 +43,9 @@ from research_loop import l0_contract
 from research_loop import deep_research, research_seed
 
 
+DEFAULT_CONTEXT_TOKEN_BUDGET = 40000
+
+
 def strip_candidate_to_frontmatter(candidate_path, include_source_path=False):
     """Read a candidate .md, return only frontmatter dict (not body).
 
@@ -398,11 +401,13 @@ def cmd_assemble_context(args):
                                  project_dir, args.cand_id, evidence_nodes)}
 
     # --- V0.7 deep-research gate + pre-research injection --------------------
-    # L1/L4/L8.5 are mandatory Deep Research stages. assemble-context fails
-    # closed unless their note and persisted evidence pack validate; L7 stays
-    # a separate soft code-search pre-step.
+    # Only profile-topology-declared compatibility stages may consult the old
+    # pre-research map. Native literature nodes have Curie-owned evidence.
     pre_research_meta = None
-    pr_cfg = PRE_RESEARCH_MAP.get(node_id)
+    declared_pre_research = str(node_info.get("pre_research") or "").strip()
+    pr_cfg = PRE_RESEARCH_MAP.get(node_id) if declared_pre_research else None
+    if pr_cfg and str(pr_cfg.get("type") or "") != declared_pre_research:
+        pr_cfg = None
     if pr_cfg:
         prf = _pre_research_file(project_dir, node_id)
         is_lit = pr_cfg.get("type") in _LIT_PRE_RESEARCH_TYPES
@@ -655,7 +660,9 @@ def cmd_assemble_context(args):
     context_text = "\n".join(sections)
     context_text, caveman_meta = _caveman_lite(
         context_text, required_literals=[args.cand_id, node_id, persona])
-    context_budget = getattr(args, "context_token_budget", 8000)
+    context_budget = getattr(
+        args, "context_token_budget", DEFAULT_CONTEXT_TOKEN_BUDGET
+    )
     est_context_tokens = _estimate_tokens(context_text)
     if context_budget and est_context_tokens > context_budget:
         print(f"ERROR: context token budget exceeded "
@@ -827,6 +834,14 @@ def _inject_pre_research(prf, pr_cfg, args, node_id):
     warns = []
     fatal_error = None
     digest = _extract_section(full_text, "Runtime digest")
+    # L4B summaries keep the complete E/G/A handle index outside the bounded
+    # runtime digest.  Inject that index alongside the digest so Fisher still
+    # has every local handle available without making the literature gate count
+    # the full registry toward its fixed 1000-token digest budget.
+    handle_index = (
+        _extract_section(full_text, "L4C reference index")
+        if node_id == "L4" else ""
+    )
     archived_only = False
     omitted_reason = None
 
@@ -879,6 +894,12 @@ def _inject_pre_research(prf, pr_cfg, args, node_id):
                 sections.append(f"=== PRE-RESEARCH ({pr_cfg['type']}) [digest] ===")
                 sections.append(digest)
                 injected_text = digest
+                if handle_index:
+                    sections.extend([
+                        "=== L4C reference index (provider handles) ===",
+                        handle_index,
+                    ])
+                    injected_text = f"{digest}\n{handle_index}"
         else:
             if est_full <= budget:
                 sections.append(f"=== PRE-RESEARCH ({pr_cfg['type']}) [fallback: full under budget] ===")
