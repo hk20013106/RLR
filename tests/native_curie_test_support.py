@@ -4,11 +4,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from project_ready_test_support import install as install_project_ready
 from research_loop import l05_curie, research_seed
 
 
 def install(native_helpers) -> None:
     """Wrap native provider fixtures so L1 owns a real native Curie binding."""
+    install_project_ready(native_helpers)
     if getattr(native_helpers, "_native_curie_support_installed", False):
         return
     original = native_helpers.write_native_emission_receipts
