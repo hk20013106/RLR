@@ -265,6 +265,8 @@ def _prepare_europepmc_acquisition(
     http_get: Callable[[str, int], bytes] | None,
     timeout: int,
     round_index: int,
+    reformulation_index: int = 0,
+    query_id_prefix: str = "Q",
 ) -> dict:
     """Discover and select Europe PMC records once for each acquisition mode."""
     try:
@@ -283,6 +285,8 @@ def _prepare_europepmc_acquisition(
         round_index=round_index,
         explicit_queries=explicit_queries,
         providers=["europe-pmc"],
+        reformulation_index=reformulation_index,
+        query_id_prefix=query_id_prefix,
     )
     validate_query_plan(query_plan, seed_sha256=seed_digest)
     transport = EuropePmcTransport(
@@ -327,6 +331,16 @@ def _prepare_europepmc_acquisition(
             "selector_artifact_sha256": generic_selection.get("artifact_sha256"),
         },
     }
+
+
+def _initial_acquisition_outcome(prepared: dict) -> tuple[bool, str | None]:
+    """Classify only the bounded first-attempt outcomes eligible to reformulate."""
+    records = prepared["discovery"]["records"]
+    if not records:
+        return True, "zero_discovery_records"
+    if not prepared["selection"]["selected"]:
+        return True, "no_source_qualified_records"
+    return False, None
 
 
 def _paperqa_pdf_path(pdf_paths: object, paper_id: str) -> tuple[Path, str]:
@@ -466,12 +480,49 @@ def run_europepmc_acquisition(
         timeout=timeout,
         round_index=round_index,
     )
+    query_plans = [prepared["query_plan"]]
+    discovery_batches = list(prepared["discovery_batches"])
+    initial_attempts = [{
+        "attempt_index": 0,
+        "query_plan_id": prepared["query_plan"]["plan_id"],
+        "discovery_outcome": {
+            "record_count": len(prepared["discovery"]["records"]),
+            "source_qualified_record_count": len(prepared["selection"]["selected"]),
+        },
+    }]
+    needs_reformulation, reformulation_reason = _initial_acquisition_outcome(prepared)
+    if explicit_queries is None and needs_reformulation:
+        prepared = _prepare_europepmc_acquisition(
+            project,
+            candidate_id,
+            explicit_queries=None,
+            max_papers=max_papers,
+            page_size=page_size,
+            # Each bounded attempt persists its own immutable discovery and
+            # selector receipts; reusing the first attempt's path would turn a
+            # truthful reformulation into an overwrite attempt.
+            run_id=f"{prepared['run_id']}_reformulated",
+            http_get=http_get,
+            timeout=timeout,
+            round_index=round_index,
+            reformulation_index=1,
+            query_id_prefix="R",
+        )
+        query_plans.append(prepared["query_plan"])
+        discovery_batches.extend(prepared["discovery_batches"])
+        initial_attempts.append({
+            "attempt_index": 1,
+            "query_plan_id": prepared["query_plan"]["plan_id"],
+            "discovery_outcome": {
+                "record_count": len(prepared["discovery"]["records"]),
+                "source_qualified_record_count": len(prepared["selection"]["selected"]),
+            },
+        })
     seed = prepared["seed"]
     seed_digest = prepared["seed_sha256"]
     run_id = prepared["run_id"]
     query_plan = prepared["query_plan"]
     handshake = prepared["transport_handshake"]
-    discovery_batches = prepared["discovery_batches"]
     selection = prepared["selection"]
 
     source_snapshots: list[dict] = []
@@ -546,7 +597,7 @@ def run_europepmc_acquisition(
             round_id=str(seed["round_id"]),
             seed_sha256=seed_digest,
             version=1,
-            query_plans=[query_plan],
+            query_plans=query_plans,
             discovery_receipts=discovery_batches,
             selected_papers=acquired_papers,
             evidence=verified_evidence,
@@ -565,6 +616,14 @@ def run_europepmc_acquisition(
         "seed_sha256": seed_digest,
         "transport_handshake": handshake,
         "query_plan": query_plan,
+        "query_plans": query_plans,
+        "queries_executed": [item for plan in query_plans for item in plan["queries"]],
+        "final_executed_queries": list(query_plan["queries"]),
+        "initial_acquisition": {
+            "reformulated": len(initial_attempts) > 1,
+            "reformulation_reason": reformulation_reason if len(initial_attempts) > 1 else None,
+            "attempts": initial_attempts,
+        },
         "discovery_batches": discovery_batches,
         "selection": selection,
         "source_snapshots": source_snapshots,
