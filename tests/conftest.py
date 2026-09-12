@@ -174,13 +174,19 @@ def l4_paperqa2_runtime():
 
 
 @pytest.fixture(autouse=True)
-def complete_deep_research_l0_fixture(request, monkeypatch):
+def complete_deep_research_l0_fixture(request, monkeypatch, tmp_path):
     """Migrate old provider-runtime fixtures to current L0/L0.5 preconditions.
 
     The shared ``test_deep_research`` factory predates strict L0 and invokes
     ``new-candidate --input data``. The literal ``data`` is intentionally a
     production placeholder, so keep the validator strict and rewrite only that
     exact test-fixture command to a descriptive synthetic input.
+
+    Selected provider-runtime tests also require formal Codex preflight to pass
+    before they exercise their actual host/process behavior. CI intentionally
+    has no real Codex install, so expose a PATH-visible test sentinel only to
+    those named tests. The sentinel is never a scientific provider and is never
+    launched; tests that exercise provider absence remain untouched.
 
     Two historical positive provider-lifecycle tests also predate native Curie
     authority and finish by assembling native L1 context. Their scope is the
@@ -191,6 +197,33 @@ def complete_deep_research_l0_fixture(request, monkeypatch):
     """
     if not request.module.__name__.endswith("test_deep_research"):
         return
+
+    codex_presence_fixture_tests = {
+        "test_l10_context_includes_l9b_state",
+        "test_emit_l10b_transition_is_idempotent",
+        "test_detached_deep_research_survives_start_process_exit_and_collects",
+        "test_deep_research_cli_executes_a_local_fake_codex",
+        "test_deep_research_execution_rejects_provider_host_mismatch_before_spawn",
+        "test_deep_research_execution_rejects_inconsistent_execution_spec_before_spawn",
+        "test_deep_research_execution_rejects_unknown_host_before_spawn",
+        "test_deep_research_execution_rejects_declared_host_mismatch_before_spawn",
+        "test_deep_research_cli_executes_local_fake_claude_plugin",
+    }
+    if request.node.name in codex_presence_fixture_tests:
+        bin_dir = tmp_path / "fake-provider-bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            executable = bin_dir / "codex.cmd"
+            executable.write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+        else:
+            executable = bin_dir / "codex"
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+        current_path = os.environ.get("PATH", "")
+        monkeypatch.setenv(
+            "PATH",
+            str(bin_dir) + (os.pathsep + current_path if current_path else ""),
+        )
 
     native_context_fixture_tests = {
         "test_detached_deep_research_survives_start_process_exit_and_collects",
