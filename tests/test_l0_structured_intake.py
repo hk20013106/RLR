@@ -11,6 +11,7 @@ import yaml
 
 from research_loop import l0_contract, l0_intake, l0_plan_intake
 from research_loop.commands import lifecycle
+from native_v2_helpers import bootstrap_project_ready
 
 ROOT = Path(__file__).resolve().parents[1]
 RL = str(ROOT / "research_loop_v04.py")
@@ -26,6 +27,7 @@ def _new_project(tmp_path):
     project = tmp_path / "P"
     result = _run("new-project", str(project), "Structured intake test")
     assert result.returncode == 0, result.stderr
+    bootstrap_project_ready(project, ROOT / "research_loop_v04.py")
     return project
 
 

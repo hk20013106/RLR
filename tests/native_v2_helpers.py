@@ -1,18 +1,102 @@
 import hashlib
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 from research_loop import deep_research, l0_contract, research_seed
 from research_loop.hypothesis_ledger import (
-    HypothesisLedger, canonical_json,
+    HypothesisLedger, binding_path, canonical_json,
 )
-from research_loop.compatibility import get_profile
+from research_loop.compatibility import DEFAULT_NATIVE_PROFILE, get_profile
 from research_loop.delta import artifact_for_node
 from research_loop.persona_catalog import resolve_persona_template
 from research_loop.providers.base import RunReceipt
 from research_loop.topology import topology_for_profile
 from research_loop.yamlio import _load_yaml_front, _replace_field
+
+
+def bootstrap_project_ready(project_dir, controller, *, cwd=None, extra_env=None,
+                            profile_id=DEFAULT_NATIVE_PROFILE, project_id=None):
+    """Create a real v2 PROJECT_READY fixture without an ARS installation.
+
+    The temporary vault is a genuine required first-mile dependency. PubMed is
+    deliberately recorded as an unavailable readiness-only future transport,
+    rather than being mocked or promoted to a blocking consumer.
+    """
+    project = Path(project_dir)
+    project.mkdir(parents=True, exist_ok=True)
+    index = project / "00_Project_Index.md"
+    if not index.exists():
+        index.write_text(
+            "---\nproject_name: test-project\nkind: project_index\n"
+            "created_at: 2026-01-01T00:00:00\n---\n# test-project\n",
+            encoding="utf-8",
+        )
+    vault = project.parent / f"{project.name}-vault"
+    (vault / ".obsidian").mkdir(parents=True, exist_ok=True)
+    preflight = project / "00_Preflight"
+    preflight.mkdir(parents=True, exist_ok=True)
+    # Let the production preflight materialize the runtime config so the
+    # fixture exercises the same first-mile path as a real project.  Preserve
+    # any caller-supplied config instead of overwriting test state.
+    pubmed_config = preflight / "pubmed_mcp.json"
+    if not pubmed_config.exists():
+        pubmed_config.write_text(
+            json.dumps({"command": "rlr-fixture-unavailable-pubmed"}) + "\n",
+            encoding="utf-8",
+        )
+    env = {
+        **os.environ,
+        **(extra_env or {}),
+        "OBSIDIAN_VAULT": str(vault),
+        "RLR_HOST_BACKEND": "codex",
+    }
+    store = str(env.get("RLR_HYPOTHESIS_STORE") or "").strip()
+    if not store:
+        raise AssertionError("ProjectReady fixture requires RLR_HYPOTHESIS_STORE")
+    ledger = HypothesisLedger(store)
+    if not binding_path(project).is_file():
+        ledger.bind_project(
+            project, project_id=project_id, profile_id=profile_id,
+        )
+    else:
+        try:
+            ledger.require_activated_project(project)
+        except Exception as exc:  # test fixture setup should fail explicitly
+            raise AssertionError(
+                f"invalid native test ledger binding: {binding_path(project)}"
+            ) from exc
+    result = subprocess.run(
+        [sys.executable, str(controller), "preflight", str(project), "--backend", "codex"],
+        capture_output=True, text=True, encoding="utf-8", cwd=cwd, env=env,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr or result.stdout)
+    # The native workspace contract intentionally does not consume the
+    # historical input_manifest.md.  Keep it absent in fixtures after the
+    # production preflight has completed its other readiness probes.
+    legacy_manifest = preflight / "input_manifest.md"
+    if legacy_manifest.exists():
+        legacy_manifest.unlink()
+    receipt = project / "00_Preflight" / "preflight_receipt.json"
+    receipt_sha = hashlib.sha256(receipt.read_bytes()).hexdigest()
+    for candidate_file in sorted((project / "01_Candidates").glob("C*.md")):
+        front = _load_yaml_front(candidate_file)
+        if front.get("project_ready_receipt_path") is None:
+            _replace_field(
+                candidate_file,
+                "project_ready_receipt_path",
+                "00_Preflight/preflight_receipt.json",
+            )
+        if front.get("project_ready_receipt_sha256") is None:
+            _replace_field(
+                candidate_file,
+                "project_ready_receipt_sha256",
+                receipt_sha,
+            )
+    return env
 
 
 def activate_native_project(project_dir):

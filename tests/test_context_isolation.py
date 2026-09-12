@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from deep_research_fixtures import persist_synthetic_evidence
+from native_v2_helpers import bootstrap_project_ready
 
 HERE = Path(__file__).resolve().parent.parent
 
@@ -47,7 +48,7 @@ def _assemble(node, project, candidate):
 
 
 @pytest.fixture
-def context_project(tmp_path):
+def context_project(tmp_path, monkeypatch):
     project = tmp_path / "context-isolation"
     source_input = tmp_path / "input.txt"
     source_input.write_text("synthetic input", encoding="utf-8")
@@ -56,6 +57,9 @@ def context_project(tmp_path):
         capture_output=True, text=True, cwd=str(HERE),
     )
     assert created.returncode == 0, created.stderr
+    env = bootstrap_project_ready(project, HERE / "research_loop_v04.py", cwd=str(HERE))
+    monkeypatch.setenv("OBSIDIAN_VAULT", env["OBSIDIAN_VAULT"])
+    monkeypatch.setenv("RLR_HOST_BACKEND", "codex")
     candidate = subprocess.run(
         [sys.executable, str(HERE / "research_loop_v04.py"), "new-candidate", str(project),
          "--title", "T", "--question", "Q", "--claim", "C",
@@ -151,10 +155,11 @@ def _l85_fixture_project(tmp_path):
         capture_output=True, text=True, cwd=str(HERE),
     )
     assert created.returncode == 0, created.stderr
+    env = bootstrap_project_ready(project, HERE / "research_loop_v04.py", cwd=str(HERE))
     candidate = subprocess.run(
         [sys.executable, str(HERE / "research_loop_v04.py"), "new-candidate", str(project),
          "--title", "T", "--question", "Q", "--claim", "C", "--input", "data"],
-        capture_output=True, text=True, cwd=str(HERE),
+        capture_output=True, text=True, cwd=str(HERE), env=env,
     )
     assert candidate.returncode == 0, candidate.stderr
     cand_id = candidate.stdout.splitlines()[0]

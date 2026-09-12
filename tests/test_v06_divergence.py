@@ -11,6 +11,7 @@ import os
 import sqlite3
 from pathlib import Path
 from native_v2_helpers import (
+    bootstrap_project_ready,
     commit_finalized,
     seed_revise_continuation,
     write_native_emission_receipts,
@@ -28,6 +29,7 @@ def _run(*args, cwd=None):
 def _new_project(tmp_path):
     r = _run("new-project", str(tmp_path / "P"), "Test", "--profile", "v2.1")
     assert r.returncode == 0, r.stderr
+    bootstrap_project_ready(tmp_path / "P", RL)
     return tmp_path / "P"
 
 

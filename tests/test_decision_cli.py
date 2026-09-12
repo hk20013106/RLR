@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from native_v2_helpers import write_native_emission_receipts
+from native_v2_helpers import bootstrap_project_ready, write_native_emission_receipts
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +53,10 @@ def test_cli_decision_new_to_idea_proposed_writes_existing_log_contract(tmp_path
         "--knowledge-store", str(store),
     )
     assert created.returncode == 0, created.stderr
+    bootstrap_project_ready(
+        project, ROOT / "research_loop_v04.py", cwd=ROOT,
+        extra_env={"RLR_HYPOTHESIS_STORE": str(store)},
+    )
 
     candidate_result = _run_public_cli(
         "new-candidate", str(project), "--title", "candidate",

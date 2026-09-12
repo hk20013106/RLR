@@ -7,11 +7,21 @@ DOI/PMID/URL): a non-empty `## Query log`, a non-empty `## Tool receipt`, and an
 explicit `## Source count` >= 1.
 """
 import sys
+import os
 import subprocess
 import tempfile
 from pathlib import Path
 from research_loop import deep_research as dr
-from native_v2_helpers import activate_native_project
+from native_v2_helpers import (
+    activate_native_project,
+    bootstrap_project_ready,
+    seed_selected_hypothesis,
+)
+from research_loop import l4_evidence_bundle as bundle
+from research_loop import l4_pipeline as l4p
+from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
+from research_loop.hypothesis_ledger import HypothesisLedger
+from test_l4b_to_l4c_context import _bind_round_data, _fetcher, _manifest, METHOD_TEXT
 
 HERE = Path(__file__).resolve().parent
 RL = str(HERE.parent / "research_loop_v04.py")
@@ -77,6 +87,61 @@ def _digest_with_estimated_tokens(tokens, identifier="doi:10.1000/abc123"):
     return f"## Runtime digest\n{body}\n"
 
 
+def _native_l4b_summary(tmp_path, runtime_factory):
+    """Produce a real Curie/PaperQA2 L4B summary for the budget assertion."""
+    project = tmp_path / "native-l4b"
+    project.mkdir()
+    (project / "00_Project_Index.md").write_text(
+        "---\nproject_name: T\nkind: project_index\n"
+        "created_at: 2026-01-01T00:00:00\n---\n# T\n",
+        encoding="utf-8",
+    )
+    candidate_dir = project / "01_Candidates"
+    candidate_dir.mkdir(parents=True)
+    (candidate_dir / "C1.md").write_text(
+        "---\ncandidate_id: C1\ntitle: T\nquestion: Which method should test H1?\n"
+        "claim: H1 predicts differential expression.\ncurrent_status: IDEA_SELECTED\n"
+        "round_id: 1\nround_type: initial\n---\n# C1\n",
+        encoding="utf-8",
+    )
+    store = os.environ["RLR_HYPOTHESIS_STORE"]
+    binding = HypothesisLedger(store).bind_project(
+        project, profile_id=DEFAULT_NATIVE_PROFILE
+    )
+    _bind_round_data(project)
+    bootstrap_project_ready(
+        project,
+        Path(__file__).resolve().parents[1] / "research_loop_v04.py",
+        profile_id=DEFAULT_NATIVE_PROFILE,
+        extra_env={"RLR_HYPOTHESIS_STORE": store},
+    )
+    seed_selected_hypothesis(project, "C1")
+    manifest = _manifest(project, str(binding["project_id"]))
+    artifact = bundle.run_l4b_evidence(
+        l4p,
+        dr,
+        project,
+        "C1",
+        manifest,
+        project / "08_Audit" / "deep_research_runtime" / "C1" / "L4",
+        project_id=str(binding["project_id"]),
+        round_id="1",
+        profile_id=DEFAULT_NATIVE_PROFILE,
+        research_persona="Curie",
+        fetcher=_fetcher,
+        paperqa_runtime=runtime_factory(METHOD_TEXT)[0],
+    )
+    return project, Path(project / artifact["summary_path"])
+
+
+def _replace_runtime_digest(summary, digest):
+    start = summary.index("## Runtime digest\n")
+    next_section = summary.find("\n## ", start + len("## Runtime digest\n"))
+    if next_section < 0:
+        raise AssertionError("native L4B summary has no following section")
+    return summary[:start] + digest + summary[next_section + 1:]
+
+
 def _fail(artifact, needle):
     r = _assemble_l1(_mkproj(), artifact)
     assert r.returncode == 3, f"expected rc=3, got {r.returncode}: {r.stderr}"
@@ -131,12 +196,24 @@ def test_l4_digest_near_781_tokens_passes_under_literature_budget():
     assert r.returncode == 0, f"expected rc=0, got {r.returncode}: {r.stderr}"
 
 
-def test_digest_over_1000_tokens_fails_with_actionable_compression_message():
-    artifact = _art(
-        _digest_with_estimated_tokens(1001), _QLOG, _TREC, _SCOUNT)
-    r = _assemble_node(_mkproj(), "L4", artifact)
-    assert r.returncode == 3, f"expected rc=3, got {r.returncode}: {r.stderr}"
-    message = r.stderr.lower()
+def test_digest_over_1000_tokens_fails_with_actionable_compression_message(
+    tmp_path, l4_paperqa2_runtime,
+):
+    # Exercise the budget validator against the current native Curie/PaperQA2
+    # L4B evidence summary.  Only the digest body is enlarged; the generated
+    # source, query log, receipt, and evidence handles remain real and intact.
+    _project, summary_path = _native_l4b_summary(tmp_path, l4_paperqa2_runtime)
+    summary = summary_path.read_text(encoding="utf-8")
+    overlong = _replace_runtime_digest(
+        summary, _digest_with_estimated_tokens(1001)
+    )
+    from research_loop.preresearch import PRE_RESEARCH_MAP, _validate_pre_research_content
+
+    ok, reason = _validate_pre_research_content(
+        overlong, PRE_RESEARCH_MAP["L4"]
+    )
+    assert not ok
+    message = reason.lower()
     assert "1001" in message and "1000" in message
     assert "caveman" in message
     assert "provenance-preserving" in message

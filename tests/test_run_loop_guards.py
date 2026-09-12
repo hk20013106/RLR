@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parent))
 import run_loop
+from native_v2_helpers import bootstrap_project_ready
 from research_loop.compatibility import PROFILE_V21_CATALOG_1
 from research_loop.hypothesis_ledger import HypothesisLedger
 
@@ -42,6 +43,11 @@ def test_main_agent_run_emits_handoff_without_python_provider():
             (candidates / "C1.md").write_text(
                 "---\ncandidate_id: C1\ncurrent_status: NEW\n---\n",
                 encoding="utf-8")
+            bootstrap_project_ready(
+                project,
+                Path(__file__).resolve().parents[1] / "research_loop_v04.py",
+                extra_env={"RLR_HYPOTHESIS_STORE": str(store)},
+            )
             args = SimpleNamespace(
                 project_dir=str(project), cand_id="C1", config=None,
                 knowledge_store=str(store), max_rounds=None, dry_run=False,

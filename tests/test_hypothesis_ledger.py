@@ -1,12 +1,13 @@
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
 from research_loop.delta import _v2_commit_valid
 from research_loop.hypothesis_ledger import HypothesisLedger, LedgerError, canonical_json
 from research_loop.engine import main
-from native_v2_helpers import write_catalog_emission_receipts
+from native_v2_helpers import bootstrap_project_ready, write_catalog_emission_receipts
 
 
 def _commit(ledger, project, node, delta, *, candidate="C1", round_id="1",
@@ -269,10 +270,18 @@ def test_bound_but_unactivated_project_cannot_commit(tmp_path):
         })
 
 
-def test_cli_v2_emission_requires_binding_and_writes_receipt(tmp_path):
+def test_cli_v2_emission_requires_binding_and_writes_receipt(tmp_path, monkeypatch):
     project = tmp_path / "P"
     store = tmp_path / "ledger.sqlite"
+    monkeypatch.setenv("RLR_HYPOTHESIS_STORE", str(store))
     assert main(["new-project", str(project), "topic", "--knowledge-store", str(store)]) == 0
+    env = bootstrap_project_ready(
+        project,
+        Path(__file__).resolve().parents[1] / "research_loop_v04.py",
+        extra_env={"RLR_HYPOTHESIS_STORE": str(store)},
+    )
+    monkeypatch.setenv("OBSIDIAN_VAULT", env["OBSIDIAN_VAULT"])
+    monkeypatch.setenv("RLR_HOST_BACKEND", "codex")
     assert main(["new-candidate", str(project), "--title", "t", "--question", "q", "--claim", "c", "--input", "inline", "--knowledge-store", str(store)]) == 0
     candidate = next((project / "01_Candidates").glob("C*.md")).stem
     source = tmp_path / "l1.json"

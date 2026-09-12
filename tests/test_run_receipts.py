@@ -11,7 +11,7 @@ from research_loop.engine import main
 from research_loop.hypothesis_ledger import HypothesisLedger
 from research_loop.providers.base import RunReceipt
 from research_loop.yamlio import _replace_field
-from native_v2_helpers import write_catalog_emission_receipts
+from native_v2_helpers import bootstrap_project_ready, write_catalog_emission_receipts
 
 
 def _receipt(**overrides):
@@ -115,12 +115,20 @@ def test_atomic_callback_failure_leaves_no_ledger_emission(tmp_path):
         con.close()
 
 
-def _native_l1_boundary(tmp_path):
+def _native_l1_boundary(tmp_path, monkeypatch):
     project = tmp_path / "P"
     store = tmp_path / "ledger.sqlite"
+    monkeypatch.setenv("RLR_HYPOTHESIS_STORE", str(store))
     assert main([
         "new-project", str(project), "topic", "--knowledge-store", str(store)
     ]) == 0
+    env = bootstrap_project_ready(
+        project,
+        Path(__file__).resolve().parents[1] / "research_loop_v04.py",
+        extra_env={"RLR_HYPOTHESIS_STORE": str(store)},
+    )
+    monkeypatch.setenv("OBSIDIAN_VAULT", env["OBSIDIAN_VAULT"])
+    monkeypatch.setenv("RLR_HOST_BACKEND", "codex")
     assert main([
         "new-candidate", str(project), "--title", "t", "--question", "q",
         "--claim", "c", "--input", "inline", "--knowledge-store", str(store),
@@ -171,9 +179,9 @@ def _emit_l1(project, store, candidate, source, manifest, receipt):
     ])
 
 
-def test_receipt_identity_mismatch_rejects_before_any_write(tmp_path):
+def test_receipt_identity_mismatch_rejects_before_any_write(tmp_path, monkeypatch):
     project, store, candidate, source, manifest, receipt = _native_l1_boundary(
-        tmp_path
+        tmp_path, monkeypatch
     )
     payload = json.loads(receipt.read_text(encoding="utf-8"))
     payload["round_id"] = "99"
@@ -182,18 +190,18 @@ def test_receipt_identity_mismatch_rejects_before_any_write(tmp_path):
     _assert_zero_native_writes(project, store, candidate)
 
 
-def test_provider_delta_hash_tamper_rejects_before_any_write(tmp_path):
+def test_provider_delta_hash_tamper_rejects_before_any_write(tmp_path, monkeypatch):
     project, store, candidate, source, manifest, receipt = _native_l1_boundary(
-        tmp_path
+        tmp_path, monkeypatch
     )
     source.write_text(source.read_text(encoding="utf-8") + "\n", encoding="utf-8")
     assert _emit_l1(project, store, candidate, source, manifest, receipt) == 1
     _assert_zero_native_writes(project, store, candidate)
 
 
-def test_transformed_provider_receipt_rejects_tampered_raw_to_bound_edge(tmp_path):
+def test_transformed_provider_receipt_rejects_tampered_raw_to_bound_edge(tmp_path, monkeypatch):
     project, store, candidate, source, manifest, receipt = _native_l1_boundary(
-        tmp_path
+        tmp_path, monkeypatch
     )
     raw = tmp_path / "raw-provider.json"
     raw.write_text('{"raw":true}\n', encoding="utf-8")
@@ -224,9 +232,9 @@ def test_transformed_provider_receipt_rejects_tampered_raw_to_bound_edge(tmp_pat
     _assert_zero_native_writes(project, store, candidate)
 
 
-def test_exact_evidence_artifact_tamper_rejects_before_any_write(tmp_path):
+def test_exact_evidence_artifact_tamper_rejects_before_any_write(tmp_path, monkeypatch):
     project, store, candidate, source, manifest, receipt = _native_l1_boundary(
-        tmp_path
+        tmp_path, monkeypatch
     )
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     paper = next(
@@ -242,10 +250,10 @@ def test_exact_evidence_artifact_tamper_rejects_before_any_write(tmp_path):
 
 
 def test_l1_canonical_seed_drift_rejects_stale_receipt_before_any_write(
-    tmp_path, capsys
+    tmp_path, capsys, monkeypatch
 ):
     project, store, candidate, source, manifest, receipt = _native_l1_boundary(
-        tmp_path
+        tmp_path, monkeypatch
     )
     contract, _path, _raw = l0_contract.load_contract(project, candidate)
     contract["scientific_question"] = "a different canonical scientific question"

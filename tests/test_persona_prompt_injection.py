@@ -30,6 +30,7 @@ import subprocess  # noqa: E402
 
 from research_loop.providers.command import CommandProvider  # noqa: E402
 from deep_research_fixtures import persist_synthetic_evidence  # noqa: E402
+from native_v2_helpers import bootstrap_project_ready  # noqa: E402
 
 RL = str(HERE / "research_loop_v04.py")
 
@@ -60,6 +61,13 @@ def _assemble(proj, cand, node, *extra):
 def _new_project(tmp_path):
     r = _run("new-project", str(tmp_path / "P"), "T")
     assert r.returncode == 0, r.stderr
+    env = bootstrap_project_ready(
+        tmp_path / "P", HERE / "research_loop_v04.py", extra_env=_ENV
+    )
+    _ENV.update({
+        "OBSIDIAN_VAULT": env["OBSIDIAN_VAULT"],
+        "RLR_HOST_BACKEND": "codex",
+    })
     return tmp_path / "P"
 
 
