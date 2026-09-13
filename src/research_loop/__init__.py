@@ -33,44 +33,30 @@ from research_loop.l4_pipeline_compat import install as _install_l4_pipeline_com
 from research_loop import l4_lineage as _l4_lineage_module
 from research_loop import l4_provenance as _l4_provenance_module
 from research_loop.l4_provenance import install as _install_l4_provenance
-from research_loop.l4_provenance_compat import (
-    install as _install_l4_provenance_compat,
-)
+from research_loop.l4_provenance_compat import install as _install_l4_provenance_compat
 from research_loop.l4_path_safety import install as _install_l4_path_safety
 from research_loop.l4_lineage import install as _install_l4_lineage
 from research_loop.l45_context_binding import install as _install_l45_context_binding
 from research_loop import l4_inventory as _l4_inventory_module
 from research_loop import l4_method_registry as _l4_method_registry_module
-from research_loop.l4_registry_projection_integrity import (
-    install as _install_l4_registry_projection_integrity,
-)
-from research_loop.l4_inventory_projection import (
-    install as _install_l4_inventory_projection,
-)
-from research_loop.l4_contextual_literature import (
-    install as _install_l4_contextual_literature,
-)
+from research_loop.l4_registry_projection_integrity import install as _install_l4_registry_projection_integrity
+from research_loop.l4_inventory_projection import install as _install_l4_inventory_projection
+from research_loop import l4_contextual_literature as _l4_contextual_module
+from research_loop.l4_contextual_literature import install as _install_l4_contextual_literature
 from research_loop import l4_evidence_bundle as _l4_evidence_bundle_module
 from research_loop.l4_evidence_bundle import install as _install_l4_evidence_bundle
 from research_loop.l4_runtime_compat import install as _install_l4_runtime_compat
 from research_loop import l4_closed_corpus as _l4_closed_corpus
+from research_loop import l4a_specter2 as _l4a_specter2_module
+from research_loop.l05_curie import paperqa2_runtime as _paperqa2_runtime_module
+from research_loop.literature_query_language import install as _install_literature_query_language
 
 _install_l4_pipeline(deep_research)
 _install_l4_pipeline_compat(_l4_pipeline_module, deep_research)
-_install_l4_provenance(
-    _l4_pipeline_module,
-    deep_research,
-    _l4_lineage_module,
-)
-_install_l4_provenance_compat(
-    _l4_pipeline_module,
-    _l4_provenance_module,
-)
+_install_l4_provenance(_l4_pipeline_module, deep_research, _l4_lineage_module)
+_install_l4_provenance_compat(_l4_pipeline_module, _l4_provenance_module)
 _install_l4_path_safety(_l4_pipeline_module, deep_research)
-_install_l4_registry_projection_integrity(
-    _l4_method_registry_module,
-    _l4_inventory_module,
-)
+_install_l4_registry_projection_integrity(_l4_method_registry_module, _l4_inventory_module)
 _install_l4_inventory_projection(_l4_inventory_module, deep_research)
 _install_l4_contextual_literature(_l4_inventory_module, deep_research)
 _install_l4_evidence_bundle(_l4_pipeline_module, deep_research)
@@ -78,43 +64,34 @@ _install_l4_runtime_compat(deep_research, _l4_evidence_bundle_module)
 _install_l4_lineage(deep_research)
 _install_l45_context_binding(_l4_pipeline_module)
 _l4_closed_corpus.install(_l4_pipeline_module, deep_research)
+_install_literature_query_language(
+    _l4_inventory_module,
+    _l4_contextual_module,
+    _l4a_specter2_module,
+    _paperqa2_runtime_module,
+    deep_research,
+)
 
 # Provider observability is installed after all scientific Deep Research/L4
 # wrappers so it supervises the final runtime boundary without changing their
 # contracts, validators, persistence, or authority.
 from research_loop import deep_research_task as _deep_research_task_module
-from research_loop.provider_runtime_observability import (
-    install as _install_provider_runtime_observability,
-)
+from research_loop.provider_runtime_observability import install as _install_provider_runtime_observability
 _install_provider_runtime_observability(deep_research, _deep_research_task_module)
 
 from research_loop import hypothesis_contracts as hypothesis_contracts
 from research_loop.method_contracts import install as _install_method_contracts
-from research_loop.hypothesis_reactivation_contracts import (
-    install as _install_reactivation_contracts,
-)
-
+from research_loop.hypothesis_reactivation_contracts import install as _install_reactivation_contracts
 _install_method_contracts(hypothesis_contracts)
 _install_reactivation_contracts(hypothesis_contracts)
 
 from research_loop import hypothesis_ledger as hypothesis_ledger
 from research_loop import constraint_validation as _constraint_validation
-from research_loop.ledger_receipt_idempotency import (
-    install as _install_receipt_idempotency,
-)
-from research_loop.hypothesis_reactivation import (
-    install as _install_hypothesis_reactivation,
-)
-from research_loop.hypothesis_reactivation_constraints import (
-    install as _install_reactivation_constraints,
-)
-from research_loop.conditional_skip_constraints import (
-    install as _install_conditional_skip_constraints,
-)
-from research_loop.hypothesis_reactivation_compat import (
-    install as _install_reactivation_compat,
-)
-
+from research_loop.ledger_receipt_idempotency import install as _install_receipt_idempotency
+from research_loop.hypothesis_reactivation import install as _install_hypothesis_reactivation
+from research_loop.hypothesis_reactivation_constraints import install as _install_reactivation_constraints
+from research_loop.conditional_skip_constraints import install as _install_conditional_skip_constraints
+from research_loop.hypothesis_reactivation_compat import install as _install_reactivation_compat
 _install_receipt_idempotency(hypothesis_ledger)
 _install_hypothesis_reactivation(hypothesis_ledger)
 _install_reactivation_constraints(hypothesis_ledger)
@@ -123,38 +100,26 @@ _install_reactivation_compat(hypothesis_ledger, _constraint_validation)
 
 from research_loop import topology as topology
 from research_loop.topology_extensions import install as _install_topology_extensions
-
 _install_topology_extensions(topology)
 
 # Native v2.1 L1 evidence binding is installed on the canonical research_seed
 # module. It is independent of the historical Deep Research run bridge.
 from research_loop import research_seed as _research_seed_module
 from research_loop.l05_native_binding import install as _install_l05_native_binding
-
 _install_l05_native_binding(_research_seed_module)
 
 from research_loop.commands import lifecycle as _lifecycle
 from research_loop.commands import ledger as _ledger_commands
 from research_loop import context as _context
 from research_loop.conditional_routing import install as _install_conditional_routing
-from research_loop.l05_native_context_gate import (
-    install as _install_l05_native_context_gate,
-)
+from research_loop.l05_native_context_gate import install as _install_l05_native_context_gate
 from research_loop.l05_context import install as _install_l05_context
-from research_loop.hypothesis_recall_context import (
-    install as _install_hypothesis_recall_context,
-)
+from research_loop.hypothesis_recall_context import install as _install_hypothesis_recall_context
 from research_loop.l45_ledger import install as _install_l45_ledger
-
 _install_l45_ledger(_ledger_commands)
 _install_conditional_routing(_lifecycle, _context)
-# For native v2.1 L1, replace the historical Deep Research acquisition gate
-# with the exact Curie binding gate before the frozen-pack injection wrapper is
-# installed. Historical v2.0 and every non-L1 node remain unchanged.
 _install_l05_native_context_gate(_context)
 _install_l05_context(_context)
-# Recall remains outermost so it can add only its separately authorized
-# historical snapshot after the canonical native evidence context is complete.
 _install_hypothesis_recall_context(_context, _ledger_commands)
 
 # CLI extensions are installed only after the canonical CLI module has defined
@@ -163,7 +128,6 @@ _install_hypothesis_recall_context(_context, _ledger_commands)
 from research_loop import cli as _cli
 from research_loop.hypothesis_pool_cli import install as _install_hypothesis_pool_cli
 from research_loop.l05_curie_cli import install as _install_l05_europepmc_cli
-
 _install_hypothesis_pool_cli(_cli)
 _install_l05_europepmc_cli(_cli)
 
@@ -176,13 +140,12 @@ del _install_l4_provenance, _install_l4_provenance_compat
 del _install_l4_path_safety, _install_l4_lineage
 del _install_l4_registry_projection_integrity
 del _install_l4_inventory_projection, _install_l4_contextual_literature
-del _install_l4_evidence_bundle
-del _install_l4_runtime_compat, _install_l45_context_binding
-del _install_provider_runtime_observability
+del _install_l4_evidence_bundle, _install_l4_runtime_compat, _install_l45_context_binding
+del _install_literature_query_language, _install_provider_runtime_observability
 del _deep_research_task_module
-del _l4_pipeline_module, _l4_lineage_module
-del _l4_provenance_module, _l4_inventory_module
-del _l4_method_registry_module, _l4_evidence_bundle_module
+del _l4_pipeline_module, _l4_lineage_module, _l4_provenance_module
+del _l4_inventory_module, _l4_method_registry_module, _l4_evidence_bundle_module
+del _l4_contextual_module, _l4a_specter2_module, _paperqa2_runtime_module
 del _l4_closed_corpus
 del _install_method_contracts, _install_reactivation_contracts
 del _install_receipt_idempotency, _install_hypothesis_reactivation
