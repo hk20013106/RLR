@@ -1,10 +1,9 @@
 """Canonical L0 -> L0.5 -> L1 research-seed and evidence binding.
 
-The validated L0 sidecar remains the sole semantic authority. New user input is
-normalized to English before those canonical contract bytes are frozen. L0.5
-Curie owns literature acquisition and freezes an immutable EvidencePack.
-Einstein receives the canonical English ResearchSeed plus that exact frozen
-evidence state; it does not gain independent retrieval or translation authority.
+The L0 sidecar remains the sole semantic authority.  L0.5 Curie owns literature
+acquisition and freezes an immutable EvidencePack.  Einstein receives the
+canonical ResearchSeed plus that exact frozen evidence state; it does not gain
+independent retrieval authority.
 """
 from __future__ import annotations
 
@@ -13,7 +12,6 @@ import json
 from pathlib import Path
 
 from research_loop import l0_contract
-from research_loop.l0_language import L0LanguageError, validate_internal_english
 from research_loop.paths import _candidate_file
 from research_loop.yamlio import _load_yaml_front
 
@@ -36,11 +34,10 @@ def _canonical_json(value) -> str:
 
 
 def load_l1_research_seed(project_dir, cand_id):
-    """Validate L0 and return the single canonical English semantic seed.
+    """Validate L0 and return the single canonical semantic seed for L1.
 
-    No candidate-frontmatter ``question``/``claim`` fallback is permitted. A
-    missing, malformed, mismatched, tampered, or non-English canonical L0
-    sidecar fails closed. Language normalization is owned by intake, not here.
+    No candidate-frontmatter ``question``/``claim`` fallback is permitted.  A
+    missing, malformed, mismatched, or tampered L0 sidecar fails closed.
     """
     project_dir = Path(project_dir)
     candidate_path = _candidate_file(project_dir, cand_id)
@@ -64,20 +61,6 @@ def load_l1_research_seed(project_dir, cand_id):
 
     current_round = contract["current_round"]
     try:
-        scientific_question = validate_internal_english(
-            contract["scientific_question"],
-            name="canonical L0 scientific_question",
-        )
-        hypothesis_seed = validate_internal_english(
-            current_round["hypothesis"],
-            name="canonical L0 current_round.hypothesis",
-        )
-    except (KeyError, L0LanguageError) as exc:
-        raise ResearchSeedError(
-            f"canonical L0 internal scientific semantics must be English: {exc}"
-        ) from exc
-
-    try:
         relative_path = artifact_path.relative_to(project_dir).as_posix()
     except ValueError:
         relative_path = artifact_path.as_posix()
@@ -87,8 +70,8 @@ def load_l1_research_seed(project_dir, cand_id):
         "candidate_id": str(contract["candidate_id"]),
         "round_id": str(contract["round_id"]),
         "round_type": str(contract["round_type"]),
-        "scientific_question": scientific_question,
-        "hypothesis_seed": hypothesis_seed,
+        "scientific_question": str(contract["scientific_question"]),
+        "hypothesis_seed": str(current_round["hypothesis"]),
         "l0_contract_schema_version": str(contract["schema_version"]),
         "l0_contract_path": relative_path,
         "l0_contract_sha256": hashlib.sha256(raw).hexdigest(),
@@ -213,7 +196,7 @@ def write_l1_evidence_binding(project_dir, seed, run_id) -> dict:
             )
     else:
         path.write_text(
-            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2),
             encoding="utf-8",
         )
     return evidence_binding_manifest_entry(project_dir, seed, run_id)
@@ -301,7 +284,7 @@ def evidence_binding_manifest_entry(project_dir, seed, run_id) -> dict:
 
 
 def render_context_block(seed) -> str:
-    """Render the exact canonical English semantics consumed by Einstein."""
+    """Render the exact canonical semantics consumed by Einstein."""
     payload = {
         "schema_version": seed["schema_version"],
         "candidate_id": seed["candidate_id"],
@@ -312,8 +295,8 @@ def render_context_block(seed) -> str:
         "l0_contract_sha256": seed["l0_contract_sha256"],
     }
     return (
-        "=== L1 RESEARCH SEED (canonical English L0 projection) ===\n"
-        "AUTHORITY: validated canonical L0 sidecar; candidate frontmatter "
-        "question/claim are not semantic inputs to L1.\n"
+        "=== L1 RESEARCH SEED (canonical L0 projection) ===\n"
+        "AUTHORITY: validated L0 sidecar; candidate frontmatter question/claim "
+        "are not semantic inputs to L1.\n"
         + json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
     )

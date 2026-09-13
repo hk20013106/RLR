@@ -1,9 +1,8 @@
 """Canonical, result-driven L8.5 literature verification.
 
-This module owns neither a second retriever nor evidence identity. It derives
+This module owns neither a second retriever nor evidence identity.  It derives
 queries from completed L7/L8 findings, uses Curie discovery, and admits only
-source-located evidence to a closed finding verdict. Internal scientific state
-is English-only; L8.5 never translates upstream findings.
+source-located evidence to a closed finding verdict.
 """
 from __future__ import annotations
 
@@ -17,7 +16,6 @@ from research_loop import research_seed
 from research_loop.compatibility import get_profile
 from research_loop.delta import _delta_for_candidate, artifact_for_node
 from research_loop.hypothesis_ledger import binding_path
-from research_loop.l0_language import L0LanguageError, validate_internal_english
 from research_loop.l05_curie import europepmc, multisource, selector
 from research_loop.l05_curie.contracts import CurieContractError
 from research_loop.l05_curie.semantic_verifier import SemanticEvidenceVerifier
@@ -81,22 +79,14 @@ def active_findings(l7_delta: dict | None, l8_delta: dict | None) -> list[dict]:
 
 
 def finding_queries(findings: list[dict], *, max_chars: int = 240) -> list[str]:
-    """Derive bounded deterministic queries from English internal findings."""
+    """Derive bounded, deterministic queries from actual findings."""
     queries = []
     for finding in findings:
         finding_id = str(finding.get("finding_id") or "").strip()
         if not finding_id:
             raise L85VerificationError("finding_id must be non-empty")
-        try:
-            text = validate_internal_english(
-                finding.get("text"), name=f"L8.5 finding {finding_id}"
-            )
-        except L0LanguageError as exc:
-            raise L85VerificationError(
-                f"internal L8.5 finding must already be English: {exc}"
-            ) from exc
         words = []
-        for token in _TOKEN.findall(text):
+        for token in _TOKEN.findall(str(finding.get("text") or "")):
             if len(token) < 3 or token.casefold() in _STOPWORDS:
                 continue
             if token.casefold() not in {item.casefold() for item in words}:
