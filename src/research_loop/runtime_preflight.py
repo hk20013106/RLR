@@ -23,6 +23,8 @@ from typing import Any
 RUNTIME_PREFLIGHT_SCHEMA = "RLRRuntimePreflight/v1"
 FORMAL_ENVIRONMENT = "rlr"
 REQUIRED_PYTHON = (3, 13)
+# Single owner for the confirmed formal interpreter on this workstation.
+FORMAL_INTERPRETER = Path(r"C:\Users\hk200\miniforge3\envs\rlr\python.exe")
 
 # These are the versions that make the verified Python 3.13 composition
 # reproducible.  Core RLR packages remain owned by requirements.txt and
@@ -79,15 +81,35 @@ def _resolved(value: str | Path) -> Path:
     return Path(value).expanduser().resolve()
 
 
+def formal_runtime_command(*args: str | Path) -> list[str]:
+    """Build the sole formal launcher from the configured interpreter."""
+
+    prefix = FORMAL_INTERPRETER.parent
+    conda = prefix.parents[1] / "Scripts" / "conda.exe"
+    return [str(conda), "run", "--prefix", str(prefix), "python", *map(str, args)]
+
+
+def formal_runtime_command_text() -> str:
+    """Render the canonical command for operator-facing instructions."""
+
+    return " ".join(f'"{part}"' if " " in part else part
+                    for part in formal_runtime_command())
+
+
 def _interpreter_detail() -> str:
     executable = _resolved(sys.executable)
     prefix = _resolved(sys.prefix)
+    expected_executable = _resolved(FORMAL_INTERPRETER)
     reasons: list[str] = []
 
     if prefix.name.casefold() != FORMAL_ENVIRONMENT:
         reasons.append(f"sys.prefix is not the {FORMAL_ENVIRONMENT!r} environment: {prefix}")
     if executable.parent != prefix:
         reasons.append(f"sys.executable is outside sys.prefix: {executable}")
+    if executable != expected_executable:
+        reasons.append(
+            f"sys.executable is not the canonical formal interpreter: {expected_executable}"
+        )
 
     conda_prefix = str(os.environ.get("CONDA_PREFIX") or "").strip()
     if not conda_prefix or _resolved(conda_prefix) != prefix:

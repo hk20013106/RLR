@@ -341,6 +341,8 @@ def test_run_l0_invokes_canonical_runner_with_l0_stop(tmp_path):
         assert engine.cmd_normalize_l0_input(args) == 0
 
     command = run.call_args.args[0]
-    assert command[:5] == ["micromamba", "run", "-n", "rlr", "python"]
+    from research_loop.runtime_preflight import formal_runtime_command
+
+    assert command[:5] == formal_runtime_command()
     assert command[-2:] == ["--stop-after-node", "L0"]
     assert Path(command[5]).name == "run_loop.py"

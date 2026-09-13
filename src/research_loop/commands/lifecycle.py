@@ -1054,12 +1054,11 @@ def cmd_normalize_l0_input(args):
                      agent="Oppenheimer", kind="seed")
     print(f"Written to: 01_Candidates/{artifact_path.name}")
     if args.run_l0:
-        from research_loop.runtime_preflight import FORMAL_ENVIRONMENT
+        from research_loop.runtime_preflight import formal_runtime_command
 
         runner = Path(__file__).resolve().parents[1] / "run_loop.py"
         command = [
-            "micromamba", "run", "-n", FORMAL_ENVIRONMENT, "python",
-            str(runner), "run", str(project_dir), cand_id,
+            *formal_runtime_command(), str(runner), "run", str(project_dir), cand_id,
             "--stop-after-node", "L0",
         ]
         return subprocess.run(command).returncode

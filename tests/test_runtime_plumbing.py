@@ -70,11 +70,24 @@ def test_formal_runner_fails_closed_before_dependency_gate_on_runtime_drift(
 
 
 def test_generated_main_agent_prompt_declares_formal_runtime_and_codex_host():
-    prompt = run_loop.MAIN_AGENT_PROMPT_TEMPLATE
+    prompt = run_loop.MAIN_AGENT_PROMPT_TEMPLATE.format(
+        project="PROJECT", cand_id="C1", max_rounds=3, l9_rule="rule",
+        formal_runtime_command=runtime_preflight.formal_runtime_command_text(),
+    )
 
-    assert "micromamba run -n rlr python" in prompt
+    assert runtime_preflight.formal_runtime_command_text() in prompt
+    assert "micromamba" not in prompt
     assert "$env:RLR_HOST_BACKEND='codex'" in prompt
     assert "Do not set it to codex on non-Codex hosts" in prompt
+
+
+def test_formal_runtime_launcher_has_one_canonical_interpreter_owner():
+    expected = Path(r"C:\Users\hk200\miniforge3\envs\rlr\python.exe")
+    assert runtime_preflight.FORMAL_INTERPRETER == expected
+    assert runtime_preflight.formal_runtime_command() == [
+        r"C:\Users\hk200\miniforge3\Scripts\conda.exe",
+        "run", "--prefix", str(expected.parent), "python",
+    ]
 
 
 def test_runtime_preflight_module_is_not_preimported_during_package_startup():
