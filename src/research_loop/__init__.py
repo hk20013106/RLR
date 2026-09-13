@@ -93,7 +93,6 @@ _install_literature_query_language(
     _l4_contextual_module,
     _l4a_specter2_module,
     _paperqa2_runtime_module,
-    deep_research,
 )
 
 # Provider observability is installed after all scientific Deep Research/L4
