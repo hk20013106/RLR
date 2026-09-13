@@ -5,6 +5,7 @@ import pytest
 from research_loop import research_seed
 from research_loop import l4_contextual_literature as l4ctx
 from research_loop import l85_literature_verification as l85
+from research_loop import l05_curie_cli as l05cli
 from research_loop.l05_curie import CurieContractError
 from research_loop.l05_curie import europepmc_runtime
 from research_loop.l05_curie.multisource import build_multisource_query_plan
@@ -48,6 +49,24 @@ def test_l05_chinese_requires_provider_planning_but_english_does_not():
             "Melanin-associated programs may protect hair cells.",
         )
     ) is False
+
+
+def test_l05_explicit_english_query_does_not_bypass_supported_seed_language(monkeypatch):
+    monkeypatch.setattr(
+        l05cli.research_seed,
+        "load_l1_research_seed",
+        lambda *_args, **_kwargs: _seed(
+            "蝸牛の色素と騒音障害",
+            "Noise injury may alter sensory-cell survival.",
+        ),
+    )
+
+    with pytest.raises(CurieContractError, match="only Chinese and English"):
+        l05cli._resolved_l05_queries(
+            "unused-project",
+            "C001",
+            ["cochlear pigment noise injury"],
+        )
 
 
 def test_l05_english_planner_is_generic_not_project_lexicon_driven():
