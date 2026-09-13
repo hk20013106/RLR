@@ -1,6 +1,6 @@
 """Canonical, result-driven L8.5 literature verification.
 
-This module owns neither a second retriever nor evidence identity. It derives
+This module owns neither a second retriever nor evidence identity.  It derives
 queries from completed L7/L8 findings, uses Curie discovery, and admits only
 source-located evidence to a closed finding verdict.
 """
@@ -19,7 +19,7 @@ from research_loop.hypothesis_ledger import binding_path
 from research_loop.l05_curie import europepmc, multisource, selector
 from research_loop.l05_curie.contracts import CurieContractError
 from research_loop.l05_curie.query_language import (
-    contains_cjk,
+    classify_supported_input_language,
     validate_english_retrieval_query,
 )
 from research_loop.l05_curie.semantic_verifier import SemanticEvidenceVerifier
@@ -67,20 +67,14 @@ def active_findings(l7_delta: dict | None, l8_delta: dict | None) -> list[dict]:
     for result in (l7_delta or {}).get("results") or []:
         if isinstance(result, dict):
             for hypothesis_id in result.get("hypothesis_ids") or []:
-                add(
-                    hypothesis_id,
-                    result.get("summary") or result.get("result_key"),
-                    "L7",
-                )
+                add(hypothesis_id, result.get("summary") or result.get("result_key"), "L7")
     for assessment in (l8_delta or {}).get("evidence_assessments") or []:
         if isinstance(assessment, dict):
             for relation in assessment.get("relations") or []:
                 if isinstance(relation, dict):
                     add(
                         relation.get("hypothesis_id"),
-                        relation.get("reason")
-                        or assessment.get("reason")
-                        or assessment.get("evidence_id"),
+                        relation.get("reason") or assessment.get("reason") or assessment.get("evidence_id"),
                         "L8",
                     )
     if not by_id:
@@ -88,26 +82,32 @@ def active_findings(l7_delta: dict | None, l8_delta: dict | None) -> list[dict]:
     return copy.deepcopy([by_id[key] for key in sorted(by_id)])
 
 
+def _finding_language(finding: dict) -> tuple[str, str, str]:
+    finding_id = str(finding.get("finding_id") or "").strip()
+    if not finding_id:
+        raise L85VerificationError("finding_id must be non-empty")
+    text = str(finding.get("text") or "").strip()
+    language = classify_supported_input_language(
+        text, name=f"L8.5 finding {finding_id}"
+    )
+    return finding_id, text, language
+
+
 def finding_queries(findings: list[dict], *, max_chars: int = 240) -> list[str]:
-    """Derive bounded queries only when the finding is already English-searchable."""
+    """Derive bounded queries only for findings already written in English."""
     queries = []
     for finding in findings:
-        finding_id = str(finding.get("finding_id") or "").strip()
-        if not finding_id:
-            raise L85VerificationError("finding_id must be non-empty")
-        text = str(finding.get("text") or "").strip()
-        if contains_cjk(text):
+        finding_id, text, language = _finding_language(finding)
+        if language == "zh":
             raise L85VerificationError(
-                f"finding {finding_id} requires provider-planned English verification query"
+                f"finding {finding_id} requires Chinese-to-English provider planning"
             )
         words = []
-        seen = set()
         for token in _TOKEN.findall(text):
-            folded = token.casefold()
-            if len(token) < 3 or folded in _STOPWORDS or folded in seen:
+            if len(token) < 3 or token.casefold() in _STOPWORDS:
                 continue
-            seen.add(folded)
-            words.append(token)
+            if token.casefold() not in {item.casefold() for item in words}:
+                words.append(token)
         query = " ".join(words)[:max_chars].strip()
         if not query:
             raise L85VerificationError(f"finding {finding_id} has no searchable terms")
@@ -146,10 +146,10 @@ def _finding_query_schema(count: int) -> dict:
 
 
 def _provider_finding_queries(
-    project: Path,
-    candidate_id: str,
-    findings: list[dict],
+    project: Path, candidate_id: str, findings: list[dict]
 ) -> tuple[list[str], list[dict]]:
+    for finding in findings:
+        _finding_language(finding)
     try:
         spec, _skill_version = deep_research.load_runtime_spec(project)
     except deep_research.DeepResearchError as exc:
@@ -189,8 +189,9 @@ supplied finding. Each object must repeat the exact finding_id and provide one
 concise English scientific literature-search query suitable for PubMed,
 Europe PMC, OpenAlex, Crossref, and Semantic Scholar. Preserve the finding's
 entities, direction, comparison, tissue/cell type, phenotype, and mechanism
-when present. Use standard English scientific terminology even when the
-finding is written in another language.
+when present. When a finding is written in Chinese, express its scientific
+meaning in standard English terminology; findings already in English should
+remain English.
 
 Do not search literature. Do not browse the web. Do not return papers,
 citations, DOI/PMID/PMCID values, evidence, verdicts, or conclusions. Do not
@@ -279,12 +280,9 @@ no prose, Markdown, code fences, commentary, or fields outside the schema.
 
 
 def build_query_plan(
-    seed: dict,
-    findings: list[dict],
-    *,
-    explicit_queries: list[str] | None = None,
+    seed: dict, findings: list[dict], *, explicit_queries: list[str] | None = None
 ) -> dict:
-    """Delegate canonical QueryPlan construction to Curie."""
+    """Delegate planning to Curie; this module owns no query schema."""
     try:
         queries = finding_queries(findings) if explicit_queries is None else [
             validate_english_retrieval_query(
@@ -300,9 +298,7 @@ def build_query_plan(
             providers=list(multisource._PROVIDERS),
         )
     except (CurieContractError, TypeError, ValueError) as exc:
-        raise L85VerificationError(
-            f"canonical L8.5 query planning failed: {exc}"
-        ) from exc
+        raise L85VerificationError(f"canonical L8.5 query planning failed: {exc}") from exc
 
 
 def validate_finding_verdicts(
@@ -319,89 +315,52 @@ def validate_finding_verdicts(
         grouped.setdefault(str(item["finding_id"]), []).append(item)
     missing = [finding_id for finding_id in expected if len(grouped.get(finding_id, [])) != 1]
     if missing:
-        raise ValueError(
-            "L8.5 requires exactly one verdict per active finding: " + ", ".join(missing)
-        )
+        raise ValueError("L8.5 requires exactly one verdict per active finding: " + ", ".join(missing))
     known = {str(item) for item in known_evidence_ids}
     normalized = []
     for finding_id in expected:
         item = grouped[finding_id][0]
         verdict = str(item.get("verdict") or "").casefold()
-        evidence_ids = [
-            str(value).strip()
-            for value in item.get("evidence_ids") or []
-            if str(value).strip()
-        ]
+        evidence_ids = [str(value).strip() for value in item.get("evidence_ids") or [] if str(value).strip()]
         if verdict not in _VERDICTS:
             raise ValueError("L8.5 verdict must be supports, contradicts, or unresolved")
-        if len(evidence_ids) != len(set(evidence_ids)) or any(
-            value not in known for value in evidence_ids
-        ):
-            raise ValueError(
-                f"L8.5 verdict for {finding_id} references non-located evidence"
-            )
+        if len(evidence_ids) != len(set(evidence_ids)) or any(value not in known for value in evidence_ids):
+            raise ValueError(f"L8.5 verdict for {finding_id} references non-located evidence")
         if verdict in {"supports", "contradicts"} and not evidence_ids:
-            raise ValueError(
-                f"L8.5 {verdict} verdict for {finding_id} requires located evidence"
-            )
+            raise ValueError(f"L8.5 {verdict} verdict for {finding_id} requires located evidence")
         normalized.append({
-            "finding_id": finding_id,
-            "verdict": verdict,
-            "evidence_ids": evidence_ids,
-            "reason": str(item.get("reason") or "").strip(),
+            "finding_id": finding_id, "verdict": verdict,
+            "evidence_ids": evidence_ids, "reason": str(item.get("reason") or "").strip(),
         })
     return normalized
 
 
 def _run_manifest_path(project: Path, candidate_id: str, run_id: str) -> Path:
-    return (
-        project
-        / "08_Audit"
-        / "l85_literature_verification"
-        / str(candidate_id)
-        / f"{run_id}.json"
-    )
+    return project / "08_Audit" / "l85_literature_verification" / str(candidate_id) / f"{run_id}.json"
 
 
-def persist_run_manifest(
-    project_dir: str | Path,
-    candidate_id: str,
-    *,
-    run_id: str,
-    payload: dict,
-) -> dict:
+def persist_run_manifest(project_dir: str | Path, candidate_id: str, *, run_id: str, payload: dict) -> dict:
     """Persist an immutable, byte-bound canonical L8.5 result."""
     project = Path(project_dir)
     path = _run_manifest_path(project, candidate_id, run_id)
-    body = {
-        "schema_version": RUN_SCHEMA_VERSION,
-        "run_id": str(run_id),
-        "candidate_id": str(candidate_id),
-        **copy.deepcopy(payload),
-    }
+    body = {"schema_version": RUN_SCHEMA_VERSION, "run_id": str(run_id), "candidate_id": str(candidate_id), **copy.deepcopy(payload)}
     body.pop("run_sha256", None)
     body["run_sha256"] = _sha(body)
     raw = _canonical_bytes(body)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and path.read_bytes() != raw:
-        raise L85VerificationError(
-            f"L8.5 canonical run already exists with different bytes: {path}"
-        )
+        raise L85VerificationError(f"L8.5 canonical run already exists with different bytes: {path}")
     if not path.exists():
         path.write_bytes(raw)
     return load_run_manifest(project, candidate_id, run_id)
 
 
-def load_run_manifest(
-    project_dir: str | Path, candidate_id: str, run_id: str
-) -> dict:
+def load_run_manifest(project_dir: str | Path, candidate_id: str, run_id: str) -> dict:
     path = _run_manifest_path(Path(project_dir), candidate_id, run_id)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise L85VerificationError(
-            f"L8.5 canonical run is unreadable: {path}"
-        ) from exc
+        raise L85VerificationError(f"L8.5 canonical run is unreadable: {path}") from exc
     body = dict(payload)
     expected = str(body.pop("run_sha256", ""))
     if payload.get("schema_version") != RUN_SCHEMA_VERSION or expected != _sha(body):
@@ -409,69 +368,32 @@ def load_run_manifest(
     return payload
 
 
-def audit_run_manifest(
-    project_dir: str | Path,
-    candidate_id: str,
-    *,
-    run_id: str,
-) -> tuple[bool, str, dict | None]:
+def audit_run_manifest(project_dir: str | Path, candidate_id: str, *, run_id: str) -> tuple[bool, str, dict | None]:
     """Revalidate run bytes and every source snapshot referenced as LOCATED."""
     try:
         run = load_run_manifest(project_dir, candidate_id, run_id)
-        located = [
-            item for item in run.get("located_evidence") or []
-            if isinstance(item, dict)
-        ]
+        located = [item for item in run.get("located_evidence") or [] if isinstance(item, dict)]
         located_ids = {str(item.get("evidence_id") or "") for item in located}
-        validate_finding_verdicts(
-            run.get("findings") or [],
-            run.get("verdicts") or [],
-            known_evidence_ids=located_ids,
-        )
+        validate_finding_verdicts(run.get("findings") or [], run.get("verdicts") or [], known_evidence_ids=located_ids)
         root = Path(project_dir).resolve()
         for item in located:
             if item.get("verification_status") != "LOCATED":
                 raise L85VerificationError("located evidence is not LOCATED")
             retrieval = item.get("retrieval") or {}
-            relative = Path(
-                str(
-                    retrieval.get("snapshot_path")
-                    or retrieval.get("artifact_path")
-                    or ""
-                )
-            )
+            relative = Path(str(retrieval.get("snapshot_path") or retrieval.get("artifact_path") or ""))
             source = (root / relative).resolve()
-            if (
-                relative.is_absolute()
-                or not source.is_file()
-                or root not in source.parents and source != root
-            ):
+            if relative.is_absolute() or not source.is_file() or root not in source.parents and source != root:
                 raise L85VerificationError("located evidence source snapshot is missing")
-            recorded_sha = str(
-                retrieval.get("source_sha256")
-                or retrieval.get("artifact_sha256")
-                or ""
-            )
+            recorded_sha = str(retrieval.get("source_sha256") or retrieval.get("artifact_sha256") or "")
             if hashlib.sha256(source.read_bytes()).hexdigest() != recorded_sha:
-                raise L85VerificationError(
-                    "located evidence source snapshot hash mismatch"
-                )
+                raise L85VerificationError("located evidence source snapshot hash mismatch")
         return True, "", run
     except (L85VerificationError, TypeError, ValueError) as exc:
         return False, str(exc), None
 
 
-def _adjudicate(
-    findings: list[dict],
-    evidence: list[dict],
-    assessor,
-    assessor_id: str,
-) -> tuple[list[dict], list[dict]]:
-    verifier = (
-        SemanticEvidenceVerifier(assessor=assessor, assessor_id=assessor_id)
-        if callable(assessor)
-        else None
-    )
+def _adjudicate(findings: list[dict], evidence: list[dict], assessor, assessor_id: str) -> tuple[list[dict], list[dict]]:
+    verifier = SemanticEvidenceVerifier(assessor=assessor, assessor_id=assessor_id) if callable(assessor) else None
     semantic, verdicts = [], []
     for finding in findings:
         authorized = []
@@ -482,60 +404,25 @@ def _adjudicate(
                 except CurieContractError:
                     continue
                 semantic.append(result)
-                if (
-                    result.get("verdict") == "PASS"
-                    and result.get("entailment") in {"SUPPORTED", "CONTRADICTED"}
-                ):
+                if result.get("verdict") == "PASS" and result.get("entailment") in {"SUPPORTED", "CONTRADICTED"}:
                     authorized.append(result)
         if authorized:
             first = authorized[0]
-            verdicts.append({
-                "finding_id": finding["finding_id"],
-                "verdict": (
-                    "supports"
-                    if first["entailment"] == "SUPPORTED"
-                    else "contradicts"
-                ),
-                "evidence_ids": [str(first["evidence_id"])],
-                "reason": str(first.get("reason") or ""),
-            })
+            verdicts.append({"finding_id": finding["finding_id"], "verdict": "supports" if first["entailment"] == "SUPPORTED" else "contradicts", "evidence_ids": [str(first["evidence_id"])], "reason": str(first.get("reason") or "")})
         else:
-            verdicts.append({
-                "finding_id": finding["finding_id"],
-                "verdict": "unresolved",
-                "evidence_ids": [],
-                "reason": "no independent authorized semantic verdict",
-            })
-    return (
-        validate_finding_verdicts(
-            findings,
-            verdicts,
-            known_evidence_ids={
-                str(item.get("evidence_id") or "") for item in evidence
-            },
-        ),
-        semantic,
-    )
+            verdicts.append({"finding_id": finding["finding_id"], "verdict": "unresolved", "evidence_ids": [], "reason": "no independent authorized semantic verdict"})
+    return validate_finding_verdicts(findings, verdicts, known_evidence_ids={str(item.get("evidence_id") or "") for item in evidence}), semantic
 
 
-def run_native_l85(
-    project_dir: str | Path,
-    candidate_id: str,
-    *,
-    semantic_assessor=None,
-    semantic_assessor_id: str = "l85-semantic-adjudicator/v1",
-    timeout: int = 20,
-) -> dict:
-    """Run the native Curie discovery/retrieval/verifier path from real findings."""
+def run_native_l85(project_dir: str | Path, candidate_id: str, *, semantic_assessor=None, semantic_assessor_id: str = "l85-semantic-adjudicator/v1", timeout: int = 20) -> dict:
+    """Run the native Curie discovery/retrieval/verifier path from real L7/L8 findings."""
     project = Path(project_dir)
     seed = research_seed.load_l1_research_seed(project, candidate_id)
     try:
         binding = json.loads(binding_path(project).read_text(encoding="utf-8"))
         profile = get_profile(str(binding["profile_id"]))
     except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
-        raise L85VerificationError(
-            f"L8.5 project profile binding is unavailable: {exc}"
-        ) from exc
+        raise L85VerificationError(f"L8.5 project profile binding is unavailable: {exc}") from exc
 
     def load_delta(key: str) -> dict:
         path = _delta_for_candidate(project, key, candidate_id)
@@ -545,34 +432,19 @@ def run_native_l85(
             value = {}
         return value if isinstance(value, dict) else {}
 
-    findings = active_findings(
-        load_delta("L7_turing"),
-        load_delta(artifact_for_node(profile, "L8").storage_key),
-    )
-    if any(contains_cjk(item.get("text")) for item in findings):
-        planned_queries, finding_query_map = _provider_finding_queries(
-            project, candidate_id, findings
-        )
+    findings = active_findings(load_delta("L7_turing"), load_delta(artifact_for_node(profile, "L8").storage_key))
+    languages = [_finding_language(finding)[2] for finding in findings]
+    if "zh" in languages:
+        queries, finding_query_map = _provider_finding_queries(project, candidate_id, findings)
     else:
-        planned_queries = finding_queries(findings)
+        queries = finding_queries(findings)
         finding_query_map = [
             {"finding_id": str(finding["finding_id"]), "query": query}
-            for finding, query in zip(findings, planned_queries)
+            for finding, query in zip(findings, queries, strict=True)
         ]
-    plan = build_query_plan(
-        seed, findings, explicit_queries=planned_queries
-    )
-    run_id = "L85_" + _sha({
-        "seed_sha256": research_seed.seed_sha256(seed),
-        "finding_ids": [item["finding_id"] for item in findings],
-        "query_plan_id": plan["plan_id"],
-    })[:20]
-    common = {
-        "project_dir": project,
-        "candidate_id": candidate_id,
-        "run_id": run_id,
-        "timeout": timeout,
-    }
+    plan = build_query_plan(seed, findings, explicit_queries=queries)
+    run_id = "L85_" + _sha({"seed_sha256": research_seed.seed_sha256(seed), "finding_ids": [item["finding_id"] for item in findings], "query_plan_id": plan["plan_id"]})[:20]
+    common = {"project_dir": project, "candidate_id": candidate_id, "run_id": run_id, "timeout": timeout}
     transports = {
         "europe-pmc": europepmc.EuropePmcTransport(**common),
         "pubmed": multisource.PubMedTransport(**common),
@@ -580,35 +452,11 @@ def run_native_l85(
         "crossref": multisource.CrossrefTransport(**common),
         "semantic-scholar": multisource.SemanticScholarTransport(**common),
     }
-    discovery = multisource.run_multisource_discovery_strict(
-        plan,
-        transports,
-        seed_sha256=research_seed.seed_sha256(seed),
-        page_size=25,
-        allow_partial=True,
-    )
+    discovery = multisource.run_multisource_discovery_strict(plan, transports, seed_sha256=research_seed.seed_sha256(seed), page_size=25, allow_partial=True)
     records = list(discovery.get("records") or [])
     if not records:
-        raise L85VerificationError(
-            "canonical L8.5 discovery returned no real literature records"
-        )
-    selected = selector.select_candidates_strict(
-        records,
-        seed=seed,
-        scorer=lambda _record, _seed: {
-            "relevance": .5,
-            "directness": .5,
-            "methodological_value": 0,
-            "contradiction_value": .5,
-            "evidence_diversity": .5,
-            "reason": "result-driven source verification",
-        },
-        eligibility=lambda record: (
-            bool(record.get("identifiers")), "CANONICAL_IDENTITY_REQUIRED"
-        ),
-        max_papers=3,
-        query_ids={str(item["query_id"]) for item in plan["queries"]},
-    )
+        raise L85VerificationError("canonical L8.5 discovery returned no real literature records")
+    selected = selector.select_candidates_strict(records, seed=seed, scorer=lambda _record, _seed: {"relevance": .5, "directness": .5, "methodological_value": 0, "contradiction_value": .5, "evidence_diversity": .5, "reason": "result-driven source verification"}, eligibility=lambda record: (bool(record.get("identifiers")), "CANONICAL_IDENTITY_REQUIRED"), max_papers=3, query_ids={str(item["query_id"]) for item in plan["queries"]})
     selected_ids = set(selected.get("included_paper_ids") or [])
     located, snapshots = [], []
     for record in records:
@@ -619,40 +467,10 @@ def run_native_l85(
         if not pmcid:
             continue
         try:
-            retrieval = europepmc.EuropePmcEvidenceRetriever(
-                project,
-                candidate_id=candidate_id,
-                run_id=run_id,
-                timeout=timeout,
-            ).retrieve(
-                {**record, "identifiers": {**identifiers, "pmcid": pmcid}},
-                seed=seed,
-            )
-            located.extend(
-                europepmc.EuropePmcEvidenceVerifier(
-                    project, candidate_id=candidate_id
-                ).verify(retrieval["snapshot"], retrieval["candidates"])
-            )
+            retrieval = europepmc.EuropePmcEvidenceRetriever(project, candidate_id=candidate_id, run_id=run_id, timeout=timeout).retrieve({**record, "identifiers": {**identifiers, "pmcid": pmcid}}, seed=seed)
+            located.extend(europepmc.EuropePmcEvidenceVerifier(project, candidate_id=candidate_id).verify(retrieval["snapshot"], retrieval["candidates"]))
             snapshots.append(retrieval["snapshot"])
         except CurieContractError:
             continue
-    verdicts, semantic = _adjudicate(
-        findings, located, semantic_assessor, semantic_assessor_id
-    )
-    return persist_run_manifest(
-        project,
-        candidate_id,
-        run_id=run_id,
-        payload={
-            "research_seed": research_seed.manifest_entry(seed),
-            "finding_queries": finding_query_map,
-            "query_plan": plan,
-            "discovery": discovery,
-            "selected_paper_ids": sorted(selected_ids),
-            "source_snapshots": snapshots,
-            "located_evidence": located,
-            "semantic_verifications": semantic,
-            "findings": findings,
-            "verdicts": verdicts,
-        },
-    )
+    verdicts, semantic = _adjudicate(findings, located, semantic_assessor, semantic_assessor_id)
+    return persist_run_manifest(project, candidate_id, run_id=run_id, payload={"research_seed": research_seed.manifest_entry(seed), "query_plan": plan, "finding_queries": finding_query_map, "discovery": discovery, "selected_paper_ids": sorted(selected_ids), "source_snapshots": snapshots, "located_evidence": located, "semantic_verifications": semantic, "findings": findings, "verdicts": verdicts})
