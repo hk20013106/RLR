@@ -29,7 +29,6 @@ from .paperqa2_runtime import (
     PaperQA2CurieRuntime,
     validate_pinned_paperqa2_runtime,
 )
-from .query_language import validate_english_retrieval_query
 from .semantic_verifier import SemanticEvidenceVerifier, admit_reasoning_evidence
 # Keep the legacy selector re-export for callers that imported it here.
 from .selector import select_candidates, select_candidates_strict
@@ -159,50 +158,21 @@ def _europepmc_full_text_eligibility(record: dict) -> tuple[bool, str]:
     return True, "SOURCE_QUALIFIED"
 
 
-def _query_plan_texts(query_plan: dict, query_ids: set[str] | None = None) -> list[str]:
-    """Return validated English queries, optionally restricted to provenance IDs."""
-    if not isinstance(query_plan, dict):
-        raise CurieContractError("L0.5 ranking requires the canonical QueryPlan")
-    texts = []
-    for item in query_plan.get("queries") or []:
-        if not isinstance(item, dict):
-            continue
-        query_id = str(item.get("query_id") or "").strip()
-        if query_ids is not None and query_id not in query_ids:
-            continue
-        texts.append(
-            validate_english_retrieval_query(
-                item.get("query"),
-                name=f"L0.5 QueryPlan {query_id or '<unknown>'} English retrieval query",
-            )
-        )
-    if not texts:
-        raise CurieContractError("L0.5 QueryPlan contains no authorized English retrieval query")
-    return texts
-
-
-def _record_originating_query_ids(record: dict) -> set[str]:
-    provenance = record.get("provenance")
-    provenance = provenance if isinstance(provenance, dict) else {}
-    values = provenance.get("originating_query_ids") or []
-    return {str(value).strip() for value in values if str(value).strip()}
-
-
-def _europepmc_selector_score(record: dict, query_plan: dict) -> dict:
-    """Rank one paper only against the English queries that discovered it."""
+def _europepmc_selector_score(record: dict, seed: dict) -> dict:
+    """Provide deterministic ranking only; eligibility remains authoritative."""
     source = " ".join((
         str(record.get("title") or ""),
         str((record.get("metadata") or {}).get("abstract") or ""),
     )).casefold()
-    query_ids = _record_originating_query_ids(record)
-    queries = _query_plan_texts(query_plan, query_ids if query_ids else None)
-    query_terms = {
-        token.casefold()
-        for token in re.findall(r"[A-Za-z][A-Za-z0-9+]*(?:[-/][A-Za-z0-9+]+)*", " ".join(queries))
-        if len(token) > 2 and token.casefold() not in _PAPERQA2_STOPWORDS
+    seed_terms = {
+        term for term in (
+            str(seed.get("scientific_question") or "") + " "
+            + str(seed.get("hypothesis_seed") or "")
+        ).casefold().replace("?", " ").replace(",", " ").split()
+        if len(term) > 2
     }
-    matched = sum(term in source for term in query_terms)
-    relevance = matched / max(1, len(query_terms))
+    matched = sum(term in source for term in seed_terms)
+    relevance = matched / max(1, len(seed_terms))
     source_count = len(
         ((record.get("provenance") or {}).get("source_records") or [])
     )
@@ -212,7 +182,7 @@ def _europepmc_selector_score(record: dict, query_plan: dict) -> dict:
         "methodological_value": 0.5,
         "contradiction_value": 0.0,
         "evidence_diversity": min(1.0, source_count / 2),
-        "reason": "Deterministic source-qualified Europe PMC ranking from the canonical English QueryPlan.",
+        "reason": "Deterministic source-qualified Europe PMC ranking from the canonical ResearchSeed.",
     }
 
 
@@ -319,7 +289,6 @@ def _prepare_europepmc_acquisition(
         query_id_prefix=query_id_prefix,
     )
     validate_query_plan(query_plan, seed_sha256=seed_digest)
-    _query_plan_texts(query_plan)
     transport = EuropePmcTransport(
         project,
         candidate_id=candidate_id,
@@ -335,7 +304,7 @@ def _prepare_europepmc_acquisition(
     )
     generic_selection = select_candidates_strict(
         discovery["records"],
-        seed=query_plan,
+        seed=seed,
         scorer=_europepmc_selector_score,
         eligibility=_europepmc_full_text_eligibility,
         max_papers=max_papers,
@@ -398,21 +367,35 @@ def _paperqa2_semantic_target(seed: dict) -> str:
 
 
 def _paperqa2_retrieval_query(selected: dict, seed: dict, query_plan: dict) -> str:
-    """Build a bounded English paper-local query from the canonical QueryPlan."""
-    del seed  # semantic ResearchSeed remains reserved for semantic admission below
+    """Build a bounded, paper-local query without changing evidence authority.
+
+    The selected title anchors retrieval to one paper. Existing QueryPlan text
+    and the canonical ResearchSeed provide the scientific focus, but the focus
+    is token-bounded so a long seed is not forwarded verbatim to PaperQA2.
+    This helper only returns a retrieval string; source verification and
+    semantic admission remain downstream authorities.
+    """
     if not isinstance(selected, dict):
         raise CurieContractError("PaperQA2 retrieval requires a selected paper object")
-    title = validate_english_retrieval_query(
-        selected.get("title"), name="PaperQA2 selected-paper English title anchor"
-    )
-    query_ids = _record_originating_query_ids(selected)
-    queries = _query_plan_texts(query_plan, query_ids if query_ids else None)
+    title = str(selected.get("title") or "").strip()
+    if not title:
+        raise CurieContractError("PaperQA2 retrieval requires a non-empty paper title anchor")
+    seed = seed if isinstance(seed, dict) else {}
+    query_plan = query_plan if isinstance(query_plan, dict) else {}
+    fragments = [
+        str(seed.get("scientific_question") or ""),
+        str(seed.get("hypothesis_seed") or ""),
+    ]
+    for item in query_plan.get("queries") or []:
+        if isinstance(item, dict):
+            fragments.append(str(item.get("query") or ""))
     terms: list[str] = []
     seen_terms: set[str] = set()
     total_chars = 0
     for raw in re.findall(
-        r"[A-Za-z][A-Za-z0-9+]*(?:[-/][A-Za-z0-9+]+)*",
-        " ".join(queries),
+        r"[^\W_]+(?:[-'][^\W_]+)*",
+        " ".join(fragments),
+        flags=re.UNICODE,
     ):
         token = raw.strip()
         if not token or token.casefold() in _PAPERQA2_STOPWORDS or token.isdigit():
@@ -430,12 +413,9 @@ def _paperqa2_retrieval_query(selected: dict, seed: dict, query_plan: dict) -> s
             break
     if not terms:
         raise CurieContractError(
-            "PaperQA2 retrieval requires targeted English scientific retrieval terms"
+            "PaperQA2 retrieval requires targeted scientific retrieval terms"
         )
-    return validate_english_retrieval_query(
-        f"{title} | retrieval focus: {' '.join(terms)}",
-        name="PaperQA2 English retrieval query",
-    )
+    return f"{title} | retrieval focus: {' '.join(terms)}"
 
 
 def _admit_paperqa2_semantic_evidence(
