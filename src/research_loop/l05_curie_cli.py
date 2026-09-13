@@ -130,6 +130,19 @@ def _provider_translate_seed(
 
 
 def _ensure_english_research_seed(project_dir: str | Path, cand_id: str) -> dict:
+    # Fast path: English raw input passes through, and Chinese input with an
+    # already-frozen valid projection reuses that projection without a model call.
+    try:
+        return research_seed.load_l1_research_seed(project_dir, cand_id)
+    except research_seed.ResearchSeedError as exc:
+        projection_path = research_seed._english_seed_path(project_dir, cand_id)
+        if projection_path.is_file():
+            # Existing but invalid projections are immutable failures; never
+            # hide corruption or semantic drift by retranslating over them.
+            raise CurieContractError(
+                f"canonical English ResearchSeed is invalid: {exc}"
+            ) from exc
+
     try:
         raw_seed = research_seed.load_l0_research_seed(project_dir, cand_id)
     except research_seed.ResearchSeedError as exc:
@@ -149,20 +162,24 @@ def _ensure_english_research_seed(project_dir: str | Path, cand_id: str) -> dict
         )
     except L0LanguageError as exc:
         raise CurieContractError(str(exc)) from exc
-    if receipt["mode"] == "translated":
-        try:
-            research_seed.write_english_research_seed(
-                project_dir,
-                raw_seed,
-                normalized,
-                receipt,
-            )
-        except research_seed.ResearchSeedError as exc:
-            raise CurieContractError(str(exc)) from exc
+    if receipt["mode"] != "translated":
+        # An English raw seed should have succeeded in the fast path. Reaching
+        # this state means the internal projection contract is inconsistent.
+        raise CurieContractError(
+            "English ResearchSeed passthrough failed before normalization"
+        )
     try:
+        research_seed.write_english_research_seed(
+            project_dir,
+            raw_seed,
+            normalized,
+            receipt,
+        )
         return research_seed.load_l1_research_seed(project_dir, cand_id)
     except research_seed.ResearchSeedError as exc:
-        raise CurieContractError(f"canonical English ResearchSeed is invalid: {exc}") from exc
+        raise CurieContractError(
+            f"canonical English ResearchSeed is invalid: {exc}"
+        ) from exc
 
 
 def _english_explicit_queries(values: list[str] | None) -> list[str] | None:
