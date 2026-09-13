@@ -13,6 +13,7 @@ from .contracts import CurieContractError
 
 
 _CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+_GREEK = re.compile(r"[\u0370-\u03ff\u1f00-\u1fff]")
 _ASCII_LETTER = re.compile(r"[A-Za-z]")
 
 
@@ -25,15 +26,40 @@ def _is_cjk_char(char: str) -> bool:
     return bool(_CJK.fullmatch(char))
 
 
+def _is_greek_char(char: str) -> bool:
+    return bool(_GREEK.fullmatch(char))
+
+
+def _isolated_scientific_greek(text: str, index: int) -> bool:
+    """Allow Greek symbols such as β-catenin, TGF-β, ΔFosB, or μm.
+
+    Consecutive Greek alphabetic characters are treated as a Greek-language
+    word and remain unsupported. This permits scientific notation without
+    expanding the supported natural-language set beyond Chinese and English.
+    """
+    char = text[index]
+    if not _is_greek_char(char):
+        return False
+    previous = text[index - 1] if index else ""
+    following = text[index + 1] if index + 1 < len(text) else ""
+    return not (
+        (previous.isalpha() and _is_greek_char(previous))
+        or (following.isalpha() and _is_greek_char(following))
+    )
+
+
 def _unsupported_alphabetic_chars(text: str) -> list[str]:
-    """Return alphabetic characters outside the supported Chinese/ASCII set."""
-    return [
-        char
-        for char in text
-        if char.isalpha()
-        and not ("A" <= char <= "Z" or "a" <= char <= "z")
-        and not _is_cjk_char(char)
-    ]
+    """Return alphabetic characters outside Chinese/ASCII plus scientific symbols."""
+    unsupported = []
+    for index, char in enumerate(text):
+        if not char.isalpha():
+            continue
+        if "A" <= char <= "Z" or "a" <= char <= "z" or _is_cjk_char(char):
+            continue
+        if _isolated_scientific_greek(text, index):
+            continue
+        unsupported.append(char)
+    return unsupported
 
 
 def classify_supported_input_language(
@@ -41,12 +67,12 @@ def classify_supported_input_language(
     *,
     name: str = "scientific input",
 ) -> str:
-    """Classify supported input as Chinese or English; reject other scripts.
+    """Classify supported input as Chinese or English; reject other languages.
 
     Mixed Chinese + ASCII scientific terminology is classified as Chinese and
-    therefore goes through provider translation/planning. English input must
-    use ASCII alphabetic text. Other alphabetic scripts are intentionally out
-    of scope and fail closed rather than being translated implicitly.
+    therefore goes through provider translation/planning. English scientific
+    text may contain isolated Greek symbols such as β-catenin or α-synuclein.
+    Other alphabetic scripts are intentionally out of scope and fail closed.
     """
     text = unicodedata.normalize("NFKC", str(value or "")).strip()
     if not text:
@@ -72,9 +98,9 @@ def validate_english_retrieval_query(
 ) -> str:
     """Validate one query at the boundary to an English literature system.
 
-    Retrieval queries may contain digits and scientific punctuation, but all
-    alphabetic query text must be ASCII English. Chinese and every other
-    alphabetic script fail closed before retrieval.
+    Retrieval queries may contain digits, scientific punctuation, and isolated
+    Greek scientific symbols, but natural-language alphabetic text must remain
+    English. Chinese and unsupported language scripts fail closed.
     """
     text = unicodedata.normalize("NFKC", str(value or "")).strip()
     if not text:
