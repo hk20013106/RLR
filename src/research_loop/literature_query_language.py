@@ -7,8 +7,6 @@ existing retrieval/ranking/evidence authorities.
 """
 from __future__ import annotations
 
-import copy
-
 from research_loop.l0_language import L0LanguageError, validate_internal_english
 from research_loop.l05_curie.contracts import CurieContractError
 
@@ -68,45 +66,6 @@ def install(
             )
         return plan
 
-    original_paperqa2_query = europepmc_runtime_module._paperqa2_retrieval_query
-
-    def paperqa2_retrieval_query(selected, seed, query_plan):
-        if not isinstance(selected, dict) or not str(selected.get("title") or "").strip():
-            raise CurieContractError(
-                "PaperQA2 retrieval requires a non-empty paper title anchor"
-            )
-        seed = seed if isinstance(seed, dict) else {}
-        question = _english(
-            seed.get("scientific_question"),
-            name="ResearchSeed scientific_question",
-        )
-        hypothesis = _english(
-            seed.get("hypothesis_seed"),
-            name="ResearchSeed hypothesis_seed",
-        )
-        # Preserve the pre-existing compatibility behavior for locator-only
-        # explicit queries such as EXT_ID:...: PaperQA2 still needs the English
-        # scientific semantic focus, not only the locator string.
-        augmented_plan = copy.deepcopy(query_plan) if isinstance(query_plan, dict) else {}
-        queries = list(augmented_plan.get("queries") or [])
-        queries.append({
-            "query_id": "SEED_ENGLISH_FOCUS",
-            "query": _english(
-                f"{question} {hypothesis}",
-                name="English ResearchSeed retrieval focus",
-            ),
-            "intent": "english_seed_semantic_focus",
-        })
-        augmented_plan["queries"] = queries
-        selected_for_retrieval = copy.deepcopy(selected)
-        provenance = selected_for_retrieval.get("provenance")
-        provenance = provenance if isinstance(provenance, dict) else {}
-        provenance.pop("originating_query_ids", None)
-        selected_for_retrieval["provenance"] = provenance
-        return original_paperqa2_query(
-            selected_for_retrieval, seed, augmented_plan
-        )
-
     original_build_prompt = l4_inventory_module.build_prompt
 
     def build_prompt(question, claim, known_sources=None):
@@ -140,33 +99,6 @@ Internal-language contract:
                     raise dr.DeepResearchError(str(exc)) from exc
         return canonical
 
-    def method_query(method: dict, planner_queries: list[dict]) -> str:
-        method_id = str(method.get("method_id") or "").strip()
-        planned = []
-        seen = set()
-        for item in planner_queries or []:
-            if not isinstance(item, dict):
-                continue
-            method_ids = {
-                str(value).strip() for value in item.get("method_ids") or []
-            }
-            if method_id not in method_ids:
-                continue
-            query = _english(
-                item.get("query"),
-                name=f"L4A method {method_id} contextual English query",
-            )
-            key = query.casefold()
-            if key not in seen:
-                seen.add(key)
-                planned.append(query)
-        if planned:
-            return ". ".join(planned)
-        return _english(
-            method.get("name"),
-            name=f"L4A method {method_id or '<unknown>'} canonical English name",
-        )
-
     original_rank_method_papers = l4a_specter2_module.rank_method_papers
 
     def rank_method_papers(method_query, canonical_records, *, ranker=None):
@@ -188,13 +120,9 @@ Internal-language contract:
         )
 
     multisource_module.build_multisource_query_plan = build_multisource_query_plan
-    # EuropePMC imported the builder before this extension is installed; bind
-    # the same validated function there so the runtime cannot bypass the guard.
     europepmc_runtime_module.build_multisource_query_plan = build_multisource_query_plan
-    europepmc_runtime_module._paperqa2_retrieval_query = paperqa2_retrieval_query
     l4_inventory_module.build_prompt = build_prompt
     l4_inventory_module._validate_inventory_payload = validate_inventory_payload
-    l4_contextual_module._method_query = method_query
     l4a_specter2_module.rank_method_papers = rank_method_papers
     paperqa2_runtime_module.PaperQA2CurieRuntime.retrieve_and_verify = retrieve_and_verify
     l4_inventory_module._english_retrieval_boundary_installed = True
