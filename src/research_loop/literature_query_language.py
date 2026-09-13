@@ -3,11 +3,13 @@
 This module creates no query planner, retriever, evidence authority, identity,
 or retry path. It only constrains existing query-plan/L4/PaperQA2/SPECTER2
 consumers to English retrieval text and reuses already-authorized queries.
+Input support is intentionally limited to Chinese and English.
 """
 from __future__ import annotations
 
 from research_loop.l05_curie.contracts import CurieContractError
 from research_loop.l05_curie.query_language import (
+    classify_supported_input_language,
     validate_english_retrieval_query,
     validate_english_retrieval_queries,
 )
@@ -49,15 +51,19 @@ def install(
     original_build_prompt = l4_inventory_module.build_prompt
 
     def build_prompt(question, claim, known_sources=None):
+        for label, value in (("L4 scientific question", question), ("L4 claim", claim)):
+            classify_supported_input_language(value, name=label)
         prompt = original_build_prompt(question, claim, known_sources)
         return prompt + """
 
 Retrieval-language contract:
-- The scientific question and claim above may be written in any language.
+- The scientific question and claim above may be written in Chinese or English only.
+- Chinese scientific semantics must be expressed as standard English scientific
+  terminology in every retrieval-facing method description.
+- English scientific semantics should remain English; do not translate them.
 - Every method_inventory item's `name`, `purpose`, and `inventory_reason` MUST
   be written in English scientific terminology.
-- Preserve the scientific meaning; do not merely transliterate non-English
-  method descriptions.
+- Other input languages are unsupported and must fail closed.
 - This language rule does not authorize literature retrieval in this offline
   inventory step.
 """
@@ -138,10 +144,39 @@ Retrieval-language contract:
             verify=verify,
         )
 
+    # L8.5 remains its existing owner. This wrapper only prevents unsupported
+    # languages from reaching its Chinese->English planner or English fast path.
+    from research_loop import l85_literature_verification as l85_module
+
+    original_finding_queries = l85_module.finding_queries
+    original_provider_finding_queries = l85_module._provider_finding_queries
+
+    def finding_queries(findings, *, max_chars=240):
+        for finding in findings:
+            finding_id = str(finding.get("finding_id") or "").strip() or "<unknown>"
+            language = classify_supported_input_language(
+                finding.get("text"), name=f"L8.5 finding {finding_id}"
+            )
+            if language == "zh":
+                raise l85_module.L85VerificationError(
+                    f"finding {finding_id} requires Chinese-to-English provider planning"
+                )
+        return original_finding_queries(findings, max_chars=max_chars)
+
+    def provider_finding_queries(project, candidate_id, findings):
+        for finding in findings:
+            finding_id = str(finding.get("finding_id") or "").strip() or "<unknown>"
+            classify_supported_input_language(
+                finding.get("text"), name=f"L8.5 finding {finding_id}"
+            )
+        return original_provider_finding_queries(project, candidate_id, findings)
+
     multisource_module.build_multisource_query_plan = build_multisource_query_plan
     l4_inventory_module.build_prompt = build_prompt
     l4_inventory_module._validate_inventory_payload = validate_inventory_payload
     l4_contextual_module._method_query = method_query
     l4a_specter2_module.rank_method_papers = rank_method_papers
     paperqa2_runtime_module.PaperQA2CurieRuntime.retrieve_and_verify = retrieve_and_verify
+    l85_module.finding_queries = finding_queries
+    l85_module._provider_finding_queries = provider_finding_queries
     l4_inventory_module._english_retrieval_boundary_installed = True
