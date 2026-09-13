@@ -8,7 +8,11 @@ from research_loop import l85_literature_verification as l85
 from research_loop.l05_curie import CurieContractError
 from research_loop.l05_curie import europepmc_runtime
 from research_loop.l05_curie.multisource import build_multisource_query_plan
-from research_loop.l05_curie.query_planner import build_scientific_query_plan
+from research_loop.l05_curie.query_language import classify_supported_input_language
+from research_loop.l05_curie.query_planner import (
+    build_scientific_query_plan,
+    requires_provider_planning,
+)
 
 
 CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
@@ -21,6 +25,28 @@ def _seed(question, hypothesis):
         "scientific_question": question,
         "hypothesis_seed": hypothesis,
     }
+
+
+def test_supported_input_language_scope_is_chinese_and_english_only():
+    assert classify_supported_input_language("耳蜗黑色素与噪声损伤") == "zh"
+    assert classify_supported_input_language("Cochlear melanin and noise injury") == "en"
+    with pytest.raises(CurieContractError, match="only Chinese and English"):
+        classify_supported_input_language("蝸牛の色素と騒音障害")
+
+
+def test_l05_chinese_requires_provider_planning_but_english_does_not():
+    assert requires_provider_planning(
+        _seed(
+            "耳蜗黑色素是否降低噪声损伤？",
+            "黑色素相关程序可能保护毛细胞。",
+        )
+    ) is True
+    assert requires_provider_planning(
+        _seed(
+            "Does cochlear melanin reduce noise injury?",
+            "Melanin-associated programs may protect hair cells.",
+        )
+    ) is False
 
 
 def test_multisource_rejects_explicit_cjk_retrieval_query_before_transport():
@@ -38,7 +64,7 @@ def test_multisource_rejects_explicit_cjk_retrieval_query_before_transport():
         )
 
 
-def test_default_l05_planner_fails_closed_for_non_english_seed_instead_of_using_project_lexicon():
+def test_default_l05_planner_fails_closed_for_chinese_seed_instead_of_using_project_lexicon():
     with pytest.raises(CurieContractError, match="provider-planned English"):
         build_scientific_query_plan(
             _seed(
@@ -115,12 +141,23 @@ def test_l4_specter_query_reuses_contextual_english_query_only():
     assert CJK.search(query) is None
 
 
-def test_l85_non_english_finding_requires_provider_planned_english_query():
+def test_l85_chinese_finding_requires_provider_planned_english_query():
     findings = [{
         "finding_id": "H1",
         "text": "回声定位蝙蝠外毛细胞中膜蛋白运输和细胞极性相关程序显著增强",
         "sources": ["L7"],
     }]
 
-    with pytest.raises(l85.L85VerificationError, match="provider-planned English"):
+    with pytest.raises(l85.L85VerificationError, match="Chinese-to-English"):
+        l85.finding_queries(findings)
+
+
+def test_l85_unsupported_language_fails_closed_instead_of_being_translated():
+    findings = [{
+        "finding_id": "H1",
+        "text": "蝸牛の色素と騒音障害",
+        "sources": ["L7"],
+    }]
+
+    with pytest.raises(CurieContractError, match="only Chinese and English"):
         l85.finding_queries(findings)
