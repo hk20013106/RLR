@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from research_loop import deep_research, research_seed, structured_execution
+from research_loop.l0_language import L0LanguageError, normalize_semantic_fields
 from research_loop.l05_curie import CurieContractError
 from research_loop.l05_curie.europepmc_runtime import (
     run_europepmc_acquisition,
@@ -16,14 +17,6 @@ from research_loop.l05_curie.europepmc_runtime import (
 from research_loop.l05_curie.paperqa2_runtime import (
     PaperQA2CurieRuntime,
     PaperQA2SubprocessBackend,
-)
-from research_loop.l05_curie.query_language import (
-    validate_english_retrieval_queries,
-)
-from research_loop.l05_curie.query_planner import (
-    MAX_QUERY_CANDIDATES,
-    MIN_QUERY_CANDIDATES,
-    requires_provider_planning,
 )
 from research_loop.providers import CommandProvider, ProviderError
 
@@ -34,119 +27,75 @@ _SEMANTIC_ASSESSMENT_SCHEMA = {
     "qualification_preserved": bool,
     "reason": str,
 }
-_QUERY_PLANNING_SCHEMA = {
+_ENGLISH_SEED_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "queries": {
-            "type": "array",
-            "minItems": MIN_QUERY_CANDIDATES,
-            "maxItems": MAX_QUERY_CANDIDATES,
-            "uniqueItems": True,
-            "items": {"type": "string", "minLength": 1},
-        },
+        "scientific_question": {"type": "string", "minLength": 1},
+        "hypothesis_seed": {"type": "string", "minLength": 1},
     },
-    "required": ["queries"],
+    "required": ["scientific_question", "hypothesis_seed"],
 }
 
 
-def _query_planner_prompt(seed: dict) -> str:
-    return f"""RLR stage: L0.5 Scientific Literature Query Planning
-Scientific question: {seed['scientific_question']}
-Hypothesis seed: {seed['hypothesis_seed']}
+def _seed_normalization_prompt(fields: dict[str, str]) -> str:
+    return f"""RLR boundary: user-language normalization into canonical internal English.
 
-Return JSON only with one field named queries. Produce between
-{MIN_QUERY_CANDIDATES} and {MAX_QUERY_CANDIDATES} concise English scientific
-literature-search queries suitable for PubMed, Europe PMC, OpenAlex, Crossref,
-and Semantic Scholar. Preserve the scientific meaning of the question and
-hypothesis, but express the retrieval concepts in standard English scientific
-terminology. Use complementary query formulations rather than translations
-that merely repeat the same wording.
+User semantic fields:
+{json.dumps(fields, ensure_ascii=False, sort_keys=True)}
 
-Do not search literature. Do not browse the web. Do not return papers,
-citations, DOI/PMID/PMCID values, evidence, conclusions, or claims about what
-the literature contains. Do not include CJK characters in any query. Do not
-include prose, Markdown, code fences, commentary, or fields other than queries.
+Return JSON only with exactly two fields: scientific_question and
+hypothesis_seed.
+
+Rules:
+- Chinese input must be translated into precise standard English scientific terminology.
+- English input must be copied exactly, byte-for-byte after surrounding whitespace is removed.
+- Preserve gene/protein names, abbreviations, numbers, directionality, comparisons,
+  tissue/cell types, causal qualifiers, uncertainty, and hypothesis strength.
+- Do not summarize, expand, reinterpret, answer, search literature, browse the web,
+  add citations, or change the scientific claim.
+- Output must contain English natural-language text only, apart from normal
+  scientific symbols such as Greek letters.
+- Return no prose, Markdown, code fences, commentary, or extra fields.
 """
 
 
-def _persist_query_planner_receipt(
+def _provider_translate_seed(
     project_dir: str | Path,
     cand_id: str,
-    *,
-    seed: dict,
-    queries: list[str],
-    command: list[str],
-    prompt: str,
-    completed,
-    spec,
-) -> None:
-    root = Path(project_dir) / "08_Audit" / "l05_query_planner" / str(cand_id)
-    root.mkdir(parents=True, exist_ok=True)
-    receipt = structured_execution.execution_receipt(
-        spec.backend,
-        command,
-        prompt,
-        exit_code=completed.returncode,
-        stdout_hash=hashlib.sha256(completed.stdout.encode("utf-8")).hexdigest(),
-        model=spec.model,
-        purpose="l05_scientific_query_planning",
-    )
-    payload = {
-        "schema_version": "L05ScientificQueryPlanningReceipt/v1",
-        "candidate_id": str(cand_id),
-        "seed_sha256": research_seed.seed_sha256(seed),
-        "queries": list(queries),
-        "provider_receipt": receipt,
-    }
-    path = root / "query_planning_receipt.json"
-    raw = json.dumps(
-        payload, ensure_ascii=False, indent=2, sort_keys=True
-    ) + "\n"
-    if path.exists() and path.read_text(encoding="utf-8") != raw:
-        raise CurieContractError(
-            "L0.5 query-planning receipt already exists with different content"
-        )
-    if not path.exists():
-        path.write_text(raw, encoding="utf-8")
-
-
-def _provider_planned_queries(
-    project_dir: str | Path,
-    cand_id: str,
-    seed: dict,
-) -> list[str]:
+    fields: dict[str, str],
+) -> tuple[dict[str, str], dict]:
     try:
         spec, _skill_version = deep_research.load_runtime_spec(project_dir)
     except deep_research.DeepResearchError as exc:
         raise CurieContractError(
-            f"L0.5 query planner runtime is not configured: {exc}"
+            f"L0 English normalization runtime is not configured: {exc}"
         ) from exc
     consistent, reason = deep_research.validate_spec_consistency(spec)
     if not consistent:
         raise CurieContractError(
-            f"L0.5 query planner runtime spec is inconsistent: {reason}"
+            f"L0 English normalization runtime spec is inconsistent: {reason}"
         )
     ready, reason = structured_execution.runtime_ready(spec)
     if not ready:
         raise CurieContractError(
-            f"L0.5 query planner runtime is not ready: {reason}"
+            f"L0 English normalization runtime is not ready: {reason}"
         )
 
-    work = Path(project_dir) / "08_Audit" / "l05_query_planner" / str(cand_id)
+    work = Path(project_dir) / "08_Audit" / "research_seed_bindings" / "english" / str(cand_id)
     work.mkdir(parents=True, exist_ok=True)
-    schema_path = work / "query_planner_output.schema.json"
+    schema_path = work / "english_seed_output.schema.json"
     schema_path.write_text(
-        json.dumps(_QUERY_PLANNING_SCHEMA, ensure_ascii=False, indent=2),
+        json.dumps(_ENGLISH_SEED_SCHEMA, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     try:
         command = structured_execution.build_invocation(spec, schema_path)
     except structured_execution.StructuredExecutionError as exc:
         raise CurieContractError(
-            f"L0.5 query planner invocation is invalid: {exc}"
+            f"L0 English normalization invocation is invalid: {exc}"
         ) from exc
-    prompt = _query_planner_prompt(seed)
+    prompt = _seed_normalization_prompt(fields)
     command[0] = deep_research.resolve_subprocess_executable(command[0])
     execution_command, invocation_kwargs = deep_research.subprocess_invocation(
         command, prompt
@@ -155,70 +104,96 @@ def _provider_planned_queries(
         execution_command,
         invocation_kwargs,
         timeout=spec.timeout,
-        label="L0.5 scientific-query planner",
+        label="L0 Chinese-to-English semantic normalization",
     )
     if completed.returncode != 0:
         raise CurieContractError(
-            f"L0.5 scientific-query planner exited {completed.returncode}: "
+            f"L0 English normalization exited {completed.returncode}: "
             f"{completed.stderr.strip()}"
         )
     try:
         payload = deep_research._parse_cli_output(completed.stdout)
     except deep_research.DeepResearchError as exc:
         raise CurieContractError(
-            f"L0.5 scientific-query planner returned invalid JSON: {exc}"
+            f"L0 English normalization returned invalid JSON: {exc}"
         ) from exc
-    queries = validate_english_retrieval_queries(
-        payload.get("queries"),
-        name="provider-planned English retrieval queries",
-        min_items=MIN_QUERY_CANDIDATES,
-        max_items=MAX_QUERY_CANDIDATES,
+    receipt = structured_execution.execution_receipt(
+        spec.backend,
+        command,
+        prompt,
+        exit_code=completed.returncode,
+        stdout_hash=hashlib.sha256(completed.stdout.encode("utf-8")).hexdigest(),
+        model=spec.model,
+        purpose="l0_user_language_to_internal_english",
     )
-    _persist_query_planner_receipt(
-        project_dir,
-        cand_id,
-        seed=seed,
-        queries=queries,
-        command=command,
-        prompt=prompt,
-        completed=completed,
-        spec=spec,
-    )
-    return queries
+    return payload, receipt
 
 
-def _resolved_l05_queries(
-    project_dir: str | Path,
-    cand_id: str,
-    explicit_queries: list[str] | None,
-) -> list[str] | None:
+def _ensure_english_research_seed(project_dir: str | Path, cand_id: str) -> dict:
     try:
-        seed = research_seed.load_l1_research_seed(project_dir, cand_id)
+        raw_seed = research_seed.load_l0_research_seed(project_dir, cand_id)
     except research_seed.ResearchSeedError as exc:
-        raise CurieContractError(
-            f"canonical ResearchSeed is invalid: {exc}"
-        ) from exc
+        raise CurieContractError(f"canonical L0 ResearchSeed is invalid: {exc}") from exc
+    source_fields = {
+        "scientific_question": str(raw_seed["scientific_question"]),
+        "hypothesis_seed": str(raw_seed["hypothesis_seed"]),
+    }
 
-    provider_planning_required = requires_provider_planning(seed)
-    if explicit_queries:
-        return validate_english_retrieval_queries(
-            list(explicit_queries),
-            name="explicit English retrieval queries",
+    def translator(fields):
+        return _provider_translate_seed(project_dir, cand_id, fields)
+
+    try:
+        normalized, receipt = normalize_semantic_fields(
+            source_fields,
+            translator=translator,
         )
-    if not provider_planning_required:
+    except L0LanguageError as exc:
+        raise CurieContractError(str(exc)) from exc
+    if receipt["mode"] == "translated":
+        try:
+            research_seed.write_english_research_seed(
+                project_dir,
+                raw_seed,
+                normalized,
+                receipt,
+            )
+        except research_seed.ResearchSeedError as exc:
+            raise CurieContractError(str(exc)) from exc
+    try:
+        return research_seed.load_l1_research_seed(project_dir, cand_id)
+    except research_seed.ResearchSeedError as exc:
+        raise CurieContractError(f"canonical English ResearchSeed is invalid: {exc}") from exc
+
+
+def _english_explicit_queries(values: list[str] | None) -> list[str] | None:
+    if not values:
         return None
-    return _provider_planned_queries(project_dir, cand_id, seed)
+    from research_loop.l0_language import validate_internal_english
+
+    result = []
+    seen = set()
+    for index, value in enumerate(values, 1):
+        try:
+            query = validate_internal_english(
+                value, name=f"explicit literature query {index}"
+            )
+        except L0LanguageError as exc:
+            raise CurieContractError(str(exc)) from exc
+        key = query.casefold()
+        if key in seen:
+            raise CurieContractError("explicit literature queries must be distinct")
+        seen.add(key)
+        result.append(query)
+    return result
 
 
 def cmd_l05_acquire_europepmc(args) -> int:
     try:
-        queries = _resolved_l05_queries(
-            args.project_dir, args.cand_id, args.queries or None
-        )
+        _ensure_english_research_seed(args.project_dir, args.cand_id)
         result = run_europepmc_acquisition(
             args.project_dir,
             args.cand_id,
-            explicit_queries=queries,
+            explicit_queries=_english_explicit_queries(args.queries),
             max_papers=args.max_papers,
             page_size=args.page_size,
             run_id=args.run_id,
@@ -242,11 +217,7 @@ def _load_pdf_paths(path: str) -> dict[str, str]:
         raise CurieContractError("PaperQA2 PDF map must be a non-empty object")
     paths = {}
     for paper_id, pdf_path in value.items():
-        if (
-            not str(paper_id).strip()
-            or not isinstance(pdf_path, str)
-            or not pdf_path.strip()
-        ):
+        if not str(paper_id).strip() or not isinstance(pdf_path, str) or not pdf_path.strip():
             raise CurieContractError(
                 "PaperQA2 PDF map keys and values must be non-empty strings"
             )
@@ -263,15 +234,11 @@ def _semantic_assessor_from_command(
     """Adapt an explicit headless command to the fixed semantic-assessor contract."""
     command = str(command or "").strip()
     if not command:
-        raise CurieContractError(
-            "PaperQA2 semantic assessor command must be non-empty"
-        )
+        raise CurieContractError("PaperQA2 semantic assessor command must be non-empty")
     try:
         provider = CommandProvider({"command": command, "timeout": timeout})
     except ProviderError as exc:
-        raise CurieContractError(
-            f"PaperQA2 semantic assessor is invalid: {exc}"
-        ) from exc
+        raise CurieContractError(f"PaperQA2 semantic assessor is invalid: {exc}") from exc
     root = Path(run_dir)
     counter = 0
 
@@ -303,9 +270,7 @@ def _semantic_assessor_from_command(
                 f"PaperQA2 semantic assessor command failed: {exc}"
             ) from exc
         if not isinstance(result, dict):
-            raise CurieContractError(
-                "PaperQA2 semantic assessor command must return JSON object"
-            )
+            raise CurieContractError("PaperQA2 semantic assessor command must return JSON object")
         return result
 
     command_sha = hashlib.sha256(command.encode("utf-8")).hexdigest()
@@ -314,9 +279,7 @@ def _semantic_assessor_from_command(
 
 def cmd_l05_acquire_paperqa2_europepmc(args) -> int:
     try:
-        queries = _resolved_l05_queries(
-            args.project_dir, args.cand_id, args.queries or None
-        )
+        _ensure_english_research_seed(args.project_dir, args.cand_id)
         backend = PaperQA2SubprocessBackend(
             python_executable=args.paperqa_python,
             bridge_script=args.paperqa_bridge,
@@ -340,17 +303,14 @@ def cmd_l05_acquire_paperqa2_europepmc(args) -> int:
             pdf_paths=_load_pdf_paths(args.pdf_map),
             semantic_assessor=semantic_assessor,
             semantic_assessor_id=semantic_assessor_id,
-            explicit_queries=queries,
+            explicit_queries=_english_explicit_queries(args.queries),
             max_papers=args.max_papers,
             page_size=args.page_size,
             run_id=args.run_id,
             timeout=args.timeout,
         )
     except CurieContractError as exc:
-        print(
-            f"ERROR: L0.5 PaperQA2 Europe PMC acquisition -- {exc}",
-            file=sys.stderr,
-        )
+        print(f"ERROR: L0.5 PaperQA2 Europe PMC acquisition -- {exc}", file=sys.stderr)
         return 2
     print(json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True))
     return 0
@@ -365,23 +325,17 @@ def install(cli_module) -> None:
     def build_parser():
         parser = original_build_parser()
         subparsers = next(
-            action
-            for action in parser._actions
+            action for action in parser._actions
             if isinstance(action, argparse._SubParsersAction)
         )
         command = subparsers.add_parser(
             "l05-acquire-europepmc",
-            help=(
-                "run one auditable L0.5 Europe PMC acquisition round through FREEZE"
-            ),
+            help="run one auditable L0.5 Europe PMC acquisition round through FREEZE",
         )
         command.add_argument("project_dir")
         command.add_argument("cand_id")
         command.add_argument(
-            "--query",
-            dest="queries",
-            action="append",
-            default=None,
+            "--query", dest="queries", action="append", default=None,
             help="explicit reproducible English Europe PMC query (repeatable)",
         )
         command.add_argument("--max-papers", type=int, default=3)
@@ -392,9 +346,7 @@ def install(cli_module) -> None:
 
         paperqa = subparsers.add_parser(
             "l05-acquire-paperqa2-europepmc",
-            help=(
-                "run pinned PaperQA2 retrieval through Europe PMC verification into L1 v1"
-            ),
+            help="run pinned PaperQA2 retrieval through Europe PMC verification into L1 v1",
         )
         paperqa.add_argument("project_dir")
         paperqa.add_argument("cand_id")
@@ -413,10 +365,7 @@ def install(cli_module) -> None:
         )
         paperqa.add_argument("--semantic-assessor-timeout", type=int, default=300)
         paperqa.add_argument(
-            "--query",
-            dest="queries",
-            action="append",
-            default=None,
+            "--query", dest="queries", action="append", default=None,
             help="explicit reproducible English Europe PMC query (repeatable)",
         )
         paperqa.add_argument("--max-papers", type=int, default=3)
