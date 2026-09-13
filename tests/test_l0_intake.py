@@ -104,8 +104,8 @@ def test_normalize_initial_request_with_local_directory(tmp_path):
     (data_dir / "trees.nwk").write_text("(A,B);\n", encoding="utf-8")
     request = tmp_path / "request.md"
     request.write_text(
-        "科学问题：Mogera sp. 是否与 M. imaizumii 存在古老基因渗入？\n"
-        "本轮新假说：两者共同祖先之间存在古老基因渗入。\n",
+        "Scientific question: Is there ancient introgression between Mogera sp. and M. imaizumii?\n"
+        "Current hypothesis: Ancient introgression occurred between their ancestral lineages.\n",
         encoding="utf-8")
 
     result = _run("normalize-l0-input", "--project", str(project),
@@ -117,7 +117,7 @@ def test_normalize_initial_request_with_local_directory(tmp_path):
     contract = yaml.safe_load(artifacts[0].read_text(encoding="utf-8"))
     candidate_id = contract["candidate_id"]
     assert contract["round_type"] == "initial"
-    assert contract["scientific_question"] == "Mogera sp. 是否与 M. imaizumii 存在古老基因渗入？"
+    assert contract["scientific_question"] == "Is there ancient introgression between Mogera sp. and M. imaizumii?"
     assert contract["source_input"]["input_type"] == "directory"
     assert set(contract["source_input"]["files"]) == {
         str(data_dir / "samples.vcf"), str(data_dir / "trees.nwk")}
@@ -271,8 +271,8 @@ def test_frontmatter_hypothesis_key_does_not_shadow_body_label(tmp_path):
         "    frontmatter block-scalar residue, must not leak into the contract\n"
         "---\n"
         "\n"
-        "科学问题：真实假说会不会被 frontmatter 的 hypothesis 键吞掉？\n"
-        "本轮新假说：真实假说文本，来自正文，不是 frontmatter 残留。\n",
+        "Scientific question: Can the body hypothesis be shadowed by the frontmatter hypothesis key?\n"
+        "Current hypothesis: Real hypothesis text from the body, not frontmatter residue.\n",
         encoding="utf-8")
 
     result = _run("normalize-l0-input", "--project", str(project),
@@ -281,7 +281,7 @@ def test_frontmatter_hypothesis_key_does_not_shadow_body_label(tmp_path):
     assert result.returncode == 0, result.stderr
     artifact = next((project / "01_Candidates").glob("*.l0_input.yaml"))
     contract = yaml.safe_load(artifact.read_text(encoding="utf-8"))
-    assert contract["current_round"]["hypothesis"] == "真实假说文本，来自正文，不是 frontmatter 残留。"
+    assert contract["current_round"]["hypothesis"] == "Real hypothesis text from the body, not frontmatter residue."
     assert ">-" not in contract["current_round"]["hypothesis"]
 
 
