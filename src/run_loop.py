@@ -1559,25 +1559,25 @@ Candidate: {cand_id}
 Instructions:
 0. Runtime boundary: on a Codex host, first run `$env:RLR_HOST_BACKEND='codex'`
    in the launching PowerShell. Do not set it to codex on non-Codex hosts.
-   Run every RLR command with `micromamba run -n rlr python`.
+   Run every RLR command with `{formal_runtime_command}`.
    Before a formal run, verify the environment with:
-     micromamba run -n rlr python -m research_loop.runtime_preflight
+     {formal_runtime_command} -m research_loop.runtime_preflight
    If that gate fails, stop and report it.
-1. Run:  micromamba run -n rlr python research_loop_v04.py next-step {project} {cand_id}
+1. Run:  {formal_runtime_command} research_loop_v04.py next-step {project} {cand_id}
 2. Read the JSON output to get the current DAG node, persona, and context_files.
 3. DEEP RESEARCH (mandatory): before L1, L4, or L8.5, run the configured
    Academic Research runtime; it invokes `$academic-research-suite` for Codex
    or the installed ARS plugin for Claude and persists located paper evidence:
-     micromamba run -n rlr python research_loop_v04.py deep-research-run {project} {cand_id} --node NODE
+     {formal_runtime_command} research_loop_v04.py deep-research-run {project} {cand_id} --node NODE
    L1 requires Results/Discussion/Conclusion evidence; L4 requires Methods plus
    a review-search receipt; L8.5 requires paper-based result verification. Do
    not hand-write a pre-research note. L7 remains the separate code-search step.
-4. Run:  micromamba run -n rlr python research_loop_v04.py assemble-context {project} {cand_id} --node NODE
+4. Run:  {formal_runtime_command} research_loop_v04.py assemble-context {project} {cand_id} --node NODE
 5. The assemble-context output is your ONLY input for this node (it now includes the
    pre-research summary when present). Do NOT read other delta files.
 6. Act as the specified persona. Generate a strict JSON delta matching the schema.
 7. Write the delta to a temp file, then run:
-   micromamba run -n rlr python research_loop_v04.py emit-delta {project} {cand_id} --node NODE --persona PERSONA --file TEMP_DELTA.json
+   {formal_runtime_command} research_loop_v04.py emit-delta {project} {cand_id} --node NODE --persona PERSONA --file TEMP_DELTA.json
 8. If emit-delta says VALIDATION: PASS, run the advance_command.
 9. Repeat from step 1 until next-step returns L10c (aggregate-report).
 10. After L10c, evaluate StopPolicy: if KEEP + review accept, stop. If REVISE with
@@ -1617,12 +1617,13 @@ def cmd_print_main_agent_prompt(args):
     )
     prompt = MAIN_AGENT_PROMPT_TEMPLATE.format(
         project=project, cand_id=cand, max_rounds=max_rounds,
-        l9_rule=l9_rule)
+        l9_rule=l9_rule,
+        formal_runtime_command=runtime_preflight.formal_runtime_command_text())
     prompt, meta = rl._caveman_lite(
         prompt,
         required_literals=[
             project, cand, "main-agent", "Do NOT", "RLR_HOST_BACKEND",
-            "micromamba run -n rlr python",
+            runtime_preflight.formal_runtime_command_text(),
         ],
     )
     print(prompt)
