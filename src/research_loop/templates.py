@@ -229,7 +229,7 @@ Topic: {topic}
   `CurrentRoundDataBinding`, and an approved plan (status METHOD_APPROVED).
 - `00_Preflight/input_manifest.md` and `input_alias` are human/legacy metadata;
   neither grants scientific-data access to L7.
-- Each persona runs as an isolated subagent under the v0.9.2 topology.
+- Each persona runs as an isolated subagent under the native topology.
 - State flows between subagents via delta JSON files only.
 
 ## DAG Node Flow

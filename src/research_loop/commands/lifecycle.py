@@ -299,7 +299,7 @@ def cmd_new_project(args):
     except LedgerError as exc:
         print(f"ERROR: hypothesis ledger project binding failed: {exc}", file=sys.stderr)
         return 2
-    print(f"Created v0.9.2 native project: {project_dir.resolve()}")
+    print(f"Created native project: {project_dir.resolve()}")
     print("Next: run `preflight` (Linnaeus L0) before any candidate work.")
     return 0
 
