@@ -1,8 +1,9 @@
 """Canonical, result-driven L8.5 literature verification.
 
-This module owns neither a second retriever nor evidence identity.  It derives
+This module owns neither a second retriever nor evidence identity. It derives
 queries from completed L7/L8 findings, uses Curie discovery, and admits only
-source-located evidence to a closed finding verdict.
+source-located evidence to a closed finding verdict. Internal scientific state
+is English-only; L8.5 never translates upstream findings.
 """
 from __future__ import annotations
 
@@ -12,16 +13,13 @@ import json
 import re
 from pathlib import Path
 
-from research_loop import deep_research, research_seed, structured_execution
+from research_loop import research_seed
 from research_loop.compatibility import get_profile
 from research_loop.delta import _delta_for_candidate, artifact_for_node
 from research_loop.hypothesis_ledger import binding_path
+from research_loop.l0_language import L0LanguageError, validate_internal_english
 from research_loop.l05_curie import europepmc, multisource, selector
 from research_loop.l05_curie.contracts import CurieContractError
-from research_loop.l05_curie.query_language import (
-    classify_supported_input_language,
-    validate_english_retrieval_query,
-)
 from research_loop.l05_curie.semantic_verifier import SemanticEvidenceVerifier
 
 
@@ -82,26 +80,21 @@ def active_findings(l7_delta: dict | None, l8_delta: dict | None) -> list[dict]:
     return copy.deepcopy([by_id[key] for key in sorted(by_id)])
 
 
-def _finding_language(finding: dict) -> tuple[str, str, str]:
-    finding_id = str(finding.get("finding_id") or "").strip()
-    if not finding_id:
-        raise L85VerificationError("finding_id must be non-empty")
-    text = str(finding.get("text") or "").strip()
-    language = classify_supported_input_language(
-        text, name=f"L8.5 finding {finding_id}"
-    )
-    return finding_id, text, language
-
-
 def finding_queries(findings: list[dict], *, max_chars: int = 240) -> list[str]:
-    """Derive bounded queries only for findings already written in English."""
+    """Derive bounded deterministic queries from English internal findings."""
     queries = []
     for finding in findings:
-        finding_id, text, language = _finding_language(finding)
-        if language == "zh":
-            raise L85VerificationError(
-                f"finding {finding_id} requires Chinese-to-English provider planning"
+        finding_id = str(finding.get("finding_id") or "").strip()
+        if not finding_id:
+            raise L85VerificationError("finding_id must be non-empty")
+        try:
+            text = validate_internal_english(
+                finding.get("text"), name=f"L8.5 finding {finding_id}"
             )
+        except L0LanguageError as exc:
+            raise L85VerificationError(
+                f"internal L8.5 finding must already be English: {exc}"
+            ) from exc
         words = []
         for token in _TOKEN.findall(text):
             if len(token) < 3 or token.casefold() in _STOPWORDS:
@@ -111,190 +104,18 @@ def finding_queries(findings: list[dict], *, max_chars: int = 240) -> list[str]:
         query = " ".join(words)[:max_chars].strip()
         if not query:
             raise L85VerificationError(f"finding {finding_id} has no searchable terms")
-        try:
-            query = validate_english_retrieval_query(
-                query, name=f"L8.5 finding {finding_id} English retrieval query"
-            )
-        except CurieContractError as exc:
-            raise L85VerificationError(str(exc)) from exc
         queries.append(query)
     return queries
 
 
-def _finding_query_schema(count: int) -> dict:
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "queries": {
-                "type": "array",
-                "minItems": count,
-                "maxItems": count,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "finding_id": {"type": "string", "minLength": 1},
-                        "query": {"type": "string", "minLength": 1},
-                    },
-                    "required": ["finding_id", "query"],
-                },
-            },
-        },
-        "required": ["queries"],
-    }
-
-
-def _provider_finding_queries(
-    project: Path, candidate_id: str, findings: list[dict]
-) -> tuple[list[str], list[dict]]:
-    for finding in findings:
-        _finding_language(finding)
-    try:
-        spec, _skill_version = deep_research.load_runtime_spec(project)
-    except deep_research.DeepResearchError as exc:
-        raise L85VerificationError(
-            f"L8.5 query planner runtime is not configured: {exc}"
-        ) from exc
-    consistent, reason = deep_research.validate_spec_consistency(spec)
-    if not consistent:
-        raise L85VerificationError(
-            f"L8.5 query planner runtime spec is inconsistent: {reason}"
-        )
-    ready, reason = structured_execution.runtime_ready(spec)
-    if not ready:
-        raise L85VerificationError(
-            f"L8.5 query planner runtime is not ready: {reason}"
-        )
-
-    work = project / "08_Audit" / "l85_query_planner" / str(candidate_id)
-    work.mkdir(parents=True, exist_ok=True)
-    schema_path = work / "query_planner_output.schema.json"
-    schema_path.write_text(
-        json.dumps(_finding_query_schema(len(findings)), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    try:
-        command = structured_execution.build_invocation(spec, schema_path)
-    except structured_execution.StructuredExecutionError as exc:
-        raise L85VerificationError(
-            f"L8.5 query planner invocation is invalid: {exc}"
-        ) from exc
-    prompt = f"""RLR stage: L8.5 Result Verification Query Planning
-Actual findings to verify:
-{json.dumps(findings, ensure_ascii=False, sort_keys=True)}
-
-Return JSON only with a queries array containing exactly one object for every
-supplied finding. Each object must repeat the exact finding_id and provide one
-concise English scientific literature-search query suitable for PubMed,
-Europe PMC, OpenAlex, Crossref, and Semantic Scholar. Preserve the finding's
-entities, direction, comparison, tissue/cell type, phenotype, and mechanism
-when present. When a finding is written in Chinese, express its scientific
-meaning in standard English terminology; findings already in English should
-remain English.
-
-Do not search literature. Do not browse the web. Do not return papers,
-citations, DOI/PMID/PMCID values, evidence, verdicts, or conclusions. Do not
-include CJK characters in any query. Do not invent or omit finding IDs. Return
-no prose, Markdown, code fences, commentary, or fields outside the schema.
-"""
-    command[0] = deep_research.resolve_subprocess_executable(command[0])
-    execution_command, invocation_kwargs = deep_research.subprocess_invocation(
-        command, prompt
-    )
-    completed = deep_research.execute_provider_invocation(
-        execution_command,
-        invocation_kwargs,
-        timeout=spec.timeout,
-        label="L8.5 scientific-query planner",
-    )
-    if completed.returncode != 0:
-        raise L85VerificationError(
-            f"L8.5 scientific-query planner exited {completed.returncode}: "
-            f"{completed.stderr.strip()}"
-        )
-    try:
-        payload = deep_research._parse_cli_output(completed.stdout)
-    except deep_research.DeepResearchError as exc:
-        raise L85VerificationError(
-            f"L8.5 scientific-query planner returned invalid JSON: {exc}"
-        ) from exc
-    rows = payload.get("queries")
-    if not isinstance(rows, list) or len(rows) != len(findings):
-        raise L85VerificationError(
-            "L8.5 scientific-query planner must return exactly one query per finding"
-        )
-    expected = [str(item["finding_id"]) for item in findings]
-    by_id: dict[str, str] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            raise L85VerificationError("L8.5 planned query must be an object")
-        finding_id = str(row.get("finding_id") or "").strip()
-        if finding_id not in expected or finding_id in by_id:
-            raise L85VerificationError(
-                "L8.5 scientific-query planner returned an unknown or duplicate finding_id"
-            )
-        try:
-            query = validate_english_retrieval_query(
-                row.get("query"),
-                name=f"L8.5 finding {finding_id} English retrieval query",
-            )
-        except CurieContractError as exc:
-            raise L85VerificationError(str(exc)) from exc
-        by_id[finding_id] = query
-    if set(by_id) != set(expected):
-        raise L85VerificationError(
-            "L8.5 scientific-query planner omitted an active finding"
-        )
-    ordered = [by_id[finding_id] for finding_id in expected]
-    mapping = [
-        {"finding_id": finding_id, "query": by_id[finding_id]}
-        for finding_id in expected
-    ]
-    receipt = structured_execution.execution_receipt(
-        spec.backend,
-        command,
-        prompt,
-        exit_code=completed.returncode,
-        stdout_hash=hashlib.sha256(completed.stdout.encode("utf-8")).hexdigest(),
-        model=spec.model,
-        purpose="l85_scientific_query_planning",
-    )
-    receipt_payload = {
-        "schema_version": "L85ScientificQueryPlanningReceipt/v1",
-        "candidate_id": str(candidate_id),
-        "queries": mapping,
-        "provider_receipt": receipt,
-    }
-    receipt_path = work / "query_planning_receipt.json"
-    raw = json.dumps(
-        receipt_payload, ensure_ascii=False, sort_keys=True, indent=2
-    ) + "\n"
-    if receipt_path.exists() and receipt_path.read_text(encoding="utf-8") != raw:
-        raise L85VerificationError(
-            "L8.5 query-planning receipt already exists with different content"
-        )
-    if not receipt_path.exists():
-        receipt_path.write_text(raw, encoding="utf-8")
-    return ordered, mapping
-
-
-def build_query_plan(
-    seed: dict, findings: list[dict], *, explicit_queries: list[str] | None = None
-) -> dict:
+def build_query_plan(seed: dict, findings: list[dict]) -> dict:
     """Delegate planning to Curie; this module owns no query schema."""
     try:
-        queries = finding_queries(findings) if explicit_queries is None else [
-            validate_english_retrieval_query(
-                query, name="L8.5 English retrieval query"
-            )
-            for query in explicit_queries
-        ]
         return multisource.build_multisource_query_plan(
             seed,
             seed_sha256=research_seed.seed_sha256(seed),
             round_index=int(str(seed.get("round_id") or "1")),
-            explicit_queries=queries,
+            explicit_queries=finding_queries(findings),
             providers=list(multisource._PROVIDERS),
         )
     except (CurieContractError, TypeError, ValueError) as exc:
@@ -433,16 +254,7 @@ def run_native_l85(project_dir: str | Path, candidate_id: str, *, semantic_asses
         return value if isinstance(value, dict) else {}
 
     findings = active_findings(load_delta("L7_turing"), load_delta(artifact_for_node(profile, "L8").storage_key))
-    languages = [_finding_language(finding)[2] for finding in findings]
-    if "zh" in languages:
-        queries, finding_query_map = _provider_finding_queries(project, candidate_id, findings)
-    else:
-        queries = finding_queries(findings)
-        finding_query_map = [
-            {"finding_id": str(finding["finding_id"]), "query": query}
-            for finding, query in zip(findings, queries, strict=True)
-        ]
-    plan = build_query_plan(seed, findings, explicit_queries=queries)
+    plan = build_query_plan(seed, findings)
     run_id = "L85_" + _sha({"seed_sha256": research_seed.seed_sha256(seed), "finding_ids": [item["finding_id"] for item in findings], "query_plan_id": plan["plan_id"]})[:20]
     common = {"project_dir": project, "candidate_id": candidate_id, "run_id": run_id, "timeout": timeout}
     transports = {
@@ -473,4 +285,4 @@ def run_native_l85(project_dir: str | Path, candidate_id: str, *, semantic_asses
         except CurieContractError:
             continue
     verdicts, semantic = _adjudicate(findings, located, semantic_assessor, semantic_assessor_id)
-    return persist_run_manifest(project, candidate_id, run_id=run_id, payload={"research_seed": research_seed.manifest_entry(seed), "query_plan": plan, "finding_queries": finding_query_map, "discovery": discovery, "selected_paper_ids": sorted(selected_ids), "source_snapshots": snapshots, "located_evidence": located, "semantic_verifications": semantic, "findings": findings, "verdicts": verdicts})
+    return persist_run_manifest(project, candidate_id, run_id=run_id, payload={"research_seed": research_seed.manifest_entry(seed), "query_plan": plan, "discovery": discovery, "selected_paper_ids": sorted(selected_ids), "source_snapshots": snapshots, "located_evidence": located, "semantic_verifications": semantic, "findings": findings, "verdicts": verdicts})
