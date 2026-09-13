@@ -1,16 +1,12 @@
 """Bounded, provider-neutral query planning for Curie acquisition.
 
-This module owns only deterministic scientific-query planning from the
-canonical English ResearchSeed. Language normalization occurs once upstream at
-the L0 -> ResearchSeed boundary. This module never translates input, selects
-records, retrieves source bytes, verifies evidence, or creates an EvidencePack.
+Language normalization is complete before canonical L0 is frozen. This module
+only plans deterministic scientific queries from that canonical semantic state.
 """
 from __future__ import annotations
 
 import re
 import unicodedata
-
-from research_loop.l0_language import L0LanguageError, validate_internal_english
 
 from .contracts import CurieContractError
 
@@ -54,7 +50,7 @@ def _english_tokens(value: str) -> list[str]:
     ])
 
 
-def _english_seed(seed: dict) -> tuple[str, str, list[str], list[str]]:
+def _seed_terms(seed: dict) -> tuple[str, str, list[str], list[str]]:
     if not isinstance(seed, dict):
         raise CurieContractError("ResearchSeed must be an object")
     question = _text(
@@ -63,17 +59,6 @@ def _english_seed(seed: dict) -> tuple[str, str, list[str], list[str]]:
     hypothesis = _text(
         seed.get("hypothesis_seed"), "ResearchSeed hypothesis_seed"
     )
-    try:
-        question = validate_internal_english(
-            question, name="ResearchSeed scientific_question"
-        )
-        hypothesis = validate_internal_english(
-            hypothesis, name="ResearchSeed hypothesis_seed"
-        )
-    except L0LanguageError as exc:
-        raise CurieContractError(
-            f"Curie requires the canonical English ResearchSeed: {exc}"
-        ) from exc
     question_tokens = _english_tokens(question)
     hypothesis_tokens = _english_tokens(hypothesis)
     if not question_tokens and not hypothesis_tokens:
@@ -105,12 +90,7 @@ def _bounded(values: list[str]) -> str:
         terms.pop()
     if not terms:
         raise CurieContractError("scientific query planner produced an empty query")
-    try:
-        return validate_internal_english(
-            " ".join(terms), name="English retrieval query"
-        )
-    except L0LanguageError as exc:
-        raise CurieContractError(str(exc)) from exc
+    return " ".join(terms)
 
 
 def validate_scientific_query_plan(plan: dict) -> dict:
@@ -157,12 +137,7 @@ def validate_scientific_query_plan(plan: dict) -> dict:
             or not query["concepts"]
         ):
             raise CurieContractError("scientific query plan query is invalid")
-        try:
-            rendered = validate_internal_english(
-                query["query"], name="English retrieval query"
-            )
-        except L0LanguageError as exc:
-            raise CurieContractError(str(exc)) from exc
+        rendered = _text(query["query"], "retrieval query")
         key = rendered.casefold()
         if key in seen:
             raise CurieContractError(
@@ -198,7 +173,7 @@ def build_scientific_query_plan(
         raise CurieContractError(
             f"reformulation_index must be between 0 and {MAX_REFORMULATION_INDEX}"
         )
-    _question, _hypothesis, question_tokens, hypothesis_tokens = _english_seed(seed)
+    _question, _hypothesis, question_tokens, hypothesis_tokens = _seed_terms(seed)
     concepts = _concepts(question_tokens, hypothesis_tokens)
     core = _unique(question_tokens + hypothesis_tokens)
 
