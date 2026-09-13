@@ -7,6 +7,8 @@ Input support is intentionally limited to Chinese and English.
 """
 from __future__ import annotations
 
+import copy
+
 from research_loop.l05_curie.contracts import CurieContractError
 from research_loop.l05_curie.query_language import (
     classify_supported_input_language,
@@ -17,6 +19,7 @@ from research_loop.l05_curie.query_language import (
 
 def install(
     multisource_module,
+    europepmc_runtime_module,
     l4_inventory_module,
     l4_contextual_module,
     l4a_specter2_module,
@@ -47,6 +50,45 @@ def install(
                 ),
             )
         return plan
+
+    original_paperqa2_query = europepmc_runtime_module._paperqa2_retrieval_query
+
+    def paperqa2_retrieval_query(selected, seed, query_plan):
+        if not isinstance(selected, dict) or not str(selected.get("title") or "").strip():
+            raise CurieContractError(
+                "PaperQA2 retrieval requires a non-empty paper title anchor"
+            )
+        seed = seed if isinstance(seed, dict) else {}
+        question = str(seed.get("scientific_question") or "").strip()
+        hypothesis = str(seed.get("hypothesis_seed") or "").strip()
+        if question and hypothesis:
+            question_language = classify_supported_input_language(
+                question, name="ResearchSeed scientific_question"
+            )
+            hypothesis_language = classify_supported_input_language(
+                hypothesis, name="ResearchSeed hypothesis_seed"
+            )
+            if question_language == hypothesis_language == "en":
+                augmented_plan = copy.deepcopy(query_plan) if isinstance(query_plan, dict) else {}
+                queries = list(augmented_plan.get("queries") or [])
+                queries.append({
+                    "query_id": "SEED_ENGLISH_FOCUS",
+                    "query": validate_english_retrieval_query(
+                        f"{question} {hypothesis}",
+                        name="English ResearchSeed retrieval focus",
+                    ),
+                    "intent": "english_seed_semantic_focus",
+                })
+                augmented_plan["queries"] = queries
+                selected_for_retrieval = copy.deepcopy(selected)
+                provenance = selected_for_retrieval.get("provenance")
+                provenance = provenance if isinstance(provenance, dict) else {}
+                provenance.pop("originating_query_ids", None)
+                selected_for_retrieval["provenance"] = provenance
+                return original_paperqa2_query(
+                    selected_for_retrieval, seed, augmented_plan
+                )
+        return original_paperqa2_query(selected, seed, query_plan)
 
     original_build_prompt = l4_inventory_module.build_prompt
 
@@ -172,6 +214,7 @@ Retrieval-language contract:
         return original_provider_finding_queries(project, candidate_id, findings)
 
     multisource_module.build_multisource_query_plan = build_multisource_query_plan
+    europepmc_runtime_module._paperqa2_retrieval_query = paperqa2_retrieval_query
     l4_inventory_module.build_prompt = build_prompt
     l4_inventory_module._validate_inventory_payload = validate_inventory_payload
     l4_contextual_module._method_query = method_query
