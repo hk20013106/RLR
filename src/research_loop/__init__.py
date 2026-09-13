@@ -3,9 +3,7 @@
 # Install focused extensions on stable module objects before CLI modules import
 # their functions and schemas.
 from research_loop import deep_research as deep_research
-from research_loop.source_payload_integrity import (
-    install as _install_source_payload_integrity,
-)
+from research_loop.source_payload_integrity import install as _install_source_payload_integrity
 from research_loop.method_evidence import install as _install_method_evidence
 from research_loop.method_evidence_compat import install as _install_method_evidence_compat
 from research_loop import method_review_navigation as _review_navigation
@@ -48,6 +46,7 @@ from research_loop.l4_evidence_bundle import install as _install_l4_evidence_bun
 from research_loop.l4_runtime_compat import install as _install_l4_runtime_compat
 from research_loop import l4_closed_corpus as _l4_closed_corpus
 from research_loop import l4a_specter2 as _l4a_specter2_module
+from research_loop.l05_curie import multisource as _l05_multisource_module
 from research_loop.l05_curie import paperqa2_runtime as _paperqa2_runtime_module
 from research_loop.literature_query_language import install as _install_literature_query_language
 
@@ -65,6 +64,7 @@ _install_l4_lineage(deep_research)
 _install_l45_context_binding(_l4_pipeline_module)
 _l4_closed_corpus.install(_l4_pipeline_module, deep_research)
 _install_literature_query_language(
+    _l05_multisource_module,
     _l4_inventory_module,
     _l4_contextual_module,
     _l4a_specter2_module,
@@ -145,7 +145,8 @@ del _install_literature_query_language, _install_provider_runtime_observability
 del _deep_research_task_module
 del _l4_pipeline_module, _l4_lineage_module, _l4_provenance_module
 del _l4_inventory_module, _l4_method_registry_module, _l4_evidence_bundle_module
-del _l4_contextual_module, _l4a_specter2_module, _paperqa2_runtime_module
+del _l4_contextual_module, _l4a_specter2_module
+del _l05_multisource_module, _paperqa2_runtime_module
 del _l4_closed_corpus
 del _install_method_contracts, _install_reactivation_contracts
 del _install_receipt_idempotency, _install_hypothesis_reactivation
