@@ -69,7 +69,9 @@ def install(
                 hypothesis, name="ResearchSeed hypothesis_seed"
             )
             if question_language == hypothesis_language == "en":
-                augmented_plan = copy.deepcopy(query_plan) if isinstance(query_plan, dict) else {}
+                augmented_plan = (
+                    copy.deepcopy(query_plan) if isinstance(query_plan, dict) else {}
+                )
                 queries = list(augmented_plan.get("queries") or [])
                 queries.append({
                     "query_id": "SEED_ENGLISH_FOCUS",
@@ -93,18 +95,21 @@ def install(
     original_build_prompt = l4_inventory_module.build_prompt
 
     def build_prompt(question, claim, known_sources=None):
-        for label, value in (("L4 scientific question", question), ("L4 claim", claim)):
+        for label, value in (
+            ("L4 scientific question", question),
+            ("L4 claim", claim),
+        ):
             classify_supported_input_language(value, name=label)
         prompt = original_build_prompt(question, claim, known_sources)
         return prompt + """
 
 Retrieval-language contract:
 - The scientific question and claim above may be written in Chinese or English only.
-- Chinese scientific semantics must be expressed as standard English scientific
-  terminology in every retrieval-facing method description.
-- English scientific semantics should remain English; do not translate them.
-- Every method_inventory item's `name`, `purpose`, and `inventory_reason` MUST
-  be written in English scientific terminology.
+- For Chinese input, express retrieval-facing method text in standard English
+  scientific terminology. English input should remain English.
+- Every method_inventory item's `name` and `purpose` MUST be written in English
+  scientific terminology because those fields can become downstream retrieval
+  focus. `inventory_reason` may remain in the input language.
 - Other input languages are unsupported and must fail closed.
 - This language rule does not authorize literature retrieval in this offline
   inventory step.
@@ -116,7 +121,7 @@ Retrieval-language contract:
         canonical = original_validate_inventory(l4p, dr, payload)
         for method in canonical.get("method_inventory") or []:
             method_id = str(method.get("method_id") or "").strip() or "<unknown>"
-            for field in ("name", "purpose", "inventory_reason"):
+            for field in ("name", "purpose"):
                 try:
                     validate_english_retrieval_query(
                         method.get(field),
@@ -133,7 +138,9 @@ Retrieval-language contract:
         for item in planner_queries or []:
             if not isinstance(item, dict):
                 continue
-            method_ids = {str(value).strip() for value in item.get("method_ids") or []}
+            method_ids = {
+                str(value).strip() for value in item.get("method_ids") or []
+            }
             if method_id not in method_ids:
                 continue
             query = validate_english_retrieval_query(
@@ -146,21 +153,10 @@ Retrieval-language contract:
                 planned.append(query)
         if planned:
             return ". ".join(planned)
-        fallback = []
-        for field in ("name", "purpose", "inventory_reason"):
-            value = str(method.get(field) or "").strip()
-            if value:
-                fallback.append(
-                    validate_english_retrieval_query(
-                        value,
-                        name=f"L4A method {method_id} {field}",
-                    )
-                )
-        if not fallback:
-            raise ValueError(
-                f"L4A method {method_id or '<unknown>'} has no English retrieval text"
-            )
-        return ". ".join(fallback)
+        return validate_english_retrieval_query(
+            method.get("name"),
+            name=f"L4A method {method_id or '<unknown>'} canonical English name",
+        )
 
     original_rank_method_papers = l4a_specter2_module.rank_method_papers
 
@@ -195,7 +191,9 @@ Retrieval-language contract:
 
     def finding_queries(findings, *, max_chars=240):
         for finding in findings:
-            finding_id = str(finding.get("finding_id") or "").strip() or "<unknown>"
+            finding_id = (
+                str(finding.get("finding_id") or "").strip() or "<unknown>"
+            )
             language = classify_supported_input_language(
                 finding.get("text"), name=f"L8.5 finding {finding_id}"
             )
@@ -207,13 +205,19 @@ Retrieval-language contract:
 
     def provider_finding_queries(project, candidate_id, findings):
         for finding in findings:
-            finding_id = str(finding.get("finding_id") or "").strip() or "<unknown>"
+            finding_id = (
+                str(finding.get("finding_id") or "").strip() or "<unknown>"
+            )
             classify_supported_input_language(
                 finding.get("text"), name=f"L8.5 finding {finding_id}"
             )
         return original_provider_finding_queries(project, candidate_id, findings)
 
     multisource_module.build_multisource_query_plan = build_multisource_query_plan
+    # europepmc_runtime imported this function directly before extension install;
+    # update that stable module reference too so explicit-query validation cannot
+    # be bypassed by calling the runtime rather than the CLI.
+    europepmc_runtime_module.build_multisource_query_plan = build_multisource_query_plan
     europepmc_runtime_module._paperqa2_retrieval_query = paperqa2_retrieval_query
     l4_inventory_module.build_prompt = build_prompt
     l4_inventory_module._validate_inventory_payload = validate_inventory_payload
