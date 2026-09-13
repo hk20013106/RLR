@@ -1,16 +1,20 @@
 """Install one English-retrieval language invariant on existing runtime seams.
 
 This module creates no query planner, retriever, evidence authority, identity,
-or retry path. It only constrains existing L4/PaperQA2/SPECTER2 consumers to
-English retrieval text and reuses already-authorized contextual queries.
+or retry path. It only constrains existing query-plan/L4/PaperQA2/SPECTER2
+consumers to English retrieval text and reuses already-authorized queries.
 """
 from __future__ import annotations
 
 from research_loop.l05_curie.contracts import CurieContractError
-from research_loop.l05_curie.query_language import validate_english_retrieval_query
+from research_loop.l05_curie.query_language import (
+    validate_english_retrieval_query,
+    validate_english_retrieval_queries,
+)
 
 
 def install(
+    multisource_module,
     l4_inventory_module,
     l4_contextual_module,
     l4a_specter2_module,
@@ -19,6 +23,28 @@ def install(
 ) -> None:
     if getattr(l4_inventory_module, "_english_retrieval_boundary_installed", False):
         return
+
+    original_build_query_plan = multisource_module.build_multisource_query_plan
+
+    def build_multisource_query_plan(*args, **kwargs):
+        if kwargs.get("explicit_queries") is not None:
+            kwargs = dict(kwargs)
+            kwargs["explicit_queries"] = validate_english_retrieval_queries(
+                kwargs["explicit_queries"],
+                name="explicit English retrieval queries",
+            )
+        plan = original_build_query_plan(*args, **kwargs)
+        for item in plan.get("queries") or []:
+            if not isinstance(item, dict):
+                continue
+            validate_english_retrieval_query(
+                item.get("query"),
+                name=(
+                    "canonical QueryPlan English retrieval query "
+                    f"{str(item.get('query_id') or '<unknown>')}"
+                ),
+            )
+        return plan
 
     original_build_prompt = l4_inventory_module.build_prompt
 
@@ -112,6 +138,7 @@ Retrieval-language contract:
             verify=verify,
         )
 
+    multisource_module.build_multisource_query_plan = build_multisource_query_plan
     l4_inventory_module.build_prompt = build_prompt
     l4_inventory_module._validate_inventory_payload = validate_inventory_payload
     l4_contextual_module._method_query = method_query
