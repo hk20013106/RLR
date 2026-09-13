@@ -174,7 +174,7 @@ def install(cli_module) -> None:
         command.add_argument("cand_id")
         command.add_argument(
             "--query", dest="queries", action="append", default=None,
-            help="explicit reproducible English Europe PMC query (repeatable)",
+            help="explicit reproducible Europe PMC query (repeatable)",
         )
         command.add_argument("--max-papers", type=int, default=3)
         command.add_argument("--page-size", type=int, default=25)
@@ -204,7 +204,7 @@ def install(cli_module) -> None:
         paperqa.add_argument("--semantic-assessor-timeout", type=int, default=300)
         paperqa.add_argument(
             "--query", dest="queries", action="append", default=None,
-            help="explicit reproducible English Europe PMC query (repeatable)",
+            help="explicit reproducible Europe PMC query (repeatable)",
         )
         paperqa.add_argument("--max-papers", type=int, default=3)
         paperqa.add_argument("--page-size", type=int, default=25)
