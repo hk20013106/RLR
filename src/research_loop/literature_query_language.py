@@ -1,9 +1,9 @@
 """Install one English-retrieval language invariant on existing runtime seams.
 
 This module creates no query planner, retriever, evidence authority, identity,
-or retry path. It only constrains existing query-plan/L4/PaperQA2/SPECTER2
-consumers to English retrieval text and reuses already-authorized queries.
-Input support is intentionally limited to Chinese and English.
+or retry path. It only constrains existing L0.5/L4/PaperQA2/SPECTER2 consumers
+to English retrieval text and reuses already-authorized queries. Input support
+is intentionally limited to Chinese and English.
 """
 from __future__ import annotations
 
@@ -24,7 +24,6 @@ def install(
     l4_contextual_module,
     l4a_specter2_module,
     paperqa2_runtime_module,
-    deep_research_module,
 ) -> None:
     if getattr(l4_inventory_module, "_english_retrieval_boundary_installed", False):
         return
@@ -182,37 +181,6 @@ Retrieval-language contract:
             verify=verify,
         )
 
-    # L8.5 remains its existing owner. This wrapper only prevents unsupported
-    # languages from reaching its Chinese->English planner or English fast path.
-    from research_loop import l85_literature_verification as l85_module
-
-    original_finding_queries = l85_module.finding_queries
-    original_provider_finding_queries = l85_module._provider_finding_queries
-
-    def finding_queries(findings, *, max_chars=240):
-        for finding in findings:
-            finding_id = (
-                str(finding.get("finding_id") or "").strip() or "<unknown>"
-            )
-            language = classify_supported_input_language(
-                finding.get("text"), name=f"L8.5 finding {finding_id}"
-            )
-            if language == "zh":
-                raise l85_module.L85VerificationError(
-                    f"finding {finding_id} requires Chinese-to-English provider planning"
-                )
-        return original_finding_queries(findings, max_chars=max_chars)
-
-    def provider_finding_queries(project, candidate_id, findings):
-        for finding in findings:
-            finding_id = (
-                str(finding.get("finding_id") or "").strip() or "<unknown>"
-            )
-            classify_supported_input_language(
-                finding.get("text"), name=f"L8.5 finding {finding_id}"
-            )
-        return original_provider_finding_queries(project, candidate_id, findings)
-
     multisource_module.build_multisource_query_plan = build_multisource_query_plan
     # europepmc_runtime imported this function directly before extension install;
     # update that stable module reference too so explicit-query validation cannot
@@ -224,6 +192,4 @@ Retrieval-language contract:
     l4_contextual_module._method_query = method_query
     l4a_specter2_module.rank_method_papers = rank_method_papers
     paperqa2_runtime_module.PaperQA2CurieRuntime.retrieve_and_verify = retrieve_and_verify
-    l85_module.finding_queries = finding_queries
-    l85_module._provider_finding_queries = provider_finding_queries
     l4_inventory_module._english_retrieval_boundary_installed = True
