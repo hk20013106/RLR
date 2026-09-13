@@ -81,12 +81,7 @@ def _persist_query_planner_receipt(
     completed,
     spec,
 ) -> None:
-    root = (
-        Path(project_dir)
-        / "08_Audit"
-        / "l05_query_planner"
-        / str(cand_id)
-    )
+    root = Path(project_dir) / "08_Audit" / "l05_query_planner" / str(cand_id)
     root.mkdir(parents=True, exist_ok=True)
     receipt = structured_execution.execution_receipt(
         spec.backend,
@@ -138,12 +133,7 @@ def _provider_planned_queries(
             f"L0.5 query planner runtime is not ready: {reason}"
         )
 
-    work = (
-        Path(project_dir)
-        / "08_Audit"
-        / "l05_query_planner"
-        / str(cand_id)
-    )
+    work = Path(project_dir) / "08_Audit" / "l05_query_planner" / str(cand_id)
     work.mkdir(parents=True, exist_ok=True)
     schema_path = work / "query_planner_output.schema.json"
     schema_path.write_text(
@@ -202,18 +192,20 @@ def _resolved_l05_queries(
     cand_id: str,
     explicit_queries: list[str] | None,
 ) -> list[str] | None:
-    if explicit_queries:
-        return validate_english_retrieval_queries(
-            list(explicit_queries),
-            name="explicit English retrieval queries",
-        )
     try:
         seed = research_seed.load_l1_research_seed(project_dir, cand_id)
     except research_seed.ResearchSeedError as exc:
         raise CurieContractError(
             f"canonical ResearchSeed is invalid: {exc}"
         ) from exc
-    if not requires_provider_planning(seed):
+
+    provider_planning_required = requires_provider_planning(seed)
+    if explicit_queries:
+        return validate_english_retrieval_queries(
+            list(explicit_queries),
+            name="explicit English retrieval queries",
+        )
+    if not provider_planning_required:
         return None
     return _provider_planned_queries(project_dir, cand_id, seed)
 
@@ -250,7 +242,11 @@ def _load_pdf_paths(path: str) -> dict[str, str]:
         raise CurieContractError("PaperQA2 PDF map must be a non-empty object")
     paths = {}
     for paper_id, pdf_path in value.items():
-        if not str(paper_id).strip() or not isinstance(pdf_path, str) or not pdf_path.strip():
+        if (
+            not str(paper_id).strip()
+            or not isinstance(pdf_path, str)
+            or not pdf_path.strip()
+        ):
             raise CurieContractError(
                 "PaperQA2 PDF map keys and values must be non-empty strings"
             )
@@ -267,11 +263,15 @@ def _semantic_assessor_from_command(
     """Adapt an explicit headless command to the fixed semantic-assessor contract."""
     command = str(command or "").strip()
     if not command:
-        raise CurieContractError("PaperQA2 semantic assessor command must be non-empty")
+        raise CurieContractError(
+            "PaperQA2 semantic assessor command must be non-empty"
+        )
     try:
         provider = CommandProvider({"command": command, "timeout": timeout})
     except ProviderError as exc:
-        raise CurieContractError(f"PaperQA2 semantic assessor is invalid: {exc}") from exc
+        raise CurieContractError(
+            f"PaperQA2 semantic assessor is invalid: {exc}"
+        ) from exc
     root = Path(run_dir)
     counter = 0
 
@@ -303,7 +303,9 @@ def _semantic_assessor_from_command(
                 f"PaperQA2 semantic assessor command failed: {exc}"
             ) from exc
         if not isinstance(result, dict):
-            raise CurieContractError("PaperQA2 semantic assessor command must return JSON object")
+            raise CurieContractError(
+                "PaperQA2 semantic assessor command must return JSON object"
+            )
         return result
 
     command_sha = hashlib.sha256(command.encode("utf-8")).hexdigest()
@@ -345,7 +347,10 @@ def cmd_l05_acquire_paperqa2_europepmc(args) -> int:
             timeout=args.timeout,
         )
     except CurieContractError as exc:
-        print(f"ERROR: L0.5 PaperQA2 Europe PMC acquisition -- {exc}", file=sys.stderr)
+        print(
+            f"ERROR: L0.5 PaperQA2 Europe PMC acquisition -- {exc}",
+            file=sys.stderr,
+        )
         return 2
     print(json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True))
     return 0
@@ -360,17 +365,23 @@ def install(cli_module) -> None:
     def build_parser():
         parser = original_build_parser()
         subparsers = next(
-            action for action in parser._actions
+            action
+            for action in parser._actions
             if isinstance(action, argparse._SubParsersAction)
         )
         command = subparsers.add_parser(
             "l05-acquire-europepmc",
-            help="run one auditable L0.5 Europe PMC acquisition round through FREEZE",
+            help=(
+                "run one auditable L0.5 Europe PMC acquisition round through FREEZE"
+            ),
         )
         command.add_argument("project_dir")
         command.add_argument("cand_id")
         command.add_argument(
-            "--query", dest="queries", action="append", default=None,
+            "--query",
+            dest="queries",
+            action="append",
+            default=None,
             help="explicit reproducible English Europe PMC query (repeatable)",
         )
         command.add_argument("--max-papers", type=int, default=3)
@@ -381,7 +392,9 @@ def install(cli_module) -> None:
 
         paperqa = subparsers.add_parser(
             "l05-acquire-paperqa2-europepmc",
-            help="run pinned PaperQA2 retrieval through Europe PMC verification into L1 v1",
+            help=(
+                "run pinned PaperQA2 retrieval through Europe PMC verification into L1 v1"
+            ),
         )
         paperqa.add_argument("project_dir")
         paperqa.add_argument("cand_id")
@@ -400,7 +413,10 @@ def install(cli_module) -> None:
         )
         paperqa.add_argument("--semantic-assessor-timeout", type=int, default=300)
         paperqa.add_argument(
-            "--query", dest="queries", action="append", default=None,
+            "--query",
+            dest="queries",
+            action="append",
+            default=None,
             help="explicit reproducible English Europe PMC query (repeatable)",
         )
         paperqa.add_argument("--max-papers", type=int, default=3)
