@@ -6,9 +6,10 @@ import tempfile
 from pathlib import Path
 
 from research_loop import deep_research, structured_execution
+from research_loop.l0_language import L0LanguageError
 
 
-class L0LanguageProviderError(ValueError):
+class L0LanguageProviderError(L0LanguageError):
     pass
 
 
