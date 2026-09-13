@@ -55,7 +55,7 @@ def test_multisource_rejects_explicit_cjk_retrieval_query_before_transport():
         "Melanin-associated programs may protect cochlear homeostasis.",
     )
 
-    with pytest.raises(CurieContractError, match="English retrieval query"):
+    with pytest.raises(CurieContractError, match="English-only scientific text"):
         build_multisource_query_plan(
             seed,
             seed_sha256=research_seed.seed_sha256(seed),
@@ -119,6 +119,30 @@ def test_l05_paperqa2_retrieval_reuses_english_query_plan_without_chinese_seed_t
 
     assert selected["title"] in query
     assert "cochlear melanin" in query.casefold()
+    assert CJK.search(query) is None
+
+
+def test_l05_paperqa2_english_seed_keeps_semantic_focus_with_locator_query():
+    selected = {
+        "title": "The bZIP Transcription Factor Rca1p",
+        "provenance": {"originating_query_ids": ["Q001"]},
+    }
+    seed = _seed(
+        "How is carbon dioxide sensed by yeast?",
+        "Rca1p regulates the carbon dioxide transcriptional response.",
+    )
+    query_plan = {
+        "queries": [{
+            "query_id": "Q001",
+            "query": "EXT_ID:22253597 AND SRC:MED",
+            "intent": "operator_reproducible_query",
+        }],
+    }
+
+    query = europepmc_runtime._paperqa2_retrieval_query(selected, seed, query_plan)
+
+    assert "carbon" in query.casefold()
+    assert "rca1p" in query.casefold()
     assert CJK.search(query) is None
 
 
