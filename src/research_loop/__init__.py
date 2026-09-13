@@ -47,7 +47,6 @@ from research_loop.l4_registry_projection_integrity import (
 from research_loop.l4_inventory_projection import (
     install as _install_l4_inventory_projection,
 )
-from research_loop import l4_contextual_literature as _l4_contextual_module
 from research_loop.l4_contextual_literature import (
     install as _install_l4_contextual_literature,
 )
@@ -55,13 +54,6 @@ from research_loop import l4_evidence_bundle as _l4_evidence_bundle_module
 from research_loop.l4_evidence_bundle import install as _install_l4_evidence_bundle
 from research_loop.l4_runtime_compat import install as _install_l4_runtime_compat
 from research_loop import l4_closed_corpus as _l4_closed_corpus
-from research_loop import l4a_specter2 as _l4a_specter2_module
-from research_loop.l05_curie import multisource as _l05_multisource_module
-from research_loop.l05_curie import europepmc_runtime as _europepmc_runtime_module
-from research_loop.l05_curie import paperqa2_runtime as _paperqa2_runtime_module
-from research_loop.literature_query_language import (
-    install as _install_literature_query_language,
-)
 
 _install_l4_pipeline(deep_research)
 _install_l4_pipeline_compat(_l4_pipeline_module, deep_research)
@@ -86,14 +78,6 @@ _install_l4_runtime_compat(deep_research, _l4_evidence_bundle_module)
 _install_l4_lineage(deep_research)
 _install_l45_context_binding(_l4_pipeline_module)
 _l4_closed_corpus.install(_l4_pipeline_module, deep_research)
-_install_literature_query_language(
-    _l05_multisource_module,
-    _europepmc_runtime_module,
-    _l4_inventory_module,
-    _l4_contextual_module,
-    _l4a_specter2_module,
-    _paperqa2_runtime_module,
-)
 
 # Provider observability is installed after all scientific Deep Research/L4
 # wrappers so it supervises the final runtime boundary without changing their
@@ -163,8 +147,7 @@ from research_loop.hypothesis_recall_context import (
 )
 from research_loop.l45_ledger import install as _install_l45_ledger
 
-# Normalize Chinese/English user semantics before any new canonical L0 contract
-# is frozen and before CLI parsers bind lifecycle command functions.
+# User language is normalized exactly once before canonical L0 is frozen.
 _install_l0_language_boundary(_lifecycle)
 _install_l45_ledger(_ledger_commands)
 _install_conditional_routing(_lifecycle, _context)
@@ -198,14 +181,11 @@ del _install_l4_registry_projection_integrity
 del _install_l4_inventory_projection, _install_l4_contextual_literature
 del _install_l4_evidence_bundle
 del _install_l4_runtime_compat, _install_l45_context_binding
-del _install_literature_query_language
 del _install_provider_runtime_observability
 del _deep_research_task_module
 del _l4_pipeline_module, _l4_lineage_module
 del _l4_provenance_module, _l4_inventory_module
 del _l4_method_registry_module, _l4_evidence_bundle_module
-del _l4_contextual_module, _l4a_specter2_module
-del _l05_multisource_module, _europepmc_runtime_module, _paperqa2_runtime_module
 del _l4_closed_corpus
 del _install_method_contracts, _install_reactivation_contracts
 del _install_receipt_idempotency, _install_hypothesis_reactivation
