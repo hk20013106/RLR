@@ -1,20 +1,38 @@
-"""Install one English-retrieval language invariant on existing runtime seams.
+"""Install the English-internal invariant on literature-facing runtime seams.
 
-This module creates no query planner, retriever, evidence authority, identity,
-or retry path. It only constrains existing L0.5/L4/PaperQA2/SPECTER2 consumers
-to English retrieval text and reuses already-authorized queries. Input support
-is intentionally limited to Chinese and English.
+User-language normalization occurs once upstream at the L0 -> ResearchSeed
+boundary. This module never translates. It only fails closed if later internal
+scientific state or retrieval text is not already English, and preserves the
+existing retrieval/ranking/evidence authorities.
 """
 from __future__ import annotations
 
 import copy
 
+from research_loop.l0_language import L0LanguageError, validate_internal_english
 from research_loop.l05_curie.contracts import CurieContractError
-from research_loop.l05_curie.query_language import (
-    classify_supported_input_language,
-    validate_english_retrieval_query,
-    validate_english_retrieval_queries,
-)
+
+
+def _english(value, *, name: str) -> str:
+    try:
+        return validate_internal_english(value, name=name)
+    except L0LanguageError as exc:
+        raise CurieContractError(str(exc)) from exc
+
+
+def _english_queries(values, *, name: str) -> list[str]:
+    if not isinstance(values, list) or not values:
+        raise CurieContractError(f"{name} must be a non-empty list")
+    result = []
+    seen = set()
+    for index, value in enumerate(values, 1):
+        query = _english(value, name=f"{name} item {index}")
+        key = query.casefold()
+        if key in seen:
+            raise CurieContractError(f"{name} must not contain duplicate queries")
+        seen.add(key)
+        result.append(query)
+    return result
 
 
 def install(
@@ -33,7 +51,7 @@ def install(
     def build_multisource_query_plan(*args, **kwargs):
         if kwargs.get("explicit_queries") is not None:
             kwargs = dict(kwargs)
-            kwargs["explicit_queries"] = validate_english_retrieval_queries(
+            kwargs["explicit_queries"] = _english_queries(
                 kwargs["explicit_queries"],
                 name="explicit English retrieval queries",
             )
@@ -41,7 +59,7 @@ def install(
         for item in plan.get("queries") or []:
             if not isinstance(item, dict):
                 continue
-            validate_english_retrieval_query(
+            _english(
                 item.get("query"),
                 name=(
                     "canonical QueryPlan English retrieval query "
@@ -58,58 +76,50 @@ def install(
                 "PaperQA2 retrieval requires a non-empty paper title anchor"
             )
         seed = seed if isinstance(seed, dict) else {}
-        question = str(seed.get("scientific_question") or "").strip()
-        hypothesis = str(seed.get("hypothesis_seed") or "").strip()
-        if question and hypothesis:
-            question_language = classify_supported_input_language(
-                question, name="ResearchSeed scientific_question"
-            )
-            hypothesis_language = classify_supported_input_language(
-                hypothesis, name="ResearchSeed hypothesis_seed"
-            )
-            if question_language == hypothesis_language == "en":
-                augmented_plan = (
-                    copy.deepcopy(query_plan) if isinstance(query_plan, dict) else {}
-                )
-                queries = list(augmented_plan.get("queries") or [])
-                queries.append({
-                    "query_id": "SEED_ENGLISH_FOCUS",
-                    "query": validate_english_retrieval_query(
-                        f"{question} {hypothesis}",
-                        name="English ResearchSeed retrieval focus",
-                    ),
-                    "intent": "english_seed_semantic_focus",
-                })
-                augmented_plan["queries"] = queries
-                selected_for_retrieval = copy.deepcopy(selected)
-                provenance = selected_for_retrieval.get("provenance")
-                provenance = provenance if isinstance(provenance, dict) else {}
-                provenance.pop("originating_query_ids", None)
-                selected_for_retrieval["provenance"] = provenance
-                return original_paperqa2_query(
-                    selected_for_retrieval, seed, augmented_plan
-                )
-        return original_paperqa2_query(selected, seed, query_plan)
+        question = _english(
+            seed.get("scientific_question"),
+            name="ResearchSeed scientific_question",
+        )
+        hypothesis = _english(
+            seed.get("hypothesis_seed"),
+            name="ResearchSeed hypothesis_seed",
+        )
+        # Preserve the pre-existing compatibility behavior for locator-only
+        # explicit queries such as EXT_ID:...: PaperQA2 still needs the English
+        # scientific semantic focus, not only the locator string.
+        augmented_plan = copy.deepcopy(query_plan) if isinstance(query_plan, dict) else {}
+        queries = list(augmented_plan.get("queries") or [])
+        queries.append({
+            "query_id": "SEED_ENGLISH_FOCUS",
+            "query": _english(
+                f"{question} {hypothesis}",
+                name="English ResearchSeed retrieval focus",
+            ),
+            "intent": "english_seed_semantic_focus",
+        })
+        augmented_plan["queries"] = queries
+        selected_for_retrieval = copy.deepcopy(selected)
+        provenance = selected_for_retrieval.get("provenance")
+        provenance = provenance if isinstance(provenance, dict) else {}
+        provenance.pop("originating_query_ids", None)
+        selected_for_retrieval["provenance"] = provenance
+        return original_paperqa2_query(
+            selected_for_retrieval, seed, augmented_plan
+        )
 
     original_build_prompt = l4_inventory_module.build_prompt
 
     def build_prompt(question, claim, known_sources=None):
-        for label, value in (
-            ("L4 scientific question", question),
-            ("L4 claim", claim),
-        ):
-            classify_supported_input_language(value, name=label)
+        _english(question, name="L4 scientific question")
+        _english(claim, name="L4 claim")
         prompt = original_build_prompt(question, claim, known_sources)
         return prompt + """
 
-Retrieval-language contract:
-- The scientific question and claim above may be written in Chinese or English only.
-- For Chinese input, express retrieval-facing method text in standard English
-  scientific terminology. English input should remain English.
-- Every method_inventory item's `name` and `purpose` MUST be written in English
-  scientific terminology because those fields can become downstream retrieval
-  focus. `inventory_reason` may remain in the input language.
-- Other input languages are unsupported and must fail closed.
+Internal-language contract:
+- All RLR internal scientific semantics are already English.
+- Every method_inventory item's `name`, `purpose`, and `inventory_reason` MUST
+  be written in standard English scientific terminology.
+- Do not translate, localize, or reproduce user-language text in these fields.
 - This language rule does not authorize literature retrieval in this offline
   inventory step.
 """
@@ -120,9 +130,9 @@ Retrieval-language contract:
         canonical = original_validate_inventory(l4p, dr, payload)
         for method in canonical.get("method_inventory") or []:
             method_id = str(method.get("method_id") or "").strip() or "<unknown>"
-            for field in ("name", "purpose"):
+            for field in ("name", "purpose", "inventory_reason"):
                 try:
-                    validate_english_retrieval_query(
+                    _english(
                         method.get(field),
                         name=f"L4A method {method_id} {field}",
                     )
@@ -142,7 +152,7 @@ Retrieval-language contract:
             }
             if method_id not in method_ids:
                 continue
-            query = validate_english_retrieval_query(
+            query = _english(
                 item.get("query"),
                 name=f"L4A method {method_id} contextual English query",
             )
@@ -152,7 +162,7 @@ Retrieval-language contract:
                 planned.append(query)
         if planned:
             return ". ".join(planned)
-        return validate_english_retrieval_query(
+        return _english(
             method.get("name"),
             name=f"L4A method {method_id or '<unknown>'} canonical English name",
         )
@@ -160,9 +170,7 @@ Retrieval-language contract:
     original_rank_method_papers = l4a_specter2_module.rank_method_papers
 
     def rank_method_papers(method_query, canonical_records, *, ranker=None):
-        query = validate_english_retrieval_query(
-            method_query, name="SPECTER2 English retrieval query"
-        )
+        query = _english(method_query, name="SPECTER2 English retrieval query")
         return original_rank_method_papers(query, canonical_records, ranker=ranker)
 
     original_paperqa_retrieve = (
@@ -170,9 +178,7 @@ Retrieval-language contract:
     )
 
     def retrieve_and_verify(self, *, paper, question, source_candidates, verify):
-        query = validate_english_retrieval_query(
-            question, name="PaperQA2 English retrieval query"
-        )
+        query = _english(question, name="PaperQA2 English retrieval query")
         return original_paperqa_retrieve(
             self,
             paper=paper,
@@ -182,9 +188,8 @@ Retrieval-language contract:
         )
 
     multisource_module.build_multisource_query_plan = build_multisource_query_plan
-    # europepmc_runtime imported this function directly before extension install;
-    # update that stable module reference too so explicit-query validation cannot
-    # be bypassed by calling the runtime rather than the CLI.
+    # EuropePMC imported the builder before this extension is installed; bind
+    # the same validated function there so the runtime cannot bypass the guard.
     europepmc_runtime_module.build_multisource_query_plan = build_multisource_query_plan
     europepmc_runtime_module._paperqa2_retrieval_query = paperqa2_retrieval_query
     l4_inventory_module.build_prompt = build_prompt
