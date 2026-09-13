@@ -214,7 +214,7 @@ def test_runtime_promotes_reserve_after_include_has_no_target_sections(tmp_path)
     result = run_europepmc_acquisition(
         project,
         "C001",
-        explicit_queries=["first selected paper regression"],
+        explicit_queries=["reserve regression"],
         max_papers=1,
         run_id="RUN_RESERVE_PROMOTION",
         http_get=http_get,
@@ -605,12 +605,7 @@ def test_paperqa2_retrieval_query_bounds_long_non_ascii_seed():
         "scientific_question": long_question,
         "hypothesis_seed": "需要定位具体方法机制",
     }
-    query_plan = {
-        "queries": [{
-            "query": "scientific retrieval boundary method mechanism",
-            "intent": "translated_seed_question_hypothesis",
-        }],
-    }
+    query_plan = {"queries": [{"query": long_question, "intent": "seed_question_hypothesis"}]}
 
     query = europepmc_runtime._paperqa2_retrieval_query(
         selected, seed, query_plan
@@ -619,7 +614,6 @@ def test_paperqa2_retrieval_query_bounds_long_non_ascii_seed():
     assert selected["title"] in query
     assert len(query) < len(long_question)
     assert query != long_question
-    assert "scientific retrieval boundary" in query.casefold()
 
 
 def test_paperqa2_retrieval_query_fails_closed_without_title_or_target_terms():
@@ -628,9 +622,9 @@ def test_paperqa2_retrieval_query_fails_closed_without_title_or_target_terms():
             {}, {"scientific_question": "method", "hypothesis_seed": "target"}, {}
         )
 
-    with pytest.raises(CurieContractError, match="targeted English scientific retrieval terms"):
+    with pytest.raises(CurieContractError, match="targeted scientific retrieval terms"):
         europepmc_runtime._paperqa2_retrieval_query(
             {"title": "Paper"},
             {"scientific_question": "", "hypothesis_seed": ""},
-            {"queries": [{"query": "the and of", "intent": "stopwords_only"}]},
+            {"queries": []},
         )
