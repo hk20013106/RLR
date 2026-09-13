@@ -13,6 +13,7 @@ from research_loop.l05_curie.query_planner import (
     build_scientific_query_plan,
     requires_provider_planning,
 )
+from tests.test_l05_curie_europepmc_runtime import _project
 
 
 CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
@@ -49,6 +50,23 @@ def test_l05_chinese_requires_provider_planning_but_english_does_not():
     ) is False
 
 
+def test_l05_english_planner_is_generic_not_project_lexicon_driven():
+    plan = build_scientific_query_plan(
+        _seed(
+            "How does drought alter stomatal closure in Arabidopsis leaves?",
+            "ABA signaling may increase guard-cell ion efflux during water stress.",
+        )
+    )
+
+    rendered = " ".join(item["query"] for item in plan["queries"]).casefold()
+    assert 3 <= len(plan["queries"]) <= 6
+    assert "drought" in rendered
+    assert "stomatal" in rendered
+    assert "cardiac" not in rendered
+    assert "shrew" not in rendered
+    assert "adrenergic" not in rendered
+
+
 def test_multisource_rejects_explicit_cjk_retrieval_query_before_transport():
     seed = _seed(
         "How does cochlear pigment affect acoustic injury?",
@@ -62,6 +80,24 @@ def test_multisource_rejects_explicit_cjk_retrieval_query_before_transport():
             explicit_queries=["耳蜗 黑色素 噪声损伤"],
             providers=["europe-pmc"],
         )
+
+
+def test_europepmc_runtime_cannot_bypass_explicit_query_language_gate(tmp_path):
+    project, _seed_value = _project(tmp_path)
+    called = {"transport": False}
+
+    def http_get(_url, _timeout):
+        called["transport"] = True
+        raise AssertionError("transport must not run for a Chinese retrieval query")
+
+    with pytest.raises(CurieContractError, match="English-only scientific text"):
+        europepmc_runtime.run_europepmc_acquisition(
+            project,
+            "C001",
+            explicit_queries=["耳蜗 黑色素 噪声损伤"],
+            http_get=http_get,
+        )
+    assert called["transport"] is False
 
 
 def test_default_l05_planner_fails_closed_for_chinese_seed_instead_of_using_project_lexicon():
