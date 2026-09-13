@@ -150,6 +150,7 @@ from research_loop.l05_native_binding import install as _install_l05_native_bind
 _install_l05_native_binding(_research_seed_module)
 
 from research_loop.commands import lifecycle as _lifecycle
+from research_loop.l0_language_boundary import install as _install_l0_language_boundary
 from research_loop.commands import ledger as _ledger_commands
 from research_loop import context as _context
 from research_loop.conditional_routing import install as _install_conditional_routing
@@ -162,6 +163,9 @@ from research_loop.hypothesis_recall_context import (
 )
 from research_loop.l45_ledger import install as _install_l45_ledger
 
+# Normalize Chinese/English user semantics before any new canonical L0 contract
+# is frozen and before CLI parsers bind lifecycle command functions.
+_install_l0_language_boundary(_lifecycle)
 _install_l45_ledger(_ledger_commands)
 _install_conditional_routing(_lifecycle, _context)
 # For native v2.1 L1, replace the historical Deep Research acquisition gate
@@ -209,6 +213,7 @@ del _install_reactivation_constraints, _install_conditional_skip_constraints
 del _install_reactivation_compat
 del _install_topology_extensions, _install_l45_ledger
 del _install_l05_native_binding, _research_seed_module
+del _install_l0_language_boundary
 del _install_l05_native_context_gate
 del _install_conditional_routing, _install_l05_context
 del _install_hypothesis_recall_context
