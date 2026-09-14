@@ -1,7 +1,7 @@
 """Bounded, provider-neutral query planning for Curie acquisition.
 
-This module owns only scientific-query planning.  It never selects records,
-retrieves source bytes, verifies evidence, or creates an EvidencePack.
+Language normalization is complete before canonical L0 is frozen. This module
+only plans deterministic scientific queries from that canonical semantic state.
 """
 from __future__ import annotations
 
@@ -10,37 +10,18 @@ import unicodedata
 
 from .contracts import CurieContractError
 
-
 SCIENTIFIC_QUERY_PLAN_SCHEMA_VERSION = "L05ScientificQueryPlan/v1"
 SCIENTIFIC_QUERY_PLANNER_VERSION = "scientific-query-planner/v1"
 MIN_QUERY_CANDIDATES = 3
 MAX_QUERY_CANDIDATES = 6
 MAX_REFORMULATION_INDEX = 1
 MAX_QUERY_CHARS = 240
-_CJK = re.compile(r"[\u3400-\u9fff]")
 _TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9+]*(?:[-/][A-Za-z0-9+]+)*")
-_STOPWORDS = frozenset({"a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "for", "from", "how", "in", "is", "of", "on", "or", "that", "the", "to", "what", "which", "with"})
-_LEXICON = (
-    ("高心率", "high heart rate", "phenomenon"),
-    ("病理性重塑", "pathological remodeling", "outcome"),
-    ("肾上腺素能", "adrenergic regulation", "mechanism"),
-    ("钙离子处理", "calcium handling", "mechanism"),
-    ("Ca2+", "calcium handling", "mechanism"),
-    ("兴奋-收缩", "excitation-contraction coupling", "mechanism"),
-    ("心脏", "cardiac", "system"),
-    ("鼩鼱", "shrews", "organism"),
-    ("哺乳动物", "mammals", "organism"),
-)
-_ROLES = {
-    "heart": ("heart", "system"), "cardiac": ("cardiac", "system"),
-    "calcium": ("calcium handling", "mechanism"),
-    "ca2+": ("calcium handling", "mechanism"),
-    "adrenergic": ("adrenergic regulation", "mechanism"),
-    "remodeling": ("remodeling", "outcome"), "injury": ("injury", "outcome"),
-    "adaptation": ("adaptation", "outcome"), "mechanism": ("mechanism", "mechanism"),
-    "shrew": ("shrews", "organism"), "shrews": ("shrews", "organism"),
-    "mammal": ("mammals", "organism"), "mammals": ("mammals", "organism"),
-}
+_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "for",
+    "from", "how", "in", "is", "of", "on", "or", "that", "the", "to",
+    "what", "which", "with",
+})
 
 
 def _text(value: object, name: str) -> str:
@@ -51,37 +32,55 @@ def _text(value: object, name: str) -> str:
 
 def _unique(values: list[str]) -> list[str]:
     result: list[str] = []
+    seen: set[str] = set()
     for value in values:
-        value = re.sub(r"\s+", " ", value).strip().lower()
-        if value and value not in result:
-            result.append(value)
+        normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+        key = normalized.casefold()
+        if normalized and key not in seen:
+            seen.add(key)
+            result.append(normalized)
     return result
 
 
-def _concepts(seed: dict) -> list[dict]:
-    question = _text(seed.get("scientific_question"), "ResearchSeed scientific_question")
-    hypothesis = _text(seed.get("hypothesis_seed"), "ResearchSeed hypothesis_seed")
-    source = f"{question} {hypothesis}"
+def _english_tokens(value: str) -> list[str]:
+    return _unique([
+        token
+        for token in _TOKEN.findall(value)
+        if token.casefold() not in _STOPWORDS
+    ])
+
+
+def _seed_terms(seed: dict) -> tuple[str, str, list[str], list[str]]:
+    if not isinstance(seed, dict):
+        raise CurieContractError("ResearchSeed must be an object")
+    question = _text(
+        seed.get("scientific_question"), "ResearchSeed scientific_question"
+    )
+    hypothesis = _text(
+        seed.get("hypothesis_seed"), "ResearchSeed hypothesis_seed"
+    )
+    question_tokens = _english_tokens(question)
+    hypothesis_tokens = _english_tokens(hypothesis)
+    if not question_tokens and not hypothesis_tokens:
+        raise CurieContractError(
+            "scientific query planner could not derive searchable concepts from the ResearchSeed"
+        )
+    return question, hypothesis, question_tokens, hypothesis_tokens
+
+
+def _concepts(question_tokens: list[str], hypothesis_tokens: list[str]) -> list[dict]:
     concepts: list[dict] = []
     seen: set[str] = set()
-
-    def add(term: str, role: str, origin: str) -> None:
-        term = term.strip().lower()
-        if term and term not in seen:
-            concepts.append({"term": term, "role": role, "source": origin})
-            seen.add(term)
-
-    for needle, term, role in _LEXICON:
-        if needle.casefold() in source.casefold():
-            add(term, role, f"lexicon:{needle}")
-    for token in _TOKEN.findall(source):
-        normalized = token.casefold()
-        if normalized in _STOPWORDS:
-            continue
-        term, role = _ROLES.get(normalized, (normalized, "mechanism" if normalized.endswith(("ing", "tion", "ity")) else "phenomenon"))
-        add(term, role, "seed")
-    if not concepts:
-        raise CurieContractError("scientific query planner could not derive searchable concepts from the ResearchSeed")
+    for source, values in (
+        ("scientific_question", question_tokens),
+        ("hypothesis_seed", hypothesis_tokens),
+    ):
+        for term in values:
+            key = term.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            concepts.append({"term": term, "role": "concept", "source": source})
     return concepts
 
 
@@ -95,65 +94,143 @@ def _bounded(values: list[str]) -> str:
 
 
 def validate_scientific_query_plan(plan: dict) -> dict:
-    if not isinstance(plan, dict) or plan.get("schema_version") != SCIENTIFIC_QUERY_PLAN_SCHEMA_VERSION:
+    if (
+        not isinstance(plan, dict)
+        or plan.get("schema_version") != SCIENTIFIC_QUERY_PLAN_SCHEMA_VERSION
+    ):
         raise CurieContractError("scientific query plan schema_version is invalid")
     if plan.get("planner") != SCIENTIFIC_QUERY_PLANNER_VERSION:
         raise CurieContractError("scientific query plan planner is invalid")
     index = plan.get("reformulation_index")
-    if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index <= MAX_REFORMULATION_INDEX:
-        raise CurieContractError("scientific query plan reformulation_index is invalid")
-    if set(plan).intersection({"papers", "evidence", "evidence_pack", "verification", "status"}):
-        raise CurieContractError("scientific query plan must not contain evidence authority fields")
+    if (
+        isinstance(index, bool)
+        or not isinstance(index, int)
+        or not 0 <= index <= MAX_REFORMULATION_INDEX
+    ):
+        raise CurieContractError(
+            "scientific query plan reformulation_index is invalid"
+        )
+    if set(plan).intersection({
+        "papers", "evidence", "evidence_pack", "verification", "status"
+    }):
+        raise CurieContractError(
+            "scientific query plan must not contain evidence authority fields"
+        )
     concepts = plan.get("concepts")
     queries = plan.get("queries")
-    if not isinstance(concepts, list) or not concepts or not isinstance(queries, list) or not MIN_QUERY_CANDIDATES <= len(queries) <= MAX_QUERY_CANDIDATES:
-        raise CurieContractError("scientific query plan must contain bounded concepts and queries")
+    if (
+        not isinstance(concepts, list)
+        or not concepts
+        or not isinstance(queries, list)
+        or not MIN_QUERY_CANDIDATES <= len(queries) <= MAX_QUERY_CANDIDATES
+    ):
+        raise CurieContractError(
+            "scientific query plan must contain bounded concepts and queries"
+        )
     seen: set[str] = set()
     for query in queries:
-        if not isinstance(query, dict) or not str(query.get("intent") or "").strip() or not str(query.get("query") or "").strip() or not isinstance(query.get("concepts"), list) or not query["concepts"]:
+        if (
+            not isinstance(query, dict)
+            or not str(query.get("intent") or "").strip()
+            or not str(query.get("query") or "").strip()
+            or not isinstance(query.get("concepts"), list)
+            or not query["concepts"]
+        ):
             raise CurieContractError("scientific query plan query is invalid")
-        if _CJK.search(query["query"]):
-            raise CurieContractError("scientific query plan query must be normalized to retrieval language")
-        key = query["query"].casefold()
+        rendered = _text(query["query"], "retrieval query")
+        key = rendered.casefold()
         if key in seen:
-            raise CurieContractError("scientific query plan queries must be distinct")
+            raise CurieContractError(
+                "scientific query plan queries must be distinct"
+            )
         seen.add(key)
     return plan
 
 
-def build_scientific_query_plan(seed: dict, *, reformulation_index: int = 0) -> dict:
-    if isinstance(reformulation_index, bool) or not isinstance(reformulation_index, int) or not 0 <= reformulation_index <= MAX_REFORMULATION_INDEX:
-        raise CurieContractError(f"reformulation_index must be between 0 and {MAX_REFORMULATION_INDEX}")
-    concepts = _concepts(seed)
-    by_role = lambda role: [item["term"] for item in concepts if item["role"] == role]
-    core = _unique(by_role("phenomenon") + by_role("organism") + by_role("system") + by_role("outcome") + by_role("mechanism"))
-    if reformulation_index:
-        templates = [
-            ("broad_biological_context", by_role("organism") + by_role("system") + by_role("phenomenon")),
-            ("mechanism_axis", by_role("system") + by_role("mechanism")[:3] + ["primary evidence"]),
-            ("outcome_or_adaptation", by_role("outcome") + by_role("mechanism")[-3:] + ["adaptation"]),
-        ]
+def _append_query(
+    queries: list[dict], intent: str, terms: list[str]
+) -> None:
+    rendered = _bounded(terms)
+    if rendered.casefold() in {
+        str(item["query"]).casefold() for item in queries
+    }:
+        return
+    queries.append({
+        "intent": intent,
+        "query": rendered,
+        "concepts": _unique(terms),
+    })
+
+
+def build_scientific_query_plan(
+    seed: dict, *, reformulation_index: int = 0
+) -> dict:
+    if (
+        isinstance(reformulation_index, bool)
+        or not isinstance(reformulation_index, int)
+        or not 0 <= reformulation_index <= MAX_REFORMULATION_INDEX
+    ):
+        raise CurieContractError(
+            f"reformulation_index must be between 0 and {MAX_REFORMULATION_INDEX}"
+        )
+    _question, _hypothesis, question_tokens, hypothesis_tokens = _seed_terms(seed)
+    concepts = _concepts(question_tokens, hypothesis_tokens)
+    core = _unique(question_tokens + hypothesis_tokens)
+
+    queries: list[dict] = []
+    if reformulation_index == 0:
+        _append_query(queries, "scientific_question", question_tokens)
+        _append_query(queries, "hypothesis_seed", hypothesis_tokens)
+        _append_query(
+            queries,
+            "combined_scientific_context",
+            core + ["primary research"],
+        )
     else:
-        templates = [
-            ("broad_biological_context", core[:5]),
-            ("mechanism_axis", by_role("system") + by_role("phenomenon") + by_role("mechanism")[:4]),
-            ("outcome_or_adaptation", by_role("phenomenon") + by_role("outcome") + by_role("mechanism")[-3:]),
-        ]
-    queries = []
-    for intent, terms in templates:
-        rendered = _bounded(terms or core)
-        if rendered not in [item["query"] for item in queries]:
-            queries.append({"intent": intent, "query": rendered, "concepts": _unique(terms or core)})
-    for suffix in ("mechanistic evidence", "comparative evidence", "primary research"):
+        _append_query(
+            queries,
+            "question_primary_evidence",
+            question_tokens + ["primary evidence"],
+        )
+        _append_query(
+            queries,
+            "hypothesis_experimental_evidence",
+            hypothesis_tokens + ["experimental evidence"],
+        )
+        _append_query(
+            queries,
+            "combined_comparative_evidence",
+            core + ["comparative evidence"],
+        )
+
+    for suffix in (
+        "mechanistic evidence",
+        "experimental evidence",
+        "comparative evidence",
+        "primary research",
+    ):
         if len(queries) >= MIN_QUERY_CANDIDATES:
             break
-        rendered = _bounded(core + [suffix])
-        if rendered not in [item["query"] for item in queries]:
-            queries.append({"intent": "complementary_scientific_evidence", "query": rendered, "concepts": _unique(core + [suffix])})
-    plan = {"schema_version": SCIENTIFIC_QUERY_PLAN_SCHEMA_VERSION, "planner": SCIENTIFIC_QUERY_PLANNER_VERSION, "language": "mixed" if _CJK.search(str(seed)) and _TOKEN.search(str(seed)) else ("zh" if _CJK.search(str(seed)) else "en"), "reformulation_index": reformulation_index, "concepts": concepts, "queries": queries[:MAX_QUERY_CANDIDATES]}
+        _append_query(
+            queries,
+            "complementary_scientific_evidence",
+            core + [suffix],
+        )
+
+    plan = {
+        "schema_version": SCIENTIFIC_QUERY_PLAN_SCHEMA_VERSION,
+        "planner": SCIENTIFIC_QUERY_PLANNER_VERSION,
+        "language": "en",
+        "reformulation_index": reformulation_index,
+        "concepts": concepts,
+        "queries": queries[:MAX_QUERY_CANDIDATES],
+    }
     return validate_scientific_query_plan(plan)
 
 
 def reformulate_scientific_query_plan(seed: dict, previous_plan: dict) -> dict:
     previous = validate_scientific_query_plan(previous_plan)
-    return build_scientific_query_plan(seed, reformulation_index=previous["reformulation_index"] + 1)
+    return build_scientific_query_plan(
+        seed,
+        reformulation_index=previous["reformulation_index"] + 1,
+    )
