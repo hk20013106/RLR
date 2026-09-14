@@ -61,6 +61,7 @@ _PROFILES = {
             "round_manifest_hash_integrity",
             "continuation_manifest_binding_integrity",
             "runner_nonzero_propagation",
+            "first_mile_project_ready_integrity",
         ),
         required_validation=(
             _pytest_step(
@@ -72,6 +73,13 @@ _PROFILES = {
             _pytest_step(
                 "root_entrypoint_regression",
                 "tests/test_root_run_loop_entrypoint.py",
+                "-q",
+            ),
+            _pytest_step(
+                "first_mile_autowake",
+                "tests/test_first_mile_maintenance_autowake.py",
+                "tests/test_first_mile_unhandled_autowake.py",
+                "tests/test_first_mile_bootstrap.py",
                 "-q",
             ),
             _pytest_step(

@@ -54,6 +54,16 @@ def test_phase3_composes_maintenance_only_at_public_runtime_boundary():
     assert "research_loop.cli" in imports
 
 
+def test_first_mile_autowake_stays_at_repository_root_boundary():
+    imports = _imports(ROOT / "research_loop_v04.py")
+
+    assert "rlr_maintenance.autowake_adapter" in imports
+    assert all(
+        "rlr_maintenance.autowake_adapter" not in _imports(path)
+        for path in sorted((ROOT / "src" / "research_loop").rglob("*.py"))
+    )
+
+
 def test_phase3_public_runtime_entrypoint_installs_outer_adapter():
     completed = subprocess.run(
         [
