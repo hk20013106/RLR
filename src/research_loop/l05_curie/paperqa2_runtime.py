@@ -49,6 +49,18 @@ _PINNED_RUNTIME = {
 }
 
 
+class PaperQA2ExecutionError(CurieContractError):
+    """PaperQA2 did not produce a trustworthy successful process response."""
+
+
+class PaperQA2IntegrityError(CurieContractError):
+    """PaperQA2 runtime or document provenance failed an integrity check."""
+
+
+class PaperQA2SourceError(CurieContractError):
+    """A valid PaperQA2 result could not yield evidence for this source."""
+
+
 def _text(value: object, name: str) -> str:
     value = str(value or "").strip()
     if not value:
@@ -56,9 +68,16 @@ def _text(value: object, name: str) -> str:
     return value
 
 
+def _integrity_text(value: object, name: str) -> str:
+    try:
+        return _text(value, name)
+    except CurieContractError as exc:
+        raise PaperQA2IntegrityError(str(exc)) from exc
+
+
 def _sha256_file(path: Path) -> str:
     if not path.is_file():
-        raise CurieContractError(f"PaperQA2 PDF is missing: {path}")
+        raise PaperQA2IntegrityError(f"PaperQA2 PDF is missing: {path}")
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
@@ -80,40 +99,48 @@ def validate_pinned_paperqa2_runtime(
 ) -> dict:
     """Validate immutable PaperQA2 integration provenance at every use boundary."""
     if not isinstance(runtime, dict):
-        raise CurieContractError("PaperQA2 bridge runtime provenance must be an object")
+        raise PaperQA2IntegrityError("PaperQA2 bridge runtime provenance must be an object")
     schema_version = runtime.get("schema_version")
     if schema_version == PAPERQA2_RUNTIME_SCHEMA_VERSION:
         required_runtime = _REQUIRED_RUNTIME + ("pdf_sha256",)
     elif schema_version == PAPERQA2_DOCUMENT_RUNTIME_SCHEMA_VERSION:
         required_runtime = _REQUIRED_RUNTIME + ("document_sha256", "media_type")
     else:
-        raise CurieContractError("PaperQA2 bridge runtime schema_version is invalid")
+        raise PaperQA2IntegrityError("PaperQA2 bridge runtime schema_version is invalid")
     for field in required_runtime:
-        _text(runtime.get(field), f"PaperQA2 bridge runtime {field}")
+        _integrity_text(runtime.get(field), f"PaperQA2 bridge runtime {field}")
     commit = str(runtime["upstream_commit"]).lower()
     if not _GIT_COMMIT.fullmatch(commit):
-        raise CurieContractError("PaperQA2 bridge upstream_commit must be a 40-character git SHA")
+        raise PaperQA2IntegrityError(
+            "PaperQA2 bridge upstream_commit must be a 40-character git SHA"
+        )
     for field, expected in _PINNED_RUNTIME.items():
         observed = commit if field == "upstream_commit" else str(runtime[field])
         if observed != expected:
-            raise CurieContractError(
+            raise PaperQA2IntegrityError(
                 f"PaperQA2 runtime {field} does not match the pinned integration"
             )
     if schema_version == PAPERQA2_RUNTIME_SCHEMA_VERSION:
-        expected_hash = _text(pdf_sha256, "requested PaperQA2 PDF hash").lower()
+        expected_hash = _integrity_text(
+            pdf_sha256, "requested PaperQA2 PDF hash"
+        ).lower()
         if str(runtime["pdf_sha256"]).lower() != expected_hash:
-            raise CurieContractError("PaperQA2 runtime PDF hash does not match the requested PDF")
+            raise PaperQA2IntegrityError(
+                "PaperQA2 runtime PDF hash does not match the requested PDF"
+            )
     else:
-        expected_hash = _text(
+        expected_hash = _integrity_text(
             document_sha256, "requested PaperQA2 document hash"
         ).lower()
-        expected_media_type = _text(media_type, "requested PaperQA2 media_type")
+        expected_media_type = _integrity_text(
+            media_type, "requested PaperQA2 media_type"
+        )
         if str(runtime["document_sha256"]).lower() != expected_hash:
-            raise CurieContractError(
+            raise PaperQA2IntegrityError(
                 "PaperQA2 runtime document hash does not match the requested document"
             )
         if str(runtime["media_type"]) != expected_media_type:
-            raise CurieContractError(
+            raise PaperQA2IntegrityError(
                 "PaperQA2 runtime media_type does not match the requested document"
             )
     return copy.deepcopy(runtime)
@@ -196,19 +223,19 @@ class PaperQA2SubprocessBackend:
                 errors="strict",
             )
         except OSError as exc:
-            raise CurieContractError(
+            raise PaperQA2ExecutionError(
                 f"PaperQA2 subprocess could not start: {exc}"
             ) from exc
         if completed.terminal_state == "timed_out":
-            raise CurieContractError("PaperQA2 subprocess timed out")
+            raise PaperQA2ExecutionError("PaperQA2 subprocess timed out")
         if completed.returncode != 0:
-            raise CurieContractError(
+            raise PaperQA2ExecutionError(
                 f"PaperQA2 subprocess failed with exit code {completed.returncode}"
             )
         try:
             payload = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
-            raise CurieContractError("PaperQA2 bridge did not return JSON") from exc
+            raise PaperQA2ExecutionError("PaperQA2 bridge did not return JSON") from exc
         if not isinstance(payload, dict) or payload.get("engine") != "paperqa2":
             raise CurieContractError("PaperQA2 bridge engine identity is invalid")
         if document_path is not None:
@@ -365,7 +392,9 @@ def align_paperqa2_chunks(*, chunks: list[dict], source_candidates: list[dict]) 
                 best_by_locator[locator] = candidate
 
     if not best_by_locator:
-        raise CurieContractError("PaperQA2 retrieved chunks could not align to source candidates")
+        raise PaperQA2SourceError(
+            "PaperQA2 retrieved chunks could not align to source candidates"
+        )
 
     aligned: list[dict] = []
     winners = sorted(
