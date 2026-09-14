@@ -4,7 +4,12 @@ import json
 import sys
 from pathlib import Path
 
-from research_loop import deep_research, deep_research_task, l0_preflight, structured_execution
+from research_loop import (
+    deep_research,
+    deep_research_task,
+    l0_preflight,
+    structured_execution,
+)
 from research_loop import l85_literature_verification
 from research_loop import l4_evidence_bundle, l4_pipeline, research_seed
 from research_loop.common import _now
@@ -512,6 +517,16 @@ def _deep_research_spec_from_args(args):
     }
     return deep_research.load_runtime_spec(args.project_dir, overrides)
 
+
+def _require_bound_paperqa2(spec):
+    from research_loop import runtime_preflight
+
+    try:
+        return runtime_preflight.require_bound_paperqa2(spec)
+    except runtime_preflight.RuntimePreflightError as exc:
+        raise deep_research.DeepResearchError(str(exc)) from exc
+
+
 def cmd_deep_research_run(args):
     """Run historical research or the profile-owned native evidence stage."""
     project_dir = Path(args.project_dir)
@@ -546,6 +561,8 @@ def cmd_deep_research_run(args):
     if l4a_manifest:
         fm = _load_yaml_front(cf)
         try:
+            spec, _skill_version = deep_research.load_runtime_spec(project_dir)
+            _require_bound_paperqa2(spec)
             profile, binding = _bound_profile(project_dir)
             _, node_map, _ = topology_for_profile(profile.profile_id)
             research_persona = str(
@@ -571,7 +588,11 @@ def cmd_deep_research_run(args):
             ok, reason = deep_research.audit_evidence_pack(
                 project_dir, args.cand_id, "L4", run_id=artifact["run_id"]
             )
-        except (deep_research.DeepResearchError, KeyError, ValueError) as exc:
+        except (
+            deep_research.DeepResearchError,
+            KeyError,
+            ValueError,
+        ) as exc:
             print(f"ERROR: L4B resume failed: {exc}", file=sys.stderr)
             return 3
         if not ok:
@@ -607,6 +628,12 @@ def cmd_deep_research_run(args):
     if not ready:
         print(f"ERROR: Deep Research runtime is not ready: {reason}", file=sys.stderr)
         return 3
+    if bound_profile.profile_id == PROFILE_V21_CATALOG_1 and args.node == "L4":
+        try:
+            _require_bound_paperqa2(spec)
+        except deep_research.DeepResearchError as exc:
+            print(f"ERROR: Deep Research runtime is not ready: {exc}", file=sys.stderr)
+            return 3
     fm = _load_yaml_front(cf)
     try:
         profile, binding = _bound_profile(project_dir)

@@ -302,6 +302,29 @@ class PaperQA2CurieRuntime:
         }
 
 
+def runtime_from_config(config: object) -> PaperQA2CurieRuntime:
+    """Build the one pinned PaperQA2 runtime from an explicit bound config."""
+
+    if not isinstance(config, dict) or not config:
+        raise CurieContractError("PaperQA2 runtime is not configured")
+    required = ("python_executable", "bridge_script", "paperqa_repo", "pqa_home")
+    missing = [
+        field for field in required if not str(config.get(field) or "").strip()
+    ]
+    if missing:
+        raise CurieContractError(
+            "PaperQA2 runtime config is incomplete: " + ", ".join(missing)
+        )
+    backend = PaperQA2SubprocessBackend(
+        python_executable=config["python_executable"],
+        bridge_script=config["bridge_script"],
+        paperqa_repo=config["paperqa_repo"],
+        pqa_home=config["pqa_home"],
+        timeout_seconds=int(config.get("timeout_seconds") or 300),
+    )
+    return PaperQA2CurieRuntime(backend=backend, backend_id=backend.backend_id)
+
+
 def align_paperqa2_chunks(*, chunks: list[dict], source_candidates: list[dict]) -> list[dict]:
     """Map retrieved chunks to exact source paragraphs without certifying them.
 

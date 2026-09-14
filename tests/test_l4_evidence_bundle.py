@@ -1,10 +1,12 @@
 import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 from research_loop import deep_research as dr
+from research_loop import cli as rlr_cli
 from research_loop import l4_pipeline as l4p
 from research_loop import l4_inventory
 from research_loop import l4_evidence_bundle as bundle
@@ -162,6 +164,173 @@ def _response(url, payload=A1_XML):
     }
 
 
+def _native_l4_project_with_missing_paperqa2(tmp_path):
+    project = tmp_path / "project"
+    candidate = project / "01_Candidates" / "C1.md"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text(
+        "---\nquestion: Which method should test H1?\n"
+        "claim: H1 predicts differential expression.\nround_id: 1\n---\n",
+        encoding="utf-8",
+    )
+    manifest = _persist(
+        project,
+        assets=[_asset(selection_status="selected")],
+        methods=[_method(source_asset_ids=["A1"])],
+    )
+    preflight = project / "00_Preflight"
+    preflight.mkdir(parents=True, exist_ok=True)
+    runtime_path = preflight / "deep_research_runtime.json"
+    runtime_path.write_text(
+        json.dumps(
+            {
+                "schema_version": dr.SCHEMA_VERSION,
+                "backend": "codex",
+                "executable": sys.executable,
+                "plugin_dir": "",
+                "skill_path": "",
+                "skill_version": "test",
+                "timeout": 30,
+                "top_k_per_method": 5,
+                "paperqa2": {},
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    receipt_path = preflight / "preflight_receipt.json"
+    receipt_path.write_text(
+        json.dumps({"schema_version": "L0PreflightReceipt/v2", "status": "PASS"})
+        + "\n",
+        encoding="utf-8",
+    )
+    return project, manifest, runtime_path, receipt_path
+
+
+def _run_missing_paperqa2_native_l4(monkeypatch, project, manifest, mode):
+    downstream_calls = []
+    monkeypatch.setenv("RLR_HOST_BACKEND", "codex")
+    monkeypatch.setattr(
+        research_commands.l0_preflight,
+        "validate_project_ready",
+        lambda *args, **kwargs: {"status": "PASS", "legacy": False},
+    )
+    monkeypatch.setattr(
+        research_commands,
+        "_bound_profile",
+        lambda _project: (
+            SimpleNamespace(profile_id="v2.1-catalog-1"),
+            {"project_id": "P1"},
+        ),
+    )
+    monkeypatch.setattr(
+        research_commands,
+        "topology_for_profile",
+        lambda _profile: (
+            {},
+            {"L4": {"research_required": True, "research_persona": "Curie"}},
+            {},
+        ),
+    )
+    monkeypatch.setattr(dr, "audit_evidence_pack", lambda *args, **kwargs: (True, ""))
+
+    def normal_l4(*args, **kwargs):
+        downstream_calls.append("normal")
+        return {"run_id": "C1_L4"}
+
+    def replay_l4b(*args, **kwargs):
+        downstream_calls.append("replay")
+        return {"run_id": "C1_L4"}
+
+    monkeypatch.setattr(dr, "run_and_persist", normal_l4)
+    monkeypatch.setattr(bundle, "run_l4b_from_manifest", replay_l4b)
+    command = [
+        "deep-research-run",
+        str(project),
+        "C1",
+        "--node",
+        "L4",
+    ]
+    if mode == "replay":
+        command.extend(["--l4a-manifest", manifest["path"]])
+    args = rlr_cli.build_parser().parse_args(command)
+    return args.func(args), downstream_calls
+
+
+def test_bound_native_l4_empty_paperqa2_is_not_ready(tmp_path):
+    project, _manifest, _runtime_path, _receipt_path = (
+        _native_l4_project_with_missing_paperqa2(tmp_path)
+    )
+    spec, _skill_version = dr.load_runtime_spec(project)
+
+    with pytest.raises(dr.DeepResearchError, match="PaperQA2"):
+        bundle._paperqa_runtime_from_spec(dr, spec)
+
+
+@pytest.mark.parametrize("mode", ["normal", "replay"])
+def test_native_l4_and_replay_reject_same_missing_paperqa2(
+    monkeypatch, tmp_path, mode
+):
+    project, manifest, _runtime_path, _receipt_path = (
+        _native_l4_project_with_missing_paperqa2(tmp_path)
+    )
+
+    result, downstream_calls = _run_missing_paperqa2_native_l4(
+        monkeypatch, project, manifest, mode
+    )
+
+    assert (result, downstream_calls) == (3, [])
+
+
+def test_bound_paperqa2_fields_reach_real_subprocess_backend(tmp_path):
+    python_executable = tmp_path / "runtime" / "python.exe"
+    python_executable.parent.mkdir()
+    python_executable.write_bytes(b"test runtime executable")
+    bridge_script = tmp_path / "bridge.py"
+    bridge_script.write_text("# test bridge\n", encoding="utf-8")
+    paperqa_repo = tmp_path / "paper-qa"
+    paperqa_repo.mkdir()
+    pqa_home = tmp_path / "pqa-home"
+    spec = dr.RuntimeSpec(
+        backend="codex",
+        executable=sys.executable,
+        paperqa2={
+            "python_executable": str(python_executable),
+            "bridge_script": str(bridge_script),
+            "paperqa_repo": str(paperqa_repo),
+            "pqa_home": str(pqa_home),
+        },
+    )
+
+    runtime = bundle._paperqa_runtime_from_spec(dr, spec)
+
+    assert runtime.backend.python_executable == python_executable.resolve()
+    assert runtime.backend.bridge_script == bridge_script.resolve()
+    assert runtime.backend.paperqa_repo == paperqa_repo.resolve()
+    assert runtime.backend.pqa_home == pqa_home.resolve()
+
+
+def test_bound_runtime_config_is_not_rewritten_on_capability_failure(
+    monkeypatch, tmp_path
+):
+    project, manifest, runtime_path, receipt_path = (
+        _native_l4_project_with_missing_paperqa2(tmp_path)
+    )
+    manifest_path = project / manifest["path"]
+    before = {
+        path: path.read_bytes()
+        for path in (runtime_path, receipt_path, manifest_path)
+    }
+
+    result, downstream_calls = _run_missing_paperqa2_native_l4(
+        monkeypatch, project, manifest, "replay"
+    )
+
+    assert {path: path.read_bytes() for path in before} == before
+    assert (result, downstream_calls) == (3, [])
+
+
 def test_inventory_promotes_referenced_reserve_asset(tmp_path):
     manifest = _persist(
         tmp_path,
@@ -176,7 +345,9 @@ def test_inventory_promotes_referenced_reserve_asset(tmp_path):
     assert l4p.validate_l4a_manifest(tmp_path, manifest) == (True, "")
 
 
-def test_l4b_resume_from_existing_manifest_skips_l4a_provider(monkeypatch, tmp_path):
+def test_l4b_resume_from_existing_manifest_skips_l4a_provider(
+    monkeypatch, tmp_path, l4_paperqa2_runtime
+):
     """An explicit frozen manifest enters deterministic L4B without discovery."""
     project = tmp_path / "project"
     manifest = _persist(
@@ -204,6 +375,7 @@ def test_l4b_resume_from_existing_manifest_skips_l4a_provider(monkeypatch, tmp_p
         round_id="1",
         profile_id="v2.1-catalog-1",
         fetcher=lambda url: _response(url),
+        paperqa_runtime=l4_paperqa2_runtime(METHOD_TEXT)[0],
     )
 
     assert calls == []
@@ -375,7 +547,9 @@ def test_l4b_resume_revalidates_manifest_identity_and_hash(tmp_path):
         )
 
 
-def test_native_l4_entry_resumes_l4b_without_provider(monkeypatch, tmp_path):
+def test_native_l4_entry_resumes_l4b_without_provider(
+    monkeypatch, tmp_path, l4_paperqa2_runtime
+):
     project = tmp_path / "project"
     (project / "01_Candidates").mkdir(parents=True)
     (project / "01_Candidates" / "C1.md").write_text(
@@ -388,15 +562,27 @@ def test_native_l4_entry_resumes_l4b_without_provider(monkeypatch, tmp_path):
         assets=[_asset(selection_status="selected")],
         methods=[_method(source_asset_ids=["A1"])],
     )
+    paperqa_runtime = l4_paperqa2_runtime(METHOD_TEXT)[0]
     original_resume = bundle.run_l4b_from_manifest
     observed = {}
 
     def resume(*args, **kwargs):
         observed["called"] = True
         kwargs["fetcher"] = lambda url: _response(url)
+        kwargs["paperqa_runtime"] = paperqa_runtime
         return original_resume(*args, **kwargs)
 
     monkeypatch.setattr(bundle, "run_l4b_from_manifest", resume)
+    monkeypatch.setattr(
+        dr,
+        "load_runtime_spec",
+        lambda _project: (dr.RuntimeSpec("codex", "codex", paperqa2={}), "test"),
+    )
+    monkeypatch.setattr(
+        research_commands,
+        "_require_bound_paperqa2",
+        lambda _spec: paperqa_runtime,
+    )
     monkeypatch.setattr(
         research_commands,
         "_bound_profile",
@@ -456,6 +642,9 @@ def test_normal_native_l4_keeps_l4a_then_l4b_order(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(l4_inventory, "run_discovery", discovery)
     monkeypatch.setattr(bundle, "run_l4b_evidence", resolver)
+    monkeypatch.setattr(
+        bundle, "_paperqa_runtime_from_spec", lambda _dr, _spec: object()
+    )
 
     bundle.install(l4p, fake_dr)
     result = fake_dr.run_and_persist(
@@ -574,7 +763,9 @@ def test_l4b_summary_exposes_short_l4c_reference_handles_not_canonical_ids(tmp_p
     assert "gap-unresolved-no-source" not in summary
 
 
-def test_l4b_no_source_becomes_gap_not_global_failure(tmp_path):
+def test_l4b_no_source_becomes_gap_not_global_failure(
+    tmp_path, l4_paperqa2_runtime
+):
     project = tmp_path / "project"
     manifest = _persist(
         project,
@@ -586,7 +777,14 @@ def test_l4b_no_source_becomes_gap_not_global_failure(tmp_path):
     )
 
     artifact = bundle.run_l4b_evidence(
-        l4p, dr, project, "C1", manifest, tmp_path / "work", fetcher=None
+        l4p,
+        dr,
+        project,
+        "C1",
+        manifest,
+        tmp_path / "work",
+        fetcher=None,
+        paperqa_runtime=l4_paperqa2_runtime(METHOD_TEXT)[0],
     )
 
     assert artifact["evidence_cards"] == []
@@ -597,7 +795,9 @@ def test_l4b_no_source_becomes_gap_not_global_failure(tmp_path):
     assert bundle.audit_bundle(l4p, dr, project, "C1", artifact) == (True, "")
 
 
-def test_l4b_audit_rejects_tampered_source_payload(tmp_path):
+def test_l4b_audit_rejects_tampered_source_payload(
+    tmp_path, l4_paperqa2_runtime
+):
     project = tmp_path / "project"
     manifest = _persist(
         project,
@@ -612,6 +812,7 @@ def test_l4b_audit_rejects_tampered_source_payload(tmp_path):
         manifest,
         tmp_path / "work",
         fetcher=lambda url: _response(url),
+        paperqa_runtime=l4_paperqa2_runtime(METHOD_TEXT)[0],
     )
     paper = json.loads((project / artifact["papers"][0]["path"]).read_text(
         encoding="utf-8"

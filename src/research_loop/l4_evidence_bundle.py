@@ -205,33 +205,12 @@ def _paper_id(dr, asset: dict, result: dict) -> str:
 
 
 def _paperqa_runtime_from_spec(dr, spec):
-    config = getattr(spec, "paperqa2", None)
-    if not config:
-        return None
-    required = ("python_executable", "bridge_script", "paperqa_repo", "pqa_home")
-    missing = [field for field in required if not str(config.get(field) or "").strip()]
-    if missing:
-        raise dr.DeepResearchError(
-            "PaperQA2 runtime config is incomplete: " + ", ".join(missing)
-        )
-    try:
-        from research_loop.l05_curie.paperqa2_runtime import (
-            PaperQA2CurieRuntime,
-            PaperQA2SubprocessBackend,
-        )
+    from research_loop import runtime_preflight
 
-        backend = PaperQA2SubprocessBackend(
-            python_executable=config["python_executable"],
-            bridge_script=config["bridge_script"],
-            paperqa_repo=config["paperqa_repo"],
-            pqa_home=config["pqa_home"],
-            timeout_seconds=int(config.get("timeout_seconds") or 300),
-        )
-        return PaperQA2CurieRuntime(backend=backend, backend_id=backend.backend_id)
-    except Exception as exc:
-        if isinstance(exc, dr.DeepResearchError):
-            raise
-        raise dr.DeepResearchError(f"PaperQA2 runtime is invalid: {exc}") from exc
+    try:
+        return runtime_preflight.require_bound_paperqa2(spec)
+    except runtime_preflight.RuntimePreflightError as exc:
+        raise dr.DeepResearchError(str(exc)) from exc
 
 
 def _receipt_payload(result: dict) -> dict:
@@ -388,6 +367,10 @@ def run_l4b_evidence(
     paperqa_runtime=None,
 ) -> dict:
     """Resolve inventory sources and persist a deterministic L4B bundle."""
+    if paperqa_runtime is None:
+        raise dr.DeepResearchError(
+            "PaperQA2 runtime is required for native L4B evidence retrieval"
+        )
     project = Path(project_dir)
     ok, reason = l4p.validate_native_l4a_manifest(project, manifest)
     if not ok:
@@ -483,11 +466,6 @@ def run_l4b_evidence(
         if result.get("status") != "resolved" or not payload_bytes:
             for method_id in method_ids:
                 gap_reason_by_method[method_id] = _failure_reason(result)
-        elif paperqa_runtime is None:
-            for method_id in method_ids:
-                gap_reason_by_method[method_id] = (
-                    "PaperQA2 runtime is not configured for native L4B evidence retrieval"
-                )
         elif "xml" not in content_type.casefold():
             for method_id in method_ids:
                 gap_reason_by_method[method_id] = (

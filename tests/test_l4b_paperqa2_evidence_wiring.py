@@ -1,3 +1,5 @@
+import pytest
+
 from research_loop import deep_research as dr
 from research_loop import l4_evidence_bundle as bundle
 from research_loop import l4_inventory
@@ -197,22 +199,31 @@ def test_native_l4b_does_not_assign_method_role_to_experimental_results(tmp_path
     assert "Methods" in artifact["evidence_gaps"][0]["failure_reason"]
 
 
-def test_native_l4b_does_not_accept_legacy_methods_parser_without_paperqa2(tmp_path):
+def test_native_l4b_missing_runtime_fails_before_persistence(tmp_path):
     manifest = _manifest(tmp_path)
-    artifact = bundle.run_l4b_evidence(
-        l4p,
-        dr,
-        tmp_path,
-        "C1",
-        manifest,
-        tmp_path / "work",
-        project_id="P1",
-        round_id="1",
-        profile_id="v2.1-catalog-1",
-        fetcher=lambda url: _fetch(url, METHOD_XML),
-        paperqa_runtime=None,
-    )
+    before = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
 
-    assert artifact["evidence_cards"] == []
-    assert len(artifact["evidence_gaps"]) == 1
-    assert "PaperQA2" in artifact["evidence_gaps"][0]["failure_reason"]
+    with pytest.raises(dr.DeepResearchError, match="PaperQA2"):
+        bundle.run_l4b_evidence(
+            l4p,
+            dr,
+            tmp_path,
+            "C1",
+            manifest,
+            tmp_path / "work",
+            project_id="P1",
+            round_id="1",
+            profile_id="v2.1-catalog-1",
+            fetcher=lambda url: _fetch(url, METHOD_XML),
+            paperqa_runtime=None,
+        )
+
+    assert {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    } == before

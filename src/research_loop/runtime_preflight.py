@@ -81,6 +81,19 @@ def _resolved(value: str | Path) -> Path:
     return Path(value).expanduser().resolve()
 
 
+def require_bound_paperqa2(spec):
+    """Return the project-bound PaperQA2 runtime or fail the native L4 gate."""
+
+    from research_loop.l05_curie.paperqa2_runtime import runtime_from_config
+
+    try:
+        return runtime_from_config(getattr(spec, "paperqa2", None))
+    except Exception as exc:
+        raise RuntimePreflightError(
+            f"bound PaperQA2 capability is not ready: {exc}"
+        ) from exc
+
+
 def formal_runtime_command(*args: str | Path) -> list[str]:
     """Build the sole formal launcher from the configured interpreter."""
 

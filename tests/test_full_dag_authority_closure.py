@@ -17,7 +17,7 @@ from research_loop.hypothesis_ledger import HypothesisLedger
 from research_loop.topology import topology_for_profile
 
 
-def _goal10_regression_project(tmp_path, monkeypatch):
+def _goal10_regression_project(tmp_path, monkeypatch, paperqa_runtime):
     project = tmp_path / "project"
     project.mkdir()
     store = tmp_path / "hypotheses.sqlite"
@@ -89,14 +89,17 @@ def _goal10_regression_project(tmp_path, monkeypatch):
         profile_id=PROFILE_V21_CATALOG_1,
         research_persona="Curie",
         fetcher=_fetcher,
+        paperqa_runtime=paperqa_runtime,
     )
     return project, store, evidence
 
 
 def test_goal10_regression_current_round_authority_reaches_l4(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, capsys, l4_paperqa2_runtime
 ):
-    project, store, evidence = _goal10_regression_project(tmp_path, monkeypatch)
+    project, store, evidence = _goal10_regression_project(
+        tmp_path, monkeypatch, l4_paperqa2_runtime("DESeq2 method evidence " * 40)[0]
+    )
     args = SimpleNamespace(
         project_dir=str(project),
         cand_id="C1",
@@ -146,12 +149,14 @@ def test_native_l4_and_l7_share_one_current_round_authority_owner():
 
 
 def test_l7_execution_consumes_current_round_binding_through_authority_resolver(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, l4_paperqa2_runtime
 ):
     from research_loop import authority
     from research_loop.commands import execution
 
-    project, _store, _evidence = _goal10_regression_project(tmp_path, monkeypatch)
+    project, _store, _evidence = _goal10_regression_project(
+        tmp_path, monkeypatch, l4_paperqa2_runtime("DESeq2 method evidence " * 40)[0]
+    )
     calls = []
     original = authority.resolve_authority
 
