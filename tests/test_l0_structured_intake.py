@@ -406,8 +406,8 @@ def test_rules_v1_intake_does_not_create_snapshot_dir(tmp_path):
 
     request = tmp_path / "rules_req.md"
     request.write_text(
-        "科学问题：规则一提取问题？\n"
-        "本轮新假说：规则一提取假说。\n",
+        "Scientific question: Does rules-v1 intake avoid research-plan snapshots?\n"
+        "Current hypothesis: Rules-v1 intake does not create research-plan snapshots.\n",
         encoding="utf-8")
 
     result = _run("normalize-l0-input", "--project", str(project),

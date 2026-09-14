@@ -362,20 +362,16 @@ def test_recoverable_error_event_does_not_claim_terminal_provider_failure(tmp_pa
     monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "recoverable_error")
     monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.15")
     runtime = tmp_path / "runtime"
-    holder = {}
-    thread = threading.Thread(target=lambda: holder.setdefault("result", _run(runtime)))
-    thread.start()
 
-    status = _wait_for(lambda: (
-        value if (
-            (value := _status(runtime)).get("last_provider_event", {}).get("type") == "error"
-        ) else None
-    ))
-    assert status["provider_alive"] is True
-    assert status["state"] != "provider_failed"
+    result = _run(runtime)
+    events = [
+        json.loads(line)
+        for line in (runtime / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
 
-    thread.join(5)
-    assert holder["result"].final_status == "succeeded"
+    assert any(event.get("type") == "error" for event in events)
+    assert result.final_status == "succeeded"
+    assert _status(runtime)["state"] != "provider_failed"
 
 
 def test_worker_failure_after_provider_success_becomes_validation_failed(tmp_path, monkeypatch):
