@@ -5,6 +5,7 @@ import copy
 import datetime as dt
 import hashlib
 import html
+import http.client
 import json
 import ipaddress
 import re
@@ -275,6 +276,10 @@ def _fetch(value):
                     ),
                     "body": body,
                 }
+        except http.client.IncompleteRead as exc:
+            if retry_index >= MAX_HTTP_RETRIES:
+                raise
+            time.sleep(_retry_after_seconds(exc, retry_index))
         except urllib.error.HTTPError as exc:
             if exc.code != 429 or retry_index >= MAX_HTTP_RETRIES:
                 raise

@@ -1,4 +1,5 @@
 import hashlib
+import http.client
 import io
 import json
 import urllib.error
@@ -310,6 +311,70 @@ class _RetryOpener:
                 io.BytesIO(b"blocked"),
             )
         return _Response(self.url, METHOD_XML.encode("utf-8"))
+
+
+class _IncompleteReadResponse(_Response):
+    def read(self, _limit):
+        partial = self._body[:100]
+        raise http.client.IncompleteRead(partial, len(self._body))
+
+
+class _IncompleteReadOpener:
+    def __init__(self, url, body):
+        self.url = url
+        self.body = body
+        self.calls = 0
+
+    def open(self, request, timeout=30):
+        del request, timeout
+        self.calls += 1
+        if self.calls == 1:
+            return _IncompleteReadResponse(self.url, self.body)
+        return _Response(self.url, self.body)
+
+
+class _AlwaysIncompleteReadOpener(_IncompleteReadOpener):
+    def open(self, request, timeout=30):
+        del request, timeout
+        self.calls += 1
+        return _IncompleteReadResponse(self.url, self.body)
+
+
+def test_default_fetch_retries_incomplete_read_before_evidence_hash(monkeypatch, tmp_path):
+    url = "https://doi.org/10.1234/example.method"
+    full_body = METHOD_XML.encode("utf-8")
+    opener = _IncompleteReadOpener(url, full_body)
+    monkeypatch.setattr(cc.urllib.request, "build_opener", lambda *_args: opener)
+    monkeypatch.setattr(cc.time, "sleep", lambda _seconds: None)
+
+    result = cc.resolve_contract(
+        tmp_path,
+        cc._internal_contract(_asset()),
+        fetcher=cc._fetch,
+    )
+
+    assert result["status"] == "resolved"
+    assert opener.calls == 2
+    assert result["source_bytes"] == full_body
+    assert result["receipt"]["byte_length"] == len(full_body)
+    assert result["receipt"]["content_hash"] == hashlib.sha256(full_body).hexdigest()
+    assert len(result["attempts"]) == 1
+
+
+def test_default_fetch_fails_closed_after_incomplete_read_retry_limit(monkeypatch):
+    url = "https://doi.org/10.1234/example.method"
+    full_body = METHOD_XML.encode("utf-8")
+    opener = _AlwaysIncompleteReadOpener(url, full_body)
+    sleeps = []
+    monkeypatch.setattr(cc.urllib.request, "build_opener", lambda *_args: opener)
+    monkeypatch.setattr(cc.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    with pytest.raises(http.client.IncompleteRead) as exc_info:
+        cc._fetch(url)
+
+    assert len(exc_info.value.partial) == 100
+    assert opener.calls == cc.MAX_HTTP_RETRIES + 1
+    assert sleeps == [1.0, 2.0]
 
 
 def test_default_fetch_retries_429_and_honors_retry_after(monkeypatch):
