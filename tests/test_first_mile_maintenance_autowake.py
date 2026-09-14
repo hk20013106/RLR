@@ -63,6 +63,47 @@ def test_pre_l0_failure_wakes_once_and_replays_only_verified_repair(monkeypatch,
     assert replays[0]["argv"] == argv
 
 
+def test_verified_cli_replay_keeps_retry_guard(monkeypatch, tmp_path):
+    handoff = _handoff(tmp_path)
+    observed = {}
+
+    def runner(_command, **kwargs):
+        observed.update(kwargs)
+        return SimpleNamespace(returncode=3)
+
+    result = adapter._resume_verified_cli(
+        handoff=handoff,
+        entrypoint_name="research_loop_v04.py",
+        argv=["preflight", str(tmp_path / "project"), "--backend", "codex"],
+        runner=runner,
+    )
+
+    assert result == 3
+    assert observed["env"][AUTOWAKE_RETRY_GUARD_ENV] == "1"
+
+
+def test_first_mile_validator_receives_cli_backend(monkeypatch, tmp_path):
+    from research_loop import l0_preflight
+
+    observed = {}
+
+    def validator(_project_dir, **kwargs):
+        observed.update(kwargs)
+        return {"status": "PASS"}
+
+    monkeypatch.setattr(l0_preflight, "validate_project_ready", validator)
+
+    assert (
+        adapter._first_mile_failure(
+            project_dir=tmp_path,
+            operation="preflight",
+            expected_backend="claude",
+        )
+        is None
+    )
+    assert observed["expected_backend"] == "claude"
+
+
 def test_pre_l0_failure_is_inert_without_explicit_autowake_config(monkeypatch, tmp_path):
     wakes = []
     monkeypatch.delenv(AUTOWAKE_CONFIG_ENV, raising=False)

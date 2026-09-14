@@ -89,7 +89,10 @@ def _resume_verified_cli(
     if not entrypoint.is_file():
         return None
     environment = dict(os.environ)
-    environment.pop(AUTOWAKE_RETRY_GUARD_ENV, None)
+    # A replay is the one permitted post-repair retry. Keep the maintenance
+    # guard on that child so a still-failing repaired entrypoint cannot start a
+    # second Meta-RLR turn; the original failure/exit remains observable.
+    environment[AUTOWAKE_RETRY_GUARD_ENV] = "1"
     completed = runner(
         [sys.executable, str(entrypoint), *[str(token) for token in argv]],
         env=environment,
@@ -98,20 +101,31 @@ def _resume_verified_cli(
     return int(getattr(completed, "returncode", 3))
 
 
-def _first_mile_target(argv: Sequence[str], *, entrypoint_name: str) -> tuple[str, Path] | None:
+def _first_mile_target(
+    argv: Sequence[str], *, entrypoint_name: str
+) -> tuple[str, Path, str | None] | None:
     tokens = [str(token) for token in argv]
     if entrypoint_name != "research_loop_v04.py" or len(tokens) < 2:
         return None
     if tokens[0] != "preflight":
         return None
-    return "preflight", Path(tokens[1])
+    expected_backend = None
+    for index, token in enumerate(tokens[2:], start=2):
+        if token == "--backend" and index + 1 < len(tokens):
+            expected_backend = tokens[index + 1]
+            break
+    return "preflight", Path(tokens[1]), expected_backend
 
 
-def _first_mile_failure(*, project_dir: str | Path, operation: str) -> dict | None:
+def _first_mile_failure(
+    *, project_dir: str | Path, operation: str, expected_backend: str | None = None
+) -> dict | None:
     """Read the core's PROJECT_READY authority without reinterpreting it."""
     from research_loop import l0_preflight
 
-    result = l0_preflight.validate_project_ready(project_dir)
+    result = l0_preflight.validate_project_ready(
+        project_dir, expected_backend=expected_backend
+    )
     if result.get("status") == "PASS":
         return None
     return {
@@ -156,7 +170,7 @@ def wrap_first_mile_main(
                 or not os.environ.get(AUTOWAKE_CONFIG_ENV)
             ):
                 raise
-            operation, project_dir = target
+            operation, project_dir, _expected_backend = target
             failure = {
                 "code": f"FIRST_MILE_UNHANDLED_EXCEPTION:{type(original_exc).__name__}",
                 "reason": "unexpected RLR exception during First-Mile operation",
@@ -182,9 +196,13 @@ def wrap_first_mile_main(
             or not os.environ.get(AUTOWAKE_CONFIG_ENV)
         ):
             return result
-        operation, project_dir = target
+        operation, project_dir, expected_backend = target
         try:
-            failure = _first_mile_failure(project_dir=project_dir, operation=operation)
+            failure = _first_mile_failure(
+                project_dir=project_dir,
+                operation=operation,
+                expected_backend=expected_backend,
+            )
             if failure is None:
                 return result
             replayed = _wake_and_replay_first_mile(
