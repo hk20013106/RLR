@@ -16,6 +16,7 @@ from typing import Any
 from research_loop import l4_closed_corpus as cc
 from research_loop import l4_inventory
 from research_loop.l05_curie import europepmc
+from research_loop.l05_curie.paperqa2_runtime import PaperQA2SourceError
 
 
 EVIDENCE_BUNDLE_SCHEMA = "L4BEvidenceBundle/v2"
@@ -530,10 +531,8 @@ def run_l4b_evidence(
                             and dr._is_methods_section(item.get("section"))
                             and len(str(item.get("text") or "").encode("utf-8")) >= cc.MIN_BYTES
                         ]
-                    except Exception as exc:
-                        gap_reason_by_method[method_id] = (
-                            f"PaperQA2 evidence retrieval failed: {exc}"
-                        )
+                    except PaperQA2SourceError as exc:
+                        gap_reason_by_method[method_id] = str(exc)
                         continue
                     if not located:
                         gap_reason_by_method[method_id] = (

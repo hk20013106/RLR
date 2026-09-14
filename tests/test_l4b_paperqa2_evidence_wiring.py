@@ -1,3 +1,5 @@
+import copy
+
 import pytest
 
 from research_loop import deep_research as dr
@@ -5,6 +7,12 @@ from research_loop import l4_evidence_bundle as bundle
 from research_loop import l4_inventory
 from research_loop import l4_pipeline as l4p
 from research_loop.l05_curie import europepmc
+from research_loop.l05_curie.contracts import CurieContractError
+from research_loop.l05_curie.paperqa2_runtime import (
+    PaperQA2CurieRuntime,
+    PaperQA2ExecutionError,
+    PaperQA2IntegrityError,
+)
 
 
 METHOD_TEXT = (
@@ -108,6 +116,21 @@ def _fetch(url, payload=XML):
         "content_type": "application/xml",
         "body": payload.encode("utf-8"),
     }
+
+
+def _completed_l4b_runs(project):
+    runs_dir = (
+        project / "09_Literature_Database" / "evidence_packs" / "runs"
+    )
+    return list(runs_dir.glob("*_L4_*.json"))
+
+
+class _FailingPaperQA2Runtime:
+    def __init__(self, failure):
+        self.failure = failure
+
+    def retrieve_and_verify(self, **_kwargs):
+        raise self.failure
 
 
 def test_jats_paragraph_owner_exposes_experimental_procedures_without_heading_allowlist():
@@ -227,3 +250,227 @@ def test_native_l4b_missing_runtime_fails_before_persistence(tmp_path):
         for path in tmp_path.rglob("*")
         if path.is_file()
     } == before
+
+
+def test_l4b_source_failure_does_not_block_another_accepted_card(tmp_path):
+    source_a = _asset()
+    source_b = copy.deepcopy(source_a)
+    source_b.update({
+        "asset_id": "L05_P_second_source",
+        "doi": "10.1000/second-source",
+        "pmid": "22222222",
+        "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC2222222/",
+        "title": "Second exact method source",
+        "full_text_locations": [
+            "https://www.ebi.ac.uk/europepmc/webservices/rest/PMC2222222/fullTextXML"
+        ],
+        "source_metadata_response": {
+            "paper_id": "P_second_source",
+            "pmcid": "PMC2222222",
+        },
+    })
+    method_a = _method()
+    method_a.update({
+        "method_id": "source_local_gap",
+        "purpose": "Question with no aligned source evidence.",
+        "source_asset_ids": [source_a["asset_id"]],
+    })
+    method_b = _method()
+    method_b.update({
+        "method_id": "accepted_method",
+        "purpose": "Question with aligned Methods evidence.",
+        "source_asset_ids": [source_b["asset_id"]],
+    })
+    manifest = l4_inventory.persist_discovery(
+        l4p,
+        dr,
+        tmp_path,
+        "C1",
+        {
+            "schema_version": l4p.L4A_DISCOVERY_SCHEMA_VERSION,
+            "queries": [{
+                "query_id": "Q1",
+                "query": "offline method inventory",
+                "purpose": "Inventory only.",
+                "status": "completed",
+                "receipt": "fixture",
+            }],
+            "assets": [source_a, source_b],
+            "method_inventory": [method_a, method_b],
+        },
+        _receipt(),
+        question="Which exact sources support the two methods?",
+        claim="Each method has its own exact source.",
+        project_id="P1",
+        round_id="1",
+        profile_id="v2.1-catalog-1",
+    )
+    calls = []
+
+    def backend(*, paper, question):
+        calls.append({"paper": dict(paper), "question": question})
+        text = (
+            "This unrelated discussion cannot align to the Methods source."
+            if question == method_a["purpose"]
+            else METHOD_TEXT
+        )
+        return [{
+            "text": text,
+            "section": "PaperQA2",
+            "locator": "paperqa2-test/chunk:1",
+            "score": 1.0,
+        }]
+
+    artifact = bundle.run_l4b_evidence(
+        l4p,
+        dr,
+        tmp_path,
+        "C1",
+        manifest,
+        tmp_path / "work",
+        project_id="P1",
+        round_id="1",
+        profile_id="v2.1-catalog-1",
+        fetcher=lambda url: _fetch(url, METHOD_XML),
+        paperqa_runtime=PaperQA2CurieRuntime(
+            backend=backend,
+            backend_id="paperqa2-test/v1",
+        ),
+    )
+
+    assert len(calls) == 2
+    assert [card["method_id"] for card in artifact["evidence_cards"]] == [
+        "accepted_method"
+    ]
+    assert [gap["method_id"] for gap in artifact["evidence_gaps"]] == [
+        "source_local_gap"
+    ]
+    assert artifact["evidence_gaps"][0]["failure_reason"] == (
+        "PaperQA2 retrieved chunks could not align to source candidates"
+    )
+    assert bundle.audit_bundle(l4p, dr, tmp_path, "C1", artifact) == (True, "")
+
+
+def test_l4b_execution_failure_does_not_become_evidence_gap(tmp_path):
+    manifest = _manifest(tmp_path)
+    failure = PaperQA2ExecutionError("PaperQA2 process failed")
+
+    with pytest.raises(PaperQA2ExecutionError) as raised:
+        bundle.run_l4b_evidence(
+            l4p,
+            dr,
+            tmp_path,
+            "C1",
+            manifest,
+            tmp_path / "work",
+            fetcher=lambda url: _fetch(url, METHOD_XML),
+            paperqa_runtime=_FailingPaperQA2Runtime(failure),
+        )
+
+    assert raised.value is failure
+    assert _completed_l4b_runs(tmp_path) == []
+
+
+def test_l4b_integrity_failure_does_not_become_evidence_gap(tmp_path):
+    manifest = _manifest(tmp_path)
+    failure = PaperQA2IntegrityError("PaperQA2 document hash mismatch")
+
+    with pytest.raises(PaperQA2IntegrityError) as raised:
+        bundle.run_l4b_evidence(
+            l4p,
+            dr,
+            tmp_path,
+            "C1",
+            manifest,
+            tmp_path / "work",
+            fetcher=lambda url: _fetch(url, METHOD_XML),
+            paperqa_runtime=_FailingPaperQA2Runtime(failure),
+        )
+
+    assert raised.value is failure
+    assert _completed_l4b_runs(tmp_path) == []
+
+
+def test_l4b_unknown_contract_failure_does_not_become_evidence_gap(tmp_path):
+    manifest = _manifest(tmp_path)
+    failure = CurieContractError("unclassified PaperQA2 contract failure")
+
+    with pytest.raises(CurieContractError) as raised:
+        bundle.run_l4b_evidence(
+            l4p,
+            dr,
+            tmp_path,
+            "C1",
+            manifest,
+            tmp_path / "work",
+            fetcher=lambda url: _fetch(url, METHOD_XML),
+            paperqa_runtime=_FailingPaperQA2Runtime(failure),
+        )
+
+    assert raised.value is failure
+    assert _completed_l4b_runs(tmp_path) == []
+
+
+def test_l4b_verifier_failure_does_not_become_evidence_gap(
+    monkeypatch, tmp_path, l4_paperqa2_runtime
+):
+    manifest = _manifest(tmp_path)
+    failure = RuntimeError("independent verifier failed")
+
+    def fail_verification(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(europepmc, "verify_jats_candidates", fail_verification)
+    runtime = l4_paperqa2_runtime(METHOD_TEXT)[0]
+
+    with pytest.raises(RuntimeError) as raised:
+        bundle.run_l4b_evidence(
+            l4p,
+            dr,
+            tmp_path,
+            "C1",
+            manifest,
+            tmp_path / "work",
+            fetcher=lambda url: _fetch(url, METHOD_XML),
+            paperqa_runtime=runtime,
+        )
+
+    assert raised.value is failure
+    assert _completed_l4b_runs(tmp_path) == []
+
+
+def test_l4b_available_runtime_can_complete_with_only_truthful_gaps(tmp_path):
+    manifest = _manifest(tmp_path)
+    calls = []
+
+    def backend(*, paper, question):
+        calls.append({"paper": dict(paper), "question": question})
+        return [{
+            "text": "An unrelated discussion without matching Methods content.",
+            "section": "PaperQA2",
+            "locator": "paperqa2-test/chunk:1",
+            "score": 1.0,
+        }]
+
+    artifact = bundle.run_l4b_evidence(
+        l4p,
+        dr,
+        tmp_path,
+        "C1",
+        manifest,
+        tmp_path / "work",
+        fetcher=lambda url: _fetch(url, METHOD_XML),
+        paperqa_runtime=PaperQA2CurieRuntime(
+            backend=backend,
+            backend_id="paperqa2-test/v1",
+        ),
+    )
+
+    assert len(calls) == 1
+    assert artifact["status"] == "completed"
+    assert artifact["evidence_cards"] == []
+    assert len(artifact["evidence_gaps"]) == 1
+    assert artifact["evidence_gaps"][0]["failure_reason"] == (
+        "PaperQA2 retrieved chunks could not align to source candidates"
+    )
+    assert bundle.audit_bundle(l4p, dr, tmp_path, "C1", artifact) == (True, "")
