@@ -6,8 +6,56 @@ from research_loop import research_seed
 from research_loop.l05_curie import CurieContractError
 from research_loop.l05_curie import europepmc_runtime
 from research_loop.l05_curie.multisource import build_multisource_query_plan
-from research_loop.l05_curie.query_planner import build_scientific_query_plan
+from research_loop.l05_curie.query_planner import (
+    MAX_QUERY_CHARS,
+    build_scientific_query_plan,
+)
 from tests.test_l05_curie_europepmc_runtime import XML, _project, _search_payload
+
+
+def test_real_long_research_seed_keeps_final_queries_bounded_and_unique():
+    """The real failed E2E seed must survive final truncation and deduplication."""
+    seed = {
+        "candidate_id": "C20260914184154018192",
+        "round_id": "1",
+        "scientific_question": (
+            "How do high-heart-rate species avoid pathological remodeling or "
+            "functional damage associated with sustained high-frequency cardiac "
+            "activity while maintaining extremely high heart rates over the long "
+            "term? Is this physiological trait accompanied by coordinated remodeling "
+            "of energy and nutrient supply, the adrenergic regulation–Ca2+ "
+            "regulation–myocardial contraction axis, and cardiac structure and "
+            "mechanical properties?"
+        ),
+        "hypothesis_seed": (
+            "The tolerance of Sk and Sm to extremely high heart rates is associated "
+            "with remodeling of multiple interrelated physiological systems: (1) "
+            "energy and nutrient supply mechanisms are adjusted to meet the metabolic "
+            "demands of sustained high-frequency cardiac activity; (2) adrenergic "
+            "regulation, Ca2+ handling, excitation–contraction coupling, and "
+            "myofilament responses to Ca2+ signals undergo coordinated changes, but "
+            "these changes are not presupposed to manifest as enhancement, weakening, "
+            "acceleration, or deceleration; among these, alternative splicing of TNNT3 "
+            "and/or exon 3 deletion is a candidate mechanism requiring focused testing, "
+            "suggesting that the changes may extend to the conversion of Ca2+ signals "
+            "into myofilament contractile output; (3) cardiac structure and mechanical "
+            "properties are adjusted to maintain tissue integrity and appropriate "
+            "compliance under sustained high-frequency mechanical loading. This round "
+            "of transcriptomic analysis is intended to test whether these mechanistic "
+            "axes exhibit molecular association evidence shared across high-heart-rate "
+            "species and does not directly support causal or adaptive inferences on "
+            "this basis."
+        ),
+    }
+
+    plan = build_scientific_query_plan(seed)
+    queries = [item["query"] for item in plan["queries"]]
+
+    assert 3 <= len(queries) <= 6
+    assert len({query.casefold() for query in queries}) == len(queries)
+    assert all(len(query) <= MAX_QUERY_CHARS for query in queries)
+    assert all(item["concepts"] for item in plan["queries"])
+    assert plan == build_scientific_query_plan(seed)
 
 
 def test_default_curie_plan_is_bounded_and_keeps_planner_provenance():

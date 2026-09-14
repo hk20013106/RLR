@@ -93,6 +93,20 @@ def _bounded(values: list[str]) -> str:
     return " ".join(terms)
 
 
+def _bounded_with_suffix(values: list[str], suffix: list[str]) -> str:
+    """Bound a query while retaining its intent-specific suffix."""
+    terms = _unique(values)
+    suffix_terms = _unique(suffix)
+    suffix_keys = {term.casefold() for term in suffix_terms}
+    terms = [term for term in terms if term.casefold() not in suffix_keys]
+    while terms and len(" ".join(terms + suffix_terms)) > MAX_QUERY_CHARS:
+        terms.pop()
+    rendered = " ".join(terms + suffix_terms)
+    if not rendered or len(rendered) > MAX_QUERY_CHARS:
+        raise CurieContractError("scientific query planner produced an empty query")
+    return rendered
+
+
 def validate_scientific_query_plan(plan: dict) -> dict:
     if (
         not isinstance(plan, dict)
@@ -148,9 +162,9 @@ def validate_scientific_query_plan(plan: dict) -> dict:
 
 
 def _append_query(
-    queries: list[dict], intent: str, terms: list[str]
+    queries: list[dict], intent: str, terms: list[str], *, suffix: list[str] | None = None
 ) -> None:
-    rendered = _bounded(terms)
+    rendered = _bounded_with_suffix(terms, suffix) if suffix else _bounded(terms)
     if rendered.casefold() in {
         str(item["query"]).casefold() for item in queries
     }:
@@ -158,7 +172,7 @@ def _append_query(
     queries.append({
         "intent": intent,
         "query": rendered,
-        "concepts": _unique(terms),
+        "concepts": _unique(terms + (suffix or [])),
     })
 
 
@@ -184,23 +198,27 @@ def build_scientific_query_plan(
         _append_query(
             queries,
             "combined_scientific_context",
-            core + ["primary research"],
+            core,
+            suffix=["primary", "research"],
         )
     else:
         _append_query(
             queries,
             "question_primary_evidence",
-            question_tokens + ["primary evidence"],
+            question_tokens,
+            suffix=["primary", "evidence"],
         )
         _append_query(
             queries,
             "hypothesis_experimental_evidence",
-            hypothesis_tokens + ["experimental evidence"],
+            hypothesis_tokens,
+            suffix=["experimental", "evidence"],
         )
         _append_query(
             queries,
             "combined_comparative_evidence",
-            core + ["comparative evidence"],
+            core,
+            suffix=["comparative", "evidence"],
         )
 
     for suffix in (
@@ -214,7 +232,8 @@ def build_scientific_query_plan(
         _append_query(
             queries,
             "complementary_scientific_evidence",
-            core + [suffix],
+            core,
+            suffix=suffix.split(),
         )
 
     plan = {
