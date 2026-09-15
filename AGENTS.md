@@ -122,7 +122,7 @@ The following are correctness boundaries, not optional conventions.
 * Missing required dependencies or artifacts must fail closed.
 
 * Never bypass a gate by:
-
+  
   * inserting a sentinel string without validating the underlying artifact;
   * weakening a validator to accept malformed data;
   * using `verified: false` or an equivalent escape;
@@ -218,6 +218,15 @@ Additional requirements:
 * Report the exact command, pass/fail result, and any skipped or uncollected tests.
 * A targeted test passing does not establish full regression safety.
 * Do not claim completion while required verification is failing.
+* 
+
+#### Local RLR runtime
+
+Canonical Python interpreter on this machine:
+
+`C:\Users\hk200\miniforge3\envs\rlr\python.exe`
+
+For RLR commands, prefer invoking this interpreter directly rather than assuming `micromamba` is on PATH.
 
 ## Git and workspace safety
 
