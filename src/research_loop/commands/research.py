@@ -561,8 +561,6 @@ def cmd_deep_research_run(args):
     if l4a_manifest:
         fm = _load_yaml_front(cf)
         try:
-            spec, _skill_version = deep_research.load_runtime_spec(project_dir)
-            _require_bound_paperqa2(spec)
             profile, binding = _bound_profile(project_dir)
             _, node_map, _ = topology_for_profile(profile.profile_id)
             research_persona = str(

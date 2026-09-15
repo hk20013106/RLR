@@ -239,12 +239,12 @@ def _run_missing_paperqa2_native_l4(monkeypatch, project, manifest, mode):
         downstream_calls.append("normal")
         return {"run_id": "C1_L4"}
 
-    def replay_l4b(*args, **kwargs):
-        downstream_calls.append("replay")
-        return {"run_id": "C1_L4"}
+    def replay_download(*args, **kwargs):
+        downstream_calls.append("replay-download")
+        raise AssertionError("replay reached exact-source retrieval")
 
     monkeypatch.setattr(dr, "run_and_persist", normal_l4)
-    monkeypatch.setattr(bundle, "run_l4b_from_manifest", replay_l4b)
+    monkeypatch.setattr(bundle.cc, "resolve_contract", replay_download)
     command = [
         "deep-research-run",
         str(project),
