@@ -3,6 +3,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 from research_loop import deep_research_task as dr_task
 from research_loop.provider_runtime_observability import run_observed_provider
 
@@ -44,6 +46,138 @@ def _prepare_task(tmp_path: Path, task_id: str = "dr-attempts") -> Path:
         encoding="utf-8",
     )
     return project
+
+
+def _write_status(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+
+def _prepare_status_pair(
+        tmp_path: Path,
+        *,
+        task_state: str = "running",
+        attempt_state: str = "running",
+        task_id: str = "dr-status",
+        attempt_id: str = "attempt-0001",
+        attempt_path: str = "attempts/attempt-0001",
+) -> tuple[Path, Path, Path]:
+    project = tmp_path / "project"
+    task_dir = _task_dir(project, task_id)
+    attempt_status_path = task_dir / "attempts" / attempt_id / "status.json"
+    _write_status(task_dir / "status.json", {
+        "schema_version": "DeepResearchDetachedTask/v2",
+        "status_schema": "ProviderRuntimeStatus/v1",
+        "task_id": task_id,
+        "state": task_state,
+        "attempt_id": attempt_id,
+        "attempt_path": attempt_path,
+    })
+    _write_status(attempt_status_path, {
+        "schema_version": "ProviderRuntimeStatus/v1",
+        "task_schema_version": "DeepResearchDetachedTask/v2",
+        "task_id": task_id,
+        "attempt_id": attempt_id,
+        "state": attempt_state,
+    })
+    return project, task_dir, attempt_status_path
+
+
+@pytest.mark.parametrize("attempt_state", [
+    "provider_failed",
+    "job_timed_out",
+    "waiting_external",
+])
+def test_running_task_reports_current_attempt_runtime_state(tmp_path, attempt_state):
+    project, _, _ = _prepare_status_pair(
+        tmp_path, attempt_state=attempt_state
+    )
+
+    assert dr_task.get_status(project, "dr-status")["state"] == attempt_state
+
+
+def test_running_task_does_not_promote_succeeded_attempt(tmp_path):
+    project, _, _ = _prepare_status_pair(
+        tmp_path, attempt_state="succeeded"
+    )
+
+    assert dr_task.get_status(project, "dr-status")["state"] == "running"
+
+
+def test_succeeded_task_remains_authoritative_over_succeeded_attempt(tmp_path):
+    project, _, _ = _prepare_status_pair(
+        tmp_path, task_state="succeeded", attempt_state="succeeded"
+    )
+
+    assert dr_task.get_status(project, "dr-status")["state"] == "succeeded"
+
+
+def test_status_without_attempt_pointer_keeps_legacy_behavior(tmp_path):
+    project = tmp_path / "project"
+    task_dir = _task_dir(project, "dr-legacy")
+    legacy = {
+        "schema_version": dr_task.TASK_SCHEMA_VERSION,
+        "task_id": "dr-legacy",
+        "state": "running",
+    }
+    _write_status(task_dir / "status.json", legacy)
+
+    assert dr_task.get_status(project, "dr-legacy") == legacy
+
+
+def test_attempt_id_and_path_must_identify_the_same_attempt(tmp_path):
+    project, task_dir, _ = _prepare_status_pair(tmp_path)
+    task_status_path = task_dir / "status.json"
+    task_status = json.loads(task_status_path.read_text(encoding="utf-8"))
+    task_status["attempt_path"] = "attempts/attempt-0002"
+    _write_status(task_status_path, task_status)
+
+    with pytest.raises(dr_task.DetachedTaskError):
+        dr_task.get_status(project, "dr-status")
+
+
+def test_attempt_status_task_id_must_match_task(tmp_path):
+    project, _, attempt_status_path = _prepare_status_pair(tmp_path)
+    attempt_status = json.loads(attempt_status_path.read_text(encoding="utf-8"))
+    attempt_status["task_id"] = "dr-other"
+    _write_status(attempt_status_path, attempt_status)
+
+    with pytest.raises(dr_task.DetachedTaskError):
+        dr_task.get_status(project, "dr-status")
+
+
+def test_attempt_status_attempt_id_must_match_current_pointer(tmp_path):
+    project, _, attempt_status_path = _prepare_status_pair(tmp_path)
+    attempt_status = json.loads(attempt_status_path.read_text(encoding="utf-8"))
+    attempt_status["attempt_id"] = "attempt-0002"
+    _write_status(attempt_status_path, attempt_status)
+
+    with pytest.raises(dr_task.DetachedTaskError):
+        dr_task.get_status(project, "dr-status")
+
+
+@pytest.mark.parametrize("attempt_path", [
+    "../attempt-0001",
+    "C:/outside/attempt-0001",
+])
+def test_attempt_path_rejects_escape_and_absolute_paths(tmp_path, attempt_path):
+    project, _, _ = _prepare_status_pair(
+        tmp_path, attempt_path=attempt_path
+    )
+
+    with pytest.raises(dr_task.DetachedTaskError):
+        dr_task.get_status(project, "dr-status")
+
+
+@pytest.mark.parametrize("contents", [None, "{"])
+def test_attempt_status_missing_or_corrupt_fails_closed(tmp_path, contents):
+    project, _, attempt_status_path = _prepare_status_pair(tmp_path)
+    attempt_status_path.unlink()
+    if contents is not None:
+        attempt_status_path.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(dr_task.DetachedTaskError):
+        dr_task.get_status(project, "dr-status")
 
 
 def test_repeated_worker_attempts_keep_independent_stderr_and_current_pointer(tmp_path):

@@ -217,7 +217,45 @@ def get_status(project_dir: str | Path, task_id: str) -> dict:
     task_dir = _task_dir(project_dir, task_id)
     status = _read_json(task_dir / "status.json", f"task {task_id} status")
     _validate_status(status, task_id)
-    return status
+    has_attempt_id = "attempt_id" in status
+    has_attempt_path = "attempt_path" in status
+    if not has_attempt_id and not has_attempt_path:
+        return status
+
+    attempt_id = status.get("attempt_id")
+    attempt_path = status.get("attempt_path")
+    if (
+        not isinstance(attempt_id, str)
+        or not attempt_id
+        or Path(attempt_id).name != attempt_id
+        or attempt_id in {".", ".."}
+        or "/" in attempt_id
+        or "\\" in attempt_id
+        or not isinstance(attempt_path, str)
+        or attempt_path != (Path("attempts") / attempt_id).as_posix()
+    ):
+        raise DetachedTaskError(
+            f"task {task_id} current attempt pointer is invalid"
+        )
+
+    attempt_dir = task_dir / attempt_path
+    if attempt_dir.resolve().parent != task_dir.resolve() / "attempts":
+        raise DetachedTaskError(
+            f"task {task_id} current attempt resolves outside its task directory"
+        )
+    attempt_status = _read_json(
+        attempt_dir / "status.json",
+        f"task {task_id} current attempt status",
+    )
+    _validate_status(attempt_status, task_id)
+    if attempt_status.get("attempt_id") != attempt_id:
+        raise DetachedTaskError(
+            f"task {task_id} current attempt identity is invalid"
+        )
+
+    if status.get("state") != "running" or attempt_status.get("state") == "succeeded":
+        return status
+    return attempt_status
 
 
 def run_worker(
