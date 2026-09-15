@@ -8,6 +8,9 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
+from research_loop import deep_research
 from research_loop import deep_research_task
 from research_loop import provider_runtime_observability as runtime_observability
 from research_loop.provider_runtime_observability import run_observed_provider
@@ -45,6 +48,192 @@ def _run(runtime_dir: Path, *, timeout: float = 3.0):
         job_timeout=timeout,
         observer_interval=0.05,
     )
+
+
+def _frozen_artifact_bytes(receipt_path: Path) -> dict[str, bytes]:
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    return {
+        "runtime_receipt.json": receipt_path.read_bytes(),
+        **{
+            record["path"]: (receipt_path.parent / record["path"]).read_bytes()
+            for record in receipt["artifacts"].values()
+        },
+    }
+
+
+def _receipt_reference(root: Path, receipt_path: Path) -> dict:
+    return {
+        "schema": runtime_observability.RECEIPT_SCHEMA,
+        "path": receipt_path.relative_to(root).as_posix(),
+        "sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+    }
+
+
+def test_sequential_invocations_preserve_first_immutable_snapshot(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "stream")
+    monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.01")
+    runtime = tmp_path / "runtime"
+
+    first = _run(runtime)
+    first_bytes = _frozen_artifact_bytes(first.runtime_receipt_path)
+    for name, content in first_bytes.items():
+        assert (runtime / name).read_bytes() == content
+    second = _run(runtime)
+    second_bytes = _frozen_artifact_bytes(second.runtime_receipt_path)
+
+    assert first.runtime_receipt_path != second.runtime_receipt_path
+    assert first.runtime_receipt_path.parent.parent.name == "provider_runtime"
+    assert first.runtime_receipt_path.parent.name == first.runtime_receipt_sha256
+    assert _frozen_artifact_bytes(first.runtime_receipt_path) == first_bytes
+    for name in ("events.jsonl", "stderr.log", "final_output.json"):
+        assert second_bytes[name] == first_bytes[name]
+    runtime_observability.validate_runtime_receipt_reference(
+        tmp_path,
+        _receipt_reference(tmp_path, first.runtime_receipt_path),
+        require_success=True,
+    )
+
+
+def test_skill_receipt_references_invocation_work_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "stream")
+    monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.01")
+    runtime = (
+        tmp_path / "08_Audit" / "deep_research_runtime" / "tasks" / "dr-snapshot"
+    )
+    method_work = tmp_path / "method_support_001_M01"
+    legacy_final = tmp_path / "legacy_final.json"
+    prompt = "immutable receipt fixture prompt"
+    command = [
+        sys.executable,
+        str(FIXTURE),
+        "exec",
+        "--json",
+        "--output-last-message",
+        str(legacy_final),
+    ]
+    context = {
+        "runtime_dir": runtime,
+        "project_dir": tmp_path,
+        "task_id": "dr-snapshot",
+        "candidate_id": "C1",
+        "node": "L4",
+        "backend": "codex",
+        "execution": None,
+    }
+    token = runtime_observability._CONTEXT.set(context)
+    try:
+        deep_research.build_invocation(
+            deep_research.RuntimeSpec(
+                "codex", "codex", model="fixture-model", timeout=3
+            ),
+            "L4",
+            "fixture question",
+            "fixture claim",
+            method_work,
+        )
+        completed = deep_research.execute_provider_invocation(
+            command,
+            {"input": prompt},
+            timeout=3,
+        )
+        receipt = deep_research.skill_receipt(
+            "codex",
+            command,
+            prompt,
+            "fixture",
+            exit_code=completed.returncode,
+            stdout_hash=hashlib.sha256(completed.stdout.encode("utf-8")).hexdigest(),
+            model="fixture-model",
+        )
+    finally:
+        runtime_observability._CONTEXT.reset(token)
+
+    frozen_path = tmp_path / receipt["runtime_receipt"]["path"]
+    assert frozen_path == context["execution"].runtime_receipt_path
+    assert frozen_path.parent.parent == method_work / "provider_runtime"
+    assert frozen_path.parent.name == receipt["runtime_receipt"]["sha256"]
+    assert frozen_path != runtime / "runtime_receipt.json"
+
+
+@pytest.mark.parametrize(
+    "damage",
+    ["missing_artifact", "wrong_artifact_bytes", "wrong_receipt_hash", "malformed_receipt"],
+)
+def test_runtime_receipt_snapshot_validation_fails_closed(
+    tmp_path, monkeypatch, damage
+):
+    monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "stream")
+    monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.01")
+    result = _run(tmp_path / "runtime")
+    reference = _receipt_reference(tmp_path, result.runtime_receipt_path)
+    receipt = json.loads(result.runtime_receipt_path.read_text(encoding="utf-8"))
+
+    if damage == "missing_artifact":
+        (result.runtime_receipt_path.parent / receipt["artifacts"]["events"]["path"]).unlink()
+    elif damage == "wrong_artifact_bytes":
+        (result.runtime_receipt_path.parent / receipt["artifacts"]["stderr"]["path"]).write_bytes(
+            b"tampered"
+        )
+    elif damage == "wrong_receipt_hash":
+        reference["sha256"] = "0" * 64
+    else:
+        result.runtime_receipt_path.write_text("{", encoding="utf-8")
+        malformed_sha256 = hashlib.sha256(
+            result.runtime_receipt_path.read_bytes()
+        ).hexdigest()
+        malformed_dir = result.runtime_receipt_path.parent.with_name(malformed_sha256)
+        result.runtime_receipt_path.parent.rename(malformed_dir)
+        reference = _receipt_reference(
+            tmp_path,
+            malformed_dir / "runtime_receipt.json",
+        )
+
+    with pytest.raises(
+        runtime_observability.ProviderRuntimeIntegrityError,
+        match="runtime receipt",
+    ):
+        runtime_observability.validate_runtime_receipt_reference(
+            tmp_path,
+            reference,
+            require_success=True,
+        )
+
+
+def test_partial_snapshot_publication_is_not_exposed(tmp_path, monkeypatch):
+    monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "stream")
+    monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.01")
+    runtime = tmp_path / "runtime"
+    invocation_work = tmp_path / "method_support_001_M01"
+    original_replace = runtime_observability.os.replace
+
+    def fail_snapshot_publish(source, destination):
+        destination = Path(destination)
+        if destination.parent.name == "provider_runtime" and Path(source).is_dir():
+            raise OSError("simulated snapshot publication interruption")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(runtime_observability.os, "replace", fail_snapshot_publish)
+
+    with pytest.raises(OSError, match="publication interruption"):
+        run_observed_provider(
+            command=[sys.executable, str(FIXTURE), "exec", "--json"],
+            prompt="fixture prompt",
+            runtime_dir=runtime,
+            invocation_work_dir=invocation_work,
+            backend="codex",
+            task_id="dr-partial",
+            candidate_id="C1",
+            node="L4",
+            job_timeout=3,
+            observer_interval=0.01,
+        )
+
+    receipt_sha256 = hashlib.sha256(
+        (runtime / "runtime_receipt.json").read_bytes()
+    ).hexdigest()
+    assert not (invocation_work / "provider_runtime" / receipt_sha256).exists()
 
 
 def test_atomic_status_write_retries_transient_windows_lock(tmp_path, monkeypatch):

@@ -49,6 +49,16 @@ _ALLOWED_STATES = _TERMINAL_STATES | {
     "starting", "running", "waiting_external", "validating", "persisting",
     "failed",
 }
+_RUNTIME_ARTIFACT_NAMES = (
+    "runtime_receipt.json",
+    "events.jsonl",
+    "stderr.log",
+    "final_output.json",
+)
+
+
+class ProviderRuntimeIntegrityError(RuntimeError):
+    """A frozen provider runtime receipt or one of its artifacts is invalid."""
 
 
 @dataclass(frozen=True)
@@ -147,6 +157,169 @@ def _file_record(path: Path) -> dict:
         return {"path": path.name, "sha256": "", "bytes": 0}
     content = path.read_bytes()
     return {"path": path.name, "sha256": _sha_bytes(content), "bytes": len(content)}
+
+
+def _validate_runtime_snapshot(
+    receipt_path: Path,
+    expected_sha256: str,
+    *,
+    require_success: bool,
+) -> dict:
+    try:
+        receipt_bytes = receipt_path.read_bytes()
+    except OSError as exc:
+        raise ProviderRuntimeIntegrityError(
+            f"runtime receipt is missing: {receipt_path}"
+        ) from exc
+    actual_receipt_sha256 = _sha_bytes(receipt_bytes)
+    if actual_receipt_sha256 != expected_sha256:
+        raise ProviderRuntimeIntegrityError(
+            "runtime receipt hash mismatch: "
+            f"{receipt_path}; expected={expected_sha256} "
+            f"actual={actual_receipt_sha256}"
+        )
+    try:
+        receipt = json.loads(receipt_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProviderRuntimeIntegrityError(
+            f"runtime receipt is malformed: {receipt_path}"
+        ) from exc
+    if not isinstance(receipt, dict) or receipt.get("schema_version") != RECEIPT_SCHEMA:
+        raise ProviderRuntimeIntegrityError(
+            f"runtime receipt schema is invalid: {receipt_path}"
+        )
+    if require_success and (
+        receipt.get("final_status") != "succeeded"
+        or receipt.get("exit_code") != 0
+        or receipt.get("timed_out") is not False
+    ):
+        raise ProviderRuntimeIntegrityError(
+            f"runtime receipt does not prove successful execution: {receipt_path}"
+        )
+    artifacts = receipt.get("artifacts")
+    expected_names = {
+        "events": "events.jsonl",
+        "stderr": "stderr.log",
+        "final_output": "final_output.json",
+    }
+    if not isinstance(artifacts, dict) or set(artifacts) != set(expected_names):
+        raise ProviderRuntimeIntegrityError(
+            f"runtime receipt artifact manifest is invalid: {receipt_path}"
+        )
+    for key, expected_name in expected_names.items():
+        record = artifacts.get(key)
+        if (
+            not isinstance(record, dict)
+            or record.get("path") != expected_name
+            or not isinstance(record.get("sha256"), str)
+            or not isinstance(record.get("bytes"), int)
+            or isinstance(record.get("bytes"), bool)
+            or record["bytes"] < 0
+        ):
+            raise ProviderRuntimeIntegrityError(
+                f"runtime receipt artifact record is invalid: {receipt_path}; artifact={key}"
+            )
+        artifact_path = receipt_path.parent / expected_name
+        try:
+            artifact_bytes = artifact_path.read_bytes()
+        except OSError as exc:
+            raise ProviderRuntimeIntegrityError(
+                f"runtime receipt artifact is missing: {artifact_path}"
+            ) from exc
+        artifact_sha256 = _sha_bytes(artifact_bytes)
+        if (
+            artifact_sha256 != record["sha256"]
+            or len(artifact_bytes) != record["bytes"]
+        ):
+            raise ProviderRuntimeIntegrityError(
+                "runtime receipt artifact integrity mismatch: "
+                f"{artifact_path}; expected_sha256={record['sha256']} "
+                f"actual_sha256={artifact_sha256}"
+            )
+    return receipt
+
+
+def validate_runtime_receipt_reference(
+    project_dir: str | Path,
+    reference: Mapping[str, Any],
+    *,
+    require_success: bool = False,
+) -> dict:
+    """Validate one content-addressed provider receipt and all owned artifacts."""
+    if not isinstance(reference, Mapping):
+        raise ProviderRuntimeIntegrityError("runtime receipt reference must be an object")
+    path_value = reference.get("path")
+    receipt_sha256 = reference.get("sha256")
+    if (
+        reference.get("schema") != RECEIPT_SCHEMA
+        or not isinstance(path_value, str)
+        or not path_value
+        or not isinstance(receipt_sha256, str)
+        or len(receipt_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in receipt_sha256)
+    ):
+        raise ProviderRuntimeIntegrityError("runtime receipt reference is invalid")
+    root = Path(project_dir).resolve()
+    receipt_path = (root / path_value).resolve()
+    try:
+        receipt_path.relative_to(root)
+    except ValueError as exc:
+        raise ProviderRuntimeIntegrityError(
+            f"runtime receipt path escapes project: {receipt_path}"
+        ) from exc
+    if (
+        receipt_path.name != "runtime_receipt.json"
+        or receipt_path.parent.name != receipt_sha256
+        or receipt_path.parent.parent.name != "provider_runtime"
+    ):
+        raise ProviderRuntimeIntegrityError(
+            f"runtime receipt path is not content-addressed: {receipt_path}"
+        )
+    return _validate_runtime_snapshot(
+        receipt_path,
+        receipt_sha256,
+        require_success=require_success,
+    )
+
+
+def _freeze_runtime_receipt(runtime_dir: Path, invocation_work_dir: Path) -> Path:
+    receipt_path = runtime_dir / "runtime_receipt.json"
+    receipt_sha256 = _sha_bytes(receipt_path.read_bytes())
+    _validate_runtime_snapshot(
+        receipt_path,
+        receipt_sha256,
+        require_success=False,
+    )
+    snapshots_root = invocation_work_dir / "provider_runtime"
+    snapshots_root.mkdir(parents=True, exist_ok=True)
+    frozen_dir = snapshots_root / receipt_sha256
+    frozen_receipt = frozen_dir / "runtime_receipt.json"
+    if frozen_dir.exists():
+        _validate_runtime_snapshot(
+            frozen_receipt,
+            receipt_sha256,
+            require_success=False,
+        )
+        return frozen_receipt
+
+    temporary = snapshots_root / f".tmp-{uuid.uuid4().hex}"
+    temporary.mkdir()
+    for name in _RUNTIME_ARTIFACT_NAMES:
+        (temporary / name).write_bytes((runtime_dir / name).read_bytes())
+    _validate_runtime_snapshot(
+        temporary / "runtime_receipt.json",
+        receipt_sha256,
+        require_success=False,
+    )
+    try:
+        os.replace(temporary, frozen_dir)
+    except FileExistsError:
+        _validate_runtime_snapshot(
+            frozen_receipt,
+            receipt_sha256,
+            require_success=False,
+        )
+    return frozen_receipt
 
 
 def _process_snapshot(pid: int) -> dict:
@@ -502,13 +675,19 @@ def run_observed_provider(
     cwd: str | Path | None = None,
     env: Mapping[str, str] | None = None,
     input_text: str | None = None,
+    invocation_work_dir: str | Path | None = None,
 ) -> ProviderExecution:
     """Execute one observed provider via the canonical bounded process engine."""
     runtime_dir = Path(runtime_dir)
     effective_cwd = Path(cwd).resolve() if cwd is not None else Path.cwd()
     runtime_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("events.jsonl", "stderr.log"):
+        (runtime_dir / name).write_bytes(b"")
+    for name in ("final_output.json", "runtime_receipt.json"):
+        path = runtime_dir / name
+        if path.exists():
+            path.unlink()
     final_output_path = runtime_dir / "final_output.json"
-    receipt_path = runtime_dir / "runtime_receipt.json"
     prepared = _prepare_command(command, backend, final_output_path)
     observer = _RuntimeObserver(
         runtime_dir=runtime_dir,
@@ -535,6 +714,7 @@ def run_observed_provider(
         )
     except OSError as exc:
         observer.publish(state="transport_lost", termination_reason=f"launch_failed: {exc}")
+        final_output_path.write_bytes(b"")
         cleanup = {
             "attempted": False,
             "targeted_pids": [],
@@ -564,9 +744,13 @@ def run_observed_provider(
             inactivity_timeout,
             observer_interval,
         )
+        frozen_receipt = _freeze_runtime_receipt(
+            runtime_dir,
+            Path(invocation_work_dir) if invocation_work_dir is not None else runtime_dir,
+        )
         return ProviderExecution(
             prepared, 127, "", str(exc), "transport_lost", runtime_dir,
-            receipt_path, receipt_hash,
+            frozen_receipt, receipt_hash,
         )
 
     if bounded.terminal_state == "timed_out":
@@ -584,6 +768,9 @@ def run_observed_provider(
     else:
         final_status = "succeeded"
         termination_reason = "completed"
+
+    if not final_output_path.exists():
+        final_output_path.write_bytes(b"")
 
     final_output = (
         final_output_path.read_text(encoding="utf-8", errors="replace")
@@ -621,6 +808,10 @@ def run_observed_provider(
         inactivity_timeout,
         observer_interval,
     )
+    frozen_receipt = _freeze_runtime_receipt(
+        runtime_dir,
+        Path(invocation_work_dir) if invocation_work_dir is not None else runtime_dir,
+    )
     return ProviderExecution(
         prepared,
         int(bounded.returncode or 0),
@@ -628,7 +819,7 @@ def run_observed_provider(
         stderr_text,
         final_status,
         runtime_dir,
-        receipt_path,
+        frozen_receipt,
         receipt_hash,
     )
 
@@ -794,6 +985,7 @@ class _ObservedExecutor:
             cwd=kwargs.get("cwd"),
             env=kwargs.get("env"),
             input_text=kwargs.get("input_text"),
+            invocation_work_dir=context.get("invocation_work_dir"),
         )
         context["execution"] = execution
         command_value = tuple(execution.args)
@@ -844,6 +1036,9 @@ def install(deep_research_module: Any, detached_task_module: Any) -> None:
         command, prompt = original_build(*args, **kwargs)
         spec = args[0] if args else kwargs.get("spec")
         work_dir = args[4] if len(args) > 4 else kwargs.get("work_dir")
+        context = _CONTEXT.get()
+        if context is not None and work_dir is not None:
+            context["invocation_work_dir"] = Path(work_dir).resolve()
         if getattr(spec, "backend", "") == "codex":
             if "--json" not in command:
                 command.append("--json")
@@ -884,6 +1079,8 @@ def install(deep_research_module: Any, detached_task_module: Any) -> None:
             })
         context = {
             "runtime_dir": runtime_dir,
+            "project_dir": Path(project_dir).resolve(),
+            "invocation_work_dir": Path(work_dir).resolve(),
             "task_id": task_id,
             "candidate_id": candidate_id,
             "node": node,
@@ -932,11 +1129,12 @@ def install(deep_research_module: Any, detached_task_module: Any) -> None:
         execution = context.get("execution") if context else None
         if execution is not None:
             try:
+                project_dir = Path(context.get("project_dir")).resolve()
                 relative = execution.runtime_receipt_path.relative_to(
-                    Path(context.get("runtime_dir")).parents[3]
+                    project_dir
                 )
                 path = str(relative).replace("\\", "/")
-            except (ValueError, IndexError):
+            except (TypeError, ValueError):
                 path = str(execution.runtime_receipt_path)
             value["runtime_receipt"] = {
                 "schema": RECEIPT_SCHEMA,
