@@ -237,3 +237,10 @@ def test_retry_policy_constants_are_bounded():
 
     assert resilience.PROVIDER_RETRY_POLICY.max_attempts == 3
     assert resilience.PROVIDER_RETRY_POLICY.wait_seconds == (30.0, 60.0)
+
+
+def test_formal_runtime_requires_shared_resilience_dependency():
+    from research_loop import runtime_preflight
+
+    assert "tenacity" in runtime_preflight.REQUIRED_DISTRIBUTIONS
+    assert "research_loop.external_resilience" in runtime_preflight.REQUIRED_IMPORTS
