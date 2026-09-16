@@ -12,7 +12,7 @@ import json
 import re
 from pathlib import Path
 
-from research_loop import research_seed
+from research_loop import fulltext_retrieval, research_seed
 from research_loop.compatibility import get_profile
 from research_loop.delta import _delta_for_candidate, artifact_for_node
 from research_loop.hypothesis_ledger import binding_path
@@ -21,7 +21,11 @@ from research_loop.l05_curie.contracts import CurieContractError
 from research_loop.l05_curie.semantic_verifier import SemanticEvidenceVerifier
 
 
-RUN_SCHEMA_VERSION = "L85CanonicalLiteratureVerification/v1"
+RUN_SCHEMA_VERSION = "L85CanonicalLiteratureVerification/v2"
+_READABLE_RUN_SCHEMA_VERSIONS = {
+    "L85CanonicalLiteratureVerification/v1",
+    RUN_SCHEMA_VERSION,
+}
 _VERDICTS = {"supports", "contradicts", "unresolved"}
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:+/-]*")
 _STOPWORDS = {
@@ -174,7 +178,9 @@ def load_run_manifest(project_dir: str | Path, candidate_id: str, run_id: str) -
         raise L85VerificationError(f"L8.5 canonical run is unreadable: {path}") from exc
     body = dict(payload)
     expected = str(body.pop("run_sha256", ""))
-    if payload.get("schema_version") != RUN_SCHEMA_VERSION or expected != _sha(body):
+    if payload.get("schema_version") not in _READABLE_RUN_SCHEMA_VERSIONS:
+        raise L85VerificationError("L8.5 canonical run schema_version is unsupported")
+    if expected != _sha(body):
         raise L85VerificationError("L8.5 canonical run hash does not match its bytes")
     return payload
 
@@ -187,17 +193,55 @@ def audit_run_manifest(project_dir: str | Path, candidate_id: str, *, run_id: st
         located_ids = {str(item.get("evidence_id") or "") for item in located}
         validate_finding_verdicts(run.get("findings") or [], run.get("verdicts") or [], known_evidence_ids=located_ids)
         root = Path(project_dir).resolve()
+
+        def verified_file(relative_value, recorded_sha, label):
+            relative = Path(str(relative_value or ""))
+            source = (root / relative).resolve()
+            if (
+                relative.is_absolute()
+                or not source.is_file()
+                or root not in source.parents and source != root
+            ):
+                raise L85VerificationError(f"{label} is missing")
+            if hashlib.sha256(source.read_bytes()).hexdigest() != str(recorded_sha or ""):
+                raise L85VerificationError(f"{label} hash mismatch")
+
+        for snapshot in run.get("source_snapshots") or []:
+            if not isinstance(snapshot, dict):
+                raise L85VerificationError("source snapshot entry is invalid")
+            verified_file(
+                snapshot.get("artifact_path"),
+                snapshot.get("artifact_sha256"),
+                "source snapshot",
+            )
+            artifacts = snapshot.get("artifacts") or []
+            if not isinstance(artifacts, list):
+                raise L85VerificationError("source snapshot artifacts are invalid")
+            for artifact in artifacts:
+                if not isinstance(artifact, dict):
+                    raise L85VerificationError("source snapshot artifact entry is invalid")
+                verified_file(
+                    artifact.get("artifact_path"),
+                    artifact.get("artifact_sha256"),
+                    "source snapshot artifact",
+                )
+            provenance_path = str(snapshot.get("provenance_path") or "")
+            if provenance_path:
+                verified_file(
+                    provenance_path,
+                    snapshot.get("provenance_sha256"),
+                    "source snapshot provenance",
+                )
+
         for item in located:
             if item.get("verification_status") != "LOCATED":
                 raise L85VerificationError("located evidence is not LOCATED")
             retrieval = item.get("retrieval") or {}
-            relative = Path(str(retrieval.get("snapshot_path") or retrieval.get("artifact_path") or ""))
-            source = (root / relative).resolve()
-            if relative.is_absolute() or not source.is_file() or root not in source.parents and source != root:
-                raise L85VerificationError("located evidence source snapshot is missing")
-            recorded_sha = str(retrieval.get("source_sha256") or retrieval.get("artifact_sha256") or "")
-            if hashlib.sha256(source.read_bytes()).hexdigest() != recorded_sha:
-                raise L85VerificationError("located evidence source snapshot hash mismatch")
+            verified_file(
+                retrieval.get("snapshot_path") or retrieval.get("artifact_path"),
+                retrieval.get("source_sha256") or retrieval.get("artifact_sha256"),
+                "located evidence source snapshot",
+            )
         return True, "", run
     except (L85VerificationError, TypeError, ValueError) as exc:
         return False, str(exc), None
@@ -225,15 +269,25 @@ def _adjudicate(findings: list[dict], evidence: list[dict], assessor, assessor_i
     return validate_finding_verdicts(findings, verdicts, known_evidence_ids={str(item.get("evidence_id") or "") for item in evidence}), semantic
 
 
-def run_native_l85(project_dir: str | Path, candidate_id: str, *, semantic_assessor=None, semantic_assessor_id: str = "l85-semantic-adjudicator/v1", timeout: int = 20) -> dict:
-    """Run the native Curie discovery/retrieval/verifier path from real L7/L8 findings."""
+def run_native_l85(
+    project_dir: str | Path,
+    candidate_id: str,
+    *,
+    semantic_assessor=None,
+    semantic_assessor_id: str = "l85-semantic-adjudicator/v1",
+    timeout: int = 20,
+    fetch_pdf_fn=None,
+) -> dict:
+    """Run result-driven discovery, full-text retrieval, and verification."""
     project = Path(project_dir)
     seed = research_seed.load_l1_research_seed(project, candidate_id)
     try:
         binding = json.loads(binding_path(project).read_text(encoding="utf-8"))
         profile = get_profile(str(binding["profile_id"]))
     except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
-        raise L85VerificationError(f"L8.5 project profile binding is unavailable: {exc}") from exc
+        raise L85VerificationError(
+            f"L8.5 project profile binding is unavailable: {exc}"
+        ) from exc
 
     def load_delta(key: str) -> dict:
         path = _delta_for_candidate(project, key, candidate_id)
@@ -243,10 +297,22 @@ def run_native_l85(project_dir: str | Path, candidate_id: str, *, semantic_asses
             value = {}
         return value if isinstance(value, dict) else {}
 
-    findings = active_findings(load_delta("L7_turing"), load_delta(artifact_for_node(profile, "L8").storage_key))
+    findings = active_findings(
+        load_delta("L7_turing"),
+        load_delta(artifact_for_node(profile, "L8").storage_key),
+    )
     plan = build_query_plan(seed, findings)
-    run_id = "L85_" + _sha({"seed_sha256": research_seed.seed_sha256(seed), "finding_ids": [item["finding_id"] for item in findings], "query_plan_id": plan["plan_id"]})[:20]
-    common = {"project_dir": project, "candidate_id": candidate_id, "run_id": run_id, "timeout": timeout}
+    run_id = "L85_" + _sha({
+        "seed_sha256": research_seed.seed_sha256(seed),
+        "finding_ids": [item["finding_id"] for item in findings],
+        "query_plan_id": plan["plan_id"],
+    })[:20]
+    common = {
+        "project_dir": project,
+        "candidate_id": candidate_id,
+        "run_id": run_id,
+        "timeout": timeout,
+    }
     transports = {
         "europe-pmc": europepmc.EuropePmcTransport(**common),
         "pubmed": multisource.PubMedTransport(**common),
@@ -254,25 +320,79 @@ def run_native_l85(project_dir: str | Path, candidate_id: str, *, semantic_asses
         "crossref": multisource.CrossrefTransport(**common),
         "semantic-scholar": multisource.SemanticScholarTransport(**common),
     }
-    discovery = multisource.run_multisource_discovery_strict(plan, transports, seed_sha256=research_seed.seed_sha256(seed), page_size=25, allow_partial=True)
+    seed_sha256 = research_seed.seed_sha256(seed)
+    discovery = multisource.run_multisource_discovery_strict(
+        plan,
+        transports,
+        seed_sha256=seed_sha256,
+        page_size=25,
+        allow_partial=True,
+    )
     records = list(discovery.get("records") or [])
     if not records:
-        raise L85VerificationError("canonical L8.5 discovery returned no real literature records")
-    selected = selector.select_candidates_strict(records, seed=seed, scorer=lambda _record, _seed: {"relevance": .5, "directness": .5, "methodological_value": 0, "contradiction_value": .5, "evidence_diversity": .5, "reason": "result-driven source verification"}, eligibility=lambda record: (bool(record.get("identifiers")), "CANONICAL_IDENTITY_REQUIRED"), max_papers=3, query_ids={str(item["query_id"]) for item in plan["queries"]})
+        raise L85VerificationError(
+            "canonical L8.5 discovery returned no real literature records"
+        )
+    selected = selector.select_candidates_strict(
+        records,
+        seed=seed,
+        scorer=lambda _record, _seed: {
+            "relevance": .5,
+            "directness": .5,
+            "methodological_value": 0,
+            "contradiction_value": .5,
+            "evidence_diversity": .5,
+            "reason": "result-driven source verification",
+        },
+        eligibility=fulltext_retrieval.has_retrievable_identifier,
+        max_papers=3,
+        query_ids={str(item["query_id"]) for item in plan["queries"]},
+    )
     selected_ids = set(selected.get("included_paper_ids") or [])
-    located, snapshots = [], []
+    located: list[dict] = []
+    snapshots: list[dict] = []
+    retrieval_attempts: list[dict] = []
+    paper_failures: list[dict] = []
     for record in records:
         if str(record.get("paper_id") or "") not in selected_ids:
             continue
-        identifiers = record.get("identifiers") or {}
-        pmcid = multisource.normalize_pmcid(identifiers.get("pmcid"))
-        if not pmcid:
-            continue
-        try:
-            retrieval = europepmc.EuropePmcEvidenceRetriever(project, candidate_id=candidate_id, run_id=run_id, timeout=timeout).retrieve({**record, "identifiers": {**identifiers, "pmcid": pmcid}}, seed=seed)
-            located.extend(europepmc.EuropePmcEvidenceVerifier(project, candidate_id=candidate_id).verify(retrieval["snapshot"], retrieval["candidates"]))
-            snapshots.append(retrieval["snapshot"])
-        except CurieContractError:
-            continue
-    verdicts, semantic = _adjudicate(findings, located, semantic_assessor, semantic_assessor_id)
-    return persist_run_manifest(project, candidate_id, run_id=run_id, payload={"research_seed": research_seed.manifest_entry(seed), "query_plan": plan, "discovery": discovery, "selected_paper_ids": sorted(selected_ids), "source_snapshots": snapshots, "located_evidence": located, "semantic_verifications": semantic, "findings": findings, "verdicts": verdicts})
+        retrieval = fulltext_retrieval.retrieve_selected_fulltext(
+            project,
+            candidate_id=candidate_id,
+            run_id=run_id,
+            paper=record,
+            seed=seed,
+            stage="l85",
+            timeout=timeout,
+            fetch_pdf_fn=fetch_pdf_fn,
+        )
+        retrieval_attempts.extend(retrieval.get("attempts") or [])
+        for snapshot in retrieval.get("snapshots") or []:
+            if isinstance(snapshot, dict):
+                snapshots.append(snapshot)
+        located.extend(retrieval.get("located") or [])
+        failure = retrieval.get("paper_failure")
+        if isinstance(failure, dict):
+            paper_failures.append(copy.deepcopy(failure))
+
+    verdicts, semantic = _adjudicate(
+        findings, located, semantic_assessor, semantic_assessor_id
+    )
+    return persist_run_manifest(
+        project,
+        candidate_id,
+        run_id=run_id,
+        payload={
+            "research_seed": research_seed.manifest_entry(seed),
+            "query_plan": plan,
+            "discovery": discovery,
+            "selected_paper_ids": sorted(selected_ids),
+            "source_snapshots": snapshots,
+            "retrieval_attempts": retrieval_attempts,
+            "paper_failures": paper_failures,
+            "located_evidence": located,
+            "semantic_verifications": semantic,
+            "findings": findings,
+            "verdicts": verdicts,
+        },
+    )

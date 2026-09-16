@@ -188,6 +188,7 @@ def test_runtime_does_not_freeze_when_no_oa_full_text_is_available(tmp_path):
         max_papers=1,
         run_id="RUN_NO_OA",
         http_get=lambda _url, _timeout: _search_payload(open_access=False),
+        fetch_pdf_fn=lambda *_args, **_kwargs: None,
     )
 
     assert result["status"] == "INSUFFICIENT_RETRY"
@@ -195,6 +196,78 @@ def test_runtime_does_not_freeze_when_no_oa_full_text_is_available(tmp_path):
     assert result["coverage"]["verdict"] == "INSUFFICIENT_RETRY"
     assert result["coverage"]["gaps"][0]["gap_id"] == "NO_VERIFIED_FULL_TEXT"
     assert not list((project / "09_Literature_Database" / "evidence_packs" / "l05").rglob("*.json"))
+
+
+def test_runtime_prefers_pmid_for_fetchpdf_xml_without_pmcid(tmp_path):
+    project, seed = _project(tmp_path)
+    search = _search_payload(open_access=False)
+    calls = []
+
+    def fetch_pdf(identifier, save_path, **kwargs):
+        calls.append((identifier, Path(save_path), kwargs))
+        xml_path = Path(save_path).with_suffix(".xml")
+        xml_path.write_bytes(XML)
+        provenance = xml_path.with_suffix(".provenance.json")
+        provenance.write_text(json.dumps({
+            "schema_version": 2,
+            "identifier": identifier,
+            "identifiers_resolved": {"doi": identifier},
+            "artifacts": [{
+                "path": xml_path.name,
+                "content_hash": "sha256:" + hashlib.sha256(XML).hexdigest(),
+            }],
+        }), encoding="utf-8")
+        return str(xml_path)
+
+    def http_get(url, _timeout):
+        if "/search?" in url:
+            return search
+        raise AssertionError(f"Europe PMC fullTextXML must not be called: {url}")
+
+    result = run_europepmc_acquisition(
+        project,
+        "C001",
+        explicit_queries=["EXT_ID:22253597 AND SRC:MED"],
+        max_papers=1,
+        run_id="RUN_FETCHPDF_DOI",
+        http_get=http_get,
+        fetch_pdf_fn=fetch_pdf,
+    )
+
+    assert result["status"] == "FROZEN"
+    assert len(calls) == 1
+    identifier, save_path, kwargs = calls[0]
+    assert identifier == "22253597"
+    assert save_path.parent.name == "xml"
+    assert save_path.parent.parent.name.startswith("P_")
+    assert kwargs == {
+        "allow_xml_fallback": False,
+        "xml_only": True,
+        "get_xml_or_html": False,
+        "target_task": "extraction",
+        "want_provenance": True,
+        "verbose": False,
+    }
+    frozen = load_frozen_evidence_pack(
+        project,
+        result["evidence_pack"],
+        candidate_id="C001",
+        round_id="1",
+        seed_sha256=research_seed.seed_sha256(seed),
+    )
+    assert {item["section"] for item in frozen["evidence"]} == {
+        "Results", "Discussion", "Conclusion"
+    }
+    assert all(
+        item["retrieval"]["engine"] == "fetchpdf-jats-source-relocator/v1"
+        for item in frozen["evidence"]
+    )
+    audit = json.loads(
+        (project / result["acquisition_manifest_path"]).read_text(encoding="utf-8")
+    )
+    assert audit["source_snapshots"][0]["provider"] == "fetchpdf"
+    assert audit["retrieval_attempts"][0]["provider"] == "fetchpdf"
+    assert audit["paper_failures"] == []
 
 
 def test_runtime_promotes_reserve_after_include_has_no_target_sections(tmp_path):
@@ -218,6 +291,7 @@ def test_runtime_promotes_reserve_after_include_has_no_target_sections(tmp_path)
         max_papers=1,
         run_id="RUN_RESERVE_PROMOTION",
         http_get=http_get,
+        fetch_pdf_fn=lambda *_args, **_kwargs: None,
     )
 
     assert result["status"] == "FROZEN"
@@ -257,6 +331,7 @@ def test_runtime_routes_all_no_target_sections_through_coverage_gap(tmp_path):
         max_papers=1,
         run_id="RUN_ALL_NO_TARGET",
         http_get=http_get,
+        fetch_pdf_fn=lambda *_args, **_kwargs: None,
     )
 
     assert result["status"] == "INSUFFICIENT_RETRY"
