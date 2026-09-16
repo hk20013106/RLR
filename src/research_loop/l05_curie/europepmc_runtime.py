@@ -1,8 +1,8 @@
-"""End-to-end Europe PMC acquisition runtime for L0.5 Curie.
+"""Europe PMC discovery and full-text acquisition runtime for L0.5 Curie.
 
-The runtime terminates at the immutable EvidencePack freeze boundary. It does
-not bind the resulting pack into L1; that migration is intentionally outside
-this Phase-2 vertical slice.
+Europe PMC JATS remains the preferred source; DOI/PMID records fall back to
+the fetchpdf Python API. The runtime terminates at the immutable EvidencePack
+freeze boundary.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from research_loop import research_seed
+from research_loop import fulltext_retrieval, research_seed
 
 from .contracts import CurieContractError, judge_coverage, validate_query_plan
 from .europepmc import EuropePmcEvidenceRetriever, EuropePmcEvidenceVerifier, EuropePmcTransport
@@ -35,7 +35,7 @@ from .selector import select_candidates, select_candidates_strict
 from .store import build_evidence_pack, freeze_evidence_pack
 
 RESULT_SCHEMA_VERSION = "L05EuropePmcAcquisitionResult/v1"
-AUDIT_SCHEMA_VERSION = "L05EuropePmcAcquisitionManifest/v1"
+AUDIT_SCHEMA_VERSION = "L05EuropePmcAcquisitionManifest/v2"
 PAPERQA2_RESULT_SCHEMA_VERSION = "L05PaperQA2EuropePmcAcquisitionResult/v1"
 PAPERQA2_AUDIT_SCHEMA_VERSION = "L05PaperQA2EuropePmcAcquisitionManifest/v1"
 _PAPERQA2_MAX_INTENT_CHARS = 320
@@ -89,10 +89,10 @@ def _coverage_for(source_snapshots: list[dict], evidence: list[dict], *, round_i
         gaps.append(_gap(
             "NO_VERIFIED_FULL_TEXT",
             "verified full text",
-            "No selected Europe PMC OA source produced independently verified located evidence.",
+            "No selected source produced independently verified located full-text evidence.",
             [
-                "broaden the Europe PMC query while retaining OPEN_ACCESS candidates",
-                "search for primary papers with PMCID-backed Europe PMC full text",
+                "broaden the literature query while retaining stable DOI/PMID/PMCID identity",
+                "retrieve a different primary paper with structured full text",
             ],
         ))
     interpretation = any(
@@ -146,9 +146,17 @@ def _write_audit_manifest(
 
 
 def _europepmc_full_text_eligibility(record: dict) -> tuple[bool, str]:
-    """Require a source-qualified Europe PMC OA full text before retrieval."""
-    identifiers = record.get("identifiers") if isinstance(record.get("identifiers"), dict) else {}
-    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    """Require a source-qualified Europe PMC OA full text."""
+    identifiers = (
+        record.get("identifiers")
+        if isinstance(record.get("identifiers"), dict)
+        else {}
+    )
+    metadata = (
+        record.get("metadata")
+        if isinstance(record.get("metadata"), dict)
+        else {}
+    )
     if not identifiers.get("pmcid"):
         return False, "NO_EUROPEPMC_PMCID"
     if metadata.get("is_open_access") is not True:
@@ -156,6 +164,11 @@ def _europepmc_full_text_eligibility(record: dict) -> tuple[bool, str]:
     if metadata.get("in_europe_pmc") is not True:
         return False, "NOT_IN_EUROPEPMC"
     return True, "SOURCE_QUALIFIED"
+
+
+def _fetchpdf_full_text_eligibility(record: dict) -> tuple[bool, str]:
+    """Require an identifier supported by Europe PMC or fetchpdf retrieval."""
+    return fulltext_retrieval.has_retrievable_identifier(record)
 
 
 def _europepmc_selector_score(record: dict, seed: dict) -> dict:
@@ -182,7 +195,7 @@ def _europepmc_selector_score(record: dict, seed: dict) -> dict:
         "methodological_value": 0.5,
         "contradiction_value": 0.0,
         "evidence_diversity": min(1.0, source_count / 2),
-        "reason": "Deterministic source-qualified Europe PMC ranking from the canonical ResearchSeed.",
+        "reason": "Deterministic full-text retrieval ranking from the canonical ResearchSeed.",
     }
 
 
@@ -238,17 +251,24 @@ def _reserve_europepmc_papers(discovery: dict, selection: dict) -> list[dict]:
     return reserves
 
 
-def _promote_reserve_after_no_target_sections(reserve: dict, failed_paper_id: str) -> dict:
+def _promote_reserve_after_fulltext_gap(
+    reserve: dict, failed_paper_id: str, failure_code: str
+) -> dict:
     """Make one selector-approved reserve eligible for the same acquisition slot."""
+    promotion_code = (
+        "PROMOTED_AFTER_NO_TARGET_SECTIONS"
+        if failure_code == "NO_TARGET_SECTIONS"
+        else "PROMOTED_AFTER_FULLTEXT_GAP"
+    )
     return {
         **reserve,
         "selection": {
             "decision": "INCLUDE",
             "reason": (
                 "Promoted from selector-approved RESERVE after "
-                f"{failed_paper_id} produced NO_TARGET_SECTIONS."
+                f"{failed_paper_id} produced full-text gap {failure_code}."
             ),
-            "reason_code": "PROMOTED_AFTER_NO_TARGET_SECTIONS",
+            "reason_code": promotion_code,
             "original_decision": "RESERVE",
         },
     }
@@ -267,6 +287,7 @@ def _prepare_europepmc_acquisition(
     round_index: int,
     reformulation_index: int = 0,
     query_id_prefix: str = "Q",
+    allow_fetchpdf: bool = False,
 ) -> dict:
     """Discover and select Europe PMC records once for each acquisition mode."""
     try:
@@ -275,10 +296,9 @@ def _prepare_europepmc_acquisition(
         raise CurieContractError(f"canonical ResearchSeed is invalid: {exc}") from exc
     seed_digest = research_seed.seed_sha256(seed)
     normalized_run_id = _safe_token(run_id or _new_run_id(candidate_id), "run_id")
-    # PaperQA2 retrieval is Europe-PMC source-qualified, but discovery and
-    # selection remain in Curie's provider-neutral planner/orchestrator path.
-    # The declared one-provider plan is deliberate: every selected record must
-    # be retrievable from the exact Europe PMC OA full-text source below.
+    # Discovery remains deliberately Europe-PMC-only in this runtime. Selected
+    # records may use a PMCID for the preferred Europe PMC JATS source or a
+    # DOI/PMID for the fetchpdf full-text fallback.
     query_plan = build_multisource_query_plan(
         seed,
         seed_sha256=seed_digest,
@@ -306,7 +326,11 @@ def _prepare_europepmc_acquisition(
         discovery["records"],
         seed=seed,
         scorer=_europepmc_selector_score,
-        eligibility=_europepmc_full_text_eligibility,
+        eligibility=(
+            _fetchpdf_full_text_eligibility
+            if allow_fetchpdf
+            else _europepmc_full_text_eligibility
+        ),
         max_papers=max_papers,
         project_dir=project,
         candidate_id=candidate_id,
@@ -465,6 +489,7 @@ def run_europepmc_acquisition(
     http_get: Callable[[str, int], bytes] | None = None,
     timeout: int = 20,
     round_index: int = 1,
+    fetch_pdf_fn: Callable | None = None,
 ) -> dict:
     """Execute one auditable Europe PMC acquisition round through FREEZE."""
     project = Path(project_dir)
@@ -479,6 +504,7 @@ def run_europepmc_acquisition(
         http_get=http_get,
         timeout=timeout,
         round_index=round_index,
+        allow_fetchpdf=True,
     )
     query_plans = [prepared["query_plan"]]
     discovery_batches = list(prepared["discovery_batches"])
@@ -507,6 +533,7 @@ def run_europepmc_acquisition(
             round_index=round_index,
             reformulation_index=1,
             query_id_prefix="R",
+            allow_fetchpdf=True,
         )
         query_plans.append(prepared["query_plan"])
         discovery_batches.extend(prepared["discovery_batches"])
@@ -529,40 +556,44 @@ def run_europepmc_acquisition(
     verified_evidence: list[dict] = []
     acquired_papers: list[dict] = []
     paper_failures: list[dict] = []
+    retrieval_attempts: list[dict] = []
     reserve_promotions: list[dict] = []
     if selection["selected"]:
-        retriever = EuropePmcEvidenceRetriever(
-            project,
-            candidate_id=candidate_id,
-            run_id=run_id,
-            http_get=http_get,
-            timeout=timeout,
-        )
-        verifier = EuropePmcEvidenceVerifier(project, candidate_id=candidate_id)
 
         def retrieve_one(paper: dict) -> bool:
-            retrieval = retriever.retrieve(paper, seed=seed)
-            source_snapshots.append(retrieval["snapshot"])
+            retrieval = fulltext_retrieval.retrieve_selected_fulltext(
+                project,
+                candidate_id=candidate_id,
+                run_id=run_id,
+                paper=paper,
+                seed=seed,
+                stage="l05",
+                timeout=timeout,
+                http_get=http_get,
+                fetch_pdf_fn=fetch_pdf_fn,
+            )
+            retrieval_attempts.extend(retrieval.get("attempts") or [])
+            for snapshot in retrieval.get("snapshots") or []:
+                if isinstance(snapshot, dict):
+                    source_snapshots.append(snapshot)
             failure = retrieval.get("paper_failure")
             if failure is not None:
                 if (
                     not isinstance(failure, dict)
                     or failure.get("paper_id") != paper.get("paper_id")
-                    or failure.get("pmcid") != (paper.get("identifiers") or {}).get("pmcid")
-                    or failure.get("reason_code") != "NO_TARGET_SECTIONS"
+                    or not str(failure.get("reason_code") or "").strip()
                 ):
                     raise CurieContractError(
-                        "Europe PMC retriever returned an invalid paper-level insufficiency"
+                        "full-text retriever returned an invalid paper-level insufficiency"
                     )
-                paper_failures.append({
-                    "paper_id": failure["paper_id"],
-                    "pmcid": failure["pmcid"],
-                    "reason_code": failure["reason_code"],
-                })
+                paper_failures.append(json.loads(json.dumps(failure)))
                 return False
-            verified_evidence.extend(
-                verifier.verify(retrieval["snapshot"], retrieval["candidates"])
-            )
+            located = retrieval.get("located")
+            if not isinstance(located, list) or not located:
+                raise CurieContractError(
+                    "full-text retriever reported success without LOCATED evidence"
+                )
+            verified_evidence.extend(located)
             acquired_papers.append(paper)
             return True
 
@@ -571,14 +602,15 @@ def run_europepmc_acquisition(
             if retrieve_one(paper):
                 continue
             while (reserve := next(reserves, None)) is not None:
-                promoted = _promote_reserve_after_no_target_sections(
-                    reserve, str(paper["paper_id"])
+                failure_code = str(paper_failures[-1]["reason_code"])
+                promoted = _promote_reserve_after_fulltext_gap(
+                    reserve, str(paper["paper_id"]), failure_code
                 )
                 reserve_promotions.append({
                     "replaced_paper_id": paper["paper_id"],
                     "promoted_paper_id": promoted["paper_id"],
                     "promoted_pmcid": promoted["identifiers"].get("pmcid"),
-                    "reason_code": "PROMOTED_AFTER_NO_TARGET_SECTIONS",
+                    "reason_code": promoted["selection"]["reason_code"],
                 })
                 if retrieve_one(promoted):
                     break
@@ -627,6 +659,7 @@ def run_europepmc_acquisition(
         "discovery_batches": discovery_batches,
         "selection": selection,
         "source_snapshots": source_snapshots,
+        "retrieval_attempts": retrieval_attempts,
         "paper_failures": paper_failures,
         "reserve_promotions": reserve_promotions,
         "verified_evidence_ids": [item["evidence_id"] for item in verified_evidence],

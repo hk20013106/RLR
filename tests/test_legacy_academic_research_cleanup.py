@@ -1,4 +1,5 @@
 import hashlib
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -81,6 +82,36 @@ def test_l85_verdicts_are_exactly_once_and_doi_is_not_verification():
             verdicts + [{"finding_id": "H1", "verdict": "contradicts", "evidence_ids": ["E1"]}],
             known_evidence_ids={"E1"},
         )
+
+
+def test_native_l85_loader_keeps_v1_read_compatibility(tmp_path):
+    from research_loop import l85_literature_verification as l85
+
+    path = (
+        tmp_path / "08_Audit" / "l85_literature_verification"
+        / "C1" / "L85_v1.json"
+    )
+    body = {
+        "schema_version": "L85CanonicalLiteratureVerification/v1",
+        "run_id": "L85_v1",
+        "candidate_id": "C1",
+        "findings": [{"finding_id": "H1", "text": "observed result"}],
+        "located_evidence": [],
+        "verdicts": [{
+            "finding_id": "H1",
+            "verdict": "unresolved",
+            "evidence_ids": [],
+        }],
+    }
+    body["run_sha256"] = l85._sha(body)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(body, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+    )
+
+    loaded = l85.load_run_manifest(tmp_path, "C1", "L85_v1")
+
+    assert loaded["schema_version"] == "L85CanonicalLiteratureVerification/v1"
 
 
 def test_native_l85_audit_revalidates_located_source_bytes(tmp_path):

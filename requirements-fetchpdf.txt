@@ -1,0 +1,4 @@
+# Optional multi-source full-text retrieval used after Europe PMC cannot
+# produce usable located evidence. Core RLR remains usable without this extra.
+-r requirements.txt
+fetchpdf[html]>=0.1.0
