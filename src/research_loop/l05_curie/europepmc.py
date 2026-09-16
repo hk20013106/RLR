@@ -15,6 +15,8 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree as ET
 
+from research_loop.external_resilience import run_http_with_retry
+
 from .contracts import (
     DISCOVERY_BATCH_SCHEMA_VERSION,
     DISCOVERY_TRANSPORT_SCHEMA_VERSION,
@@ -235,7 +237,7 @@ class EuropePmcTransport:
             cursor_mark=cursor_mark,
         )
         try:
-            raw = self.http_get(url, self.timeout)
+            raw = run_http_with_retry(lambda: self.http_get(url, self.timeout))
         except Exception as exc:
             raise CurieContractError(f"Europe PMC search request failed: {exc}") from exc
         payload, results = _decode_core_response(raw)
@@ -284,8 +286,9 @@ def lookup_exact_identifiers(
         else f"EXT_ID:{normalized_pmid} AND SRC:MED"
     )
     getter = http_get or _default_http_get
+    url = _core_search_url(query, page_size=10)
     try:
-        raw = getter(_core_search_url(query, page_size=10), timeout)
+        raw = run_http_with_retry(lambda: getter(url, timeout))
     except Exception as exc:
         raise EuropePmcLookupUnavailableError(
             f"Europe PMC exact identifier lookup failed: {exc}"
@@ -437,7 +440,7 @@ class EuropePmcEvidenceRetriever:
 
         url = f"{BASE_URL}/{pmcid}/fullTextXML"
         try:
-            raw = self.http_get(url, self.timeout)
+            raw = run_http_with_retry(lambda: self.http_get(url, self.timeout))
         except Exception as exc:
             raise CurieContractError(f"Europe PMC fullTextXML request failed: {exc}") from exc
         if not isinstance(raw, (bytes, bytearray)):
