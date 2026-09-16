@@ -193,3 +193,19 @@ def test_l4b_fetch_delegates_retry_mechanics_to_shared_owner(monkeypatch):
     assert not hasattr(cc, "MAX_HTTP_RETRIES")
     assert not hasattr(cc, "MAX_RETRY_AFTER_SECONDS")
     assert not hasattr(cc, "_retry_after_seconds")
+
+
+def test_l4b_exact_identifier_lookup_does_not_nest_retrying_fetcher(monkeypatch):
+    captured = {}
+
+    def fake_lookup_exact_identifiers(**kwargs):
+        captured.update(kwargs)
+        return {"doi": kwargs.get("doi", ""), "pmid": kwargs.get("pmid", "")}
+
+    monkeypatch.setattr(cc.europepmc, "lookup_exact_identifiers", fake_lookup_exact_identifiers)
+
+    resolved = cc._europe_pmc_exact_identifiers(doi="10.1000/example", pmid="123")
+
+    assert resolved["doi"] == "10.1000/example"
+    assert captured["timeout"] == 30
+    assert "http_get" not in captured
