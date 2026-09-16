@@ -5,25 +5,21 @@ import copy
 import datetime as dt
 import hashlib
 import html
-import http.client
 import json
 import ipaddress
 import re
-import time
-import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from research_loop.external_resilience import run_http_with_retry
 from research_loop.l05_curie import europepmc
 
 POLICY = "closed_corpus_exact_asset_only"
 RECEIPT_SCHEMA = "L4BFullTextRetrievalReceipt/v1"
 MIN_BYTES = 500
 MAX_BYTES = 5 * 1024 * 1024
-MAX_HTTP_RETRIES = 2
-MAX_RETRY_AFTER_SECONDS = 5.0
 _STATE = {}
 _SEARCH_HOSTS = {"google.com", "www.google.com", "bing.com", "www.bing.com", "duckduckgo.com"}
 _SECRET_KEYS = ("token", "secret", "password", "authorization", "cookie", "credential", "api_key")
@@ -247,56 +243,36 @@ def _frozen_source_location(project, contract):
     return sorted(candidates)[0][2]
 
 
-def _retry_after_seconds(error, retry_index):
-    value = str((getattr(error, "headers", None) or {}).get("Retry-After") or "").strip()
-    try:
-        delay = float(value)
-    except (TypeError, ValueError):
-        delay = float(2 ** retry_index)
-    return min(MAX_RETRY_AFTER_SECONDS, max(0.0, delay))
-
-
 def _fetch(value):
     request = urllib.request.Request(value, headers={
         "User-Agent": "RLR-L4B-Closed-Corpus/1.0",
         "Accept": "application/json,application/xml,text/xml,text/html,text/plain",
     })
-    redirects = _RedirectRecorder()
-    opener = urllib.request.build_opener(redirects)
-    for retry_index in range(MAX_HTTP_RETRIES + 1):
-        try:
-            with opener.open(request, timeout=30) as response:
-                body = response.read(MAX_BYTES + 1)
-                return {
-                    "resolved_url": response.geturl(),
-                    "redirect_chain": redirects.chain,
-                    "http_status": int(getattr(response, "status", 200)),
-                    "content_type": str(
-                        response.headers.get("Content-Type") or "application/octet-stream"
-                    ),
-                    "body": body,
-                }
-        except http.client.IncompleteRead as exc:
-            if retry_index >= MAX_HTTP_RETRIES:
-                raise
-            time.sleep(_retry_after_seconds(exc, retry_index))
-        except urllib.error.HTTPError as exc:
-            if exc.code != 429 or retry_index >= MAX_HTTP_RETRIES:
-                raise
-            time.sleep(_retry_after_seconds(exc, retry_index))
-    raise RuntimeError("unreachable HTTP retry state")
+
+    def fetch_once():
+        redirects = _RedirectRecorder()
+        opener = urllib.request.build_opener(redirects)
+        with opener.open(request, timeout=30) as response:
+            body = response.read(MAX_BYTES + 1)
+            return {
+                "resolved_url": response.geturl(),
+                "redirect_chain": list(redirects.chain),
+                "http_status": int(getattr(response, "status", 200)),
+                "content_type": str(
+                    response.headers.get("Content-Type") or "application/octet-stream"
+                ),
+                "body": body,
+            }
+
+    return run_http_with_retry(fetch_once)
 
 
 def _europe_pmc_exact_identifiers(*, doi="", pmid=""):
     """Delegate exact identity enrichment to the existing Europe PMC owner."""
 
-    def http_get(url, _timeout):
-        return bytes(_fetch(url).get("body") or b"")
-
     return europepmc.lookup_exact_identifiers(
         doi=doi,
         pmid=pmid,
-        http_get=http_get,
         timeout=30,
     )
 
