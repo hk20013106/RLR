@@ -55,6 +55,36 @@ _RUNTIME_ARTIFACT_NAMES = (
     "stderr.log",
     "final_output.json",
 )
+_RUNTIME_RECEIPT_FIELDS = {
+    "schema_version",
+    "task_id",
+    "attempt_id",
+    "candidate_id",
+    "node",
+    "backend",
+    "provider_version",
+    "command_hash",
+    "executed_command_hash",
+    "command_metadata",
+    "cwd",
+    "timeout_config",
+    "prompt_hash",
+    "started_at",
+    "ended_at",
+    "provider_pid",
+    "thread_id",
+    "final_status",
+    "exit_code",
+    "last_successful_event",
+    "last_provider_event",
+    "last_provider_event_at",
+    "current_item_at_termination",
+    "termination_reason",
+    "timed_out",
+    "process_activity",
+    "process_tree_cleanup",
+    "artifacts",
+}
 
 
 class ProviderRuntimeIntegrityError(RuntimeError):
@@ -159,6 +189,138 @@ def _file_record(path: Path) -> dict:
     return {"path": path.name, "sha256": _sha_bytes(content), "bytes": len(content)}
 
 
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _is_number_or_none(value: Any) -> bool:
+    return value is None or (
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+    )
+
+
+def _is_int_or_none(value: Any) -> bool:
+    return value is None or (isinstance(value, int) and not isinstance(value, bool))
+
+
+def _is_int_list(value: Any) -> bool:
+    return isinstance(value, list) and all(
+        isinstance(item, int) and not isinstance(item, bool) for item in value
+    )
+
+
+def _runtime_receipt_contract_is_valid(receipt: dict[str, Any]) -> bool:
+    if set(receipt) != _RUNTIME_RECEIPT_FIELDS:
+        return False
+    if receipt.get("schema_version") != RECEIPT_SCHEMA:
+        return False
+    for key in (
+        "task_id",
+        "candidate_id",
+        "node",
+        "backend",
+        "provider_version",
+        "cwd",
+        "started_at",
+        "ended_at",
+        "final_status",
+        "termination_reason",
+    ):
+        if not isinstance(receipt.get(key), str) or not receipt[key]:
+            return False
+    for key in ("attempt_id", "thread_id", "last_provider_event_at"):
+        if not isinstance(receipt.get(key), str):
+            return False
+    for key in ("command_hash", "executed_command_hash", "prompt_hash"):
+        if not _is_sha256(receipt.get(key)):
+            return False
+    if not _is_int_or_none(receipt.get("provider_pid")):
+        return False
+    if not _is_int_or_none(receipt.get("exit_code")):
+        return False
+    if not isinstance(receipt.get("timed_out"), bool):
+        return False
+    for key in (
+        "last_successful_event",
+        "last_provider_event",
+        "current_item_at_termination",
+        "artifacts",
+    ):
+        if not isinstance(receipt.get(key), dict):
+            return False
+
+    command_metadata = receipt.get("command_metadata")
+    if (
+        not isinstance(command_metadata, dict)
+        or set(command_metadata) != {"argv0", "argument_count", "backend"}
+        or not isinstance(command_metadata.get("argv0"), str)
+        or not isinstance(command_metadata.get("argument_count"), int)
+        or isinstance(command_metadata.get("argument_count"), bool)
+        or command_metadata["argument_count"] < 0
+        or command_metadata.get("backend") != receipt["backend"]
+    ):
+        return False
+
+    timeout_config = receipt.get("timeout_config")
+    if (
+        not isinstance(timeout_config, dict)
+        or set(timeout_config)
+        != {
+            "job_timeout_seconds",
+            "inactivity_timeout_seconds",
+            "observer_interval_seconds",
+        }
+        or not all(_is_number_or_none(value) for value in timeout_config.values())
+    ):
+        return False
+
+    process_activity = receipt.get("process_activity")
+    if (
+        not isinstance(process_activity, dict)
+        or set(process_activity)
+        != {
+            "cpu_seconds",
+            "io_bytes",
+            "last_process_activity_at",
+            "last_activity_at",
+            "process_tree_pids",
+        }
+        or not _is_number_or_none(process_activity.get("cpu_seconds"))
+        or not _is_number_or_none(process_activity.get("io_bytes"))
+        or not isinstance(process_activity.get("last_process_activity_at"), str)
+        or not isinstance(process_activity.get("last_activity_at"), str)
+        or not _is_int_list(process_activity.get("process_tree_pids"))
+    ):
+        return False
+
+    cleanup = receipt.get("process_tree_cleanup")
+    if (
+        not isinstance(cleanup, dict)
+        or set(cleanup)
+        != {
+            "attempted",
+            "targeted_pids",
+            "terminated_pids",
+            "killed_pids",
+            "errors",
+            "provider_alive_after_cleanup",
+        }
+        or not isinstance(cleanup.get("attempted"), bool)
+        or not _is_int_list(cleanup.get("targeted_pids"))
+        or not _is_int_list(cleanup.get("terminated_pids"))
+        or not _is_int_list(cleanup.get("killed_pids"))
+        or not isinstance(cleanup.get("errors"), list)
+        or not all(isinstance(item, str) for item in cleanup["errors"])
+        or not isinstance(cleanup.get("provider_alive_after_cleanup"), bool)
+    ):
+        return False
+    return True
+
+
 def _validate_runtime_snapshot(
     receipt_path: Path,
     expected_sha256: str,
@@ -184,13 +346,14 @@ def _validate_runtime_snapshot(
         raise ProviderRuntimeIntegrityError(
             f"runtime receipt is malformed: {receipt_path}"
         ) from exc
-    if not isinstance(receipt, dict) or receipt.get("schema_version") != RECEIPT_SCHEMA:
+    if not isinstance(receipt, dict) or not _runtime_receipt_contract_is_valid(receipt):
         raise ProviderRuntimeIntegrityError(
-            f"runtime receipt schema is invalid: {receipt_path}"
+            f"runtime receipt contract is invalid: {receipt_path}"
         )
     if require_success and (
         receipt.get("final_status") != "succeeded"
-        or receipt.get("exit_code") != 0
+        or type(receipt.get("exit_code")) is not int
+        or receipt["exit_code"] != 0
         or receipt.get("timed_out") is not False
     ):
         raise ProviderRuntimeIntegrityError(
@@ -244,6 +407,11 @@ def validate_runtime_receipt_reference(
     reference: Mapping[str, Any],
     *,
     require_success: bool = False,
+    expected_candidate_id: str | None = None,
+    expected_backend: str | None = None,
+    expected_prompt_sha256: str | None = None,
+    expected_command_sha256: str | None = None,
+    expected_final_output_sha256: str | None = None,
 ) -> dict:
     """Validate one content-addressed provider receipt and all owned artifacts."""
     if not isinstance(reference, Mapping):
@@ -254,9 +422,7 @@ def validate_runtime_receipt_reference(
         reference.get("schema") != RECEIPT_SCHEMA
         or not isinstance(path_value, str)
         or not path_value
-        or not isinstance(receipt_sha256, str)
-        or len(receipt_sha256) != 64
-        or any(character not in "0123456789abcdef" for character in receipt_sha256)
+        or not _is_sha256(receipt_sha256)
     ):
         raise ProviderRuntimeIntegrityError("runtime receipt reference is invalid")
     root = Path(project_dir).resolve()
@@ -275,11 +441,31 @@ def validate_runtime_receipt_reference(
         raise ProviderRuntimeIntegrityError(
             f"runtime receipt path is not content-addressed: {receipt_path}"
         )
-    return _validate_runtime_snapshot(
+    receipt = _validate_runtime_snapshot(
         receipt_path,
         receipt_sha256,
         require_success=require_success,
     )
+    expected_values = {
+        "candidate_id": expected_candidate_id,
+        "backend": expected_backend,
+        "prompt_hash": expected_prompt_sha256,
+        "command_hash": expected_command_sha256,
+    }
+    for field, expected_value in expected_values.items():
+        if expected_value is not None and receipt[field] != expected_value:
+            raise ProviderRuntimeIntegrityError(
+                f"runtime receipt {field} mismatch: {receipt_path}"
+            )
+    if (
+        expected_final_output_sha256 is not None
+        and receipt["artifacts"]["final_output"]["sha256"]
+        != expected_final_output_sha256
+    ):
+        raise ProviderRuntimeIntegrityError(
+            f"runtime receipt final_output mismatch: {receipt_path}"
+        )
+    return receipt
 
 
 def _freeze_runtime_receipt(runtime_dir: Path, invocation_work_dir: Path) -> Path:

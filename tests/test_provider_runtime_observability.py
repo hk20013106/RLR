@@ -69,6 +69,22 @@ def _receipt_reference(root: Path, receipt_path: Path) -> dict:
     }
 
 
+def _rewrite_frozen_receipt(root: Path, receipt_path: Path, mutate) -> dict:
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    mutate(receipt)
+    receipt_bytes = (
+        json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    receipt_sha256 = hashlib.sha256(receipt_bytes).hexdigest()
+    rewritten_dir = receipt_path.parent.with_name(receipt_sha256)
+    rewritten_dir.mkdir()
+    for name in ("events.jsonl", "stderr.log", "final_output.json"):
+        (rewritten_dir / name).write_bytes((receipt_path.parent / name).read_bytes())
+    rewritten_receipt = rewritten_dir / "runtime_receipt.json"
+    rewritten_receipt.write_bytes(receipt_bytes)
+    return _receipt_reference(root, rewritten_receipt)
+
+
 def test_sequential_invocations_preserve_first_immutable_snapshot(
     tmp_path, monkeypatch
 ):
@@ -193,6 +209,66 @@ def test_runtime_receipt_snapshot_validation_fails_closed(
     with pytest.raises(
         runtime_observability.ProviderRuntimeIntegrityError,
         match="runtime receipt",
+    ):
+        runtime_observability.validate_runtime_receipt_reference(
+            tmp_path,
+            reference,
+            require_success=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("expected_key", "wrong_value"),
+    [
+        ("expected_candidate_id", "C-FOREIGN"),
+        ("expected_backend", "foreign-backend"),
+        ("expected_prompt_sha256", "0" * 64),
+        ("expected_command_sha256", "1" * 64),
+        ("expected_final_output_sha256", "2" * 64),
+    ],
+)
+def test_runtime_receipt_snapshot_is_bound_to_expected_invocation(
+    tmp_path, monkeypatch, expected_key, wrong_value
+):
+    monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "stream")
+    monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.01")
+    result = _run(tmp_path / "runtime")
+    reference = _receipt_reference(tmp_path, result.runtime_receipt_path)
+
+    with pytest.raises(
+        runtime_observability.ProviderRuntimeIntegrityError,
+        match="runtime receipt.*mismatch",
+    ):
+        runtime_observability.validate_runtime_receipt_reference(
+            tmp_path,
+            reference,
+            require_success=True,
+            **{expected_key: wrong_value},
+        )
+
+
+@pytest.mark.parametrize("damage", ["missing_field", "boolean_exit_code"])
+def test_runtime_receipt_snapshot_rejects_malformed_contract(
+    tmp_path, monkeypatch, damage
+):
+    monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "stream")
+    monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.01")
+    result = _run(tmp_path / "runtime")
+
+    def mutate(receipt):
+        if damage == "missing_field":
+            del receipt["candidate_id"]
+        else:
+            receipt["exit_code"] = False
+
+    reference = _rewrite_frozen_receipt(
+        tmp_path,
+        result.runtime_receipt_path,
+        mutate,
+    )
+    with pytest.raises(
+        runtime_observability.ProviderRuntimeIntegrityError,
+        match="runtime receipt.*invalid",
     ):
         runtime_observability.validate_runtime_receipt_reference(
             tmp_path,

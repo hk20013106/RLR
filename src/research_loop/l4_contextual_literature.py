@@ -17,6 +17,7 @@ handoff; it does not create another paper identity or evidence verifier.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -34,6 +35,7 @@ from research_loop.l05_curie import europepmc, multisource, selector
 
 CONTEXTUAL_QUERY_PLAN_SCHEMA_VERSION = "L4AContextualQueryPlan/v2"
 METHOD_SUPPORT_SCHEMA_VERSION = "L4AMethodSupportAdjudication/v2"
+METHOD_SUPPORT_CHECKPOINT_SCHEMA_VERSION = "L4AMethodSupportCheckpoint/v1"
 METHOD_SUPPORT_CLASSIFICATIONS = (
     "DIRECT_METHOD_SUPPORT",
     "RELATED_BUT_NOT_METHOD_SUPPORT",
@@ -789,6 +791,360 @@ def _method_support_batches(
     return batches
 
 
+_METHOD_SUPPORT_BINDING_FIELDS = {
+    "candidate_id",
+    "method_id",
+    "ordered_candidate_paper_ids",
+    "method_support_input",
+    "backend",
+    "model",
+    "skill_version",
+    "method_support_schema_version",
+    "output_schema_sha256",
+    "command_hash",
+    "runtime_command_hash",
+    "prompt_hash",
+}
+_METHOD_SUPPORT_CHECKPOINT_FIELDS = {
+    "schema_version",
+    "input_binding",
+    "input_binding_sha256",
+    "provider_stdout",
+    "skill_receipt",
+    "content_sha256",
+}
+
+
+def _checkpoint_canonical_bytes(value: dict) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _checkpoint_sha256(value: dict) -> str:
+    return hashlib.sha256(_checkpoint_canonical_bytes(value)).hexdigest()
+
+
+def _checkpoint_is_sha256(value) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _checkpoint_corrupt(dr, path: Path, invariant: str, exc=None):
+    error = dr.DeepResearchError(
+        f"L4A method-support checkpoint is corrupt: {path}: {invariant}"
+    )
+    if exc is None:
+        raise error
+    raise error from exc
+
+
+def _method_support_input_binding(
+    *,
+    candidate_id: str,
+    method_id: str,
+    method_pairs: list[dict],
+    method_input: dict,
+    spec,
+    skill_version: str,
+    output_schema_bytes: bytes,
+    command: list[str],
+    runtime_command: list[str],
+    prompt: str,
+    inventory_module,
+) -> dict:
+    return {
+        "candidate_id": candidate_id,
+        "method_id": method_id,
+        "ordered_candidate_paper_ids": [
+            str(pair["paper_id"]).strip() for pair in method_pairs
+        ],
+        "method_support_input": copy.deepcopy(method_input),
+        "backend": str(getattr(spec, "backend", "")),
+        "model": str(getattr(spec, "model", None) or "default"),
+        "skill_version": skill_version,
+        "method_support_schema_version": METHOD_SUPPORT_SCHEMA_VERSION,
+        "output_schema_sha256": inventory_module._sha(output_schema_bytes),
+        "command_hash": inventory_module._sha(
+            json.dumps(command, ensure_ascii=False)
+        ),
+        "runtime_command_hash": inventory_module._sha(
+            json.dumps(runtime_command, ensure_ascii=False)
+        ),
+        "prompt_hash": inventory_module._sha(prompt),
+    }
+
+
+def _validate_method_support_input_binding(dr, checkpoint_path: Path, binding) -> None:
+    if not isinstance(binding, dict) or set(binding) != _METHOD_SUPPORT_BINDING_FIELDS:
+        _checkpoint_corrupt(dr, checkpoint_path, "input binding fields are invalid")
+    for key in (
+        "candidate_id",
+        "method_id",
+        "backend",
+        "model",
+        "skill_version",
+        "method_support_schema_version",
+    ):
+        if not isinstance(binding.get(key), str) or not binding[key]:
+            _checkpoint_corrupt(
+                dr, checkpoint_path, f"input binding {key} is invalid"
+            )
+    for key in (
+        "output_schema_sha256",
+        "command_hash",
+        "runtime_command_hash",
+        "prompt_hash",
+    ):
+        if not _checkpoint_is_sha256(binding.get(key)):
+            _checkpoint_corrupt(
+                dr, checkpoint_path, f"input binding {key} is invalid"
+            )
+
+    paper_ids = binding.get("ordered_candidate_paper_ids")
+    if (
+        not isinstance(paper_ids, list)
+        or not paper_ids
+        or any(not isinstance(paper_id, str) or not paper_id for paper_id in paper_ids)
+        or len(set(paper_ids)) != len(paper_ids)
+    ):
+        _checkpoint_corrupt(
+            dr, checkpoint_path, "input binding candidate paper IDs are invalid"
+        )
+
+    method_input = binding.get("method_support_input")
+    if not isinstance(method_input, dict) or set(method_input) != {
+        "method",
+        "candidates",
+    }:
+        _checkpoint_corrupt(
+            dr, checkpoint_path, "input binding method-support input is invalid"
+        )
+    method = method_input.get("method")
+    if (
+        not isinstance(method, dict)
+        or set(method) != {"name", "purpose", "inventory_reason"}
+        or any(not isinstance(value, str) for value in method.values())
+    ):
+        _checkpoint_corrupt(
+            dr, checkpoint_path, "input binding method payload is invalid"
+        )
+    candidates = method_input.get("candidates")
+    candidate_fields = {"candidate_number", "title", "abstract", "journal", "year"}
+    if not isinstance(candidates, list) or len(candidates) != len(paper_ids):
+        _checkpoint_corrupt(
+            dr, checkpoint_path, "input binding candidate payload is invalid"
+        )
+    for index, candidate in enumerate(candidates, 1):
+        if (
+            not isinstance(candidate, dict)
+            or set(candidate) != candidate_fields
+            or type(candidate.get("candidate_number")) is not int
+            or candidate["candidate_number"] != index
+            or any(
+                not isinstance(candidate.get(key), str)
+                for key in ("title", "abstract", "journal", "year")
+            )
+        ):
+            _checkpoint_corrupt(
+                dr, checkpoint_path, "input binding candidate payload is invalid"
+            )
+
+
+def _validate_checkpoint_receipt(
+    dr,
+    project_dir: str | Path,
+    checkpoint_path: Path,
+    binding: dict,
+    provider_stdout: str,
+    receipt: dict,
+    *,
+    inventory_module,
+) -> None:
+    if not isinstance(receipt, dict):
+        _checkpoint_corrupt(dr, checkpoint_path, "skill receipt must be an object")
+    required = {
+        "schema_version",
+        "backend",
+        "provider",
+        "model",
+        "skill",
+        "upstream",
+        "skill_version",
+        "command_hash",
+        "prompt_hash",
+        "executed_at",
+        "exit_code",
+        "stdout_hash",
+        "runtime_receipt",
+    }
+    if not required.issubset(receipt):
+        _checkpoint_corrupt(dr, checkpoint_path, "skill receipt is incomplete")
+    for key in (
+        "schema_version",
+        "backend",
+        "provider",
+        "model",
+        "skill",
+        "upstream",
+        "skill_version",
+        "executed_at",
+    ):
+        if not isinstance(receipt.get(key), str) or not receipt[key]:
+            _checkpoint_corrupt(
+                dr, checkpoint_path, f"skill receipt {key} is invalid"
+            )
+    for key in ("command_hash", "prompt_hash", "stdout_hash"):
+        if not _checkpoint_is_sha256(receipt.get(key)):
+            _checkpoint_corrupt(
+                dr, checkpoint_path, f"skill receipt {key} is invalid"
+            )
+    if type(receipt.get("exit_code")) is not int:
+        _checkpoint_corrupt(dr, checkpoint_path, "skill receipt exit_code is invalid")
+    if not isinstance(receipt.get("runtime_receipt"), dict):
+        _checkpoint_corrupt(
+            dr, checkpoint_path, "skill receipt runtime_receipt is invalid"
+        )
+    expected_skill = (
+        "academic-research-suite"
+        if binding["backend"] == "codex"
+        else "academic-research-skills"
+    )
+    expected_upstream = (
+        "https://github.com/Imbad0202/academic-research-skills-codex"
+        if binding["backend"] == "codex"
+        else "https://github.com/imbad0202/academic-research-skills"
+    )
+    expected = {
+        "schema_version": dr.SCHEMA_VERSION,
+        "backend": binding["backend"],
+        "provider": binding["backend"],
+        "model": binding["model"],
+        "skill": expected_skill,
+        "upstream": expected_upstream,
+        "skill_version": binding["skill_version"],
+        "command_hash": binding["command_hash"],
+        "prompt_hash": binding["prompt_hash"],
+        "exit_code": 0,
+        "stdout_hash": inventory_module._sha(provider_stdout),
+    }
+    for key, value in expected.items():
+        if receipt.get(key) != value:
+            _checkpoint_corrupt(
+                dr,
+                checkpoint_path,
+                f"skill receipt {key} mismatch",
+            )
+    from research_loop import provider_runtime_observability
+
+    try:
+        provider_runtime_observability.validate_runtime_receipt_reference(
+            project_dir,
+            receipt["runtime_receipt"],
+            require_success=True,
+            expected_candidate_id=binding["candidate_id"],
+            expected_backend=binding["backend"],
+            expected_prompt_sha256=binding["prompt_hash"],
+            expected_command_sha256=binding["runtime_command_hash"],
+            expected_final_output_sha256=inventory_module._sha(provider_stdout),
+        )
+    except provider_runtime_observability.ProviderRuntimeIntegrityError as exc:
+        _checkpoint_corrupt(
+            dr,
+            checkpoint_path,
+            f"runtime receipt validation failed: {exc}",
+            exc,
+        )
+
+
+def _build_method_support_checkpoint(
+    binding: dict,
+    provider_stdout: str,
+    receipt: dict,
+) -> dict:
+    checkpoint = {
+        "schema_version": METHOD_SUPPORT_CHECKPOINT_SCHEMA_VERSION,
+        "input_binding": copy.deepcopy(binding),
+        "input_binding_sha256": _checkpoint_sha256(binding),
+        "provider_stdout": provider_stdout,
+        "skill_receipt": copy.deepcopy(receipt),
+    }
+    checkpoint["content_sha256"] = _checkpoint_sha256(checkpoint)
+    return checkpoint
+
+
+def _load_method_support_checkpoint(
+    dr,
+    project_dir: str | Path,
+    checkpoint_path: Path,
+    current_binding: dict,
+    *,
+    inventory_module,
+) -> tuple[dict, dict] | None:
+    if not checkpoint_path.exists():
+        return None
+    try:
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        _checkpoint_corrupt(dr, checkpoint_path, "malformed JSON", exc)
+    if not isinstance(checkpoint, dict):
+        _checkpoint_corrupt(dr, checkpoint_path, "checkpoint must be an object")
+    if set(checkpoint) != _METHOD_SUPPORT_CHECKPOINT_FIELDS:
+        _checkpoint_corrupt(dr, checkpoint_path, "checkpoint fields are invalid")
+    if checkpoint.get("schema_version") != METHOD_SUPPORT_CHECKPOINT_SCHEMA_VERSION:
+        _checkpoint_corrupt(dr, checkpoint_path, "checkpoint schema is invalid")
+    binding = checkpoint.get("input_binding")
+    _validate_method_support_input_binding(dr, checkpoint_path, binding)
+    expected_content_sha256 = checkpoint.get("content_sha256")
+    content = {
+        key: value for key, value in checkpoint.items() if key != "content_sha256"
+    }
+    if expected_content_sha256 != _checkpoint_sha256(content):
+        _checkpoint_corrupt(dr, checkpoint_path, "content hash mismatch")
+    if checkpoint.get("input_binding_sha256") != _checkpoint_sha256(binding):
+        _checkpoint_corrupt(dr, checkpoint_path, "input binding hash mismatch")
+    provider_stdout = checkpoint.get("provider_stdout")
+    receipt = checkpoint.get("skill_receipt")
+    if not isinstance(provider_stdout, str):
+        _checkpoint_corrupt(dr, checkpoint_path, "provider stdout must be text")
+    _validate_checkpoint_receipt(
+        dr,
+        project_dir,
+        checkpoint_path,
+        binding,
+        provider_stdout,
+        receipt,
+        inventory_module=inventory_module,
+    )
+
+    schema_is_current = (
+        binding["method_support_schema_version"]
+        == current_binding["method_support_schema_version"]
+        and binding["output_schema_sha256"]
+        == current_binding["output_schema_sha256"]
+    )
+    if not schema_is_current:
+        return None
+    try:
+        validated = _validate_method_support_payload(
+            dr,
+            dr._parse_cli_output(provider_stdout),
+            len(binding["ordered_candidate_paper_ids"]),
+        )
+    except dr.DeepResearchError as exc:
+        _checkpoint_corrupt(dr, checkpoint_path, str(exc), exc)
+    if binding != current_binding:
+        return None
+    return validated, copy.deepcopy(receipt)
+
+
 def _run_method_support_adjudication(
     l4p,
     dr,
@@ -805,7 +1161,7 @@ def _run_method_support_adjudication(
     *,
     inventory_module,
 ) -> dict:
-    del project_dir, candidate_id, question, claim
+    del question, claim
     pairs = list(selection.get("pairs") or [])
     if not pairs:
         return {
@@ -835,10 +1191,10 @@ def _run_method_support_adjudication(
         )
         method_work.mkdir(parents=True, exist_ok=True)
         schema_path = method_work / "l4a_method_support_output.schema.json"
-        schema_path.write_text(
-            json.dumps(_method_support_schema(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        output_schema_bytes = json.dumps(
+            _method_support_schema(), ensure_ascii=False, indent=2
+        ).encode("utf-8")
+        schema_path.write_bytes(output_schema_bytes)
         command, _ = dr.build_invocation(
             spec,
             "L4",
@@ -855,40 +1211,105 @@ def _run_method_support_adjudication(
         command = inventory_module._offline_provider_command(
             command, spec, method_work
         )
+        method_input = _method_support_input(method, candidate_records)
         prompt = _method_support_prompt(
-            _method_support_input(method, candidate_records),
+            method_input,
             str(getattr(spec, "backend", "")),
         )
         command[0] = dr.resolve_subprocess_executable(command[0])
         execution_command, invocation_kwargs = dr.subprocess_invocation(
             command, prompt
         )
-        completed = dr.execute_provider_invocation(
-            execution_command,
-            invocation_kwargs,
-            timeout=spec.timeout,
-            label=f"L4A method-support adjudication CLI ({method_id})",
+        checkpoint_path = method_work / "l4a_method_support_checkpoint.json"
+        binding = _method_support_input_binding(
+            candidate_id=candidate_id,
+            method_id=method_id,
+            method_pairs=method_pairs,
+            method_input=method_input,
+            spec=spec,
+            skill_version=skill_version,
+            output_schema_bytes=output_schema_bytes,
+            command=command,
+            runtime_command=execution_command,
+            prompt=prompt,
+            inventory_module=inventory_module,
         )
-        receipt = dr.skill_receipt(
-            spec.backend,
-            command,
-            prompt,
-            skill_version,
-            exit_code=completed.returncode,
-            stdout_hash=inventory_module._sha(completed.stdout),
-            model=spec.model,
-        )
-        receipts.append(receipt)
-        if completed.returncode != 0:
-            raise dr.DeepResearchError(
-                "L4A method-support adjudication CLI exited "
-                f"{completed.returncode} for {method_id}: {completed.stderr.strip()}"
-            )
-        validated = _validate_method_support_payload(
+        checkpoint_result = _load_method_support_checkpoint(
             dr,
-            dr._parse_cli_output(completed.stdout),
-            len(candidate_records),
+            project_dir,
+            checkpoint_path,
+            binding,
+            inventory_module=inventory_module,
         )
+        if checkpoint_result is not None:
+            validated, receipt = checkpoint_result
+        else:
+            completed = dr.execute_provider_invocation(
+                execution_command,
+                invocation_kwargs,
+                timeout=spec.timeout,
+                label=f"L4A method-support adjudication CLI ({method_id})",
+            )
+            if completed.returncode != 0:
+                raise dr.DeepResearchError(
+                    "L4A method-support adjudication CLI exited "
+                    f"{completed.returncode} for {method_id}: {completed.stderr.strip()}"
+                )
+            validated = _validate_method_support_payload(
+                dr,
+                dr._parse_cli_output(completed.stdout),
+                len(candidate_records),
+            )
+            receipt = dr.skill_receipt(
+                spec.backend,
+                command,
+                prompt,
+                skill_version,
+                exit_code=completed.returncode,
+                stdout_hash=inventory_module._sha(completed.stdout),
+                model=spec.model,
+            )
+            from research_loop import provider_runtime_observability
+
+            if isinstance(receipt.get("runtime_receipt"), dict):
+                _validate_checkpoint_receipt(
+                    dr,
+                    project_dir,
+                    checkpoint_path,
+                    binding,
+                    completed.stdout,
+                    receipt,
+                    inventory_module=inventory_module,
+                )
+                checkpoint = _build_method_support_checkpoint(
+                    binding,
+                    completed.stdout,
+                    receipt,
+                )
+                provider_runtime_observability._write_json_atomic(
+                    checkpoint_path,
+                    checkpoint,
+                )
+                checkpoint_result = _load_method_support_checkpoint(
+                    dr,
+                    project_dir,
+                    checkpoint_path,
+                    binding,
+                    inventory_module=inventory_module,
+                )
+                if checkpoint_result is None:
+                    _checkpoint_corrupt(
+                        dr,
+                        checkpoint_path,
+                        "new checkpoint did not match its execution binding",
+                    )
+                validated, receipt = checkpoint_result
+            elif provider_runtime_observability._CONTEXT.get() is not None:
+                raise dr.DeepResearchError(
+                    "L4A method-support durable checkpoint requires a frozen "
+                    f"runtime receipt: {checkpoint_path}"
+                )
+        receipts.append(receipt)
         wire_decisions = list(validated["decisions"])
         bound_decisions = [
             {
