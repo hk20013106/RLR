@@ -18,6 +18,8 @@ from typing import Callable
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from research_loop.external_resilience import run_http_with_retry
+
 from .contracts import (
     DISCOVERY_BATCH_SCHEMA_VERSION,
     DISCOVERY_TRANSPORT_SCHEMA_VERSION,
@@ -616,7 +618,7 @@ class _BaseTransport:
 
     def _get(self, url: str) -> bytes:
         try:
-            raw = self.http_get(url, self.timeout)
+            raw = run_http_with_retry(lambda: self.http_get(url, self.timeout))
         except Exception as exc:
             raise CurieContractError(f"{self.provider} search request failed: {exc}") from exc
         if not isinstance(raw, (bytes, bytearray)):
