@@ -45,11 +45,13 @@ REQUIRED_DISTRIBUTIONS = tuple({
     *PINNED_DISTRIBUTIONS,
     "psutil",
     "jsonschema",
+    "tenacity",
 })
 REQUIRED_IMPORTS = (
     "research_loop",
     "run_loop",
     "paperqa",
+    "research_loop.external_resilience",
     "research_loop.l05_curie.paperqa2_runtime",
     "research_loop.l4a_specter2",
 )
