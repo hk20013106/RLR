@@ -1193,6 +1193,7 @@ class _ObservedExecutor:
             stderr=execution.stderr,
             stdout_bytes=len(execution.final_output.encode("utf-8")),
             stderr_bytes=len(execution.stderr.encode("utf-8")),
+            terminal_state=execution.final_status,
         )
         if kwargs.get("check", True) and result.returncode != 0:
             raise ProviderExecutionError(

@@ -15,6 +15,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from research_loop import external_resilience
 from research_loop.providers.executor import DEFAULT_EXECUTOR, ProviderExecutionError
 
 
@@ -1096,13 +1097,15 @@ def execute_provider_invocation(
 ):
     """Execute one provider command through the canonical provider boundary."""
     try:
-        return DEFAULT_EXECUTOR.run(
-            execution_command,
-            timeout=timeout,
-            input_text=invocation_kwargs.get("input"),
-            check=False,
-            encoding="utf-8",
-            errors="strict",
+        return external_resilience.run_provider_with_retry(
+            lambda: DEFAULT_EXECUTOR.run(
+                execution_command,
+                timeout=timeout,
+                input_text=invocation_kwargs.get("input"),
+                check=False,
+                encoding="utf-8",
+                errors="strict",
+            )
         )
     except ProviderExecutionError as exc:
         detail = exc.stderr.strip() or str(exc)

@@ -72,6 +72,19 @@ def main() -> int:
     final_path = _final_path(sys.argv)
     _emit({"type": "thread.started", "thread_id": "thread-fixture"})
     _emit({"type": "turn.started"})
+    if mode == "capacity_once":
+        counter_path = Path(os.environ["RLR_FAKE_CODEX_COUNTER_FILE"])
+        try:
+            attempt = int(counter_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            attempt = 0
+        counter_path.write_text(str(attempt + 1), encoding="utf-8")
+        if attempt == 0:
+            message = "Selected model is at capacity. Please try a different model."
+            print(message, file=sys.stderr, flush=True)
+            _emit({"type": "turn.failed", "error": {"message": message}})
+            return 9
+        mode = "stream"
     if mode == "silent":
         time.sleep(delay * 4)
         _emit({"type": "turn.completed", "usage": {}})
