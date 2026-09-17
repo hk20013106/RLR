@@ -6,6 +6,7 @@ import urllib.error
 
 import pytest
 
+from research_loop import external_resilience as resilience
 from research_loop import l4_closed_corpus as cc
 from research_loop.l05_curie import selector
 
@@ -340,12 +341,21 @@ class _AlwaysIncompleteReadOpener(_IncompleteReadOpener):
         return _IncompleteReadResponse(self.url, self.body)
 
 
+def _patch_shared_http_sleep(monkeypatch, sleep):
+    original = resilience.run_http_with_retry
+    monkeypatch.setattr(
+        cc,
+        "run_http_with_retry",
+        lambda operation: original(operation, sleep=sleep),
+    )
+
+
 def test_default_fetch_retries_incomplete_read_before_evidence_hash(monkeypatch, tmp_path):
     url = "https://doi.org/10.1234/example.method"
     full_body = METHOD_XML.encode("utf-8")
     opener = _IncompleteReadOpener(url, full_body)
     monkeypatch.setattr(cc.urllib.request, "build_opener", lambda *_args: opener)
-    monkeypatch.setattr(cc.time, "sleep", lambda _seconds: None)
+    _patch_shared_http_sleep(monkeypatch, lambda _seconds: None)
 
     result = cc.resolve_contract(
         tmp_path,
@@ -367,13 +377,13 @@ def test_default_fetch_fails_closed_after_incomplete_read_retry_limit(monkeypatc
     opener = _AlwaysIncompleteReadOpener(url, full_body)
     sleeps = []
     monkeypatch.setattr(cc.urllib.request, "build_opener", lambda *_args: opener)
-    monkeypatch.setattr(cc.time, "sleep", lambda seconds: sleeps.append(seconds))
+    _patch_shared_http_sleep(monkeypatch, lambda seconds: sleeps.append(seconds))
 
     with pytest.raises(http.client.IncompleteRead) as exc_info:
         cc._fetch(url)
 
     assert len(exc_info.value.partial) == 100
-    assert opener.calls == cc.MAX_HTTP_RETRIES + 1
+    assert opener.calls == resilience.HTTP_RETRY_POLICY.max_attempts
     assert sleeps == [1.0, 2.0]
 
 
@@ -382,7 +392,7 @@ def test_default_fetch_retries_429_and_honors_retry_after(monkeypatch):
     opener = _RetryOpener(url, status=429)
     sleeps = []
     monkeypatch.setattr(cc.urllib.request, "build_opener", lambda *_args: opener)
-    monkeypatch.setattr(cc.time, "sleep", lambda seconds: sleeps.append(seconds))
+    _patch_shared_http_sleep(monkeypatch, lambda seconds: sleeps.append(seconds))
 
     response = cc._fetch(url)
 
@@ -396,7 +406,7 @@ def test_default_fetch_does_not_retry_403(monkeypatch):
     opener = _RetryOpener(url, status=403)
     sleeps = []
     monkeypatch.setattr(cc.urllib.request, "build_opener", lambda *_args: opener)
-    monkeypatch.setattr(cc.time, "sleep", lambda seconds: sleeps.append(seconds))
+    _patch_shared_http_sleep(monkeypatch, lambda seconds: sleeps.append(seconds))
 
     with pytest.raises(urllib.error.HTTPError) as exc_info:
         cc._fetch(url)
