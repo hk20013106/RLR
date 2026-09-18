@@ -43,7 +43,7 @@ from research_loop import l0_contract
 from research_loop import deep_research, research_seed
 
 
-DEFAULT_CONTEXT_TOKEN_BUDGET = 40000
+DEFAULT_CONTEXT_TOKEN_BUDGET = 100000
 
 
 def strip_candidate_to_frontmatter(candidate_path, include_source_path=False):

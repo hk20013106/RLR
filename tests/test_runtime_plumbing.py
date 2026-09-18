@@ -25,14 +25,14 @@ def _candidate_project(tmp_path):
     return project
 
 
-def test_context_token_budget_has_one_40000_default_owner():
-    assert context.DEFAULT_CONTEXT_TOKEN_BUDGET == 40000
-    assert run_loop._context_token_budget(SimpleNamespace(data={})) == 40000
+def test_context_token_budget_has_one_100000_default_owner():
+    assert context.DEFAULT_CONTEXT_TOKEN_BUDGET == 100000
+    assert run_loop._context_token_budget(SimpleNamespace(data={})) == 100000
 
     parsed = cli.build_parser().parse_args(
         ["assemble-context", "PROJECT", "C1", "--node", "L1"]
     )
-    assert parsed.context_token_budget == 40000
+    assert parsed.context_token_budget == 100000
 
 
 def test_explicit_context_token_budget_still_overrides_the_default():
@@ -243,7 +243,7 @@ print(json.dumps({
     assert smoke.returncode == 0, smoke.stderr + smoke.stdout
     result = json.loads(smoke.stdout.strip().splitlines()[-1])
     assert result == {
-        "budget": 40000,
+        "budget": 100000,
         "context_hash_matches": True,
         "host": "codex",
         "manifest": result["manifest"],
