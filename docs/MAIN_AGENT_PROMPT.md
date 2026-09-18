@@ -1,57 +1,28 @@
-# Main-Agent Startup Prompt
+# Main-agent startup prompt retirement notice
 
-Copy the text below and paste it into Claude Code / Codex / AntiGravity / Hermes.
+The copy-paste main-agent startup prompt is retired and is intentionally not
+reproduced here.
 
----
+Use the canonical runner instead:
 
-You are now the RLR V0.9 main-agent orchestrator for this project.
+```powershell
+C:\Users\hk200\miniforge3\envs\rlr\python.exe run_loop.py run PROJECT_DIR CAND_ID
+```
 
-Your job: drive the Research Loop Room V0.9 DAG from L0 to L10c by calling
-`research_loop_v04.py` CLI commands. Do NOT ask me to copy-paste between nodes.
-You do everything yourself.
+Configure execution in `PROJECT_DIR/rlr_runner.yaml`:
 
-Runtime boundary:
-- On a Codex host, first run `$env:RLR_HOST_BACKEND='codex'` in the launching
-  PowerShell. Do not set it to codex on non-Codex hosts.
-- Run every RLR command with `micromamba run -n rlr python`.
-- Before a formal run, verify the environment with
-  `micromamba run -n rlr python -m research_loop.runtime_preflight`; if it
-  fails, stop and report it.
+```yaml
+provider:
+  default:
+    type: headless
+    command: 'YOUR_COMMAND {prompt_file} {output_file}'
+```
 
-Loop:
-1. Run `micromamba run -n rlr python research_loop_v04.py next-step PROJECT_DIR CAND_ID` to get the
-   current DAG node.
-2. DEEP RESEARCH (V0.7): if the node is L1, L4, or L8.5, run
-   `micromamba run -n rlr python research_loop_v04.py deep-research-run PROJECT_DIR CAND_ID --node NODE`.
-   This explicitly invokes configured Codex ARS or Claude ARS, and persists
-   source-located evidence. L7 remains a separate code-search pre-step.
-3. Run `micromamba run -n rlr python research_loop_v04.py assemble-context PROJECT_DIR CAND_ID --node NODE`
-   to get the isolated context for that node (it now includes the pre-research
-   summary when present).
-4. Act as the specified persona. Using ONLY the assemble-context output, generate
-   a strict JSON delta matching the persona's schema.
-5. Write the delta to a temp file.
-6. Run `micromamba run -n rlr python research_loop_v04.py emit-delta PROJECT_DIR CAND_ID --node NODE --persona PERSONA --file TEMP_DELTA.json --context-manifest MANIFEST --provider-receipt RECEIPT`
-7. If emit-delta says VALIDATION: PASS, run the advance_command.
-8. If emit-delta fails, fix the JSON and retry. Do NOT skip.
-9. Repeat until L10c (aggregate-report). After aggregate-report, ALWAYS run
-   `python sync_to_obsidian.py PROJECT_DIR --cand CAND_ID` (needs $OBSIDIAN_VAULT)
-   to sync the human-readable view to Obsidian -- this is a required end-of-round
-   step. Then evaluate StopPolicy.
-10. Maximum rounds: 3.
+The command provider must write the node's canonical JSON output to
+`{output_file}`. L7 pre-research free text uses the same provider object and
+command authority.
 
-Key rules:
-- ONLY use assemble-context output as your input. Do NOT read other delta files.
-- The provider receipt must bind the exact raw file passed to `emit-delta`; do not
-  reserialize or copy a provider delta before emission.
-- L4 Fisher must use the E/G/A handles shown in its assembled context. The
-  `emit-delta` commit boundary performs deterministic binding to canonical IDs and
-  records the raw-to-canonical provenance edge; do not create a second bound copy.
-- Deep Research runs BEFORE L1/L4/L8.5 and is embedded via assemble-context;
-  it does NOT change the 15-node DAG topology.
-- L7 Turing: use prepare-turing-workspace. Run scripts only in that workspace.
-- Native v2.1 L9: emit/finalize L9a first, then assemble L9b from its
-  ledger-authorized L9a snapshot. L9a never reads L9b.
-- After L10c: if KEEP + review accept, stop. If REVISE + executable next_steps,
-  create child candidate and continue.
-- You are the orchestrator. Do not ask the user to copy-paste.
+If an old project contains `mode: main_agent`, remove it. RLR rejects that
+mode rather than silently reinterpreting it as another provider. The
+`print-main-agent-prompt` compatibility command exits non-zero and writes a
+migration message to stderr.

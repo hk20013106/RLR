@@ -11,7 +11,7 @@ from research_loop.providers.base import (
     ProviderError, AgentProvider, _schema_repr, _compose_auto_prompt,
     _run_command_agent, run_text_command, RunReceipt, now,
 )
-from research_loop.providers.main_agent import (
+from research_loop.providers.config import (
     _scalar, _mini_yaml, load_config, ProviderConfig,
 )
 from research_loop.providers.manual import ManualProvider
@@ -21,8 +21,7 @@ from research_loop.providers.headless import HeadlessProvider
 
 def make_provider(spec, override_type=None):
     """Construct a python provider from a spec dict (optionally forcing a type).
-    No silent default. Note: main-agent mode uses NO python provider -- the host
-    agent itself orchestrates; do not call this for it."""
+    No silent fallback or second orchestration path."""
     t = override_type or (spec or {}).get("type")
     if t in ("headless", "host", "auto"):
         return HeadlessProvider(spec)
@@ -30,11 +29,15 @@ def make_provider(spec, override_type=None):
         return CommandProvider(spec)
     if t == "manual":
         return ManualProvider(spec)
+    if t == "main_agent":
+        raise ProviderError(
+            "provider type 'main_agent' is retired; configure provider.default "
+            "as headless, host, auto, command, or manual"
+        )
     if t in (None, "none"):
         raise ProviderError(
-            "no python provider for this mode. main-agent mode is the default "
-            "and uses NO python provider (the host agent orchestrates). For "
-            "unattended runs set mode=headless + a command; manual is debug-only.")
+            "no automatic provider is configured. Set provider.default.type "
+            "to headless/host/auto/command, or explicitly use manual for debug.")
     raise ProviderError(f"unknown provider type: {t!r}")
 
 

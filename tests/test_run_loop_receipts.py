@@ -597,6 +597,73 @@ def test_native_l1_binding_suppresses_legacy_deep_research(tmp_path, monkeypatch
     assert called == []
 
 
+def test_l7_pre_research_uses_canonical_provider_text_capability(
+    tmp_path, monkeypatch
+):
+    project = tmp_path / "project"
+    target = project / "02_Agent_Notes" / "_pre_research" / "L7_research.md"
+    calls = []
+
+    class TextProvider:
+        def run_text(self, prompt, run_dir, tag, timeout=None):
+            calls.append((prompt, Path(run_dir), tag, timeout))
+            return "# located code\n"
+
+    monkeypatch.setattr(run_loop, "_bound_profile_id", lambda *_a: "v2.1-catalog-1")
+    monkeypatch.setattr(
+        run_loop,
+        "_ctl",
+        lambda *argv: SimpleNamespace(returncode=0, stdout="search prompt", stderr=""),
+    )
+    monkeypatch.setattr(run_loop, "provider_for", lambda *_a: TextProvider())
+
+    assert run_loop.ensure_pre_research(
+        str(project), "C1", "L7", SimpleNamespace(),
+        SimpleNamespace(provider=None), tmp_path / "run",
+    ) is True
+    assert target.read_text(encoding="utf-8") == "# located code\n"
+    assert calls == [("search prompt", tmp_path / "run", "prefetch_L7", None)]
+
+
+def test_l7_pre_research_missing_text_provider_fails_closed(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    monkeypatch.setattr(run_loop, "_bound_profile_id", lambda *_a: "v2.1-catalog-1")
+    monkeypatch.setattr(
+        run_loop,
+        "_ctl",
+        lambda *argv: SimpleNamespace(returncode=0, stdout="search prompt", stderr=""),
+    )
+    monkeypatch.setattr(run_loop, "provider_for", lambda *_a: object())
+
+    assert run_loop.ensure_pre_research(
+        str(project), "C1", "L7", SimpleNamespace(),
+        SimpleNamespace(provider=None), tmp_path / "run",
+    ) is False
+    assert not (
+        project / "02_Agent_Notes" / "_pre_research" / "L7_research.md"
+    ).exists()
+
+
+def test_existing_l7_pre_research_continues_without_provider_dispatch(
+    tmp_path, monkeypatch
+):
+    project = tmp_path / "project"
+    target = project / "02_Agent_Notes" / "_pre_research" / "L7_research.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("existing located code", encoding="utf-8")
+    monkeypatch.setattr(run_loop, "_bound_profile_id", lambda *_a: "v2.1-catalog-1")
+    monkeypatch.setattr(
+        run_loop,
+        "provider_for",
+        lambda *_a: pytest.fail("existing pre-research must not dispatch provider"),
+    )
+
+    assert run_loop.ensure_pre_research(
+        str(project), "C1", "L7", SimpleNamespace(),
+        SimpleNamespace(provider=None), tmp_path / "run",
+    ) is True
+
+
 def test_runner_forwards_explicit_context_budget_to_engine(monkeypatch):
     seen = {}
 

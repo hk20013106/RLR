@@ -2,7 +2,7 @@
 
 Guards the split of orchestrator.py -> research_loop.providers:
   * make_provider dispatches type -> correct class,
-  * main-agent mode has NO python provider (type none/None raises; Rev-2 C1),
+  * retired/no-provider values fail rather than silently falling back,
   * every provider subclasses AgentProvider and exposes run_agent,
   * `import orchestrator as orch` still exposes the full historical surface,
     and those names ARE the research_loop.providers objects (identity).
@@ -13,7 +13,10 @@ import sys
 import pytest
 
 import orchestrator as orch
+import run_loop
 import research_loop.providers as providers
+from research_loop.providers import config as provider_config
+from research_loop.providers import main_agent as retired_main_agent
 from research_loop.l05_curie_cli import _semantic_assessor_from_command
 
 
@@ -51,6 +54,16 @@ def test_make_provider_headless_aliases():
         assert isinstance(p, orch.HeadlessProvider), t
 
 
+@pytest.mark.parametrize(
+    "provider_type", ["main_agent", "headless", "host", "auto", "command", "manual"]
+)
+def test_run_cli_accepts_canonical_and_retired_provider_vocabulary(provider_type):
+    args = run_loop.build_parser().parse_args(
+        ["run", "PROJECT", "C1", "--provider", provider_type]
+    )
+    assert args.provider == provider_type
+
+
 def test_override_type_forces_class():
     p = orch.make_provider({"type": "command", "command": "x"},
                            override_type="manual")
@@ -58,10 +71,9 @@ def test_override_type_forces_class():
 
 
 @pytest.mark.parametrize("spec", [{"type": "none"}, {"type": None}, {},
-                                  {"type": "weird"}])
+                                  {"type": "main_agent"}, {"type": "weird"}])
 def test_main_agent_and_unknown_have_no_provider(spec):
-    """type none/None (main-agent default) and unknown types must raise, never
-    silently fall back to a provider (Rev-2 C1: host agent IS the orchestrator)."""
+    """Retired, empty, and unknown types never silently select a provider."""
     with pytest.raises(orch.ProviderError):
         orch.make_provider(spec)
 
@@ -71,10 +83,17 @@ def test_command_provider_requires_command():
         orch.make_provider({"type": "command"})
 
 
-def test_provider_config_defaults_to_main_agent():
+def test_provider_config_defaults_to_canonical_automatic_provider():
     cfg = orch.ProviderConfig({})
-    assert cfg.mode == "main_agent"
-    assert cfg.for_node("L1") == {"type": "none"}
+    assert cfg.mode is None
+    assert cfg.for_node("L1") == {"type": "headless"}
+
+
+@pytest.mark.parametrize(
+    "name", ["_scalar", "_mini_yaml", "load_config", "ProviderConfig"]
+)
+def test_retired_main_agent_module_is_only_a_config_compatibility_shim(name):
+    assert getattr(retired_main_agent, name) is getattr(provider_config, name)
 
 
 def test_l05_semantic_assessor_command_adapter_executes_json_contract(tmp_path):

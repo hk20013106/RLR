@@ -69,16 +69,28 @@ def test_formal_runner_fails_closed_before_dependency_gate_on_runtime_drift(
     assert calls == ["runtime_preflight"]
 
 
-def test_generated_main_agent_prompt_declares_formal_runtime_and_codex_host():
-    prompt = run_loop.MAIN_AGENT_PROMPT_TEMPLATE.format(
-        project="PROJECT", cand_id="C1", max_rounds=3, l9_rule="rule",
-        formal_runtime_command=runtime_preflight.formal_runtime_command_text(),
-    )
+def test_print_main_agent_prompt_is_a_nonzero_stderr_retirement_shim(capsys):
+    args = SimpleNamespace(project_dir="PROJECT", cand_id="C1", config=None)
 
-    assert runtime_preflight.formal_runtime_command_text() in prompt
-    assert "micromamba" not in prompt
-    assert "$env:RLR_HOST_BACKEND='codex'" in prompt
-    assert "Do not set it to codex on non-Codex hosts" in prompt
+    assert run_loop.cmd_print_main_agent_prompt(args) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "retired" in captured.err
+    assert "run_loop.py run" in captured.err
+    assert "emit-delta" not in captured.err
+
+
+def test_default_config_uses_one_canonical_automatic_provider_owner(tmp_path):
+    config = tmp_path / "rlr_runner.yaml"
+    config.write_text(run_loop.DEFAULT_CONFIG, encoding="utf-8")
+    parsed = run_loop.orch.ProviderConfig.load(config)
+
+    assert parsed.mode is None
+    assert parsed.default["type"] == "headless"
+    assert "main_agent" not in parsed.data
+    assert "manual" not in parsed.data
+    assert "everos" not in parsed.data
+    assert "headless" not in parsed.data
 
 
 def test_formal_runtime_launcher_has_one_canonical_interpreter_owner():
@@ -162,7 +174,6 @@ def test_cold_start_formal_l0_run_stops_after_receipt(tmp_path):
     }), encoding="utf-8")
     config = tmp_path / "runner.json"
     config.write_text(json.dumps({
-        "mode": "headless",
         "max_rounds": 1,
         "provider": {"default": {
             "type": "command",
@@ -179,7 +190,7 @@ def test_cold_start_formal_l0_run_stops_after_receipt(tmp_path):
 import json, os
 from pathlib import Path
 import run_loop
-from research_loop.providers.main_agent import ProviderConfig
+from research_loop.providers.config import ProviderConfig
 
 assert os.environ["RLR_HOST_BACKEND"] == "codex"
 

@@ -1,12 +1,15 @@
-"""Provider foundation: ABC, shared prompt/command runners, run receipt (Phase 4 leaf).
+"""Provider foundation: interfaces, shared command runners, and run receipts.
 
-Stdlib only -> pure leaf. No engine import."""
+This module does not import the engine. External execution delegates retry
+mechanics to the existing :mod:`research_loop.external_resilience` owner.
+"""
 import json
 import re
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 import datetime as _dt
 
+from research_loop import external_resilience
 from research_loop.providers.executor import DEFAULT_EXECUTOR, ProviderExecutionError
 
 
@@ -33,6 +36,11 @@ class AgentProvider:
     def run_agent(self, node, persona, context, output_schema=None,
                   workspace=None, tools=None, run_dir=None):
         raise NotImplementedError
+
+    def run_text(self, prompt, run_dir, tag, timeout=None):
+        raise ProviderError(
+            f"provider {self.name!r} does not support free-text execution"
+        )
 
 def _schema_repr(s):
     """Human-readable rendering of a delta schema (turns type objects into
@@ -96,8 +104,22 @@ def _run_command_agent(command, node, persona, context, output_schema,
     provider.last_execution_status = None
     cmd = command.format(prompt_file=str(pf), output_file=str(of), node=node,
                          persona=persona, workspace=workspace or "")
+
+    def execute_once():
+        try:
+            of.unlink(missing_ok=True)
+        except OSError as exc:
+            raise ProviderError(
+                f"provider output could not be reset before execution at {of}: {exc}"
+            ) from exc
+        return DEFAULT_EXECUTOR.run(
+            cmd, shell=True, timeout=timeout, check=True
+        )
+
     try:
-        result = DEFAULT_EXECUTOR.run(cmd, shell=True, timeout=timeout)
+        result = external_resilience.run_provider_with_retry(
+            execute_once
+        )
         provider.last_exit_code = result.returncode
         provider.last_timed_out = result.timed_out
         provider.last_terminal_state = result.terminal_state
@@ -126,14 +148,33 @@ def run_text_command(command, prompt, run_dir, tag, timeout=None):
     pf.write_text(prompt, encoding="utf-8")
     cmd = command.format(prompt_file=str(pf), output_file=str(of), node=tag,
                          persona="Researcher", workspace="")
+
+    def execute_once():
+        try:
+            of.unlink(missing_ok=True)
+        except OSError as exc:
+            raise ProviderError(
+                f"provider output could not be reset before execution at {of}: {exc}"
+            ) from exc
+        return DEFAULT_EXECUTOR.run(
+            cmd, shell=True, timeout=timeout, check=True
+        )
+
     try:
-        DEFAULT_EXECUTOR.run(cmd, shell=True, timeout=timeout)
+        external_resilience.run_provider_with_retry(
+            execute_once
+        )
     except ProviderExecutionError as exc:
         raise ProviderError(
             str(exc), returncode=exc.returncode, timed_out=exc.timed_out,
             terminal_state=exc.terminal_state or None,
         ) from exc
-    return of.read_text(encoding="utf-8")
+    try:
+        return of.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ProviderError(
+            f"provider process did not produce readable text at {of}: {exc}"
+        ) from exc
 
 @dataclass
 class RunReceipt:

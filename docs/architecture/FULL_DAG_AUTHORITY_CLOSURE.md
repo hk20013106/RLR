@@ -95,7 +95,7 @@ Committed-state recovery is checked separately. The recovery hook must execute b
 
 The canonical automated runner is `src/run_loop.py`; the repository-root `run_loop.py` is only a compatibility entry point that delegates to it.
 
-Before provider preflight, main-agent handoff, or an explicit manual/debug provider can start, `cmd_run()` resolves the active profile and calls the existing `audit_static_closure(profile_id)` owner.
+Before provider preflight or an explicit manual/debug provider can start, `cmd_run()` resolves the active profile and calls the existing `audit_static_closure(profile_id)` owner. There is no host-session handoff path.
 
 ```text
 candidate/dependency checks
@@ -147,7 +147,7 @@ No MC1-specific path is required in the authority framework.
 Before another real clean E2E, all of the following must be true on the same final Git commit:
 
 1. `audit_static_closure()` reports no unresolved required path and `e2e_start_allowed=true` for the native profile.
-2. Regression tests prove that an open closure or closure-audit failure stops the runner before all provider modes, including main-agent and explicit manual/debug handoff.
+2. Regression tests prove that an open closure or closure-audit failure stops the runner before every automatic or explicit manual/debug provider dispatch.
 3. The full Windows Python 3.13 GitHub Actions pytest/coverage job passes on that exact commit.
 4. The final repository tree contains no temporary patch workflow or alternate closure implementation.
 5. The remote `codex/full-dag-authority-closure` ref points to that verified commit.

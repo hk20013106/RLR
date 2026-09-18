@@ -2,7 +2,7 @@
 """Research Loop canonical gated runtime engine.
 
 The filename `research_loop_v04.py` is retained only for import/CLI stability
-(run_loop.py and the main-agent protocol import it); it is not a legacy engine.
+(run_loop.py imports it); it is not a legacy engine.
 `assemble-context` enforces the
 Deep Research gate (`_audit_pre_research`) on L1, L4, and L8.5: it fails closed
 (rc=3) unless a successful Academic Research Skills receipt and source-located

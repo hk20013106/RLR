@@ -214,7 +214,7 @@ RLR 不以“AI 写了一段文献综述”作为证据成功条件。evidence p
 
 它们目前只是 readiness probe；在 planned consumer 真正接上之前，WARN 不等于 L0 blocking failure。
 
-Provider/main-agent readiness 由 runner 在真正知道 active provider 配置时检查；L7 workspace/runtime readiness 继续留在 L7 execution gate。
+Provider readiness 由 runner 在真正知道 active provider 配置时检查；L7 workspace/runtime readiness 继续留在 L7 execution gate。
 
 ---
 
@@ -328,6 +328,10 @@ Canonical runner：
 micromamba run -n rlr python run_loop.py run PROJECT CAND
 ```
 
+`src/run_loop.py` 是唯一 production DAG orchestrator。节点认知 backend 只由
+`provider.default` 和可选的 `provider.nodes` 配置；provider 不拥有第二套编排或
+receipt 路径。历史 `main_agent` mode 已退休并 fail closed。
+
 `research_loop_v04.py` 继续作为历史 CLI/import compatibility shim；新代码应直接使用 `research_loop.cli`、`research_loop.engine` 或 `research_loop.api`。
 
 ---
@@ -381,9 +385,8 @@ research_loop/
 │   ├── verification.py
 │   └── loopx_cli.py
 ├── docs/DAG_TOPOLOGY.md              # DAG 详细说明
-├── docs/MAIN_AGENT_RUN.md            # 主 agent 执行协议
-├── docs/MAIN_AGENT_PROMPT.md         # 主 agent 启动提示
-├── docs/RUNNER.md                    # runner / StopPolicy
+├── docs/MAIN_AGENT_RUN.md            # 已退休路径的迁移说明
+├── docs/MAIN_AGENT_PROMPT.md         # 已退休提示词的迁移说明
 └── templates/                        # layer / persona / project templates
 ```
 

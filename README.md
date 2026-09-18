@@ -167,7 +167,7 @@ Blocking framework-owned checks correspond to real current consumers, including:
 - evidence-store/project evidence availability;
 - Obsidian projection requirements.
 
-**PubMed MCP and Zotero are currently readiness-only probes**, not heavy blocking base dependencies, until their planned direct consumers are wired. Provider/main-agent readiness is runner-bound because the active provider configuration is known at invocation time. L7 execution/workspace readiness remains deferred to the L7 gate.
+**PubMed MCP and Zotero are currently readiness-only probes**, not heavy blocking base dependencies, until their planned direct consumers are wired. Provider readiness is runner-bound because the active provider configuration is known at invocation time. L7 execution/workspace readiness remains deferred to the L7 gate.
 
 A warning from a readiness-only probe is not equivalent to a blocking L0 failure.
 
@@ -275,6 +275,11 @@ Canonical runner:
 micromamba run -n rlr python run_loop.py run PROJECT CAND
 ```
 
+`src/run_loop.py` is the sole production DAG orchestrator. Configure node
+cognition under `provider.default` and optional `provider.nodes`; providers do
+not own a second orchestration or receipt path. Historical `main_agent` mode is
+retired and fails closed.
+
 The historical `research_loop_v04.py` filename remains as a compatibility CLI/import shim; new code should use `research_loop.cli`, `research_loop.engine`, or `research_loop.api` directly.
 
 ---
@@ -320,7 +325,7 @@ research_loop/
 │   ├── l0_data.py                    # CurrentRoundDataBinding/v1
 │   ├── deep_research.py              # Academic Research receipts/evidence packs
 │   ├── ranking.py                    # advisory shadow ranking
-│   └── providers/                    # main-agent/command/headless/manual providers
+│   └── providers/                    # node cognition backends + canonical config
 ├── src/rlr_maintenance/              # Meta-RLR maintenance boundary; outside DAG
 │   ├── contracts.py
 │   ├── observer.py
@@ -328,9 +333,8 @@ research_loop/
 │   ├── verification.py
 │   └── loopx_cli.py
 ├── docs/DAG_TOPOLOGY.md              # detailed reader-facing DAG description
-├── docs/MAIN_AGENT_RUN.md            # orchestration protocol
-├── docs/MAIN_AGENT_PROMPT.md         # main-agent startup prompt
-├── docs/RUNNER.md                    # runner modes / StopPolicy
+├── docs/MAIN_AGENT_RUN.md            # retired-path migration notice
+├── docs/MAIN_AGENT_PROMPT.md         # retired-prompt migration notice
 └── templates/                        # layer/persona/project templates
 ```
 

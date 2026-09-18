@@ -4,8 +4,7 @@
 sync_to_obsidian.py — RLR project → Obsidian human-readable knowledge base.
 
 A REQUIRED step of the loop: run after aggregate-report at the end of EVERY
-round (run_loop drives it automatically at L10c; in main-agent mode the host
-agent must run it per the protocol).  Converts machine JSON deltas into readable
+round (`run_loop.py` drives it automatically at L10c). Converts machine JSON deltas into readable
 Markdown notes, converts PDF figures to PNG, writes per-round summaries, and
 updates an index.
 

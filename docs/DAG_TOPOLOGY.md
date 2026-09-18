@@ -97,7 +97,7 @@ consumers: core Python/packages and filesystem, Academic Research, the
 hypothesis ledger, the evidence store, and Obsidian. PubMed MCP and Zotero are
 reported as readiness-only until the planned literature-transport and
 reference-management consumers are actually wired; they are not heavy base
-dependencies in this PR. Provider/main-agent readiness is runner-bound because
+ dependencies in this PR. Provider readiness is runner-bound because
 the active runner config is known only at invocation time. L7 workspace/runtime
 checks remain deferred to the existing L7 execution gate.
 

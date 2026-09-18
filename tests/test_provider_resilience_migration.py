@@ -10,7 +10,12 @@ import pytest
 from research_loop import deep_research
 from research_loop import external_resilience
 from research_loop import provider_runtime_observability as observability
-from research_loop.providers.executor import ProviderExecutionResult
+from research_loop.providers import base as provider_base
+from research_loop.providers import CommandProvider, ProviderError
+from research_loop.providers.executor import (
+    ProviderExecutionError,
+    ProviderExecutionResult,
+)
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_codex_jsonl.py"
@@ -45,6 +50,8 @@ class _RecordingExecutor:
     def run(self, command, **kwargs):
         self.calls.append((command, dict(kwargs)))
         outcome = next(self._outcomes)
+        if callable(outcome):
+            return outcome()
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
@@ -59,6 +66,148 @@ def _install_zero_wait_retry(monkeypatch) -> list[float]:
 
     monkeypatch.setattr(external_resilience, "run_provider_with_retry", run_now)
     return waits
+
+
+def _execution_error(message, *, terminal_state="provider_failed", timed_out=False):
+    return ProviderExecutionError(
+        message,
+        command="provider command",
+        returncode=1,
+        stderr=message,
+        timed_out=timed_out,
+        terminal_state=terminal_state,
+    )
+
+
+def _automatic_provider(monkeypatch, outcomes):
+    executor = _RecordingExecutor(outcomes)
+    monkeypatch.setattr(provider_base, "DEFAULT_EXECUTOR", executor)
+    waits = _install_zero_wait_retry(monkeypatch)
+    provider = CommandProvider({
+        "command": "provider --prompt {prompt_file} --output {output_file}",
+        "timeout": 91,
+    })
+    return provider, executor, waits
+
+
+def _write_success(path, content):
+    def write():
+        path.write_text(content, encoding="utf-8")
+        return _result(returncode=0)
+
+    return write
+
+
+def test_agent_provider_retries_capacity_through_shared_owner_without_mutation(
+    tmp_path, monkeypatch
+):
+    provider, executor, waits = _automatic_provider(
+        monkeypatch,
+        [
+            _execution_error("Selected model is at capacity"),
+            _execution_error("Selected model is at capacity"),
+            _write_success(
+                tmp_path / "L1_Einstein_delta.json",
+                '{"schema_version":"2.1"}',
+            ),
+        ],
+    )
+
+    assert provider.run_agent("L1", "Einstein", "context", run_dir=tmp_path) == {
+        "schema_version": "2.1"
+    }
+    assert waits == [30.0, 60.0]
+    assert len(executor.calls) == 3
+    assert executor.calls[0] == executor.calls[1] == executor.calls[2]
+
+
+def test_text_provider_retries_capacity_through_the_same_shared_owner(
+    tmp_path, monkeypatch
+):
+    provider, executor, waits = _automatic_provider(
+        monkeypatch,
+        [
+            _execution_error("service temporarily unavailable"),
+            _write_success(tmp_path / "prefetch_L7_out.md", "located code"),
+        ],
+    )
+
+    assert provider.run_text(
+        "find existing code", tmp_path, "prefetch_L7", timeout=91
+    ) == "located code"
+    assert waits == [30.0]
+    assert len(executor.calls) == 2
+    assert executor.calls[0] == executor.calls[1]
+
+
+def test_agent_provider_never_accepts_output_left_by_a_failed_retry_attempt(
+    tmp_path, monkeypatch
+):
+    output = tmp_path / "L1_Einstein_delta.json"
+
+    def write_stale_then_fail():
+        output.write_text('{"stale":true}', encoding="utf-8")
+        raise _execution_error("Selected model is at capacity")
+
+    provider, executor, waits = _automatic_provider(
+        monkeypatch, [write_stale_then_fail, _result(returncode=0)]
+    )
+
+    with pytest.raises(ProviderError, match="invalid JSON"):
+        provider.run_agent("L1", "Einstein", "context", run_dir=tmp_path)
+    assert len(executor.calls) == 2
+    assert waits == [30.0]
+
+
+def test_text_provider_never_accepts_output_left_by_a_failed_retry_attempt(
+    tmp_path, monkeypatch
+):
+    output = tmp_path / "prefetch_L7_out.md"
+
+    def write_stale_then_fail():
+        output.write_text("stale located code", encoding="utf-8")
+        raise _execution_error("service temporarily unavailable")
+
+    provider, executor, waits = _automatic_provider(
+        monkeypatch, [write_stale_then_fail, _result(returncode=0)]
+    )
+
+    with pytest.raises(ProviderError, match="readable text"):
+        provider.run_text("find existing code", tmp_path, "prefetch_L7", timeout=91)
+    assert len(executor.calls) == 2
+    assert waits == [30.0]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _execution_error("quota exceeded"),
+        _execution_error("authentication failure: invalid API key"),
+        _execution_error("provider timed out", terminal_state="job_timed_out", timed_out=True),
+        _execution_error("unclassified provider failure"),
+    ],
+)
+def test_agent_provider_does_not_retry_non_retryable_failures(
+    tmp_path, monkeypatch, failure
+):
+    provider, executor, waits = _automatic_provider(monkeypatch, [failure])
+
+    with pytest.raises(ProviderError):
+        provider.run_agent("L1", "Einstein", "context", run_dir=tmp_path)
+    assert len(executor.calls) == 1
+    assert waits == []
+
+
+def test_json_parse_failure_does_not_reinvoke_provider(tmp_path, monkeypatch):
+    provider, executor, waits = _automatic_provider(
+        monkeypatch, [_result(returncode=0)]
+    )
+    (tmp_path / "L1_Einstein_delta.json").write_text("not json", encoding="utf-8")
+
+    with pytest.raises(ProviderError, match="invalid JSON"):
+        provider.run_agent("L1", "Einstein", "context", run_dir=tmp_path)
+    assert len(executor.calls) == 1
+    assert waits == []
 
 
 def _invoke(monkeypatch, outcomes):

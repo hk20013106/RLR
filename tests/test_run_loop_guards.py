@@ -2,16 +2,14 @@
 """Regression tests for run_loop controller fail-closed guards."""
 import sys
 import tempfile
-from contextlib import redirect_stdout
-from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent))
 import run_loop
-from native_v2_helpers import bootstrap_project_ready
-from research_loop.compatibility import PROFILE_V21_CATALOG_1
-from research_loop.hypothesis_ledger import HypothesisLedger
+from research_loop import pre_e2e_closure
 
 
 class _Result:
@@ -21,49 +19,142 @@ class _Result:
         self.stderr = stderr
 
 
-def test_main_agent_run_emits_handoff_without_python_provider():
-    old_ctl = run_loop._ctl
-    old_run_round = run_loop.run_round
-    old_runtime_preflight = run_loop.runtime_preflight.require_ready
-    try:
-        run_loop._ctl = lambda *args: _Result(0, "", "")
-        run_loop.run_round = lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("main-agent mode must not enter python run_round"))
-        run_loop.runtime_preflight.require_ready = lambda: {
-            "environment": "rlr", "sys_executable": "test"
-        }
-        with tempfile.TemporaryDirectory() as d:
-            project = Path(d)
-            store = project / "hypotheses.sqlite"
-            HypothesisLedger(store).bind_project(
-                project, profile_id=PROFILE_V21_CATALOG_1
-            )
-            candidates = project / "01_Candidates"
-            candidates.mkdir(exist_ok=True)
-            (candidates / "C1.md").write_text(
-                "---\ncandidate_id: C1\ncurrent_status: NEW\n---\n",
-                encoding="utf-8")
-            bootstrap_project_ready(
-                project,
-                Path(__file__).resolve().parents[1] / "research_loop_v04.py",
-                extra_env={"RLR_HYPOTHESIS_STORE": str(store)},
-            )
-            args = SimpleNamespace(
-                project_dir=str(project), cand_id="C1", config=None,
-                knowledge_store=str(store), max_rounds=None, dry_run=False,
-                no_review=False, provider=None, resume=False,
-                stop_after_node="L1")
-            output = StringIO()
-            with redirect_stdout(output):
-                rc = run_loop.cmd_run(args)
-        assert rc == 0
-        text = output.getvalue()
-        assert "main-agent handoff" in text
-        assert "python research_loop_v04.py next-step" in text
-    finally:
-        run_loop._ctl = old_ctl
-        run_loop.run_round = old_run_round
-        run_loop.runtime_preflight.require_ready = old_runtime_preflight
+def _runner_args(project, config, *, provider=None):
+    return SimpleNamespace(
+        project_dir=str(project), cand_id="C1", config=str(config),
+        knowledge_store=None, max_rounds=1, dry_run=False,
+        no_review=True, provider=provider, resume=False,
+        stop_after_node="L0",
+    )
+
+
+def _prepare_runner_boundary(project, monkeypatch):
+    candidates = project / "01_Candidates"
+    candidates.mkdir(parents=True)
+    (candidates / "C1.md").write_text(
+        "---\ncandidate_id: C1\ncurrent_status: NEW\n---\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        run_loop.l0_preflight, "validate_project_ready", lambda *_a, **_k: {"status": "PASS"}
+    )
+    monkeypatch.setattr(run_loop, "_formal_runtime_preflight", lambda: True)
+    monkeypatch.setattr(run_loop, "_ctl", lambda *_a: _Result(0, "", ""))
+
+
+@pytest.mark.parametrize("backend", ["headless", "host", "auto", "command"])
+def test_backend_choice_does_not_change_canonical_run_round_path(
+    tmp_path, monkeypatch, backend
+):
+    project = tmp_path / "project"
+    _prepare_runner_boundary(project, monkeypatch)
+    config = tmp_path / "runner.yaml"
+    config.write_text(
+        "provider:\n  default:\n    type: command\n    command: unused\n"
+        "review:\n  enabled: false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(run_loop, "restore_previous_round", lambda *_a: {})
+    monkeypatch.setattr(
+        pre_e2e_closure, "audit_static_closure", lambda *_a: {"e2e_start_allowed": True}
+    )
+    calls = []
+    monkeypatch.setattr(
+        run_loop,
+        "run_round",
+        lambda *args, **kwargs: calls.append(args[1]) or "stopped_after_node",
+    )
+
+    assert run_loop.cmd_run(_runner_args(project, config, provider=backend)) == 0
+    assert calls == ["C1"]
+
+
+def test_review_uses_the_same_canonical_per_node_provider_resolver(
+    tmp_path, monkeypatch
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "FINAL_REPORT.md").write_text("report", encoding="utf-8")
+    calls = []
+
+    class Provider:
+        def run_agent(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return {"review_verdict": "accept"}
+
+    monkeypatch.setattr(run_loop, "next_step", lambda *_a: {"profile_id": "profile"})
+    monkeypatch.setattr(run_loop, "get_profile", lambda *_a: object())
+    monkeypatch.setattr(
+        run_loop, "artifact_for_node", lambda *_a: SimpleNamespace(storage_key="L8")
+    )
+    monkeypatch.setattr(run_loop, "load_delta", lambda *_a: None)
+    resolved = []
+    monkeypatch.setattr(
+        run_loop,
+        "provider_for",
+        lambda node, cfg, args: resolved.append(node) or Provider(),
+    )
+    cfg = SimpleNamespace(
+        default={"type": "command", "command": "unused"},
+        nodes={"REVIEW": {"type": "command", "command": "review"}},
+        review={"enabled": True, "provider": {"type": "main_agent"}},
+    )
+
+    result = run_loop.run_review_gate(
+        project,
+        "C1",
+        cfg,
+        SimpleNamespace(provider=None),
+        tmp_path / "run",
+    )
+
+    assert result == {"review_verdict": "accept"}
+    assert resolved == ["REVIEW"]
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("override", [None, "host", "command"])
+def test_retired_main_agent_config_fails_before_restore_even_with_override(
+    tmp_path, monkeypatch, capsys, override
+):
+    project = tmp_path / "project"
+    _prepare_runner_boundary(project, monkeypatch)
+    config = tmp_path / "legacy.yaml"
+    config.write_text(
+        "mode: main_agent\nprovider:\n  default:\n    type: headless\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        run_loop,
+        "restore_previous_round",
+        lambda *_a: pytest.fail("retired mode must fail before state restore"),
+    )
+
+    assert run_loop.cmd_run(_runner_args(project, config, provider=override)) == 2
+    output = capsys.readouterr().out
+    assert "retired mode: main_agent" in output
+    assert "Remove `mode: main_agent`" in output
+
+
+def test_retired_main_agent_cli_override_fails_with_new_config(
+    tmp_path, monkeypatch, capsys
+):
+    project = tmp_path / "project"
+    _prepare_runner_boundary(project, monkeypatch)
+    config = tmp_path / "runner.yaml"
+    config.write_text(
+        "provider:\n  default:\n    type: command\n    command: unused\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        run_loop,
+        "restore_previous_round",
+        lambda *_a: pytest.fail("retired provider must fail before state restore"),
+    )
+
+    assert run_loop.cmd_run(
+        _runner_args(project, config, provider="main_agent")
+    ) == 2
+    assert "retired mode: main_agent" in capsys.readouterr().out
 
 
 def test_assemble_context_raises_when_controller_fails():

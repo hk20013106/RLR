@@ -15,7 +15,7 @@
 │  Entry Point: run_loop.py (Loop Orchestrator)               │
 │  - Drives research_loop_v04.py (v0.6 engine, filename kept) │
 │  - Round execution, StopPolicy, provider dispatch            │
-│  - Modes: main_agent / command / headless / manual           │
+│  - Sole production orchestration path                        │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
@@ -28,8 +28,8 @@
 └─────────────────────────────────────────────────────────────┘
         ↓                    ↓                      ↓
 ┌──────────────┐  ┌──────────────────┐  ┌────────────────────┐
-│orchestrator  │  │pitfall_ledger.py │  │ars_card_adapter.py │
-│(provider)    │  │(audit trail)     │  │(token firewall)    │
+│providers/    │  │pitfall_ledger.py │  │ars_card_adapter.py │
+│(node backend)│  │(audit trail)     │  │(token firewall)    │
 └──────────────┘  └──────────────────┘  └────────────────────┘
 ```
 
@@ -41,7 +41,8 @@
 | ------------------------ | ------------------------- | ----------------------- | --------------------------------------------- | -------------------------------- |
 | **v0.6 Engine**          | `research_loop_v04.py`    | 4843                    | DAG, gates, CLI, context assembly, schemas    | pitfall_ledger, ars_card_adapter |
 | **Loop Runner**          | `run_loop.py`             | 863                     | CLI entry, round loop, StopPolicy, provider   | research_loop_v04, orchestrator  |
-| **Orchestrator**         | `orchestrator.py`         | 399                     | Provider abstraction (4 modes)                | (none)                           |
+| **Provider backends**    | `research_loop/providers/`| —                       | Per-node cognition + canonical config         | external_resilience              |
+| **Provider compat shim** | `orchestrator.py`         | —                       | Re-export historical provider import surface  | research_loop.providers          |
 | **Pitfall Ledger**       | `pitfall_ledger.py`       | 448                     | Failure audit, draft->confirmed               | (none)                           |
 | **ARS Adapter**          | `ars_card_adapter.py`     | 79                      | ARS output -> paper/method card JSON          | research_loop_v04                |
 | **Literature DB**        | `manage_literature_db.py` | 243                     | Cross-round paper dedup + reuse               | (none)                           |
@@ -188,14 +189,16 @@ emit-loop-memory(cand) -> next_loop_memory.json (from L1/L8/L9/L10b + ledgers)
 
 ---
 
-## Execution Modes
+## Provider Backends
 
-| Mode       | Entry                         | Provider                                   | Use Case        |
-| ---------- | ----------------------------- | ------------------------------------------ | --------------- |
-| main_agent | run_loop.py                   | Current session (Claude Code/Codex/Hermes) | Interactive     |
-| command    | run_loop.py                   | External CLI                               | Batch/automated |
-| headless   | run_loop.py                   | Subprocess script                          | Unattended      |
-| manual     | run_loop.py --provider manual | User stdin                                 | Debug/testing   |
+All production backends are dispatched by `run_loop.py`; none is a second DAG
+orchestrator.
+
+| Type       | Entry                         | Provider          | Use Case        |
+| ---------- | ----------------------------- | ----------------- | --------------- |
+| command    | run_loop.py                   | External CLI      | Batch/automated |
+| headless / host / auto | run_loop.py       | Resolved subprocess command | Unattended |
+| manual     | run_loop.py --provider manual | User stdin        | Debug/testing   |
 
 ---
 

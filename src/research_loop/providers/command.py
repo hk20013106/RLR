@@ -1,6 +1,6 @@
 """CommandProvider: headless shell-command-template provider (Phase 4)."""
 from research_loop.providers.base import (
-    AgentProvider, ProviderError, _run_command_agent,
+    AgentProvider, ProviderError, _run_command_agent, run_text_command,
 )
 
 
@@ -34,3 +34,9 @@ class CommandProvider(AgentProvider):
         return _run_command_agent(self.command, node, persona, context,
                                   output_schema, workspace, tools, run_dir,
                                   self.timeout, self)
+
+    def run_text(self, prompt, run_dir, tag, timeout=None):
+        return run_text_command(
+            self.command, prompt, run_dir, tag,
+            self.timeout if timeout is None else timeout,
+        )

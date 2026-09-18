@@ -10,7 +10,7 @@ from research_loop.providers.base import (
 class ManualProvider(AgentProvider):
     """DEBUG / manual-test provider only. Human-in-the-loop: writes the prompt,
     waits for a delta JSON path. NOT a default -- enable with `--provider manual`.
-    The automatic path is HostAgentProvider / CommandProvider."""
+    Automatic execution uses HeadlessProvider or CommandProvider."""
 
     type = "manual"
 

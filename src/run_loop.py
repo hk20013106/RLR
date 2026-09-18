@@ -56,20 +56,12 @@ ENGINE = EngineAPI()
 
 
 DEFAULT_CONFIG = """\
-mode: main_agent
 max_rounds: 3
-
-main_agent:
-  enabled: true
-  description: "The current Claude Code/Codex/AntiGravity/Hermes session acts as the orchestrator. No per-node copy-paste."
 
 provider:
   default:
-    type: none
-
-headless:
-  enabled: false
-  command: ""
+    type: headless
+    command: ""
 
 deep_research:
   backend: ""
@@ -78,10 +70,6 @@ deep_research:
   plugin_dir: ""
   skill_version: unknown
   timeout: 900
-
-manual:
-  enabled: false
-  debug_only: true
 
 review:
   enabled: true
@@ -93,12 +81,8 @@ stop_policy:
   max_l7_failures: 2
   max_node_failures: 2
 
-everos:
-  enabled: false
-  scope: project_only
-
-# Automatic provider templates are documented in RUNNER.md. Manual mode is
-# debug-only; the canonical runner never silently falls back to it.
+# Configure provider.default.command or RLR_HEADLESS_CMD for automatic runs.
+# Manual mode is debug-only and is never a silent fallback.
 """
 
 REVIEW_SCHEMA = {
@@ -322,7 +306,9 @@ def advance(project, cand, step):
 
 
 def provider_for(node, cfg, args):
-    return orch.make_provider(cfg.for_node(node), override_type=args.provider)
+    return orch.make_provider(
+        cfg.for_node(node), override_type=getattr(args, "provider", None)
+    )
 
 
 def _context_token_budget(cfg):
@@ -355,16 +341,14 @@ def _provider_output_schema(project, node, step):
 
 
 def preflight_providers(cfg, args):
-    if cfg.mode == "main_agent":
-        log("mode: main_agent (host session orchestrates; no python provider needed)")
-        return True
-    if args.provider == "manual":
+    override = getattr(args, "provider", None)
+    if override == "manual":
         log("provider: MANUAL (debug mode, explicitly requested via --provider manual)")
         return True
     specs = [("provider.default", cfg.default)]
     specs += [(f"provider.nodes.{n}", s) for n, s in cfg.nodes.items()]
     for label, spec in specs:
-        t = args.provider or (spec or {}).get("type")
+        t = override or (spec or {}).get("type")
         if t == "manual":
             log(f"ERROR: {label}.type = 'manual', but manual is DEBUG-ONLY.")
             log("       Configure an automatic provider (type: host | command),")
@@ -372,13 +356,13 @@ def preflight_providers(cfg, args):
                 "to force debug mode.")
             return False
         try:
-            orch.make_provider(spec, override_type=args.provider)
+            orch.make_provider(spec, override_type=override)
         except orch.ProviderError as e:
             log(f"ERROR: {label} is not runnable automatically:")
             for ln in str(e).splitlines():
                 log(f"       {ln}")
             return False
-    log(f"provider: AUTOMATIC ({args.provider or cfg.default.get('type')})")
+    log(f"provider: AUTOMATIC ({override or cfg.default.get('type')})")
     return True
 
 
@@ -1071,22 +1055,22 @@ def ensure_pre_research(project, cand, node, cfg, args, run_dir):
     if target.exists():
         log(f"pre-research {node}: already present")
         return True
-    prompt = _ctl("pre-research", project, cand, "--node", node).stdout
-    hl = getattr(cfg, "headless", {}) or {}
-    cmd = (hl.get("command") if isinstance(hl, dict) else None) \
-        or os.environ.get("RLR_HEADLESS_CMD") or os.environ.get("RLR_HOST_AGENT_CMD")
-    if not cmd:
-        log(f"pre-research {node}: no headless command -- the orchestrator must run "
-            f"`pre-research {project} {cand} --node {node}` (main-agent mode)")
-        return True
+    research = _ctl("pre-research", project, cand, "--node", node)
+    if research.returncode != 0:
+        detail = (research.stderr or research.stdout or "pre-research prompt failed").strip()
+        log(f"ERROR: pre-research {node} prompt failed closed: {detail}")
+        return False
     try:
-        timeout = hl.get("timeout") if isinstance(hl, dict) else None
-        md = orch.run_text_command(cmd, prompt, run_dir, f"prefetch_{node}", timeout)
+        provider = provider_for(node, cfg, args)
+        md = provider.run_text(
+            research.stdout, run_dir, f"prefetch_{node}"
+        )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(md, encoding="utf-8")
         log(f"pre-research {node}: produced {target}")
     except Exception as e:
-        log(f"pre-research {node}: failed ({e}); continuing without it")
+        log(f"ERROR: pre-research {node} failed closed: {e}")
+        return False
     return True
 
 
@@ -1216,9 +1200,8 @@ def run_review_gate(project, cand, cfg, args, run_dir):
         if d is not None:
             parts += [f"=== {dk} ===", json.dumps(d, indent=2, ensure_ascii=False)]
     context = "\n\n".join(parts)
-    spec = cfg.review.get("provider") or cfg.default
     try:
-        prov = orch.make_provider(spec, override_type=args.provider)
+        prov = provider_for("REVIEW", cfg, args)
         out = prov.run_agent("REVIEW", "Reviewer", context,
                              output_schema=REVIEW_SCHEMA, run_dir=str(run_dir))
         log(f"review verdict: {out.get('review_verdict')}")
@@ -1449,6 +1432,17 @@ def cmd_run(args):
         Path(cfg_path).write_text(DEFAULT_CONFIG, encoding="utf-8")
         log(f"wrote default config: {cfg_path}")
     cfg = orch.ProviderConfig.load(cfg_path)
+    override = getattr(args, "provider", None)
+    if cfg.mode == "main_agent" or override == "main_agent":
+        source = "configuration mode" if cfg.mode == "main_agent" else "CLI provider"
+        log(f"ERROR: {source} uses retired mode: main_agent.")
+        log("       Remove `mode: main_agent` and configure execution under `provider:`.")
+        return 2
+    if cfg.mode not in (None, ""):
+        log(
+            f"WARNING: top-level mode={cfg.mode!r} is deprecated and inert; "
+            "provider.default/provider.nodes select execution"
+        )
     max_rounds = args.max_rounds or cfg.max_rounds or 3
 
     if args.dry_run:
@@ -1457,8 +1451,8 @@ def cmd_run(args):
                                        and cfg.review.get("enabled", True)))
 
     # Restore is deterministic state validation, not provider work. It must run
-    # before provider readiness or main-agent handoff so a broken continuation
-    # cannot consume model quota or receive an orchestration prompt.
+    # before provider readiness so a broken continuation cannot consume model
+    # quota or receive a node prompt.
     try:
         binding = restore_previous_round(project, cand)
     except L0StateError as exc:
@@ -1487,13 +1481,8 @@ def cmd_run(args):
         return 3
 
     if not preflight_providers(cfg, args):
-        log("aborting: no automatic provider configured (see RUNNER.md).")
+        log("aborting: no runnable provider configured under provider.default/provider.nodes.")
         return 2
-
-    if cfg.mode == "main_agent" and args.provider in (None, "main_agent"):
-        log("main-agent handoff: host session must execute the protocol below; "
-            "no python provider will be called")
-        return cmd_print_main_agent_prompt(args)
 
     sp = StopPolicy(
         max_rounds=max_rounds,
@@ -1551,94 +1540,23 @@ def cmd_run(args):
     return 0
 
 
-MAIN_AGENT_PROMPT_TEMPLATE = """You are now the RLR main-agent orchestrator.
-
-Project: {project}
-Candidate: {cand_id}
-
-Instructions:
-0. Runtime boundary: on a Codex host, first run `$env:RLR_HOST_BACKEND='codex'`
-   in the launching PowerShell. Do not set it to codex on non-Codex hosts.
-   Run every RLR command with `{formal_runtime_command}`.
-   Before a formal run, verify the environment with:
-     {formal_runtime_command} -m research_loop.runtime_preflight
-   If that gate fails, stop and report it.
-1. Run:  {formal_runtime_command} research_loop_v04.py next-step {project} {cand_id}
-2. Read the JSON output to get the current DAG node, persona, and context_files.
-3. DEEP RESEARCH (mandatory): before L1, L4, or L8.5, run the configured
-   Academic Research runtime; it invokes `$academic-research-suite` for Codex
-   or the installed ARS plugin for Claude and persists located paper evidence:
-     {formal_runtime_command} research_loop_v04.py deep-research-run {project} {cand_id} --node NODE
-   L1 requires Results/Discussion/Conclusion evidence; L4 requires Methods plus
-   a review-search receipt; L8.5 requires paper-based result verification. Do
-   not hand-write a pre-research note. L7 remains the separate code-search step.
-4. Run:  {formal_runtime_command} research_loop_v04.py assemble-context {project} {cand_id} --node NODE
-5. The assemble-context output is your ONLY input for this node (it now includes the
-   pre-research summary when present). Do NOT read other delta files.
-6. Act as the specified persona. Generate a strict JSON delta matching the schema.
-7. Write the delta to a temp file, then run:
-   {formal_runtime_command} research_loop_v04.py emit-delta {project} {cand_id} --node NODE --persona PERSONA --file TEMP_DELTA.json
-8. If emit-delta says VALIDATION: PASS, run the advance_command.
-9. Repeat from step 1 until next-step returns L10c (aggregate-report).
-10. After L10c, evaluate StopPolicy: if KEEP + review accept, stop. If REVISE with
-    executable next_steps, create child candidate.
-11. Maximum rounds: {max_rounds}.
-
-Key rules:
-- Do NOT read DAG-disallowed delta files. Only use assemble-context output.
-- Deep Research runs BEFORE L1/L4/L8.5 and is embedded via assemble-context; it does NOT
-  change the 15-node DAG topology.
-- The provider receipt must bind the exact raw file passed to `emit-delta`; do not
-  reserialize or copy a provider delta before emission.
-- L4 Fisher references the local E/G/A handles shown in context. The `emit-delta`
-  commit boundary performs the deterministic handle binding and records the raw-to-
-  canonical provenance edge; do not create a runner-side bound copy.
-- L7 Turing: use prepare-turing-workspace, run scripts only in that workspace.
-- {l9_rule}
-- If emit-delta fails validation, fix the JSON and retry. Do NOT skip.
-- You are the orchestrator. Do not ask the user to copy-paste between nodes.
-"""
-
 def cmd_print_main_agent_prompt(args):
-    project, cand = args.project_dir, args.cand_id
-    cfg_path = args.config or str(Path(project) / "rlr_runner.yaml")
-    max_rounds = 3
-    if Path(cfg_path).exists():
-        cfg = orch.ProviderConfig.load(cfg_path)
-        max_rounds = cfg.max_rounds or 3
-    try:
-        profile_id = next_step(project, cand).get("profile_id", PROFILE_V20)
-    except Exception:
-        profile_id = PROFILE_V20
-    l9_rule = (
-        "Historical v2.0 L9a/L9b are parallel and mutually invisible."
-        if profile_id == PROFILE_V20 else
-        "L9: emit and finalize L9a, then assemble and emit L9b, then permit L10a."
+    print(
+        "The print-main-agent-prompt command is retired. "
+        "Use `run_loop.py run PROJECT_DIR CAND_ID` with execution configured "
+        "under `provider:`.",
+        file=sys.stderr,
     )
-    prompt = MAIN_AGENT_PROMPT_TEMPLATE.format(
-        project=project, cand_id=cand, max_rounds=max_rounds,
-        l9_rule=l9_rule,
-        formal_runtime_command=runtime_preflight.formal_runtime_command_text())
-    prompt, meta = rl._caveman_lite(
-        prompt,
-        required_literals=[
-            project, cand, "main-agent", "Do NOT", "RLR_HOST_BACKEND",
-            runtime_preflight.formal_runtime_command_text(),
-        ],
-    )
-    print(prompt)
-    log("caveman-lite: " + json.dumps(meta, sort_keys=True))
-    return 0
+    return 2
 
 def build_parser():
     p = argparse.ArgumentParser(
         prog="run_loop.py",
-        description="RLR loop runner — canonical runtime entry point "
-                    "(main-agent / headless / manual).")
+        description="RLR loop runner — sole production orchestration entry point.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     ma = sub.add_parser("print-main-agent-prompt",
-                        help="print the main-agent orchestration protocol")
+                        help="retired compatibility command (always exits non-zero)")
     ma.add_argument("project_dir")
     ma.add_argument("cand_id")
     ma.add_argument("--config")
@@ -1651,7 +1569,9 @@ def build_parser():
     sp.add_argument("--knowledge-store",
                     help="shared hypothesis SQLite store (or use RLR_HYPOTHESIS_STORE)")
     sp.add_argument("--max-rounds", dest="max_rounds", type=int, default=None)
-    sp.add_argument("--provider", choices=["main_agent", "host", "command", "manual"],
+    sp.add_argument(
+                    "--provider",
+                    choices=["main_agent", "headless", "host", "auto", "command", "manual"],
                     default=None,
                     help="force a provider type for all nodes (manual is debug-only)")
     sp.add_argument("--dry-run", action="store_true",

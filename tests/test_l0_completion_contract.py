@@ -320,7 +320,7 @@ def test_cmd_run_restore_failure_happens_before_provider_preflight(tmp_path, mon
         "load",
         lambda _path: SimpleNamespace(
             max_rounds=1, review={"enabled": False}, stop_policy={},
-            mode="main_agent", default={},
+            mode=None, default={},
         ),
     )
     monkeypatch.setattr(

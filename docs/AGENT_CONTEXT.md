@@ -9,8 +9,8 @@ code, validators, and tests.
 1. [`AGENTS.md`](../AGENTS.md): non-negotiable safety, scientific-integrity,
    compatibility, and verification rules.
 2. This file: runtime map and handoff procedure.
-3. [`DAG_TOPOLOGY.md`](DAG_TOPOLOGY.md) and
-   [`MAIN_AGENT_RUN.md`](MAIN_AGENT_RUN.md): node protocol.
+3. [`DAG_TOPOLOGY.md`](DAG_TOPOLOGY.md): node protocol. The historical
+   [`MAIN_AGENT_RUN.md`](MAIN_AGENT_RUN.md) path is a retirement notice.
 4. The narrow source module and test for the behavior being changed.
 
 The project is an auditable scientific-research DAG. It prioritizes scientific
@@ -23,7 +23,7 @@ citations, datasets, hashes, lineage, or computed results.
 ```text
 run_loop.py                         public runner shim
 research_loop_v04.py                public engine CLI / compatibility shim
-src/run_loop.py                     loop runner and main-agent protocol
+src/run_loop.py                     sole production DAG orchestrator
 src/research_loop/engine.py         command dispatch, gates, persistence
 src/research_loop/topology.py       executable DAG and authority metadata
 src/research_loop/context.py        scoped cognitive-context assembly
@@ -39,7 +39,7 @@ src/research_loop/l4_closed_corpus.py exact-source resolver service
 src/research_loop/l4_evidence_bundle.py deterministic L4B bundle and L4.5 path gate
 src/research_loop/method_contracts.py Fisher/L5/L6 method contracts
 src/research_loop/runtime_preflight.py formal Micromamba/PaperQA2/SPECTER2 gate
-src/research_loop/providers/        optional non-main-agent providers
+src/research_loop/providers/        node cognition backends + config
 src/research_loop/api.py            runner-to-engine facade
 ```
 
@@ -205,28 +205,28 @@ Separate observed inputs, computed results, and interpretation in all deltas
 and reports. A passing synthetic test is evidence of software behavior only,
 not a scientific conclusion.
 
-## Main-agent operating loop
+## Canonical production operating loop
 
-For Codex, Claude, Antigravity, or similar hosts, the normal mode is
-**main-agent mode**: the host agent orchestrates the DAG itself. It does not
-use a Python provider for cognitive nodes.
+`src/run_loop.py` is the sole production orchestrator. Codex, Claude, and
+other command backends are node cognition providers; they do not execute a
+parallel host-session DAG protocol.
 
 ```text
 preflight / check-deps
 repeat until terminal:
-    next-step
-    deep-research-run before L1, L4, and L8.5
-    assemble-context for the active node
-    create a schema-conforming delta
-    emit-delta
+    run_round
+    provider_for(node) → AgentProvider
+    canonical provider output → RunReceipt
+    emit-delta → HypothesisLedger
     execute the declared advance command
 L7: prepare workspace → execute approved scripts → emit L7 delta
 L9: emit/finalize L9a → assemble L9b from its authorized snapshot → emit L9b
 L10c: aggregate-report → human-readable sync → StopPolicy
 ```
 
-Use `next-step` instead of reconstructing control flow from memory. It returns
-the active node(s), persona, allowed context inputs, and advance command.
+The runner uses the controller's `next-step` packet rather than reconstructing
+control flow. It owns pre-research, scoped context assembly, provider dispatch,
+receipt writing, emission, and advancement in that order.
 
 After L10c, stop for terminal outcomes. Only a genuine committed `REVISE`
 decision with an L10b successor may continue. The runner first emits immutable
@@ -238,7 +238,7 @@ vault (`OBSIDIAN_VAULT` or `--vault`) and fails loudly if unavailable.
 
 ## Providers and artifacts
 
-`providers/` offers explicit optional non-main-agent paths:
+`providers/` offers node cognition backends used by the canonical runner:
 
 - `HeadlessProvider`: unattended configured host command.
 - `CommandProvider`: explicit command template.
@@ -281,7 +281,7 @@ logic.
 
 - [`AGENTS.md`](../AGENTS.md)
 - [`DAG_TOPOLOGY.md`](DAG_TOPOLOGY.md)
-- [`MAIN_AGENT_RUN.md`](MAIN_AGENT_RUN.md)
+- [`MAIN_AGENT_RUN.md`](MAIN_AGENT_RUN.md) (retirement/migration notice)
 - [`L4_METHOD_EVIDENCE.md`](L4_METHOD_EVIDENCE.md)
 - [`README.md`](../README.md)
 - [`src/research_loop/topology.py`](../src/research_loop/topology.py)

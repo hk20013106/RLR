@@ -2,7 +2,7 @@
 import os
 
 from research_loop.providers.base import (
-    AgentProvider, ProviderError, _run_command_agent,
+    AgentProvider, ProviderError, _run_command_agent, run_text_command,
 )
 
 
@@ -39,8 +39,8 @@ class HeadlessProvider(AgentProvider):
                 "to a headless command template (it MUST write the delta JSON to "
                 "{output_file}), e.g.\n"
                 "  export RLR_HEADLESS_CMD='claude -p < {prompt_file} > {output_file}'\n"
-                "or set headless.command in rlr_runner.yaml. "
-                "(For interactive use prefer main-agent mode; manual is debug-only.)")
+                "or set provider.default.command in rlr_runner.yaml. "
+                "Manual mode is debug-only.")
 
     @staticmethod
     def _detect():
@@ -54,3 +54,9 @@ class HeadlessProvider(AgentProvider):
         return _run_command_agent(self.command, node, persona, context,
                                   output_schema, workspace, tools, run_dir,
                                   self.timeout, self)
+
+    def run_text(self, prompt, run_dir, tag, timeout=None):
+        return run_text_command(
+            self.command, prompt, run_dir, tag,
+            self.timeout if timeout is None else timeout,
+        )
