@@ -345,14 +345,8 @@ class RunReceipt:
         self.validate()
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        serialized = json.dumps(asdict(self), indent=2, ensure_ascii=False)
-        try:
-            with p.open("x", encoding="utf-8", newline="\n") as handle:
-                handle.write(serialized)
-        except FileExistsError as exc:
-            raise ValueError(
-                f"RunReceipt is immutable and already exists: {p}"
-            ) from exc
+        p.write_text(json.dumps(asdict(self), indent=2, ensure_ascii=False),
+                     encoding="utf-8")
         return str(p)
 
     @classmethod
