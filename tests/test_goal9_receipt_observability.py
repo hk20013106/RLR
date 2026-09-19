@@ -169,6 +169,31 @@ def test_malformed_provider_output_is_contract_failure_with_raw_provenance(
     assert receipt.raw_provider_delta_hash == hashlib.sha256(raw.read_bytes()).hexdigest()
 
 
+def test_provider_attempt_receipt_cannot_overwrite_same_attempt(tmp_path):
+    run_dir = tmp_path / "run"
+    manifest = _manifest(tmp_path)
+    config = tmp_path / "runner.yaml"
+    config.write_text("mode: headless\n", encoding="utf-8")
+    provider = CommandProvider({"command": _provider_command(tmp_path, "success")})
+    delta = provider.run_agent("L4", "Fisher", "context", run_dir=str(run_dir))
+    raw, _ = run_loop.canonical_provider_emission(
+        provider, run_dir, "L4", "Fisher", delta
+    )
+    first = run_loop.write_receipt(
+        run_dir, "L4", "Fisher", provider, "context", _step(), "C1", "1",
+        manifest=str(manifest), provider_delta_file=raw, config_path=config,
+    )
+    original = Path(first).read_bytes()
+
+    with pytest.raises(ValueError, match="provider attempt receipt already exists"):
+        run_loop.write_receipt(
+            run_dir, "L4", "Fisher", provider, "context", _step(), "C1", "1",
+            manifest=str(manifest), provider_delta_file=raw, config_path=config,
+        )
+
+    assert Path(first).read_bytes() == original
+
+
 def test_retry_attempts_preserve_distinct_raw_outputs_and_receipts(
     tmp_path, monkeypatch
 ):
