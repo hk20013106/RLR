@@ -452,11 +452,10 @@ def write_receipt(run_dir, node, persona, prov, context, step, cand, round_id,
 def _write_provider_failure_receipt(run_dir, node, persona, prov, context,
                                     step, cand, round_id, manifest=None,
                                     workspace=None, config_path=None):
-    """Persist a failed command invocation when its prompt was created.
+    """Persist a failed provider invocation without inventing canonical output.
 
-    A failed provider has no canonical delta, so the receipt records the
-    execution outcome while keeping delta provenance absent rather than
-    inventing an artifact or hash.
+    If the process produced raw bytes before an output-contract failure, retain
+    that exact artifact path/hash while keeping canonical provider_delta absent.
     """
     if not getattr(prov, "last_prompt_file", None):
         return None
