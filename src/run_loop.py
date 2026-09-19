@@ -445,6 +445,10 @@ def write_receipt(run_dir, node, persona, prov, context, step, cand, round_id,
     path = provider_attempt_path(
         run_dir, node, persona, "receipt", ".json", attempt_number
     )
+    if path.exists():
+        raise ValueError(
+            f"provider attempt receipt already exists and is immutable: {path}"
+        )
     rec.write(path)
     return str(path)
 
