@@ -14,8 +14,7 @@ from research_loop.providers.executor import DEFAULT_EXECUTOR, ProviderExecution
 
 
 class ProviderError(Exception):
-    """Raised when a provider cannot be constructed / resolved. The runner turns
-    this into a fail-loud error (it never silently falls back to manual)."""
+    """Raised when a provider invocation cannot satisfy its runtime contract."""
 
     def __init__(self, message, *, returncode=None, timed_out=None,
                  terminal_state=None):
@@ -25,6 +24,11 @@ class ProviderError(Exception):
         self.returncode = returncode
         self.timed_out = timed_out
         self.terminal_state = terminal_state
+
+
+class ProviderOutputContractError(ProviderError):
+    """Provider execution completed, but its persisted output contract failed."""
+
 
 class AgentProvider:
     """Provider interface. Subclasses turn (node, persona, context) into a delta
@@ -87,15 +91,53 @@ def _compose_auto_prompt(node, persona, context, output_schema=None,
     lines += ["", "=== CONTEXT ===", context]
     return "\n".join(lines)
 
+
+def provider_attempt_path(run_dir, node, persona, artifact, suffix, attempt):
+    """Return the stable path for one logical provider invocation attempt."""
+    if (not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1):
+        raise ValueError("provider attempt must be a positive integer")
+    marker = "" if attempt == 1 else f".{attempt}"
+    return Path(run_dir) / f"{node}_{persona}_{artifact}{marker}{suffix}"
+
+
+def _reserve_provider_attempt(run_dir, node, persona, prompt_text):
+    """Reserve an append-only logical invocation slot using the prompt file."""
+    for attempt in range(1, 1000):
+        prompt_path = provider_attempt_path(
+            run_dir, node, persona, "prompt", ".txt", attempt
+        )
+        output_path = provider_attempt_path(
+            run_dir, node, persona, "delta", ".json", attempt
+        )
+        receipt_path = provider_attempt_path(
+            run_dir, node, persona, "receipt", ".json", attempt
+        )
+        if output_path.exists() or receipt_path.exists():
+            continue
+        try:
+            with prompt_path.open("x", encoding="utf-8", newline="\n") as handle:
+                handle.write(prompt_text)
+        except FileExistsError:
+            continue
+        return attempt, prompt_path, output_path
+    raise ProviderError(
+        f"unable to reserve provider attempt for {node}/{persona} in {run_dir}"
+    )
+
+
 def _run_command_agent(command, node, persona, context, output_schema,
                        workspace, tools, run_dir, timeout, provider):
     """Shared body for command-style providers using the ProviderExecutor boundary."""
     run_dir = Path(run_dir or ".")
     run_dir.mkdir(parents=True, exist_ok=True)
-    pf = run_dir / f"{node}_{persona}_prompt.txt"
-    of = run_dir / f"{node}_{persona}_delta.json"
-    pf.write_text(_compose_auto_prompt(node, persona, context, output_schema,
-                                       workspace, tools), encoding="utf-8")
+    provider.last_attempt_number = None
+    prompt_text = _compose_auto_prompt(
+        node, persona, context, output_schema, workspace, tools
+    )
+    attempt, pf, of = _reserve_provider_attempt(
+        run_dir, node, persona, prompt_text
+    )
+    provider.last_attempt_number = attempt
     provider.last_prompt_file = str(pf)
     provider.last_delta_file = str(of)
     provider.last_exit_code = None
@@ -134,10 +176,25 @@ def _run_command_agent(command, node, persona, context, output_schema,
             terminal_state=exc.terminal_state or None,
         ) from exc
     try:
-        return json.loads(of.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        raise ProviderError(
-            f"provider process wrote invalid JSON to {of}: {e}") from e
+        raw_output = of.read_text(encoding="utf-8")
+    except OSError as exc:
+        provider.last_execution_status = "failed"
+        raise ProviderOutputContractError(
+            f"provider output artifact is unreadable at {of}: {exc}",
+            returncode=provider.last_exit_code,
+            timed_out=provider.last_timed_out,
+            terminal_state=provider.last_terminal_state,
+        ) from exc
+    try:
+        return json.loads(raw_output)
+    except json.JSONDecodeError as exc:
+        provider.last_execution_status = "failed"
+        raise ProviderOutputContractError(
+            f"provider output artifact failed JSON contract at {of}: {exc}",
+            returncode=provider.last_exit_code,
+            timed_out=provider.last_timed_out,
+            terminal_state=provider.last_terminal_state,
+        ) from exc
 
 def run_text_command(command, prompt, run_dir, tag, timeout=None):
     """Run a headless command for a FREE-TEXT step through ProviderExecutor."""
