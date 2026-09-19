@@ -45,6 +45,10 @@ from research_loop.compatibility import PROFILE_V20, PROFILE_V21_CATALOG_1, get_
 from research_loop.code_state import capture_code_state
 from research_loop import deep_research, l0_preflight, runtime_preflight
 from research_loop.loopx_policy import LoopXRetryPolicy
+from research_loop.providers.base import (
+    ProviderOutputContractError,
+    provider_attempt_path,
+)
 from research_loop.deep_research import SUPPORTED_BACKENDS
 from research_loop.delta import artifact_for_node
 from research_loop.hypothesis_contracts import provider_schema_for_profile
@@ -437,7 +441,10 @@ def write_receipt(run_dir, node, persona, prov, context, step, cand, round_id,
         terminal_state=getattr(prov, "last_terminal_state", None),
         execution_status=execution_status,
     )
-    path = Path(run_dir) / f"{node}_{persona}_receipt.json"
+    attempt_number = getattr(prov, "last_attempt_number", None) or 1
+    path = provider_attempt_path(
+        run_dir, node, persona, "receipt", ".json", attempt_number
+    )
     rec.write(path)
     return str(path)
 
@@ -453,10 +460,17 @@ def _write_provider_failure_receipt(run_dir, node, persona, prov, context,
     """
     if not getattr(prov, "last_prompt_file", None):
         return None
+    raw_output = getattr(prov, "last_delta_file", None)
+    raw_output = (
+        Path(raw_output)
+        if raw_output and Path(raw_output).is_file()
+        else None
+    )
     try:
         return write_receipt(
             run_dir, node, persona, prov, context, step, cand, round_id,
             manifest=manifest, workspace=workspace, config_path=config_path,
+            raw_provider_delta_file=raw_output,
             execution_status="failed",
         )
     except (OSError, ValueError) as exc:
@@ -651,6 +665,18 @@ def exec_cognitive(project, cand, step, cfg, args, run_dir, round_id,
         delta = prov.run_agent(node, persona, ctx, output_schema=schema,
                                tools=step.get("tools_policy"),
                                run_dir=str(run_dir))
+    except ProviderOutputContractError as exc:
+        failure_receipt = _write_provider_failure_receipt(
+            run_dir, node, persona, prov, ctx, step, cand, round_id,
+            manifest=manifest, config_path=getattr(cfg, "source_path", None),
+        )
+        auto_pitfall(project, cand, node, "provider_contract_failure",
+                     str(exc), provider=pname,
+                     evidence=str(failure_receipt or run_dir))
+        _record_runtime_failure(
+            failure_state, node, "CONTRACT", "provider_artifact_contract", run_dir
+        )
+        return False
     except Exception as e:
         failure_receipt = _write_provider_failure_receipt(
             run_dir, node, persona, prov, ctx, step, cand, round_id,
@@ -739,6 +765,19 @@ def exec_turing(project, cand, step, cfg, args, run_dir, round_id, exec_state):
                                workspace=workspace,
                                tools=step.get("tools_policy") or "workspace-fs",
                                run_dir=str(run_dir))
+    except ProviderOutputContractError as exc:
+        failure_receipt = _write_provider_failure_receipt(
+            run_dir, "L7", "Turing", prov, ctx, step, cand, round_id,
+            manifest=manifest, workspace=workspace,
+            config_path=getattr(cfg, "source_path", None),
+        )
+        auto_pitfall(project, cand, "L7", "provider_contract_failure",
+                     str(exc), provider=pname,
+                     evidence=str(failure_receipt or workspace or run_dir))
+        _record_runtime_failure(
+            exec_state, "L7", "CONTRACT", "provider_artifact_contract", run_dir
+        )
+        return False
     except Exception as e:
         exec_state["l7_failures"] += 1
         failure_receipt = _write_provider_failure_receipt(
