@@ -50,6 +50,17 @@ def test_run_receipt_utf8_round_trip_and_strict_schema(tmp_path):
         RunReceipt.read(path)
 
 
+def test_run_receipt_write_refuses_to_overwrite_existing_receipt(tmp_path):
+    path = tmp_path / "receipt.json"
+    _receipt().write(path)
+    original = path.read_bytes()
+
+    with pytest.raises(ValueError, match="immutable"):
+        _receipt(provider="second").write(path)
+
+    assert path.read_bytes() == original
+
+
 def test_run_receipt_rejects_unknown_fields(tmp_path):
     path = tmp_path / "receipt.json"
     _receipt().write(path)
