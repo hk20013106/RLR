@@ -199,15 +199,56 @@ def test_agent_provider_does_not_retry_non_retryable_failures(
 
 
 def test_json_parse_failure_does_not_reinvoke_provider(tmp_path, monkeypatch):
+    output = tmp_path / "L1_Einstein_delta.json"
     provider, executor, waits = _automatic_provider(
-        monkeypatch, [_result(returncode=0)]
+        monkeypatch, [_write_success(output, "not json")]
     )
-    (tmp_path / "L1_Einstein_delta.json").write_text("not json", encoding="utf-8")
 
-    with pytest.raises(ProviderError, match="invalid JSON"):
+    with pytest.raises(
+        provider_base.ProviderOutputContractError,
+        match="failed JSON contract",
+    ):
         provider.run_agent("L1", "Einstein", "context", run_dir=tmp_path)
+
     assert len(executor.calls) == 1
     assert waits == []
+    assert output.read_text(encoding="utf-8") == "not json"
+    assert provider.last_exit_code == 0
+    assert provider.last_terminal_state == "completed"
+    assert provider.last_execution_status == "failed"
+
+
+def test_logical_provider_redispatch_preserves_prior_attempt_artifacts(
+    tmp_path, monkeypatch
+):
+    first_output = tmp_path / "L1_Einstein_delta.json"
+    second_output = tmp_path / "L1_Einstein_delta.2.json"
+    provider, executor, waits = _automatic_provider(
+        monkeypatch,
+        [
+            _write_success(first_output, "not json"),
+            _write_success(second_output, '{"schema_version":"2.1"}'),
+        ],
+    )
+
+    with pytest.raises(provider_base.ProviderOutputContractError):
+        provider.run_agent("L1", "Einstein", "context", run_dir=tmp_path)
+    first_prompt = tmp_path / "L1_Einstein_prompt.txt"
+    first_prompt_bytes = first_prompt.read_bytes()
+    first_output_bytes = first_output.read_bytes()
+
+    assert provider.run_agent(
+        "L1", "Einstein", "context", run_dir=tmp_path
+    ) == {"schema_version": "2.1"}
+
+    assert waits == []
+    assert len(executor.calls) == 2
+    assert provider.last_attempt_number == 2
+    assert provider.last_prompt_file == str(tmp_path / "L1_Einstein_prompt.2.txt")
+    assert provider.last_delta_file == str(second_output)
+    assert first_prompt.read_bytes() == first_prompt_bytes
+    assert first_output.read_bytes() == first_output_bytes
+    assert second_output != first_output
 
 
 def _invoke(monkeypatch, outcomes):
