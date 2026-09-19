@@ -1,8 +1,14 @@
 import json
 from pathlib import Path
 
+import pytest
+
+from research_loop import deep_research, l0_preflight, runtime_preflight
+from research_loop.compatibility import PROFILE_V21, PROFILE_V21_CATALOG_1
+from research_loop.hypothesis_ledger import LedgerError
 from research_loop.l0_preflight import (
     ProbeResult,
+    _runtime_binding_report,
     required_pubmed_tools,
     run_preflight_probes,
     write_preflight_receipt,
@@ -123,3 +129,75 @@ def test_preflight_receipt_persists_each_component_result(tmp_path):
     assert payload["schema_version"] == "L0PreflightReceipt/v2"
     assert payload["overall_status"] == "FAIL"
     assert payload["results"] == [item.to_dict() for item in results]
+
+
+def _runtime_report_project(tmp_path: Path) -> Path:
+    project = tmp_path / "P"
+    runtime = project / "00_Preflight" / "deep_research_runtime.json"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text(
+        json.dumps({"backend": "codex", "executable": "codex"}) + "\n",
+        encoding="utf-8",
+    )
+    return project
+
+
+def test_runtime_binding_report_requires_paperqa2_for_catalog_profile(
+    tmp_path, monkeypatch
+):
+    project = _runtime_report_project(tmp_path)
+    monkeypatch.setattr(
+        l0_preflight,
+        "_load_project_binding",
+        lambda _project: ({"profile_id": PROFILE_V21_CATALOG_1}, "store"),
+    )
+    monkeypatch.setattr(deep_research, "host_matches", lambda *_a, **_k: (True, ""))
+    calls = []
+    monkeypatch.setattr(
+        runtime_preflight,
+        "require_bound_paperqa2",
+        lambda spec: calls.append(spec) or object(),
+    )
+
+    report = _runtime_binding_report(project, "codex")
+    checks = {check["name"]: check for check in report["checks"]}
+
+    assert checks["paperqa2_binding"]["status"] == "PASS"
+    assert calls
+
+
+def test_runtime_binding_report_skips_paperqa2_for_non_catalog_profile(
+    tmp_path, monkeypatch
+):
+    project = _runtime_report_project(tmp_path)
+    monkeypatch.setattr(
+        l0_preflight,
+        "_load_project_binding",
+        lambda _project: ({"profile_id": PROFILE_V21}, "store"),
+    )
+    monkeypatch.setattr(deep_research, "host_matches", lambda *_a, **_k: (True, ""))
+    monkeypatch.setattr(
+        runtime_preflight,
+        "require_bound_paperqa2",
+        lambda _spec: pytest.fail("non-catalog profile must not require PaperQA2"),
+    )
+
+    report = _runtime_binding_report(project, "codex")
+
+    assert "paperqa2_binding" not in {check["name"] for check in report["checks"]}
+
+
+def test_runtime_binding_report_skips_unreadable_profile_binding(
+    tmp_path, monkeypatch
+):
+    project = _runtime_report_project(tmp_path)
+    monkeypatch.setattr(
+        l0_preflight,
+        "_load_project_binding",
+        lambda _project: (_ for _ in ()).throw(LedgerError("unreadable binding")),
+    )
+    monkeypatch.setattr(deep_research, "host_matches", lambda *_a, **_k: (True, ""))
+
+    report = _runtime_binding_report(project, "codex")
+
+    assert "paperqa2_binding" not in {check["name"] for check in report["checks"]}
