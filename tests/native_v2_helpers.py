@@ -9,7 +9,11 @@ from research_loop import deep_research, l0_contract, research_seed
 from research_loop.hypothesis_ledger import (
     HypothesisLedger, binding_path, canonical_json,
 )
-from research_loop.compatibility import DEFAULT_NATIVE_PROFILE, get_profile
+from research_loop.compatibility import (
+    DEFAULT_NATIVE_PROFILE,
+    PROFILE_V21_CATALOG_1,
+    get_profile,
+)
 from research_loop.delta import artifact_for_node
 from research_loop.persona_catalog import resolve_persona_template
 from research_loop.providers.base import RunReceipt
@@ -68,6 +72,8 @@ def bootstrap_project_ready(project_dir, controller, *, cwd=None, extra_env=None
             raise AssertionError(
                 f"invalid native test ledger binding: {binding_path(project)}"
             ) from exc
+    ledger.require_binding(project)
+    ensure_catalog_paperqa2_binding(project)
     result = subprocess.run(
         [sys.executable, str(controller), "preflight", str(project), "--backend", "codex"],
         capture_output=True, text=True, encoding="utf-8", cwd=cwd, env=env,
@@ -97,6 +103,38 @@ def bootstrap_project_ready(project_dir, controller, *, cwd=None, extra_env=None
                 receipt_sha,
             )
     return env
+
+
+def ensure_catalog_paperqa2_binding(project_dir):
+    """Add the valid test-only PaperQA2 binding required by catalog preflight."""
+    project = Path(project_dir)
+    binding = json.loads(binding_path(project).read_text(encoding="utf-8"))
+    if binding.get("profile_id") != PROFILE_V21_CATALOG_1:
+        return
+    stub_root = project.parent / f"{project.name}-paperqa2-stub"
+    bridge_script = stub_root / "bridge.py"
+    paperqa_repo = stub_root / "paperqa-repo"
+    pqa_home = stub_root / "pqa-home"
+    bridge_script.parent.mkdir(parents=True, exist_ok=True)
+    bridge_script.write_text("# PaperQA2 test stub\n", encoding="utf-8")
+    paperqa_repo.mkdir(parents=True, exist_ok=True)
+    pqa_home.mkdir(parents=True, exist_ok=True)
+    runtime_path = deep_research.runtime_config_path(project)
+    if runtime_path.exists():
+        runtime_config = json.loads(runtime_path.read_text(encoding="utf-8"))
+    else:
+        runtime_config = deep_research.default_runtime_config("codex")
+    runtime_config["paperqa2"] = {
+        "bridge_script": str(bridge_script),
+        "paperqa_repo": str(paperqa_repo),
+        "pqa_home": str(pqa_home),
+        "python_executable": sys.executable,
+    }
+    runtime_path.write_text(
+        json.dumps(runtime_config, ensure_ascii=False, indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def activate_native_project(project_dir):

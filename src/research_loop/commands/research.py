@@ -603,10 +603,22 @@ def cmd_deep_research_run(args):
     except deep_research.DeepResearchError as exc:
         print(f"ERROR: Deep Research runtime is not configured: {exc}", file=sys.stderr)
         return 3
+    # Consume the frozen PROJECT_READY runtime authority (same owner as L0).
+    authority_verified = False
+    if not project_ready.get("legacy"):
+        authority = l0_preflight.validate_project_ready(
+            project_dir, candidate_path=cf, expected_backend=spec.backend)
+        if not authority.get("legacy") and authority.get("status") != "PASS":
+            print(f"ERROR: PROJECT_NOT_READY: {authority.get('code')}: {authority.get('reason')}",
+                  file=sys.stderr)
+            return 3
+        authority_verified = authority.get("status") == "PASS" and not authority.get("legacy")
     if not getattr(args, "allow_host_mismatch", False):
         try:
             same_host, host_reason = deep_research.host_matches(
-                spec, explicit=getattr(args, "backend", None) is not None)
+                spec,
+                explicit=(getattr(args, "backend", None) is not None or authority_verified),
+            )
         except deep_research.DeepResearchError as exc:
             print(f"ERROR: Deep Research host is not declarable: {exc}", file=sys.stderr)
             return 3

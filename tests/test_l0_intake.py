@@ -17,6 +17,7 @@ from research_loop.compatibility import DEFAULT_NATIVE_PROFILE
 from research_loop.l0_state import ROUND_MANIFEST_SCHEMA
 from research_loop.hypothesis_ledger import binding_path
 from research_loop.providers.command import CommandProvider
+from native_v2_helpers import ensure_catalog_paperqa2_binding
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +32,7 @@ def _new_project(tmp_path):
     project = tmp_path / "P"
     result = _run("new-project", str(project), "L0 intake test")
     assert result.returncode == 0, result.stderr
+    ensure_catalog_paperqa2_binding(project)
     vault = tmp_path / "vault"
     (vault / ".obsidian").mkdir(parents=True, exist_ok=True)
     result = _run(

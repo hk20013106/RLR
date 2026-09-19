@@ -15,8 +15,15 @@ from research_loop import deep_research as dr
 from research_loop import deep_research_task as dr_task
 from research_loop import gates
 from research_loop import engine
+from research_loop import cli as rlr_cli
+from research_loop.commands import research as research_commands
 from research_loop.hypothesis_ledger import binding_path as hypothesis_binding_path
 from research_loop.preresearch import PRE_RESEARCH_MAP
+from native_v2_helpers import (
+    bootstrap_project_ready,
+    ensure_catalog_paperqa2_binding,
+    ensure_native_l0_contract,
+)
 import run_loop
 
 
@@ -545,6 +552,7 @@ def test_l10_context_includes_source_located_l1_evidence(tmp_path):
     created = subprocess.run([sys.executable, str(cli), "new-project", str(project), "Topic"],
                              capture_output=True, text=True, env=env)
     assert created.returncode == 0, created.stderr
+    ensure_catalog_paperqa2_binding(project)
     preflight = subprocess.run([sys.executable, str(cli), "preflight", str(project), "--backend", "codex"],
                                capture_output=True, text=True, env=env)
     assert preflight.returncode == 0, preflight.stderr
@@ -594,6 +602,7 @@ def test_emit_l10b_rejects_missing_literature_evidence_ids(tmp_path):
     env = {**_os.environ, "OBSIDIAN_VAULT": str(vault)}
     assert subprocess.run([sys.executable, str(cli), "new-project", str(project), "Topic"],
                           capture_output=True, text=True, env=env).returncode == 0
+    ensure_catalog_paperqa2_binding(project)
     assert subprocess.run([sys.executable, str(cli), "preflight", str(project), "--backend", "codex"],
                           capture_output=True, text=True, env=env).returncode == 0
     new = subprocess.run([sys.executable, str(cli), "new-candidate", str(project), "--title", "T",
@@ -643,6 +652,7 @@ def _sentinel_codex_project(tmp_path, monkeypatch, runtime_extra=None):
     monkeypatch.setenv("OBSIDIAN_VAULT", str(vault))
     assert subprocess.run([sys.executable, str(cli), "new-project", str(project), "Topic"],
                           capture_output=True, text=True).returncode == 0
+    ensure_catalog_paperqa2_binding(project)
     assert subprocess.run([sys.executable, str(cli), "preflight", str(project), "--backend", "codex"],
                           capture_output=True, text=True).returncode == 0
     new = subprocess.run([sys.executable, str(cli), "new-candidate", str(project), "--title", "T",
@@ -897,6 +907,7 @@ def test_deep_research_cli_executes_a_local_fake_claude_plugin(tmp_path):
     env = {**_os.environ, "OBSIDIAN_VAULT": str(vault)}
     assert subprocess.run([sys.executable, str(cli), "new-project", str(project), "Topic"],
                           capture_output=True, text=True, env=env).returncode == 0
+    ensure_catalog_paperqa2_binding(project)
     assert subprocess.run([sys.executable, str(cli), "preflight", str(project), "--backend", "codex"],
                           capture_output=True, text=True, env=env).returncode == 0
     new = subprocess.run([sys.executable, str(cli), "new-candidate", str(project), "--title", "T",
@@ -1092,3 +1103,116 @@ def test_deep_research_run_allows_an_explicitly_accepted_mismatch(tmp_path, monk
     err = capsys.readouterr().err
     assert "--allow-host-mismatch" not in err
     assert "not ready" in err
+
+
+def _bound_codex_project(tmp_path, monkeypatch):
+    project = tmp_path / "bound-project"
+    project.mkdir()
+    (project / "00_Project_Index.md").write_text(
+        "---\nproject_name: bound-project\nkind: project_index\n"
+        "created_at: 2026-01-01T00:00:00\n---\n# bound-project\n",
+        encoding="utf-8",
+    )
+    candidate = project / "01_Candidates" / "C1.md"
+    candidate.parent.mkdir()
+    candidate.write_text(
+        "---\ncandidate_id: C1\nquestion: Q\nclaim: H\n"
+        "current_status: NEW\nround_id: 1\nround_type: initial\n---\n",
+        encoding="utf-8",
+    )
+    store = tmp_path / "hypotheses.sqlite"
+    monkeypatch.setenv("RLR_HYPOTHESIS_STORE", str(store))
+    env = bootstrap_project_ready(
+        project,
+        ROOT / "research_loop_v04.py",
+        extra_env={"RLR_HYPOTHESIS_STORE": str(store)},
+    )
+    ensure_native_l0_contract(project, "C1")
+    monkeypatch.setenv("OBSIDIAN_VAULT", env["OBSIDIAN_VAULT"])
+    return project
+
+
+def test_bound_project_receipt_authorizes_unknown_host_backend(tmp_path, monkeypatch):
+    project = _bound_codex_project(tmp_path, monkeypatch)
+    monkeypatch.delenv("RLR_HOST_BACKEND", raising=False)
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE", raising=False)
+    calls = []
+    monkeypatch.setattr(dr, "runtime_ready", lambda *_args: (True, ""))
+    monkeypatch.setattr(
+        research_commands.structured_execution,
+        "runtime_ready",
+        lambda *_args: (True, ""),
+    )
+    monkeypatch.setattr(
+        research_commands,
+        "topology_for_profile",
+        lambda _profile: (
+            {},
+            {"L1": {"research_required": True, "research_persona": "Einstein"}},
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        dr,
+        "run_and_persist",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {"run_id": "C1_L1"},
+    )
+    monkeypatch.setattr(dr, "audit_evidence_pack", lambda *_args, **_kwargs: (True, ""))
+    monkeypatch.setattr(
+        research_commands.research_seed,
+        "write_l1_evidence_binding",
+        lambda *_args, **_kwargs: None,
+    )
+    args = rlr_cli.build_parser().parse_args([
+        "deep-research-run", str(project), "C1", "--node", "L1",
+    ])
+
+    assert args.func(args) == 0
+    assert calls, "the fake provider path was not invoked"
+
+
+def test_bound_project_still_rejects_a_detected_host_contradiction(
+    tmp_path, monkeypatch, capsys
+):
+    project = _bound_codex_project(tmp_path, monkeypatch)
+    monkeypatch.delenv("RLR_HOST_BACKEND", raising=False)
+    monkeypatch.setenv("CLAUDECODE", "1")
+    calls = []
+    monkeypatch.setattr(
+        dr,
+        "run_and_persist",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {"run_id": "C1_L1"},
+    )
+    args = rlr_cli.build_parser().parse_args([
+        "deep-research-run", str(project), "C1", "--node", "L1",
+    ])
+
+    assert args.func(args) == 3
+    err = capsys.readouterr().err
+    assert "claude" in err and "codex" in err
+    assert not calls
+
+
+def test_project_ready_backend_mismatch_is_not_waivable_by_allow_host_mismatch(
+    tmp_path, monkeypatch, capsys
+):
+    project = _bound_codex_project(tmp_path, monkeypatch)
+    monkeypatch.delenv("RLR_HOST_BACKEND", raising=False)
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE", raising=False)
+    calls = []
+    monkeypatch.setattr(
+        dr,
+        "run_and_persist",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {"run_id": "C1_L1"},
+    )
+    args = rlr_cli.build_parser().parse_args([
+        "deep-research-run", str(project), "C1", "--node", "L1",
+        "--backend", "claude", "--allow-host-mismatch",
+    ])
+
+    assert args.func(args) == 3
+    err = capsys.readouterr().err
+    assert "PROJECT_READY_BACKEND_MISMATCH" in err
+    assert not calls
