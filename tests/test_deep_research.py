@@ -709,7 +709,9 @@ def test_detached_deep_research_survives_start_process_exit_and_collects(
     assert started.returncode == 0, started.stderr
     start_artifact = json.loads(started.stdout)
     task_id = start_artifact["task_id"]
-    assert elapsed < 2
+    # Keep a generous CI startup bound; detachment itself is enforced by
+    # the unfinished 3-second provider sentinel below.
+    assert elapsed < 5
     assert start_artifact["state"] == "running"
     assert not finished.exists(), "start waited for the provider instead of detaching"
 
