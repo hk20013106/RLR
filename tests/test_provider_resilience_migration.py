@@ -153,7 +153,10 @@ def test_agent_provider_never_accepts_output_left_by_a_failed_retry_attempt(
         monkeypatch, [write_stale_then_fail, _result(returncode=0)]
     )
 
-    with pytest.raises(ProviderError, match="invalid JSON"):
+    with pytest.raises(
+        provider_base.ProviderOutputContractError,
+        match="output artifact is unreadable",
+    ):
         provider.run_agent("L1", "Einstein", "context", run_dir=tmp_path)
     assert len(executor.calls) == 2
     assert waits == [30.0]
