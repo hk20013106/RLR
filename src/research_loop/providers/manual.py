@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 from research_loop.providers.base import (
-    AgentProvider, ProviderError, _schema_repr,
+    AgentProvider, ProviderError, ProviderOutputContractError, _schema_repr,
 )
 
 
@@ -65,5 +65,6 @@ class ManualProvider(AgentProvider):
         try:
             return json.loads(Path(path).read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as e:
-            raise ProviderError(
-                f"cannot read delta JSON from {path}: {e}") from e
+            raise ProviderOutputContractError(
+                f"manual provider output artifact failed JSON contract at {path}: {e}"
+            ) from e
