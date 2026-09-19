@@ -44,6 +44,9 @@ def _provider_command(tmp_path: Path, mode: str) -> str:
         "if mode == 'success':\n"
         "    output.write_text(json.dumps({'schema_version': '2.1', 'candidate_id': 'C1'}), encoding='utf-8')\n"
         "    raise SystemExit(0)\n"
+        "if mode == 'malformed':\n"
+        "    output.write_text('{\\\"schema_version\\\": \\\"2.1\\\"', encoding='utf-8')\n"
+        "    raise SystemExit(0)\n"
         "if mode == 'nonzero':\n"
         "    raise SystemExit(7)\n"
         "time.sleep(5)\n",
@@ -119,6 +122,98 @@ def test_failed_command_call_preserves_execution_metadata_and_persists_receipt(
     assert receipt.terminal_state == terminal_state
     assert receipt.execution_status == "failed"
     assert receipt.provider_delta_path == ""
+
+
+def test_malformed_provider_output_is_contract_failure_with_raw_provenance(
+    tmp_path, monkeypatch
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    manifest = _manifest(tmp_path)
+    provider = CommandProvider({
+        "command": _provider_command(tmp_path, "malformed"),
+    })
+    monkeypatch.setattr(
+        run_loop, "assemble_context",
+        lambda *args, **kwargs: ("context", str(manifest)),
+    )
+    monkeypatch.setattr(run_loop, "provider_for", lambda *args, **kwargs: provider)
+    monkeypatch.setattr(run_loop, "_provider_output_schema", lambda *args: None)
+    monkeypatch.setattr(run_loop, "auto_pitfall", lambda *args, **kwargs: None)
+    config = tmp_path / "runner.yaml"
+    config.write_text("mode: headless\n", encoding="utf-8")
+    cfg = SimpleNamespace(data={}, source_path=str(config))
+    args = SimpleNamespace(evidence_run_ids={}, provider=None)
+    state = {"loopx_policy": run_loop.LoopXRetryPolicy(retry_threshold=2)}
+    run_dir = tmp_path / "run"
+
+    assert run_loop.exec_cognitive(
+        str(project), "C1", {"node": "L4", "persona": "Fisher"},
+        cfg, args, run_dir, "1", failure_state=state,
+    ) is False
+
+    event = state["last_loopx_failure"]
+    assert event["failure_class"] == "CONTRACT"
+    assert event["recommended_action"] == "ESCALATE_ARCHITECTURE_REVIEW"
+
+    raw = run_dir / "L4_Fisher_delta.json"
+    receipt_path = run_dir / "L4_Fisher_receipt.json"
+    receipt = RunReceipt.read(receipt_path)
+    assert raw.read_text(encoding="utf-8") == '{"schema_version": "2.1"'
+    assert receipt.execution_status == "failed"
+    assert receipt.exit_code == 0
+    assert receipt.timed_out is False
+    assert receipt.terminal_state == "completed"
+    assert receipt.provider_delta_path == ""
+    assert receipt.raw_provider_delta_path == str(raw)
+    assert receipt.raw_provider_delta_hash == hashlib.sha256(raw.read_bytes()).hexdigest()
+
+
+def test_retry_attempts_preserve_distinct_raw_outputs_and_receipts(
+    tmp_path, monkeypatch
+):
+    run_dir = tmp_path / "run"
+    manifest = _manifest(tmp_path)
+    config = tmp_path / "runner.yaml"
+    config.write_text("mode: headless\n", encoding="utf-8")
+    step = {
+        "node": "L4",
+        "persona": "Fisher",
+        "tools_policy": "no-fs",
+        "everos_read_scopes": [],
+        "profile_id": "v2.1-catalog-1",
+    }
+
+    failed = CommandProvider({"command": _provider_command(tmp_path, "malformed")})
+    with pytest.raises(ProviderError):
+        failed.run_agent("L4", "Fisher", "context", run_dir=str(run_dir))
+    first_receipt = run_loop._write_provider_failure_receipt(
+        run_dir, "L4", "Fisher", failed, "context", step, "C1", "1",
+        manifest=str(manifest), config_path=config,
+    )
+    first_raw = run_dir / "L4_Fisher_delta.json"
+    first_raw_bytes = first_raw.read_bytes()
+    first_receipt_bytes = Path(first_receipt).read_bytes()
+
+    succeeded = CommandProvider({"command": _provider_command(tmp_path, "success")})
+    delta = succeeded.run_agent("L4", "Fisher", "context", run_dir=str(run_dir))
+    second_raw, _ = run_loop.canonical_provider_emission(
+        succeeded, run_dir, "L4", "Fisher", delta
+    )
+    second_receipt = run_loop.write_receipt(
+        run_dir, "L4", "Fisher", succeeded, "context", step, "C1", "1",
+        manifest=str(manifest), provider_delta_file=second_raw,
+        config_path=config,
+    )
+
+    assert Path(first_receipt).name == "L4_Fisher_receipt.json"
+    assert Path(second_receipt).name == "L4_Fisher_receipt.2.json"
+    assert first_raw.name == "L4_Fisher_delta.json"
+    assert second_raw.name == "L4_Fisher_delta.2.json"
+    assert first_raw.read_bytes() == first_raw_bytes
+    assert Path(first_receipt).read_bytes() == first_receipt_bytes
+    assert RunReceipt.read(first_receipt).execution_status == "failed"
+    assert RunReceipt.read(second_receipt).execution_status == "succeeded"
 
 
 def test_historical_v2_receipt_without_execution_fields_remains_readable(tmp_path):
