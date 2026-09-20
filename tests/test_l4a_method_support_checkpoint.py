@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +18,38 @@ from research_loop import provider_runtime_observability as runtime_observabilit
 
 
 ORIGINAL_SKILL_RECEIPT = dr.skill_receipt
+
+
+def _ext(path: Path) -> str:
+    value = str(path)
+    if (
+        os.name != "nt"
+        or value.startswith("\\\\?\\")
+        or not Path(path).is_absolute()
+        or len(value) < 260
+    ):
+        return value
+    if value.startswith("\\\\"):
+        return "\\\\?\\UNC" + value[1:]
+    return "\\\\?\\" + value
+
+
+def _long_project_dir(tmp_path: Path, target_length: int) -> tuple[Path, Path]:
+    method_work_name = "method_support_001_M01"
+    pad_length = (
+        target_length
+        - len(str(tmp_path))
+        - 3
+        - len("work")
+        - len(method_work_name)
+    )
+    if not 1 <= pad_length <= 255:
+        pytest.skip("tmp_path cannot construct the requested long-path geometry")
+    project_dir = tmp_path / ("p" * pad_length)
+    method_work = project_dir / "work" / method_work_name
+    if len(str(method_work)) != target_length:
+        pytest.skip("tmp_path cannot construct the requested long-path geometry")
+    return project_dir, method_work
 
 
 def _method(method_id: str, name: str | None = None) -> dict:
@@ -187,10 +221,13 @@ def _write_runtime_snapshot(
     receipt_bytes = _json_bytes(receipt)
     receipt_sha256 = _sha(receipt_bytes)
     snapshot = method_work / "provider_runtime" / receipt_sha256
-    snapshot.mkdir(parents=True, exist_ok=True)
-    (snapshot / "runtime_receipt.json").write_bytes(receipt_bytes)
+    Path(_ext(snapshot / "runtime_receipt.json")).parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    Path(_ext(snapshot / "runtime_receipt.json")).write_bytes(receipt_bytes)
     for name, content in artifact_bytes.items():
-        (snapshot / name).write_bytes(content)
+        Path(_ext(snapshot / name)).write_bytes(content)
     return {
         "schema": runtime_observability.RECEIPT_SCHEMA,
         "path": (snapshot / "runtime_receipt.json").relative_to(project_dir).as_posix(),
@@ -298,6 +335,55 @@ def _checkpoint(project_dir: Path, index: int, method_id: str) -> Path:
         / f"method_support_{index:03d}_{method_id}"
         / "l4a_method_support_checkpoint.json"
     )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows long-path behavior")
+def test_method_support_checkpoint_round_trips_long_frozen_runtime_receipt(
+    tmp_path, monkeypatch
+):
+    project_dir, method_work = _long_project_dir(tmp_path, target_length=170)
+    frozen_receipt = (
+        method_work
+        / "provider_runtime"
+        / ("0" * 64)
+        / "runtime_receipt.json"
+    )
+    checkpoint = _checkpoint(project_dir, 1, "M01")
+    checkpoint_temporary = checkpoint.with_name(
+        f".{checkpoint.name}.{'x' * 32}.tmp"
+    )
+    assert len(str(frozen_receipt)) > 260
+    assert len(str(checkpoint_temporary)) <= 259
+
+    try:
+        result, calls = _invoke(
+            monkeypatch,
+            project_dir,
+            methods=[_method("M01")],
+            records=[_record("P01")],
+            selection=_selection(("P01", "M01")),
+            outcomes={"M01": _wire("DIRECT_METHOD_SUPPORT")},
+        )
+
+        assert calls == ["M01"]
+        assert result["status"] == "completed"
+        assert result["decisions"] == [
+            {
+                "paper_id": "P01",
+                "method_id": "M01",
+                "classification": "DIRECT_METHOD_SUPPORT",
+                "rationale": "Fixture rationale 1",
+            }
+        ]
+        assert Path(_ext(checkpoint)).is_file()
+        checkpoint_value = json.loads(
+            Path(_ext(checkpoint)).read_text(encoding="utf-8")
+        )
+        assert checkpoint_value["skill_receipt"]["runtime_receipt"]["path"].find(
+            "\\\\?\\"
+        ) == -1
+    finally:
+        shutil.rmtree(_ext(project_dir), ignore_errors=True)
 
 
 def test_m01_checkpoint_is_reused_after_m02_provider_failure(tmp_path, monkeypatch):

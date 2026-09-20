@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sys
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -17,6 +18,32 @@ from research_loop.provider_runtime_observability import run_observed_provider
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_codex_jsonl.py"
+_METHOD_WORK_NAME = "method_support_001_MI-001"
+
+
+def _ext(path: Path) -> str:
+    value = str(path)
+    if (
+        os.name != "nt"
+        or value.startswith("\\\\?\\")
+        or not Path(path).is_absolute()
+        or len(value) < 260
+    ):
+        return value
+    if value.startswith("\\\\"):
+        return "\\\\?\\UNC" + value[1:]
+    return "\\\\?\\" + value
+
+
+def _deep_work_dir(tmp_path: Path, target_length: int) -> tuple[Path, Path]:
+    pad_length = target_length - len(str(tmp_path)) - 2 - len(_METHOD_WORK_NAME)
+    if not 1 <= pad_length <= 255:
+        pytest.skip("tmp_path cannot construct the requested long-path geometry")
+    deep_root = tmp_path / ("x" * pad_length)
+    deep_work = deep_root / _METHOD_WORK_NAME
+    if len(str(deep_work)) != target_length:
+        pytest.skip("tmp_path cannot construct the requested long-path geometry")
+    return deep_root, deep_work
 
 
 def _wait_for(predicate, timeout: float = 10.0):
@@ -69,6 +96,27 @@ def _receipt_reference(root: Path, receipt_path: Path) -> dict:
     }
 
 
+def _copy_long_frozen_snapshot(
+    tmp_path: Path,
+    result,
+    *,
+    target_length: int = 170,
+) -> tuple[Path, Path, dict, Path]:
+    deep_root, deep_work = _deep_work_dir(tmp_path, target_length)
+    snapshot = deep_work / "provider_runtime" / result.runtime_receipt_sha256
+    snapshot_access = Path(_ext(snapshot / "runtime_receipt.json")).parent
+    snapshot_access.mkdir(parents=True, exist_ok=True)
+    for name, content in _frozen_artifact_bytes(result.runtime_receipt_path).items():
+        Path(_ext(snapshot / name)).write_bytes(content)
+    receipt_path = snapshot / "runtime_receipt.json"
+    reference = {
+        "schema": runtime_observability.RECEIPT_SCHEMA,
+        "path": receipt_path.relative_to(tmp_path).as_posix(),
+        "sha256": result.runtime_receipt_sha256,
+    }
+    return deep_root, deep_work, reference, receipt_path
+
+
 def _rewrite_frozen_receipt(root: Path, receipt_path: Path, mutate) -> dict:
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     mutate(receipt)
@@ -83,6 +131,186 @@ def _rewrite_frozen_receipt(root: Path, receipt_path: Path, mutate) -> dict:
     rewritten_receipt = rewritten_dir / "runtime_receipt.json"
     rewritten_receipt.write_bytes(receipt_bytes)
     return _receipt_reference(root, rewritten_receipt)
+
+
+def test_fs_access_path_windows_semantics(monkeypatch):
+    monkeypatch.setattr(runtime_observability, "_IS_WINDOWS", True)
+
+    long_local = PureWindowsPath("C:/" + "a" * 300)
+    long_unc = PureWindowsPath("//server/share/" + "b" * 300)
+    extended = PureWindowsPath(r"\\?\C:\x\y")
+    short_absolute = PureWindowsPath(r"C:\x")
+    relative = PureWindowsPath(r"x\y")
+    boundary_259 = PureWindowsPath("C:\\" + "a" * 256)
+    boundary_260 = PureWindowsPath("C:\\" + "a" * 257)
+
+    assert str(runtime_observability._fs_access_path(long_local)) == (
+        "\\\\?\\" + str(long_local)
+    )
+    assert str(runtime_observability._fs_access_path(long_unc)) == (
+        "\\\\?\\UNC" + str(long_unc)[1:]
+    )
+    assert runtime_observability._fs_access_path(extended) is extended
+    assert runtime_observability._fs_access_path(short_absolute) is short_absolute
+    assert runtime_observability._fs_access_path(relative) is relative
+    assert len(str(boundary_259)) == 259
+    assert runtime_observability._fs_access_path(boundary_259) is boundary_259
+    assert len(str(boundary_260)) == 260
+    assert str(runtime_observability._fs_access_path(boundary_260)) == (
+        "\\\\?\\" + str(boundary_260)
+    )
+
+    monkeypatch.setattr(runtime_observability, "_IS_WINDOWS", False)
+    assert runtime_observability._fs_access_path(long_local) is long_local
+    assert runtime_observability._fs_access_path(long_unc) is long_unc
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows long-path behavior")
+def test_long_frozen_receipt_validation_reads_receipt_and_all_artifacts(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "stream")
+    monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.01")
+    result = _run(tmp_path / "runtime")
+    deep_root, _deep_work, reference, receipt_path = _copy_long_frozen_snapshot(
+        tmp_path, result
+    )
+    try:
+        assert len(str(receipt_path)) > 260
+        receipt = json.loads(
+            Path(_ext(receipt_path)).read_text(encoding="utf-8")
+        )
+        assert all(
+            len(str(receipt_path.parent / record["path"])) > 260
+            for record in receipt["artifacts"].values()
+        )
+        validated = runtime_observability.validate_runtime_receipt_reference(
+            tmp_path,
+            reference,
+            require_success=True,
+        )
+        assert validated == receipt
+    finally:
+        shutil.rmtree(_ext(deep_root), ignore_errors=True)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows long-path behavior")
+@pytest.mark.parametrize("damage", ["receipt", "final_output"])
+def test_long_frozen_receipt_tamper_protection_remains_fail_closed(
+    tmp_path, monkeypatch, damage
+):
+    monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "stream")
+    monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.01")
+    result = _run(tmp_path / "runtime")
+    deep_root, _deep_work, reference, receipt_path = _copy_long_frozen_snapshot(
+        tmp_path, result
+    )
+    try:
+        if damage == "receipt":
+            Path(_ext(receipt_path)).write_bytes(b"tampered receipt")
+            expected_message = "runtime receipt hash mismatch"
+        else:
+            Path(_ext(receipt_path.parent / "final_output.json")).write_bytes(
+                b"tampered artifact"
+            )
+            expected_message = "runtime receipt artifact integrity mismatch"
+        with pytest.raises(
+            runtime_observability.ProviderRuntimeIntegrityError,
+            match=expected_message,
+        ):
+            runtime_observability.validate_runtime_receipt_reference(
+                tmp_path,
+                reference,
+                require_success=True,
+            )
+    finally:
+        shutil.rmtree(_ext(deep_root), ignore_errors=True)
+
+
+def test_runtime_receipt_reference_project_escape_remains_rejected(tmp_path):
+    with pytest.raises(
+        runtime_observability.ProviderRuntimeIntegrityError,
+        match="escapes project",
+    ):
+        runtime_observability.validate_runtime_receipt_reference(
+            tmp_path,
+            {
+                "schema": runtime_observability.RECEIPT_SCHEMA,
+                "path": "../../outside/provider_runtime/" + "0" * 64
+                + "/runtime_receipt.json",
+                "sha256": "0" * 64,
+            },
+        )
+
+
+def test_runtime_receipt_reference_content_address_identity_remains_rejected(
+    tmp_path,
+):
+    with pytest.raises(
+        runtime_observability.ProviderRuntimeIntegrityError,
+        match="not content-addressed",
+    ):
+        runtime_observability.validate_runtime_receipt_reference(
+            tmp_path,
+            {
+                "schema": runtime_observability.RECEIPT_SCHEMA,
+                "path": "provider_runtime/" + "0" * 64 + "/runtime_receipt.json",
+                "sha256": "1" * 64,
+            },
+        )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows long-path behavior")
+@pytest.mark.parametrize(
+    ("target_length", "work_length_range", "frozen_dir_is_long"),
+    [
+        pytest.param(170, range(158, 177), False, id="receipt-only-long"),
+        pytest.param(181, range(179, 183), True, id="frozen-tree-long"),
+    ],
+)
+def test_freeze_and_validate_are_symmetric_for_long_paths(
+    tmp_path,
+    monkeypatch,
+    target_length,
+    work_length_range,
+    frozen_dir_is_long,
+):
+    monkeypatch.setenv("RLR_FAKE_CODEX_MODE", "stream")
+    monkeypatch.setenv("RLR_FAKE_CODEX_DELAY", "0.01")
+    result = _run(tmp_path / "runtime")
+    deep_root, deep_work = _deep_work_dir(tmp_path, target_length)
+    try:
+        assert len(str(deep_work)) in work_length_range
+        temporary = deep_work / "provider_runtime" / (".tmp-" + "x" * 32)
+        assert len(str(temporary)) <= 259
+        expected_frozen_dir = deep_work / "provider_runtime" / result.runtime_receipt_sha256
+        assert (len(str(expected_frozen_dir)) > 260) is frozen_dir_is_long
+        if not frozen_dir_is_long:
+            assert len(str(expected_frozen_dir)) <= 258
+
+        frozen = runtime_observability._freeze_runtime_receipt(
+            tmp_path / "runtime", deep_work
+        )
+        assert len(str(frozen)) > 260
+        assert frozen.parent.name == result.runtime_receipt_sha256
+        reference = {
+            "schema": runtime_observability.RECEIPT_SCHEMA,
+            "path": frozen.relative_to(tmp_path).as_posix(),
+            "sha256": result.runtime_receipt_sha256,
+        }
+        assert "\\\\?\\" not in reference["path"]
+        validated = runtime_observability.validate_runtime_receipt_reference(
+            tmp_path,
+            reference,
+            require_success=True,
+        )
+        assert validated["final_status"] == "succeeded"
+        if frozen_dir_is_long:
+            assert runtime_observability._freeze_runtime_receipt(
+                tmp_path / "runtime", deep_work
+            ) == frozen
+    finally:
+        shutil.rmtree(_ext(deep_root), ignore_errors=True)
 
 
 def test_sequential_invocations_preserve_first_immutable_snapshot(

@@ -36,6 +36,8 @@ except ImportError:  # pragma: no cover - fallback is exercised only in minimal 
 
 STATUS_SCHEMA = "ProviderRuntimeStatus/v1"
 RECEIPT_SCHEMA = "ProviderRuntimeReceipt/v1"
+_IS_WINDOWS = os.name == "nt"
+_LEGACY_MAX_PATH = 260
 _TASK_SCHEMA_V1 = "DeepResearchDetachedTask/v1"
 _TASK_SCHEMA_V2 = "DeepResearchDetachedTask/v2"
 _CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
@@ -113,6 +115,26 @@ def _sha_bytes(value: bytes) -> str:
 
 def _sha_text(value: str) -> str:
     return _sha_bytes(value.encode("utf-8"))
+
+
+def _fs_access_path(path: Path) -> Path:
+    """OS-access view of *path* for filesystem I/O on Windows.
+
+    The canonical logical path is never modified: receipts, stored references,
+    hashes and identity checks keep using it. Only when the OS is Windows and
+    an absolute path reaches the classic MAX_PATH limit is an extended-length
+    form returned so native file APIs can reach it without LongPathsEnabled.
+    """
+    if not _IS_WINDOWS:
+        return path
+    value = str(path)
+    if value.startswith("\\\\?\\"):
+        return path
+    if not path.is_absolute() or len(value) < _LEGACY_MAX_PATH:
+        return path
+    if value.startswith("\\\\"):
+        return Path("\\\\?\\UNC" + value[1:])
+    return Path("\\\\?\\" + value)
 
 
 def _write_json_atomic(path: Path, value: dict) -> None:
@@ -328,10 +350,11 @@ def _validate_runtime_snapshot(
     require_success: bool,
 ) -> dict:
     try:
-        receipt_bytes = receipt_path.read_bytes()
+        receipt_bytes = _fs_access_path(receipt_path).read_bytes()
     except OSError as exc:
         raise ProviderRuntimeIntegrityError(
-            f"runtime receipt is missing: {receipt_path}"
+            f"runtime receipt is missing: {receipt_path} "
+            f"({type(exc).__name__}: {exc})"
         ) from exc
     actual_receipt_sha256 = _sha_bytes(receipt_bytes)
     if actual_receipt_sha256 != expected_sha256:
@@ -384,10 +407,11 @@ def _validate_runtime_snapshot(
             )
         artifact_path = receipt_path.parent / expected_name
         try:
-            artifact_bytes = artifact_path.read_bytes()
+            artifact_bytes = _fs_access_path(artifact_path).read_bytes()
         except OSError as exc:
             raise ProviderRuntimeIntegrityError(
-                f"runtime receipt artifact is missing: {artifact_path}"
+                f"runtime receipt artifact is missing: {artifact_path} "
+                f"({type(exc).__name__}: {exc})"
             ) from exc
         artifact_sha256 = _sha_bytes(artifact_bytes)
         if (
@@ -480,7 +504,7 @@ def _freeze_runtime_receipt(runtime_dir: Path, invocation_work_dir: Path) -> Pat
     snapshots_root.mkdir(parents=True, exist_ok=True)
     frozen_dir = snapshots_root / receipt_sha256
     frozen_receipt = frozen_dir / "runtime_receipt.json"
-    if frozen_dir.exists():
+    if _fs_access_path(frozen_dir).exists():
         _validate_runtime_snapshot(
             frozen_receipt,
             receipt_sha256,
@@ -498,7 +522,7 @@ def _freeze_runtime_receipt(runtime_dir: Path, invocation_work_dir: Path) -> Pat
         require_success=False,
     )
     try:
-        os.replace(temporary, frozen_dir)
+        os.replace(_fs_access_path(temporary), _fs_access_path(frozen_dir))
     except FileExistsError:
         _validate_runtime_snapshot(
             frozen_receipt,
