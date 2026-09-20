@@ -521,6 +521,52 @@ def cmd_assemble_context(args):
             sections.append("")
             pre_research_meta = {"type": pr_cfg["type"], "present": False}
 
+    # --- native v2.1 L4: freeze the exact evidence authority at assembly -----
+    # Native literature nodes do not consult the retired pre-research map, so
+    # manifest["pre_research"] stays None.  The exact immutable L4B evidence
+    # authority is frozen HERE, at the single owner of ContextManifest/v2, so
+    # the emission validator, the L4C handle binder, and L4.5 re-check the same
+    # bytes instead of re-selecting a run.
+    native_l4_evidence_meta = None
+    if (not pr_cfg and node_id == "L4"
+            and profile.delta_schema_version == "2.1"):
+        evidence_run_id = getattr(args, "evidence_run_id", None)
+        if not evidence_run_id:
+            evidence_run_id = deep_research.unique_run_id(
+                project_dir, args.cand_id, node_id
+            )
+        if evidence_run_id:
+            if hypothesis_snapshot is None:
+                print(f"ERROR: {node_id} evidence authority requires a bound "
+                      f"hypothesis context", file=sys.stderr)
+                return 3
+            try:
+                native_l4_evidence_meta = deep_research.evidence_artifact_manifest(
+                    project_dir, args.cand_id, node_id, evidence_run_id
+                )
+            except deep_research.DeepResearchError as exc:
+                print(f"ERROR: {node_id} exact evidence artifacts are invalid: "
+                      f"{exc}", file=sys.stderr)
+                return 3
+            expected_evidence_identity = {
+                "project_id": str(hypothesis_snapshot["project_id"]),
+                "candidate_id": str(args.cand_id),
+                "round_id": round_id,
+                "profile_id": profile.profile_id,
+                "target_node": node_id,
+                "research_phase": "pre_research",
+                "research_persona": str(node_info.get("research_persona") or ""),
+                "receipt_schema": "EvidenceRunReceipt/v1.1",
+            }
+            for field, expected_value in expected_evidence_identity.items():
+                if native_l4_evidence_meta.get(field) != expected_value:
+                    print(
+                        f"ERROR: {node_id} evidence receipt {field} "
+                        "does not match the bound context",
+                        file=sys.stderr,
+                    )
+                    return 3
+
     # --- pitfall cards: only THIS node's confirmed/promoted pitfalls (project +
     # global), never the whole history -> no context pollution. ---
     pitfall_meta = []
@@ -704,6 +750,7 @@ def cmd_assemble_context(args):
         "workspace": (str(workspaces[-1])
                       if (is_exec and workspaces) else None),
         "pre_research": pre_research_meta,
+        "native_l4_evidence": native_l4_evidence_meta,
         "deep_research_evidence": evidence_meta,
         "research_seed": (
             research_seed.manifest_entry(l1_research_seed)

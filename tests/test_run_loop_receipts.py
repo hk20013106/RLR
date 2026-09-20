@@ -9,8 +9,10 @@ import pytest
 import run_loop
 from research_loop.api import EngineAPI
 from research_loop.commands import ledger as ledger_commands
+from research_loop import deep_research as dr
 from research_loop import research_seed
 from research_loop import l4_evidence_bundle as l4_bundle
+from research_loop.compatibility import PROFILE_V21_CATALOG_1
 from research_loop.providers.base import RunReceipt
 from research_loop.providers.command import CommandProvider
 
@@ -163,16 +165,74 @@ def test_code_state_changes_when_same_head_has_different_working_tree_diff(tmp_p
     assert second["config_sha256"] == hashlib.sha256(config.read_bytes()).hexdigest()
 
 
+def _synthetic_l4_run_entry(project, monkeypatch):
+    """Freeze a real synthetic native L4 run in the production manifest shape.
+
+    Native L4 contexts carry the exact evidence authority in the dedicated
+    ``native_l4_evidence`` field while ``pre_research`` stays None.  The
+    staged-bundle boundary is faked here because these are unit tests of the
+    handle binder; the full real chain lives in
+    tests/test_native_l4_evidence_authority.py.
+    """
+    payload = {
+        "schema_version": dr.SCHEMA_VERSION,
+        "queries": ["synthetic L4 receipt fixture"],
+        "papers": [{
+            "url": "https://example.invalid/C1/L4",
+            "title": "Synthetic receipt fixture",
+            "source_database": "synthetic-test",
+            "source_metadata_response": {"candidate_id": "C1", "node": "L4"},
+            "open_access": False,
+            "extracts": [
+                {"section": section, "text": f"{section} evidence",
+                 "locator": f"{section} 1"}
+                for section in ("Results", "Discussion", "Conclusion", "Methods")
+            ],
+        }],
+        "review_search": {
+            "status": "none_found",
+            "receipt": "synthetic zero-result review search",
+        },
+    }
+    artifact = dr.persist_run(
+        project, "C1", "L4", payload,
+        dr.skill_receipt("codex", ["codex"], "synthetic", "test"),
+        project_id="P1", round_id="1", profile_id=PROFILE_V21_CATALOG_1,
+        research_persona="Curie",
+    )
+    evidence = {
+        **artifact,
+        "evidence_bundle_schema": l4_bundle.EVIDENCE_BUNDLE_SCHEMA,
+        "evidence_cards": [{
+            "status": "accepted", "evidence_card_id": "CARD-CANONICAL",
+            "anchor_id": "ANCHOR-CANONICAL", "method_id": "M1",
+        }],
+        "evidence_gaps": [],
+    }
+    monkeypatch.setattr(ledger_commands.deep_research, "_artifact",
+                        lambda *args, **kwargs: evidence)
+    manifest_entry = dr.evidence_artifact_manifest(
+        project, "C1", "L4", artifact["run_id"]
+    )
+    manifest = project / "context_manifest.json"
+    manifest.write_text(json.dumps({
+        "pre_research": None,
+        "native_l4_evidence": manifest_entry,
+    }), encoding="utf-8")
+    return artifact["run_id"], manifest
+
+
 def test_l4_handle_binding_creates_bound_artifact_and_explicit_provenance_edge(
     tmp_path, monkeypatch,
 ):
     project = tmp_path / "project"
     project.mkdir()
     raw = tmp_path / "L4_Fisher_delta.json"
+    run_id, manifest = _synthetic_l4_run_entry(project, monkeypatch)
     raw_data = {
         "schema_version": "2.1",
         "candidate_id": "C1",
-        "deep_research_run_id": "RUN1",
+        "deep_research_run_id": run_id,
         "method_components": [],
         "method_candidates": [{
             "method_id": "M1",
@@ -183,21 +243,6 @@ def test_l4_handle_binding_creates_bound_artifact_and_explicit_provenance_edge(
         }],
     }
     raw.write_text(json.dumps(raw_data, separators=(",", ":")), encoding="utf-8")
-    manifest = tmp_path / "context_manifest.json"
-    manifest.write_text(json.dumps({
-        "pre_research": {"evidence_artifacts": {"run_id": "RUN1"}},
-    }), encoding="utf-8")
-    evidence = {
-        "run_id": "RUN1",
-        "evidence_bundle_schema": l4_bundle.EVIDENCE_BUNDLE_SCHEMA,
-        "evidence_cards": [{
-            "status": "accepted", "evidence_card_id": "CARD-CANONICAL",
-            "anchor_id": "ANCHOR-CANONICAL", "method_id": "M1",
-        }],
-        "evidence_gaps": [],
-    }
-    monkeypatch.setattr(ledger_commands.deep_research, "_artifact",
-                        lambda *args, **kwargs: evidence)
     args = SimpleNamespace(
         project_dir=str(project), node="L4", cand_id="C1",
         context_manifest=str(manifest), receipt=None,
@@ -211,16 +256,18 @@ def test_l4_handle_binding_creates_bound_artifact_and_explicit_provenance_edge(
     candidate = bound["method_candidates"][0]
     assert candidate["evidence_card_ids"] == ["CARD-CANONICAL"]
     assert candidate["method_anchor_ids"] == ["ANCHOR-CANONICAL"]
+    assert provenance["evidence_run_id"] == run_id
     assert provenance["raw_provider_delta_sha256"] == hashlib.sha256(raw.read_bytes()).hexdigest()
 
 
 def test_emit_boundary_resolves_l4_handles_without_runner_owned_bound_copy(
     tmp_path, monkeypatch,
 ):
+    run_id, manifest = _synthetic_l4_run_entry(tmp_path, monkeypatch)
     raw_data = {
         "schema_version": "2.1",
         "candidate_id": "C1",
-        "deep_research_run_id": "RUN1",
+        "deep_research_run_id": run_id,
         "method_components": [],
         "method_candidates": [{
             "method_id": "M1",
@@ -232,21 +279,6 @@ def test_emit_boundary_resolves_l4_handles_without_runner_owned_bound_copy(
     }
     raw = tmp_path / "L4_Fisher_provider.json"
     raw.write_text(json.dumps(raw_data), encoding="utf-8")
-    manifest = tmp_path / "context_manifest.json"
-    manifest.write_text(json.dumps({
-        "pre_research": {"evidence_artifacts": {"run_id": "RUN1"}},
-    }), encoding="utf-8")
-    evidence = {
-        "run_id": "RUN1",
-        "evidence_bundle_schema": l4_bundle.EVIDENCE_BUNDLE_SCHEMA,
-        "evidence_cards": [{
-            "status": "accepted", "evidence_card_id": "CARD-CANONICAL",
-            "anchor_id": "ANCHOR-CANONICAL", "method_id": "M1",
-        }],
-        "evidence_gaps": [],
-    }
-    monkeypatch.setattr(ledger_commands.deep_research, "_artifact",
-                        lambda *args, **kwargs: evidence)
     args = SimpleNamespace(
         project_dir=str(tmp_path), node="L4", cand_id="C1",
         context_manifest=str(manifest), receipt=None,
@@ -259,6 +291,7 @@ def test_emit_boundary_resolves_l4_handles_without_runner_owned_bound_copy(
     candidate = resolved["method_candidates"][0]
     assert candidate["evidence_card_ids"] == ["CARD-CANONICAL"]
     assert candidate["method_anchor_ids"] == ["ANCHOR-CANONICAL"]
+    assert binding["evidence_run_id"] == run_id
     assert binding["raw_provider_delta_path"] == str(raw)
     assert not raw.with_name("L4_Fisher_provider_bound.json").exists()
 

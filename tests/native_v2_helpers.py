@@ -328,10 +328,16 @@ def write_native_emission_receipts(project_dir, candidate_id, node, persona, sou
         "persona_template_sha256": resolution.template_sha256,
         "persona_body_sha256": resolution.body_sha256,
         "injected_deltas": [],
+        # Native L4 contexts carry the exact evidence authority in their own
+        # field while the retired pre-research channel stays None, matching the
+        # real context assembler.  L1/L8.5 keep the historical shape.
         "pre_research": (
             {"evidence_run_id": evidence_artifacts["run_id"],
              "evidence_artifacts": evidence_artifacts}
-            if evidence_artifacts else None
+            if evidence_artifacts and node != "L4" else None
+        ),
+        "native_l4_evidence": (
+            evidence_artifacts if node == "L4" else None
         ),
         "research_seed": (
             research_seed.manifest_entry(seed) if seed is not None else None
