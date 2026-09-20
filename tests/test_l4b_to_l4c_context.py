@@ -229,6 +229,9 @@ def test_staged_l4b_passes_real_l4_context_boundary(
     assert manifests
     context_manifest = json.loads(manifests[-1].read_text(encoding="utf-8"))
     assert context_manifest["pre_research"] is None
+    # The exact native L4 evidence authority is frozen in the manifest at
+    # assembly time; emission and L4.5 re-check the same bytes.
+    assert context_manifest["native_l4_evidence"]["run_id"] == artifact["run_id"]
 
 
 def test_l4c_handle_binding_resolves_exact_l4b_ids(tmp_path, monkeypatch, l4_paperqa2_runtime):

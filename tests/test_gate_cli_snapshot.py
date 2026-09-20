@@ -9,8 +9,10 @@ which stream carries the message). Full-report byte-hashing is brittle
 substring instead.
 
 Native v2.1 L1 now fails closed at the Curie frozen-evidence binding gate rather
-than the historical V0.7 Deep Research gate. Historical L4 keeps the legacy
-pre-research gate. These are the current command-boundary baselines.
+than the historical V0.7 Deep Research gate. Native v2.1 L4 likewise fails
+closed until the exact evidence run is frozen at assembly; the retired
+pre-research channel is never its gate. These are the current command-boundary
+baselines.
 """
 import subprocess
 import sys
@@ -80,12 +82,18 @@ def test_l1_native_evidence_gate_fails_closed_rc3(gate_project):
     assert out.strip() == "", "fail-closed gate must not emit usable context on stdout"
 
 
-def test_native_l4_does_not_require_legacy_pre_research(gate_project):
-    """Native L4 is dispatched by the canonical Curie evidence owner."""
+def test_native_l4_requires_exact_frozen_evidence_run(gate_project):
+    """Native L4 fails closed without the exact frozen evidence authority.
+
+    The gate is the canonical Curie evidence run frozen at assembly, never the
+    retired pre-research channel; a context that cannot freeze it is not
+    produced.
+    """
     project, cand = gate_project
     rc, out, err = _cli("assemble-context", str(project), cand, "--node", "L4")
-    assert rc == 0, f"native L4 context must not require legacy pre-research: {err}"
-    assert out.strip()
+    assert rc == 3, f"native L4 without an exact evidence run must fail closed: {err}"
+    assert "requires an exact evidence run" in err
+    assert out.strip() == "", "fail-closed gate must not emit usable context on stdout"
 
 
 def test_l5_assemble_passes_rc0(gate_project):
