@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import run_loop
 from research_loop import cli, context, runtime_preflight
+from native_v2_helpers import ensure_catalog_paperqa2_binding
 
 
 CONTROLLER = Path(__file__).resolve().parents[1] / "research_loop_v04.py"
@@ -144,11 +145,13 @@ def test_cold_start_formal_l0_run_stops_after_receipt(tmp_path):
     runtime_config.write_text(json.dumps({
         "schema_version": "1.0", "backend": "codex", "executable": sys.executable,
     }), encoding="utf-8")
+    ensure_catalog_paperqa2_binding(project)
     preflight = subprocess.run(
         [sys.executable, str(CONTROLLER), "preflight", str(project), "--backend", "codex"],
         capture_output=True, text=True, encoding="utf-8", env=env,
     )
     assert preflight.returncode == 0, preflight.stderr
+    frozen_runtime_bytes = runtime_config.read_bytes()
     candidate_result = subprocess.run(
         [sys.executable, str(CONTROLLER), "new-candidate", str(project),
          "--title", "Cold start", "--question", "Which bytes reach L0?",
@@ -167,11 +170,7 @@ def test_cold_start_formal_l0_run_stops_after_receipt(tmp_path):
         "import shutil, sys; shutil.copyfile(sys.argv[1], sys.argv[2])",
         encoding="utf-8",
     )
-    runtime_config.write_text(json.dumps({
-        "schema_version": "1.0",
-        "backend": "codex",
-        "executable": sys.executable,
-    }), encoding="utf-8")
+    runtime_config.write_bytes(frozen_runtime_bytes)
     config = tmp_path / "runner.json"
     config.write_text(json.dumps({
         "max_rounds": 1,

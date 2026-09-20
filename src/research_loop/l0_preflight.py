@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from research_loop import deep_research, structured_execution
-from research_loop.compatibility import get_profile
+from research_loop.compatibility import PROFILE_V21_CATALOG_1, get_profile
 from research_loop.hypothesis_ledger import HypothesisLedger, LedgerError, binding_path
 
 PREFLIGHT_RECEIPT_SCHEMA = "L0PreflightReceipt/v2"
@@ -160,6 +160,28 @@ def _runtime_binding_report(project_dir: Path, backend: str | None) -> dict:
     except deep_research.DeepResearchError as exc:
         same_host, reason = False, str(exc)
     checks.append({"name": "host_backend_authorization", "status": "PASS" if same_host else "FAIL", "detail": reason or "host is authorized for the declared backend"})
+    try:
+        binding, _store_path = _load_project_binding(project)
+    except (LedgerError, KeyError, ValueError):
+        pass
+    else:
+        if binding.get("profile_id") == PROFILE_V21_CATALOG_1:
+            from research_loop import runtime_preflight
+
+            try:
+                runtime_preflight.require_bound_paperqa2(spec)
+            except runtime_preflight.RuntimePreflightError as exc:
+                checks.append({
+                    "name": "paperqa2_binding",
+                    "status": "FAIL",
+                    "detail": str(exc),
+                })
+            else:
+                checks.append({
+                    "name": "paperqa2_binding",
+                    "status": "PASS",
+                    "detail": "bound PaperQA2 runtime is ready",
+                })
     report["status"] = "PASS" if all(item["status"] == "PASS" for item in checks) else "FAIL"
     return report
 
