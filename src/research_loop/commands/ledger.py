@@ -95,18 +95,23 @@ def _native_l85_evidence_manifest(args, reference: dict) -> dict:
     return expected
 
 
-def _native_l4_evidence_manifest(args, manifest: dict) -> dict | None:
+def _native_l4_evidence_manifest(args, manifest: dict) -> dict:
     """Revalidate the frozen native L4 evidence authority of one manifest.
 
-    Returns the canonical exact evidence manifest recorded at context
-    assembly, re-derived from the frozen run ID with byte-level equality.
-    Returns None when the manifest carries no native L4 authority (legacy
-    contexts).  This single owner is shared by the emission validator and the
-    L4C handle binder so the two consumers never re-select a run.
+    Native L4 has exactly one legal evidence authority: the exact canonical
+    manifest frozen in ``native_l4_evidence`` at context assembly.  The value
+    is re-derived from the frozen run ID and must match it with exact canonical
+    manifest equality.  A missing or null field fails closed: the retired
+    pre-research channel is never an authority for native L4.  This single
+    owner is shared by the emission validator and the L4C handle binder so the
+    two consumers never re-select a run.
     """
     frozen = manifest.get("native_l4_evidence")
     if frozen is None:
-        return None
+        raise LedgerError(
+            "native L4 context lacks the frozen evidence authority "
+            "(native_l4_evidence)"
+        )
     if not isinstance(frozen, dict) or not isinstance(frozen.get("files"), list):
         raise LedgerError("native L4 evidence authority is invalid")
     run_id = str(frozen.get("run_id") or "").strip()
@@ -324,11 +329,10 @@ def _validate_native_receipts(
         if str(native_binding.get("evidence_run_id") or "") != run_id:
             raise LedgerError("native evidence binding run does not match context")
         recorded_evidence = None
-    elif native_l4_evidence is not None:
-        if args.node != "L4":
-            raise LedgerError(
-                "native L4 evidence authority is invalid for this emission"
-            )
+    elif args.node == "L4":
+        # Native L4 consumes only the frozen authority; the retired
+        # pre-research channel is never a fallback, so a missing field fails
+        # closed here instead of reaching the legacy branch below.
         current_evidence = _native_l4_evidence_manifest(args, manifest)
         run_id = str(current_evidence["run_id"])
         ok, reason = deep_research.audit_evidence_pack(
@@ -339,6 +343,10 @@ def _validate_native_receipts(
                 f"exact native L4 evidence run failed revalidation: {reason}"
             )
         recorded_evidence = current_evidence
+    elif native_l4_evidence is not None:
+        raise LedgerError(
+            "native L4 evidence authority is invalid for this emission"
+        )
     elif recorded_evidence:
         run_id = str(recorded_evidence.get("run_id") or "")
         try:
@@ -454,18 +462,12 @@ def _bind_l4_delta_for_commit(args, data, source_file):
         manifest = json.loads(Path(manifest_arg).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise LedgerError(f"invalid L4 context manifest for handle binding: {exc}") from exc
+    # Native L4 has exactly one evidence authority: the exact canonical
+    # manifest frozen at context assembly.  There is no other reference path,
+    # so the run can never be re-selected here and a context that lacks the
+    # frozen authority fails closed.
     frozen_evidence = _native_l4_evidence_manifest(args, manifest)
-    if frozen_evidence is not None:
-        # Native L4 contexts consume only the frozen authority; the run can
-        # never be re-selected here.
-        run_id = str(frozen_evidence["run_id"])
-    else:
-        # Legacy manifests retain the historical pre-research reference path.
-        pre_research = manifest.get("pre_research") or {}
-        evidence_ref = pre_research.get("evidence_artifacts") or {}
-        run_id = str(evidence_ref.get("run_id") or "")
-        if not run_id:
-            raise LedgerError("L4 context manifest lacks the frozen evidence run ID")
+    run_id = str(frozen_evidence["run_id"])
     evidence = deep_research._artifact(
         args.project_dir, args.cand_id, "L4", run_id=run_id
     )

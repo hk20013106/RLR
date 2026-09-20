@@ -403,3 +403,92 @@ def test_t5_native_l4_evidence_substitution_fails_closed(
     # The manifest bytes no longer match the provider receipt that binds them.
     assert "does not bind the exact context manifest" in captured.err
     assert not _hypothesis_commits(project)
+
+
+# --- N1: the retired pre-research channel is not a native L4 authority -------
+
+
+def test_n1_missing_native_l4_evidence_cannot_fall_back_to_pre_research(
+    tmp_path, monkeypatch, capsys, l4_paperqa2_runtime
+):
+    """Retiring the frozen authority field must fail closed, not fall back."""
+    project, store, artifact, hypothesis_id = _native_l4_project(
+        tmp_path, monkeypatch, l4_paperqa2_runtime(METHOD_TEXT)[0]
+    )
+    assert cmd_assemble_context(_assemble_args(project, store, artifact["run_id"])) == 0
+    manifest_path, manifest = _latest_manifest(project)
+    frozen = manifest["native_l4_evidence"]
+
+    # Pre-provider tamper: the frozen authority is retired while the same legal
+    # run is offered through the retired pre-research channel.  The provider
+    # receipt binds the tampered bytes afterwards, so the manifest hash chain
+    # cannot be what rejects this emission.
+    manifest.pop("native_l4_evidence")
+    manifest["pre_research"] = {
+        "evidence_run_id": frozen["run_id"],
+        "evidence_artifacts": frozen,
+    }
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    delta_path = tmp_path / "L4_Fisher_delta.json"
+    delta_path.write_text(
+        json.dumps(_provider_delta(artifact, hypothesis_id)), encoding="utf-8"
+    )
+    receipt_path = _provider_boundary(project, manifest_path, delta_path)
+
+    rc = _emit(project, store, manifest_path, receipt_path, delta_path)
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "does not bind the exact context manifest" not in captured.err
+    assert "lacks the frozen evidence authority" in captured.err
+    assert not _hypothesis_commits(project)
+
+
+# --- N2: assembly must freeze an exact evidence run before it is usable ------
+
+
+def _manifests(project):
+    return sorted((project / "08_Audit").glob("context_manifest_L4_*.json"))
+
+
+def _remove_l4_runs(project):
+    """Delete every persisted L4 run, i.e. the 'no evidence run yet' state."""
+    runs_dir, _, _ = dr._run_paths(Path(project))
+    removed = list(runs_dir.glob("C1_L4_*.json"))
+    for path in removed:
+        path.unlink()
+    assert removed, "fixture must have persisted an L4 run to remove"
+
+
+def test_n2a_assembly_fails_closed_without_any_evidence_run(
+    tmp_path, monkeypatch, capsys, l4_paperqa2_runtime
+):
+    project, store, _artifact, _hid = _native_l4_project(
+        tmp_path, monkeypatch, l4_paperqa2_runtime(METHOD_TEXT)[0]
+    )
+    _remove_l4_runs(project)
+
+    rc = cmd_assemble_context(_assemble_args(project, store, None))
+    captured = capsys.readouterr()
+    assert rc == 3
+    assert "requires an exact evidence run" in captured.err
+    assert not _manifests(project), "no usable native L4 manifest may be created"
+
+
+def test_n2b_assembly_fails_closed_when_evidence_runs_are_ambiguous(
+    tmp_path, monkeypatch, capsys, l4_paperqa2_runtime
+):
+    project, store, artifact, _hid = _native_l4_project(
+        tmp_path, monkeypatch, l4_paperqa2_runtime(METHOD_TEXT)[0]
+    )
+    second = _second_l4_run(project, store)
+    assert second["run_id"] != artifact["run_id"]
+    assert dr.unique_run_id(project, "C1", "L4") is None
+
+    before = _manifests(project)
+    rc = cmd_assemble_context(_assemble_args(project, store, None))
+    captured = capsys.readouterr()
+    assert rc == 3
+    assert "requires an exact evidence run" in captured.err
+    assert _manifests(project) == before, "no new manifest may be created"
