@@ -1,6 +1,7 @@
 import hashlib
 import json
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 
@@ -69,7 +70,7 @@ def _project(tmp_path: Path):
 
 def _search_record(
     *, pmid="22253597", pmcid="PMC3257301", doi="10.1371/journal.ppat.1002485",
-    title=None, open_access=True,
+    title=None, open_access=True, abstract=None,
 ):
     return {
         "id": pmid,
@@ -83,7 +84,7 @@ def _search_record(
         "journalTitle": "PLoS Pathog",
         "isOpenAccess": "Y" if open_access else "N",
         "inEPMC": "Y" if open_access else "N",
-        "abstractText": "Rca1p regulates the response to carbon dioxide.",
+        "abstractText": abstract if abstract is not None else "Rca1p regulates the response to carbon dioxide.",
         "pubTypeList": {"pubType": ["research-article"]},
     }
 
@@ -627,4 +628,296 @@ def test_paperqa2_retrieval_query_fails_closed_without_title_or_target_terms():
             {"title": "Paper"},
             {"scientific_question": "", "hypothesis_seed": ""},
             {"queries": []},
+        )
+
+
+def _fulltext_500(pmcid):
+    return HTTPError(
+        f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML",
+        500,
+        "Internal Server Error",
+        {},
+        None,
+    )
+
+
+def _fulltext_404(pmcid, code=404):
+    return HTTPError(
+        f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML",
+        code,
+        "Not Found",
+        {},
+        None,
+    )
+
+
+def _fulltext_503(pmcid):
+    return HTTPError(
+        f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML",
+        503,
+        "Service Unavailable",
+        {},
+        None,
+    )
+
+
+# --- Title fixtures giving deterministic INCLUDE selection regardless of
+# discovery/paper_id canonicalization order. All use empty abstract so relevance
+# is driven purely by title-term overlap with the ResearchSeed below:
+#   question  : "How is carbon dioxide sensed by yeast?"
+#   hypothesis: "Rca1p regulates the carbon dioxide transcriptional response."
+# Seed terms (len>2): how, carbon, dioxide, sensed, yeast, rca1p, regulates, response.
+_GOOD_TITLE = "Rca1p carbon dioxide sensing in yeast pathway"      # 5 matches -> INCLUDE
+_BAD_TITLE = "Metabolic control of carbon dioxide response"        # 3 matches -> INCLUDE
+_RESERVE_TITLE = "General methods overview"                        # 0 matches -> RESERVE
+
+
+# --- H1: current real type: 500 on a known-good pool degrades to RESOURCE_LEVEL ---
+# Deterministic regardless of discovery/include order: the first fullTextXML request
+# succeeds (becomes the known-good control), the second returns HTTP 500 and is then
+# probed against the first -> RESOURCE_LEVEL -> reserve promoted -> FROZEN.
+def test_h1_500_after_known_good_control_degrades_to_resource_failure(tmp_path):
+    project, seed = _project(tmp_path)
+    good_bad = _search_record(
+        pmid="11111111", pmcid="PMC1111111", doi="10.1/A", title=_GOOD_TITLE, abstract="")
+    bad = _search_record(
+        pmid="22222222", pmcid="PMC2222222", doi="10.1/B", title=_BAD_TITLE, abstract="")
+    reserve = _search_record(
+        pmid="33333333", pmcid="PMC3333333", doi="10.1/R", title=_RESERVE_TITLE, abstract="")
+    fulltext_calls = {"n": 0}
+
+    def http_get(url, _timeout):
+        if "/search?" in url:
+            return _search_payload(records=[good_bad, bad, reserve])  # high/med/low relevance
+        if url.endswith("/fullTextXML"):
+            fulltext_calls["n"] += 1
+            if fulltext_calls["n"] == 1:
+                return XML  # first processed paper becomes known-good control
+            if fulltext_calls["n"] == 2:
+                pmcid = url.rsplit("/", 2)[0].rsplit("/", 1)[-1]
+                raise _fulltext_500(pmcid)  # second processed paper -> 500
+            return XML  # promoted reserve (3rd) succeeds -> coverage FROZEN
+        raise AssertionError(url)
+
+    result = run_europepmc_acquisition(
+        project, "C001", explicit_queries=["h1 control"],
+        max_papers=2, run_id="H1", http_get=http_get,
+    )
+    audit = json.loads((project / result["acquisition_manifest_path"]).read_text())
+    assert len(audit["paper_failures"]) == 1
+    failure = audit["paper_failures"][0]
+    assert failure["reason_code"] == "RESOURCE_UNAVAILABLE"
+    assert failure["retrieval"]["failure_scope"] == "RESOURCE_LEVEL"
+    assert failure["retrieval"]["control"]["control_result"] == "HEALTHY"
+    assert failure["retrieval"]["control"]["control_http_status"] == 200
+    assert len(audit["reserve_promotions"]) == 1
+    assert audit["reserve_promotions"][0]["promoted_pmcid"] == "PMC3333333"
+    # control probe is a pure diagnostic: no extra source_snapshot
+    assert len(audit["source_snapshots"]) == 2  # the 2 successful retrievals (control + promoted reserve)
+    assert result["status"] == "FROZEN"
+
+
+# --- H2: control probe fails => SOURCE_LEVEL fail closed, no promotion ---
+def test_h2_500_with_unhealthy_control_fails_closed(tmp_path):
+    project, _seed = _project(tmp_path)
+    good = _search_record(pmid="11111111", pmcid="PMC1111111", doi="10.1/A", title=_GOOD_TITLE, abstract="")
+    bad = _search_record(pmid="22222222", pmcid="PMC2222222", doi="10.1/B", title=_BAD_TITLE, abstract="")
+    probe_state = {"good_served": False}
+
+    def http_get(url, _timeout):
+        if "/search?" in url:
+            return _search_payload(records=[good, bad])
+        if url.endswith("/PMC1111111/fullTextXML"):
+            # first call = good retrieval succeeds; second call = control probe -> 503
+            if probe_state["good_served"]:
+                raise _fulltext_503("PMC1111111")
+            probe_state["good_served"] = True
+            return XML
+        if url.endswith("/PMC2222222/fullTextXML"):
+            raise _fulltext_500("PMC2222222")
+        raise AssertionError(url)
+
+    with pytest.raises(CurieContractError, match="SOURCE_LEVEL"):
+        run_europepmc_acquisition(
+            project, "C001", explicit_queries=["h2 unhealthy control"],
+            max_papers=2, run_id="H2", http_get=http_get,
+        )
+
+
+# --- H3: first paper 500, no control => SOURCE_LEVEL fail closed, 0 control requests ---
+def test_h3_500_first_paper_no_known_good_fail_closed(tmp_path):
+    project, _seed = _project(tmp_path)
+    bad = _search_record(pmid="22222222", pmcid="PMC2222222", doi="10.1/B", title=_BAD_TITLE)
+    fulltext_calls = []
+
+    def http_get(url, _timeout):
+        if "/search?" in url:
+            return _search_payload(records=[bad, _search_record(pmid="99999999", pmcid="", doi="10.1/X", title=_RESERVE_TITLE)])
+        if url.endswith("/PMC2222222/fullTextXML"):
+            fulltext_calls.append(url)
+            raise _fulltext_500("PMC2222222")
+        raise AssertionError(url)  # no control probe possible
+
+    with pytest.raises(CurieContractError, match="no known-good control"):
+        run_europepmc_acquisition(
+            project, "C001", explicit_queries=["h3 no control"],
+            max_papers=1, run_id="H3", http_get=http_get,
+        )
+    # exactly one failure probe: the original bad paper's URL; no control probe issued
+    assert fulltext_calls == [
+        "https://www.ebi.ac.uk/europepmc/webservices/rest/PMC2222222/fullTextXML",
+    ]
+
+
+# --- H4: 404/410 => RESOURCE_LEVEL, no control probe ---
+def test_h4_404_is_resource_level_no_control_probe(tmp_path):
+    project, _seed = _project(tmp_path)
+    good = _search_record(pmid="11111111", pmcid="PMC1111111", doi="10.1/A", title=_GOOD_TITLE, abstract="")
+    missing = _search_record(pmid="22222222", pmcid="PMC2222222", doi="10.1/B", title=_BAD_TITLE, open_access=True, abstract="")
+    reserve = _search_record(pmid="33333333", pmcid="PMC3333333", doi="10.1/R", title=_RESERVE_TITLE, abstract="")
+    control_calls = []
+
+    def http_get(url, _timeout):
+        if "/search?" in url:
+            return _search_payload(records=[good, missing, reserve])
+        if url.endswith("/PMC1111111/fullTextXML"):
+            return XML  # good succeeds first (becomes known-good)
+        if url.endswith("/PMC2222222/fullTextXML"):
+            raise _fulltext_404("PMC2222222", 404)  # missing -> RESOURCE_LEVEL
+        if url.endswith("/PMC3333333/fullTextXML"):
+            return XML  # promoted reserve succeeds
+        raise AssertionError(url)
+
+    result = run_europepmc_acquisition(
+        project, "C001", explicit_queries=["h4 404"],
+        max_papers=2, run_id="H4", http_get=http_get,
+    )
+    audit = json.loads((project / result["acquisition_manifest_path"]).read_text())
+    failure = audit["paper_failures"][0]
+    assert failure["pmcid"] == "PMC2222222"
+    assert failure["reason_code"] == "RESOURCE_UNAVAILABLE"
+    assert failure["retrieval"]["failure_scope"] == "RESOURCE_LEVEL"
+    assert "control" not in failure["retrieval"]  # no control probe for 404
+    assert control_calls == []  # no control probe requested at all for 404
+    assert audit["reserve_promotions"][0]["promoted_pmcid"] == "PMC3333333"
+    assert result["status"] == "FROZEN"
+
+
+# --- H5: 429 keeps existing retry semantics, not resource downgrade ---
+def test_h5_429_does_not_become_resource_failure(tmp_path):
+    project, _seed = _project(tmp_path)
+    bad = _search_record(pmid="22222222", pmcid="PMC2222222", doi="10.1/B", title=_BAD_TITLE)
+
+    def http_get(url, _timeout):
+        if "/search?" in url:
+            return _search_payload(records=[bad])
+        if url.endswith("/PMC2222222/fullTextXML"):
+            raise _fulltext_404("PMC2222222", 429)
+        raise AssertionError(url)
+
+    with pytest.raises(CurieContractError):
+        run_europepmc_acquisition(
+            project, "C001", explicit_queries=["h5 429"],
+            max_papers=1, run_id="H5", http_get=http_get,
+        )
+
+
+# --- H6: 502/503/504 retry to exhaustion => SOURCE_LEVEL ---
+def test_h6_503_exhaustion_is_source_level(tmp_path):
+    project, _seed = _project(tmp_path)
+    bad = _search_record(pmid="22222222", pmcid="PMC2222222", doi="10.1/B", title=_BAD_TITLE)
+
+    def http_get(url, _timeout):
+        if "/search?" in url:
+            return _search_payload(records=[bad])
+        if url.endswith("/PMC2222222/fullTextXML"):
+            raise _fulltext_503("PMC2222222")
+        raise AssertionError(url)
+
+    with pytest.raises(CurieContractError):
+        run_europepmc_acquisition(
+            project, "C001", explicit_queries=["h6 503"],
+            max_papers=1, run_id="H6", http_get=http_get,
+        )
+
+
+# --- H7: control returns 200 but malformed XML => SOURCE_LEVEL ---
+def test_h7_malformed_control_xml_is_not_healthy(tmp_path):
+    project, _seed = _project(tmp_path)
+    good = _search_record(pmid="11111111", pmcid="PMC1111111", doi="10.1/A", title=_GOOD_TITLE, abstract="")
+    bad = _search_record(pmid="22222222", pmcid="PMC2222222", doi="10.1/B", title=_BAD_TITLE, abstract="")
+    probe_state = {"good_served": False}
+
+    def http_get(url, _timeout):
+        if "/search?" in url:
+            return _search_payload(records=[good, bad])
+        if url.endswith("/PMC1111111/fullTextXML"):
+            if probe_state["good_served"]:
+                return b"<not<valid xml"  # control probe: 200 but malformed
+            probe_state["good_served"] = True
+            return XML
+        if url.endswith("/PMC2222222/fullTextXML"):
+            raise _fulltext_500("PMC2222222")
+        raise AssertionError(url)
+
+    with pytest.raises(CurieContractError, match="SOURCE_LEVEL"):
+        run_europepmc_acquisition(
+            project, "C001", explicit_queries=["h7 malformed"],
+            max_papers=2, run_id="H7", http_get=http_get,
+        )
+
+
+# --- H8: NO_TARGET_SECTIONS zero regression ---
+def test_h8_no_target_sections_promote_unchanged(tmp_path):
+    project, _seed = _project(tmp_path)
+    include = _search_record(pmid="11111111", pmcid="PMC1111111", doi="10.1000/include", title="First selected paper")
+    reserve = _search_record(pmid="22222222", pmcid="PMC2222222", doi="10.1000/reserve", title="Reserve paper with Results")
+
+    def http_get(url, _timeout):
+        if "/search?" in url:
+            return _search_payload(records=[include, reserve])
+        if url.endswith("/PMC1111111/fullTextXML"):
+            return XML_WITHOUT_TARGET_SECTIONS
+        if url.endswith("/PMC2222222/fullTextXML"):
+            return XML
+        raise AssertionError(url)
+
+    result = run_europepmc_acquisition(
+        project, "C001", explicit_queries=["h8 nts"],
+        max_papers=1, run_id="H8", http_get=http_get,
+    )
+    audit = json.loads((project / result["acquisition_manifest_path"]).read_text())
+    assert audit["paper_failures"][0]["reason_code"] == "NO_TARGET_SECTIONS"
+    assert audit["reserve_promotions"][0]["promoted_pmcid"] == "PMC2222222"
+
+
+# --- Systemic outage cannot be masked by already-sufficient evidence ---
+def test_systemic_outage_fails_closed_even_with_prior_evidence(tmp_path):
+    project, _seed = _project(tmp_path)
+    p1 = _search_record(pmid="11111111", pmcid="PMC1111111", doi="10.1/A", title=_GOOD_TITLE, abstract="")
+    p2 = _search_record(pmid="22222222", pmcid="PMC2222222", doi="10.1/B", title=_GOOD_TITLE, abstract="")
+    p3 = _search_record(pmid="33333333", pmcid="PMC3333333", doi="10.1/C", title=_GOOD_TITLE, abstract="")
+    p4 = _search_record(pmid="44444444", pmcid="PMC4444444", doi="10.1/D", title=_GOOD_TITLE, abstract="")
+    probe_state = {"pmcs_probed": []}
+
+    def http_get(url, _timeout):
+        if "/search?" in url:
+            return _search_payload(records=[p1, p2, p3, p4])
+        if url.endswith("/PMC1111111/fullTextXML"):
+            return XML  # prior evidence
+        if url.endswith("/PMC2222222/fullTextXML"):
+            return XML  # prior evidence
+        if url.endswith("/PMC3333333/fullTextXML"):
+            if "PMC3333333" in probe_state["pmcs_probed"]:
+                raise _fulltext_503("PMC3333333")  # outage hits control probe
+            probe_state["pmcs_probed"].append("PMC3333333")
+            return XML  # prior evidence
+        if url.endswith("/PMC4444444/fullTextXML"):
+            raise _fulltext_500("PMC4444444")  # outage starts on final paper
+        raise AssertionError(url)
+
+    with pytest.raises(CurieContractError, match="SOURCE_LEVEL"):
+        run_europepmc_acquisition(
+            project, "C001", explicit_queries=["outage masked by evidence"],
+            max_papers=4, run_id="SYSOUT", http_get=http_get,
         )

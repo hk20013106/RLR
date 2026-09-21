@@ -12,8 +12,10 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+from urllib.error import HTTPError
 
 from research_loop import research_seed
+from research_loop.external_resilience import classify_http_failure
 
 from .contracts import CurieContractError, judge_coverage, validate_query_plan
 from .europepmc import EuropePmcEvidenceRetriever, EuropePmcEvidenceVerifier, EuropePmcTransport
@@ -238,20 +240,144 @@ def _reserve_europepmc_papers(discovery: dict, selection: dict) -> list[dict]:
     return reserves
 
 
-def _promote_reserve_after_no_target_sections(reserve: dict, failed_paper_id: str) -> dict:
-    """Make one selector-approved reserve eligible for the same acquisition slot."""
+def _promote_reserve_after_failure(reserve: dict, failed_paper_id: str, reason: str) -> dict:
+    """Make one selector-approved reserve eligible for the same acquisition slot.
+
+    Single owner for reserve promotion across resource-failure reason codes.
+    """
+    reason_code = f"PROMOTED_AFTER_{reason}"
     return {
         **reserve,
         "selection": {
             "decision": "INCLUDE",
             "reason": (
                 "Promoted from selector-approved RESERVE after "
-                f"{failed_paper_id} produced NO_TARGET_SECTIONS."
+                f"{failed_paper_id} produced {reason}."
             ),
-            "reason_code": "PROMOTED_AFTER_NO_TARGET_SECTIONS",
+            "reason_code": reason_code,
             "original_decision": "RESERVE",
         },
     }
+
+
+def _promote_reserve_after_no_target_sections(reserve: dict, failed_paper_id: str) -> dict:
+    """Backwards-compatible alias for the NO_TARGET_SECTIONS promotion path."""
+    return _promote_reserve_after_failure(
+        reserve, failed_paper_id, reason="NO_TARGET_SECTIONS"
+    )
+
+
+def _root_cause(exc: BaseException) -> BaseException:
+    """Walk the __cause__/__context__ chain to the originating transport/HTTP exception."""
+    current = exc
+    while current.__cause__ is not None or current.__context__ is not None:
+        nxt = current.__cause__ if current.__cause__ is not None else current.__context__
+        if nxt is exc:
+            break
+        current = nxt
+    return current
+
+
+def _classify_resource_failure(
+    *,
+    failure: BaseException,
+    pmcid: str,
+    known_good_snapshots: list[dict],
+    retriever: EuropePmcEvidenceRetriever,
+    seed: dict,
+) -> dict | None:
+    """Classify a single fullTextXML failure as RESOURCE_LEVEL (paper_failure) or None.
+
+    Returns a paper_failure record (to be promoted) when the failure is a resource-level
+    problem; returns None to signal SOURCE_LEVEL: the caller must re-raise `failure`
+    verbatim (fail-closed). Uses the sole HTTP classifier (`classify_http_failure`) for
+    retry semantics; this layer only adds resource-vs-source *context*.
+    """
+    original = _root_cause(failure)
+    decision = classify_http_failure(original)
+    if decision.retry:
+        # 429/502/503/504 that exhausted the shared retry policy => service-level.
+        raise CurieContractError(
+            "Europe PMC fullTextXML retry-exhausted source-level failure: "
+            f"pmcid={pmcid} retry={decision.reason} failure_scope=SOURCE_LEVEL"
+        ) from failure
+    # Non-retryable outcome: 500/404/410/transport.
+    if isinstance(original, HTTPError):
+        code = int(original.code)
+        if code in (404, 410):
+            # 4xx resource-absent semantics are per-resource; no control probe needed.
+            return {
+                "paper_id": pmcid,
+                "pmcid": pmcid,
+                "reason_code": "RESOURCE_UNAVAILABLE",
+                "retrieval": {
+                    "requested_url": str(getattr(original, "url", f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML")),
+                    "http_status": code,
+                    "failure_class": decision.reason,
+                    "failure_scope": "RESOURCE_LEVEL",
+                },
+            }
+        if code == 500:
+            return _classify_500_with_control(
+                failure=failure, pmcid=pmcid, original=original,
+                known_good_snapshots=known_good_snapshots,
+                retriever=retriever, seed=seed,
+            )
+        # Other non-retryable HTTP status (4xx except 429, other 5xx) => unknown => fail closed.
+        raise CurieContractError(
+            f"Europe PMC fullTextXML non-retryable HTTP {code} not classified as "
+            f"resource-level: pmcid={pmcid} failure_scope=SOURCE_LEVEL"
+        ) from failure
+    # Non-HTTP transport error (DNS/TLS/connection/timeout) => source-level.
+    raise CurieContractError(
+        f"Europe PMC fullTextXML transport-level failure: pmcid={pmcid} "
+        f"failure_class={decision.reason} failure_scope=SOURCE_LEVEL"
+    ) from failure
+
+
+def _classify_500_with_control(
+    *, failure: BaseException, pmcid: str, original: HTTPError,
+    known_good_snapshots: list[dict], retriever: EuropePmcEvidenceRetriever, seed: dict,
+) -> dict | None:
+    """Distinguish a single-resource 500 from a fullTextXML subsystem outage."""
+    if not known_good_snapshots:
+        raise CurieContractError(
+            "Europe PMC fullTextXML HTTP 500 with no known-good control: "
+            f"pmcid={pmcid} failure_scope=SOURCE_LEVEL"
+        ) from failure
+    control_pmcid = known_good_snapshots[-1].get("pmcid")
+    if not control_pmcid:
+        raise CurieContractError(
+            "Europe PMC fullTextXML HTTP 500 known-good snapshot lacks pmcid: "
+            f"pmcid={pmcid} failure_scope=SOURCE_LEVEL"
+        ) from failure
+    try:
+        control = retriever.health_probe(control_pmcid, seed=seed)
+    except Exception as control_exc:
+        raise CurieContractError(
+            "Europe PMC fullTextXML HTTP 500 failed contemporaneous known-good control "
+            f"probe: pmcid={pmcid} control_pmcid={control_pmcid} "
+            f"control_failure={classify_http_failure(_root_cause(control_exc)).reason} "
+            f"failure_scope=SOURCE_LEVEL"
+        ) from failure
+    return {
+        "paper_id": pmcid,
+        "pmcid": pmcid,
+        "reason_code": "RESOURCE_UNAVAILABLE",
+        "retrieval": {
+            "requested_url": str(getattr(original, "url", f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML")),
+            "http_status": 500,
+            "failure_class": "http_500",
+            "failure_scope": "RESOURCE_LEVEL",
+            "control": {
+                "control_pmcid": control["control_pmcid"],
+                "control_url": control["control_url"],
+                "control_result": control["control_result"],
+                "control_http_status": control["control_http_status"],
+            },
+        },
+    }
+
 
 
 def _prepare_europepmc_acquisition(
@@ -541,14 +667,31 @@ def run_europepmc_acquisition(
         verifier = EuropePmcEvidenceVerifier(project, candidate_id=candidate_id)
 
         def retrieve_one(paper: dict) -> bool:
-            retrieval = retriever.retrieve(paper, seed=seed)
+            paper_id = str(paper.get("paper_id"))
+            pmcid = (paper.get("identifiers") or {}).get("pmcid")
+            try:
+                retrieval = retriever.retrieve(paper, seed=seed)
+            except CurieContractError as exc:
+                # Resource-vs-source classification owner for fullTextXML failures.
+                # Source-level (DNS/connection/timeout/5xx-exhaustion/unknown 5xx) re-raises
+                # verbatim (fail closed). Resource-level (404/410; or 500 w/ healthy control)
+                # becomes a paper_failure so reserves can be promoted.
+                classified = _classify_resource_failure(
+                    failure=exc, pmcid=pmcid,
+                    known_good_snapshots=source_snapshots,
+                    retriever=retriever, seed=seed,
+                )
+                # Resource-level (404/410; 500 w/ healthy control) -> record + promote.
+                # Source-level raises inside _classify_resource_failure (fail closed).
+                paper_failures.append(classified)
+                return False
             source_snapshots.append(retrieval["snapshot"])
             failure = retrieval.get("paper_failure")
             if failure is not None:
                 if (
                     not isinstance(failure, dict)
-                    or failure.get("paper_id") != paper.get("paper_id")
-                    or failure.get("pmcid") != (paper.get("identifiers") or {}).get("pmcid")
+                    or failure.get("paper_id") != paper_id
+                    or failure.get("pmcid") != pmcid
                     or failure.get("reason_code") != "NO_TARGET_SECTIONS"
                 ):
                     raise CurieContractError(
@@ -571,14 +714,16 @@ def run_europepmc_acquisition(
             if retrieve_one(paper):
                 continue
             while (reserve := next(reserves, None)) is not None:
-                promoted = _promote_reserve_after_no_target_sections(
-                    reserve, str(paper["paper_id"])
+                last_reason = paper_failures[-1]["reason_code"]
+                promoted = _promote_reserve_after_failure(
+                    reserve, str(paper.get("paper_id")),
+                    reason=last_reason,
                 )
                 reserve_promotions.append({
-                    "replaced_paper_id": paper["paper_id"],
+                    "replaced_paper_id": paper.get("paper_id"),
                     "promoted_paper_id": promoted["paper_id"],
                     "promoted_pmcid": promoted["identifiers"].get("pmcid"),
-                    "reason_code": "PROMOTED_AFTER_NO_TARGET_SECTIONS",
+                    "reason_code": f"PROMOTED_AFTER_{last_reason}",
                 })
                 if retrieve_one(promoted):
                     break
