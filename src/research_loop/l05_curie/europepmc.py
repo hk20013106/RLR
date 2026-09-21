@@ -505,6 +505,33 @@ class EuropePmcEvidenceRetriever:
         ]
         return {"snapshot": snapshot, "candidates": candidates}
 
+    def health_probe(self, control_pmcid: str, *, seed: dict) -> dict:
+        """Contemporaneous source-level probe against a known-good fullTextXML resource.
+
+        This diagnostic request never writes snapshots/evidence: it only answers
+        whether the fullTextXML subsystem currently answers for a resource that
+        previously succeeded in this acquisition. A 200 with parseable bytes is
+        HEALTHY; any HTTP/transport failure or malformed body is NOT_HEALTHY and
+        propagates as the original exception (caller classifies it).
+        """
+        pmcid = normalize_pmcid(control_pmcid)
+        if not pmcid:
+            raise CurieContractError("Europe PMC control probe requires a PMCID")
+        _require_text(seed.get("scientific_question") if isinstance(seed, dict) else None,
+                      "seed scientific_question")
+        _require_text(seed.get("hypothesis_seed") if isinstance(seed, dict) else None,
+                      "seed hypothesis_seed")
+        url = f"{BASE_URL}/{pmcid}/fullTextXML"
+        raw = run_http_with_retry(lambda: self.http_get(url, self.timeout))
+        if not isinstance(raw, (bytes, bytearray)):
+            raise CurieContractError("Europe PMC control probe http_get must return bytes")
+        raw = bytes(raw)
+        # A 200 with unparseable bytes means the subsystem output contract is
+        # itself unreliable -> NOT_HEALTHY (propagate as failure, not a snapshot).
+        parse_jats_paragraphs(raw)
+        return {"control_pmcid": pmcid, "control_url": url, "control_result": "HEALTHY",
+                "control_http_status": 200}
+
 
 def verify_jats_candidates(
     raw: bytes,
