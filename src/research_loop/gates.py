@@ -116,9 +116,18 @@ def _audit_l10_traceability(project_dir, cand_id, delta):
     return True, ""
 
 
-def _audit_l10_evidence(project_dir, cand_id, delta):
-    """When the candidate has Deep Research, a literature reason must cite it."""
-    allowed = set(deep_research.evidence_ids(project_dir, cand_id, ["L1", "L8.5"]))
+def _audit_l10_evidence(project_dir, cand_id, delta, *,
+                        l85_evidence_ids: list[str] | None = None):
+    """When the candidate has Deep Research, a literature reason must cite it.
+
+    ``l85_evidence_ids`` is the frozen authority from ContextManifest/v2.
+    When provided, only those IDs are allowed (native L10 path).
+    When absent, falls back to deep_research.evidence_ids() (legacy path).
+    """
+    if l85_evidence_ids is not None:
+        allowed = set(l85_evidence_ids)
+    else:
+        allowed = set(deep_research.evidence_ids(project_dir, cand_id, ["L1", "L8.5"]))
     if not allowed:
         return True, ""  # legacy candidate without any new evidence pack
     cited = delta.get("literature_evidence_ids")

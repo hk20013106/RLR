@@ -21,6 +21,7 @@ from research_loop.hypothesis_ledger import binding_path as hypothesis_binding_p
 from research_loop.preresearch import PRE_RESEARCH_MAP
 from native_v2_helpers import (
     bootstrap_project_ready,
+    commit_l85_fixture_authority,
     ensure_catalog_paperqa2_binding,
     ensure_native_l0_contract,
 )
@@ -563,6 +564,12 @@ def test_l10_context_includes_source_located_l1_evidence(tmp_path):
     cand_id = candidate.stdout.splitlines()[0]
     dr.persist_run(project, cand_id, "L1", _payload(),
                    dr.skill_receipt("codex", ["codex", "exec"], "prompt", "0.1.9"))
+    # Native L10 consumers resolve the frozen L8.5 authority before the
+    # provider boundary: the project needs a committed L8.5 artifact.
+    commit_l85_fixture_authority(
+        project, cand_id,
+        result_context='{"L7_key_results": {"synthetic": "observed"}}',
+    )
     context = subprocess.run([sys.executable, str(cli), "assemble-context", str(project), cand_id,
                               "--node", "L10a"], capture_output=True, text=True, env=env)
     assert context.returncode == 0, context.stderr

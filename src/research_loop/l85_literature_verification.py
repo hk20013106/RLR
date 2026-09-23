@@ -179,6 +179,27 @@ def load_run_manifest(project_dir: str | Path, candidate_id: str, run_id: str) -
     return payload
 
 
+def resolve_l85_evidence_ids(project_dir: str | Path, candidate_id: str,
+                             run_id: str) -> list[str] | None:
+    """Return evidence IDs from an exact native L8.5 run, or None on failure.
+
+    This is the single authority for L8.5 evidence resolution — it loads by
+    exact run_id only, never by mtime, glob, or uniqueness heuristic.
+    """
+    if not run_id:
+        return None
+    try:
+        run = load_run_manifest(project_dir, candidate_id, run_id)
+    except (L85VerificationError, OSError, json.JSONDecodeError):
+        return None
+    located = run.get("located_evidence") or []
+    return [
+        str(item.get("evidence_id") or "")
+        for item in located
+        if isinstance(item, dict) and item.get("evidence_id")
+    ]
+
+
 def audit_run_manifest(project_dir: str | Path, candidate_id: str, *, run_id: str) -> tuple[bool, str, dict | None]:
     """Revalidate run bytes and every source snapshot referenced as LOCATED."""
     try:

@@ -26,7 +26,10 @@ from pathlib import Path
 import pytest
 
 from deep_research_fixtures import persist_synthetic_evidence
-from native_v2_helpers import bootstrap_project_ready
+from native_v2_helpers import (
+    bootstrap_project_ready,
+    commit_l85_fixture_authority,
+)
 
 HERE = Path(__file__).resolve().parent.parent
 
@@ -174,6 +177,13 @@ def _l85_fixture_project(tmp_path):
 def test_all_wildcard_is_l10c_only(node, tmp_path, context_project):
     """No node other than L10c may carry the `ALL` read wildcard."""
     project, candidate = _l85_fixture_project(tmp_path) if node == "L8.5" else context_project
+    if node == "L10b":
+        # Native L10 consumers resolve the frozen L8.5 authority before the
+        # provider boundary: the project needs a committed L8.5 artifact.
+        commit_l85_fixture_authority(
+            project, candidate,
+            result_context='{"L7_key_results": {"synthetic": "observed"}}',
+        )
     rc, manifest = _assemble(node, project, candidate)
     if node == "L9b":
         assert rc == 2 and manifest is None

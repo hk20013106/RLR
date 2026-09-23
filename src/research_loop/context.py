@@ -41,6 +41,7 @@ from research_loop.gates import (
 from research_loop.authority import AuthorityError, project_context_authorities
 from research_loop import l0_contract
 from research_loop import deep_research, research_seed
+from research_loop import l85_literature_verification as l85_verification
 
 
 DEFAULT_CONTEXT_TOKEN_BUDGET = 100000
@@ -389,25 +390,87 @@ def cmd_assemble_context(args):
 
     # L10 receives immutable source-located extracts rather than a database path.
     evidence_meta = []
+    native_l85_evidence_meta = None
+    # Node-level pre-research configuration, resolved before the native L10
+    # freeze guard below and the V0.7 gate further down both read it.
+    declared_pre_research = str(node_info.get("pre_research") or "").strip()
+    pr_cfg = PRE_RESEARCH_MAP.get(node_id) if declared_pre_research else None
+    if pr_cfg and str(pr_cfg.get("type") or "") != declared_pre_research:
+        pr_cfg = None
     if node_id in {"L10a", "L10b"}:
         evidence_nodes = ["L1", "L8.5"]
         evidence_text = deep_research.render_evidence_digest(
             project_dir, args.cand_id, evidence_nodes)
+        # L8.5 evidence: resolve the exact canonical run once from the delta's
+        # deep_research_run_id — never by mtime or uniqueness.  The identity is
+        # frozen before (and independently of) any rendered evidence digest.
+        l85_ids = []
+        l85_run_id = None
+        resolved = None
+        try:
+            from research_loop.delta import _delta_for_candidate as _dfc
+            l85_delta_path = _dfc(project_dir, "L8.5_curie", args.cand_id)
+            if l85_delta_path and l85_delta_path.exists():
+                l85_delta = json.loads(
+                    l85_delta_path.read_text(encoding="utf-8"))
+                l85_run_id = str(
+                    l85_delta.get("deep_research_run_id") or "").strip()
+        except (OSError, json.JSONDecodeError, KeyError):
+            l85_run_id = None
+        if l85_run_id:
+            resolved = l85_verification.resolve_l85_evidence_ids(
+                project_dir, args.cand_id, l85_run_id)
+            if resolved is not None:
+                l85_ids = resolved
+        # Native v2.1 L10a/L10b: freeze exact L8.5 authority from the same
+        # canonical identity that L8.5 assembly already validates, and fail
+        # closed when that identity is missing or invalid.  The identity check
+        # is independent of whether a rendered evidence digest exists.
+        if (not pr_cfg
+                and profile.delta_schema_version == "2.1"):
+            if not l85_run_id:
+                print(
+                    f"ERROR: {node_id} native context requires an "
+                    f"exact L8.5 deep_research_run_id", file=sys.stderr)
+                return 3
+            try:
+                if resolved is None:
+                    raise l85_verification.L85VerificationError(
+                        f"exact L8.5 evidence run {l85_run_id} is missing "
+                        f"or invalid")
+                native_l85_evidence_meta = {
+                    "run_id": l85_run_id,
+                    "evidence_ids": l85_ids,
+                }
+            except l85_verification.L85VerificationError as exc:
+                print(f"ERROR: {node_id} {exc}", file=sys.stderr)
+                return 3
+            if not native_l85_evidence_meta.get("evidence_ids"):
+                print(
+                    f"ERROR: {node_id} exact L8.5 evidence authority "
+                    f"must include at least one evidence ID",
+                    file=sys.stderr)
+                return 3
+        elif l85_run_id and resolved is not None:
+            native_l85_evidence_meta = {
+                "run_id": l85_run_id,
+                "evidence_ids": l85_ids,
+            }
         if evidence_text.strip() != "=== DEEP RESEARCH EVIDENCE ===":
             sections.append(evidence_text.rstrip())
             sections.append("")
-            evidence_meta = {"nodes": evidence_nodes,
-                             "evidence_ids": deep_research.evidence_ids(
-                                 project_dir, args.cand_id, evidence_nodes)}
+            # L1 evidence: resolved via deep_research path (unchanged)
+            l1_ids = deep_research.evidence_ids(
+                project_dir, args.cand_id, ["L1"])
+            evidence_meta = {
+                "nodes": evidence_nodes,
+                "evidence_ids": l1_ids + l85_ids,
+            }
 
     # --- V0.7 deep-research gate + pre-research injection --------------------
     # Only profile-topology-declared compatibility stages may consult the old
     # pre-research map. Native literature nodes have Curie-owned evidence.
     pre_research_meta = None
-    declared_pre_research = str(node_info.get("pre_research") or "").strip()
-    pr_cfg = PRE_RESEARCH_MAP.get(node_id) if declared_pre_research else None
-    if pr_cfg and str(pr_cfg.get("type") or "") != declared_pre_research:
-        pr_cfg = None
     if pr_cfg:
         prf = _pre_research_file(project_dir, node_id)
         is_lit = pr_cfg.get("type") in _LIT_PRE_RESEARCH_TYPES
@@ -761,6 +824,7 @@ def cmd_assemble_context(args):
                       if (is_exec and workspaces) else None),
         "pre_research": pre_research_meta,
         "native_l4_evidence": native_l4_evidence_meta,
+        "native_l85_evidence": native_l85_evidence_meta,
         "deep_research_evidence": evidence_meta,
         "research_seed": (
             research_seed.manifest_entry(l1_research_seed)

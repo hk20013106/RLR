@@ -1,11 +1,14 @@
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 
-from research_loop import deep_research, l0_contract, research_seed
+from research_loop import (
+    deep_research, l0_contract, l85_literature_verification, research_seed,
+)
 from research_loop.hypothesis_ledger import (
     HypothesisLedger, binding_path, canonical_json,
 )
@@ -225,6 +228,99 @@ def commit_v2(project_dir, candidate_id, node, persona, delta, round_id="1"):
     return result
 
 
+def commit_l85_fixture_authority(project_dir, candidate_id, *, result_context="",
+                                 round_id="1"):
+    """Commit a real synthetic L8.5 artifact for native L10 consumers.
+
+    The production L8.5 emission requires the L4-L7 chain to have advanced the
+    candidate's hypothesis to EXECUTED.  Fixtures do not replay that chain, so
+    the synthetic hypothesis is pre-advanced to EXECUTED (the state the real
+    chain produces); the evidence pack, the native verification run, and the
+    L8.5 delta emission itself all go through the real machinery.
+    """
+    from deep_research_fixtures import persist_synthetic_evidence
+
+    ok, _reason = deep_research.audit_evidence_pack(
+        project_dir, candidate_id, "L8.5"
+    )
+    if ok:
+        run_id = str(
+            deep_research.unique_run_id(project_dir, candidate_id, "L8.5") or ""
+        )
+        if not run_id:
+            raise AssertionError("existing L8.5 evidence pack is ambiguous")
+    else:
+        artifact = persist_synthetic_evidence(
+            project_dir, candidate_id, "L8.5",
+            ["synthetic L8.5 verification"], result_context=result_context,
+        )
+        run_id = str(artifact["run_id"])
+    details = deep_research.evidence_pack_details(
+        project_dir, candidate_id, "L8.5", run_id=run_id
+    )
+    evidence_id = sorted(details["records"])[0]
+
+    hypothesis_id = seed_selected_hypothesis(project_dir, candidate_id)
+    store = os.environ["RLR_HYPOTHESIS_STORE"]
+    con = sqlite3.connect(store)
+    try:
+        cursor = con.execute(
+            "UPDATE workflow_projection SET workflow_status='EXECUTED' "
+            "WHERE occurrence_id=(SELECT occurrence_id FROM occurrences "
+            "WHERE hypothesis_id=? AND candidate_id=?)",
+            (hypothesis_id, candidate_id),
+        )
+        if cursor.rowcount != 1:
+            raise AssertionError("synthetic L8.5 fixture found no occurrence")
+        con.commit()
+    finally:
+        con.close()
+
+    l85_literature_verification.persist_run_manifest(
+        project_dir, candidate_id, run_id=run_id,
+        payload={
+            "research_seed": {},
+            "query_plan": {"plan_id": "qp1", "queries": []},
+            "discovery": {},
+            "selected_paper_ids": [],
+            "source_snapshots": [],
+            "located_evidence": [{
+                "evidence_id": evidence_id,
+                "verification_status": "LOCATED",
+                "locator": "char:0:10",
+                "text": "synthetic located evidence",
+                "retrieval": {
+                    "engine": "test",
+                    "source_sha256": hashlib.sha256(
+                        evidence_id.encode("utf-8")
+                    ).hexdigest(),
+                    "snapshot_path": "",
+                },
+            }],
+            "semantic_verifications": [],
+            "findings": [{"finding_id": "f1", "text": "synthetic finding",
+                          "sources": ["L7"]}],
+            "verdicts": [{"finding_id": "f1", "verdict": "supports",
+                          "evidence_ids": [evidence_id], "reason": "synthetic"}],
+        },
+    )
+    commit_v2(project_dir, candidate_id, "L8.5", "Curie", {
+        "schema_version": "2.1",
+        "deep_research_run_id": run_id,
+        "deep_research_receipt_hash": details["receipt_hash"],
+        "assessments": [{
+            "hypothesis_id": hypothesis_id,
+            "outcome": "SUPPORTS",
+            "comparison": "synthetic L8.5 fixture",
+            "evidence_ids": [evidence_id],
+        }],
+        "summary": "synthetic L8.5 fixture delta",
+        "searched_keywords": ["synthetic"],
+        "papers": [],
+    }, round_id)
+    return run_id, evidence_id
+
+
 def write_native_emission_receipts(project_dir, candidate_id, node, persona, source_file,
                                    *, store_path=None):
     """Build an exact synthetic provider boundary for CLI integration tests."""
@@ -305,6 +401,53 @@ def write_native_emission_receipts(project_dir, candidate_id, node, persona, sou
         evidence_artifacts = deep_research.evidence_artifact_manifest(
             project, candidate_id, node, run_id
         )
+    native_l85_evidence = None
+    if node in ("L10a", "L10b"):
+        # Native L10 consumers validate the frozen L8.5 authority before the
+        # gate: mirror the real manifest shape with a synthetic exact run that
+        # freezes exactly the evidence IDs this delta cites.
+        cited = [
+            str(item) for item in
+            (json.loads(source.read_text(encoding="utf-8"))
+             .get("literature_evidence_ids") or [])
+        ]
+        run_id = f"{candidate_id}_{node}_l85_authority"
+        snapshots = project / "08_Audit" / "l85_snapshots"
+        located = []
+        for index, evidence_id in enumerate(cited):
+            snapshot = snapshots / f"{run_id}_{index}.txt"
+            snapshot.parent.mkdir(parents=True, exist_ok=True)
+            snapshot.write_bytes(evidence_id.encode("utf-8"))
+            located.append({
+                "evidence_id": evidence_id,
+                "verification_status": "LOCATED",
+                "locator": "char:0:10",
+                "text": f"synthetic boundary evidence for {evidence_id}",
+                "retrieval": {
+                    "engine": "test",
+                    "source_sha256": hashlib.sha256(
+                        evidence_id.encode("utf-8")
+                    ).hexdigest(),
+                    "snapshot_path": snapshot.relative_to(project).as_posix(),
+                },
+            })
+        l85_literature_verification.persist_run_manifest(
+            project, candidate_id, run_id=run_id,
+            payload={
+                "research_seed": {},
+                "query_plan": {"plan_id": "qp1", "queries": []},
+                "discovery": {},
+                "selected_paper_ids": [],
+                "source_snapshots": [],
+                "located_evidence": located,
+                "semantic_verifications": [],
+                "findings": [{"finding_id": "f1", "text": "synthetic finding",
+                              "sources": ["L7"]}],
+                "verdicts": [{"finding_id": "f1", "verdict": "supports",
+                              "evidence_ids": cited, "reason": "synthetic"}],
+            },
+        )
+        native_l85_evidence = {"run_id": run_id, "evidence_ids": cited}
     audit = project / "08_Audit" / "test_provider_receipts"
     audit.mkdir(parents=True, exist_ok=True)
     rendered = audit / f"{candidate_id}_{node}_context.txt"
@@ -339,6 +482,7 @@ def write_native_emission_receipts(project_dir, candidate_id, node, persona, sou
         "native_l4_evidence": (
             evidence_artifacts if node == "L4" else None
         ),
+        "native_l85_evidence": native_l85_evidence,
         "research_seed": (
             research_seed.manifest_entry(seed) if seed is not None else None
         ),

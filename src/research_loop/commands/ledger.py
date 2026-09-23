@@ -9,6 +9,7 @@ import pitfall_ledger as pl
 
 from research_loop import deep_research, hypothesis_migration, research_seed
 from research_loop import l4_evidence_bundle
+from research_loop import l85_literature_verification
 from research_loop.common import _append_decision, _now, _set_status, _stamp
 from research_loop.delta import (
     DELTA_PERSONA,
@@ -343,6 +344,24 @@ def _validate_native_receipts(
                 f"exact native L4 evidence run failed revalidation: {reason}"
             )
         recorded_evidence = current_evidence
+    elif args.node in ("L10a", "L10b"):
+        # Native L10 consumes only the frozen L8.5 verification authority; the
+        # retired legacy branch below is never a fallback for native L10, so a
+        # missing or invalid field fails closed here instead of reaching it.
+        l85_evidence = manifest.get("native_l85_evidence")
+        if not isinstance(l85_evidence, dict) or not l85_evidence.get("evidence_ids"):
+            raise LedgerError(
+                f"native {args.node} context lacks the frozen L8.5 evidence authority"
+            )
+        run_id = str(l85_evidence.get("run_id") or "")
+        ok, reason, _run = l85_literature_verification.audit_run_manifest(
+            args.project_dir, str(args.cand_id), run_id=run_id
+        )
+        if not ok:
+            raise LedgerError(
+                f"exact native L8.5 evidence run failed revalidation: {reason}"
+            )
+        recorded_evidence = l85_evidence
     elif native_l4_evidence is not None:
         raise LedgerError(
             "native L4 evidence authority is invalid for this emission"
@@ -682,8 +701,19 @@ def _emit_delta_v2(args, data):
                 project_dir, args.cand_id, data)
             if not ok_l10:
                 _errors.append(l10_reason)
+            # Reuse the frozen L8.5 authority that _validate_native_receipts
+            # already validated for this emission.  The context manifest is
+            # never reread here: a second parse that failed would silently
+            # downgrade a validated authority to None and drop native L10 into
+            # the legacy evidence resolver.
+            l85_frozen_ids = None
+            _frozen_l85 = provenance.get("evidence_artifacts")
+            if (isinstance(_frozen_l85, dict)
+                    and _frozen_l85.get("evidence_ids")):
+                l85_frozen_ids = list(_frozen_l85["evidence_ids"])
             ok_evidence, evidence_reason = _audit_l10_evidence(
-                project_dir, args.cand_id, data)
+                project_dir, args.cand_id, data,
+                l85_evidence_ids=l85_frozen_ids)
             if not ok_evidence:
                 _errors.append(evidence_reason)
         if _errors:

@@ -2,7 +2,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from native_v2_helpers import bootstrap_project_ready
+from native_v2_helpers import bootstrap_project_ready, commit_l85_fixture_authority
 from research_loop.paths import _layer_template_path, _persona_template_path
 
 
@@ -50,6 +50,13 @@ def test_full_mode_injects_current_persona_and_layer_for_key_nodes(tmp_path):
         "L10c": ("Linnaeus", "Catalog Master"),
     }
     for node, (persona, title) in expected.items():
+        # Native L10 consumers resolve the frozen L8.5 authority before the
+        # provider boundary: the project needs a committed L8.5 artifact.
+        if node == "L10b":
+            commit_l85_fixture_authority(
+                project, cand_id,
+                result_context='{"L7_key_results": {"synthetic": "observed"}}',
+            )
         result = subprocess.run(
             [sys.executable, str(CLI), "assemble-context", str(project), cand_id,
              "--node", node, "--template-mode", "full"],

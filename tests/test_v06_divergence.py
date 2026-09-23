@@ -336,6 +336,9 @@ def _emit_l10b(proj, cand, obj):
     obj = {
         "schema_version": _schema_version(proj),
         **obj,
+        # Native L10b consumes the frozen L8.5 authority at the provider
+        # boundary; the boundary fixture freezes exactly what the delta cites.
+        "literature_evidence_ids": ["synthetic-l10b-literature"],
         "hypothesis_decisions": [{
             "hypothesis_id": hid, "disposition": "ARCHIVE", "reason": "weak",
         }],
