@@ -1,0 +1,50 @@
+{
+  "schema_version": "ExternalReuseAudit/v1",
+  "change_id": "2026-09-23-external-reuse-gate",
+  "EXISTING_IMPLEMENTATIONS_REVIEWED": [
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/pre_e2e_closure.py",
+      "finding": "Existing structured, fail-closed audit owner for the runtime DAG. It already defines the report conventions (schema_version, CLOSED/CONTRACT_MISMATCH statuses, unresolved_required_paths, allowed/blocked gate) that this change reuses rather than re-inventing."
+    },
+    {
+      "scope": "internal",
+      "reference": "tools/ci_change_scope.py and .github/workflows/ci.yml (scope job)",
+      "finding": "Existing change-governance entry point: it classifies changed paths (docs-only fast path) and gates the pipeline. The reuse gate is added as one step in this same job, not as a second gate job or a second classifier. The same job already decides whether the base/head diff is knowable, which this change reuses to fail closed on an unknown diff."
+    },
+    {
+      "scope": "external",
+      "reference": "https://github.com/architecture-decision-record/architecture-decision-record",
+      "finding": "ADR Guard / archgate / Decision Guardian: the mature pattern is 'watched code paths + a required decision record added or updated in the same change + explicit named waivers + CI failure otherwise'. Template-agnostic and dependency-free. This is the pattern adopted, including self-watching the rule's own owners."
+    },
+    {
+      "scope": "external",
+      "reference": "https://www.openpolicyagent.org/docs/cicd/pr-checks",
+      "finding": "OPA/Rego PR-check policies map changed files to required checks as testable policy-as-code (opa test). Confirms the changed-paths-to-required-artifact pattern, but requires an OPA/Conftest toolchain that this repository does not use. It also demonstrates the failure mode avoided here: a check that silently passes when the change input is unavailable."
+    }
+  ],
+  "REUSABLE_COMPONENTS": [
+    {
+      "reference": "src/research_loop/pre_e2e_closure.py",
+      "disposition": "EXTEND",
+      "reason": "Reuse its structured fail-closed report conventions and single-owner discipline; the reuse gate is a separate change-governance concern, so it extends the convention family instead of enlarging the runtime DAG closure module."
+    },
+    {
+      "reference": ".github/workflows/ci.yml (scope job) + tools/ci_change_scope.py",
+      "disposition": "REUSE",
+      "reason": "The scope job already computes the changed-path set, gates CI, and knows whether the diff base is available. The gate consumes the same set and the same diff-known signal as one additional step; no new workflow or classifier is created."
+    },
+    {
+      "reference": "ADR Guard / archgate watched-path + required-record + explicit-waiver + self-watch pattern",
+      "disposition": "ADAPT",
+      "reason": "Adopt the pattern but bind it to RLR's own structured ExternalReuseAudit/v1 artifact and stdlib validator instead of an external Markdown ADR and a third-party GitHub Action."
+    },
+    {
+      "reference": "OPA / Conftest policy-as-code PR checks",
+      "disposition": "REJECT",
+      "reason": "Would add a Rego/OPA toolchain and a parallel policy owner; the repository already standardizes on dependency-free Python checks plus pytest, so adopting OPA would create a second governance owner."
+    }
+  ],
+  "ADOPTED_PATTERN": "EXTEND",
+  "WHY_NEW_CODE_IS_NECESSARY": "No existing RLR owner validates an external-reuse artifact or maps the architecture surface to a required decision record: pre_e2e_closure audits runtime DAG closure, and ci_change_scope only classifies docs-only versus full. The external prior art (ADR Guard, archgate, OPA/Conftest) is either a third-party GitHub Action or a separate Rego toolchain, which would introduce a second governance owner and new dependencies. The only genuinely new code required is a thin, dependency-free validator for the structured artifact plus its fail-closed report; it is wired into the existing scope job, self-watches its own owners (AGENTS.md, the spec, and the tool), and fails closed on an unknown diff, so no new agency, skill, or parallel gate is created."
+}

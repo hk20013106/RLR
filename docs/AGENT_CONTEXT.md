@@ -12,6 +12,9 @@ code, validators, and tests.
 3. [`DAG_TOPOLOGY.md`](DAG_TOPOLOGY.md): node protocol. The historical
    [`MAIN_AGENT_RUN.md`](MAIN_AGENT_RUN.md) path is a retirement notice.
 4. The narrow source module and test for the behavior being changed.
+5. [`architecture/EXTERNAL_REUSE_GATE.md`](architecture/EXTERNAL_REUSE_GATE.md):
+   before any architecture-level change, prove internal and external reuse was
+   evaluated; the machine check is `tools/external_reuse_gate.py`.
 
 The project is an auditable scientific-research DAG. It prioritizes scientific
 correctness, contract/provenance integrity, authority isolation,

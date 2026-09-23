@@ -53,6 +53,32 @@ patches, or create a patch stack, stop and redesign before implementation.
 Prefer removing or deliberately retiring superseded duplicate paths over keeping
 multiple authorities alive.
 
+## EXTERNAL REUSE GATE
+
+Architecture-level changes must reuse before they create. This is a hard rule,
+not a preference.
+
+Decision order: `REUSE > ADAPT > EXTEND > REFACTOR > CREATE`.
+
+An architecture-level change touches state/memory, schema/contract, agent
+handoff, evidence provenance, workflow/orchestration, database/persistence,
+validation/recovery, or skills/tools. For any such change, before design or
+coding you MUST:
+
+1. search RLR's existing code and history for an owner that already does this;
+2. search external GitHub / package / published systems for real prior art;
+3. read the actual source of the most relevant internal and external candidates;
+4. record why REUSE / ADAPT / EXTEND / REFACTOR is insufficient before CREATE.
+
+Record the result as a valid `ExternalReuseAudit/v1` artifact under
+`docs/architecture/external-reuse/` in the same change set, per
+[`docs/architecture/EXTERNAL_REUSE_GATE.md`](docs/architecture/EXTERNAL_REUSE_GATE.md).
+The machine check `tools/external_reuse_gate.py` fails the change otherwise.
+
+Gate not complete: `NO ARCHITECTURE CHANGE`. Do not create a new agency or skill
+when an existing mechanism can carry the work, and do not duplicate an existing
+governance or audit owner.
+
 ## Agent orientation
 
 For a compact architecture map, runtime entry points, authority boundaries, and

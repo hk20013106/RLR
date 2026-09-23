@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       mode: ${{ steps.classify.outputs.mode }}
+      diff_known: ${{ steps.classify.outputs.diff_known }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,21 +43,40 @@ jobs:
 
           changed="$RUNNER_TEMP/changed-files.txt"
           : > "$changed"
+          diff_known="true"
           if [[ -z "$base" || -z "$head" || "$base" =~ ^0+$ ]]; then
             mode="full"
+            diff_known="false"
           elif ! git cat-file -e "$base^{commit}" 2>/dev/null || ! git cat-file -e "$head^{commit}" 2>/dev/null; then
             mode="full"
+            diff_known="false"
           else
             git diff --name-only "$base" "$head" > "$changed"
             mode="$(python3 tools/ci_change_scope.py < "$changed")"
           fi
 
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          echo "CI scope: $mode"
+          echo "diff_known=$diff_known" >> "$GITHUB_OUTPUT"
+          echo "CI scope: $mode (diff_known=$diff_known)"
 
           if [[ "$mode" == "docs-only" ]]; then
             git diff --check "$base" "$head"
           fi
+
+      # EXTERNAL REUSE GATE: an architecture-level change must carry a valid
+      # ExternalReuseAudit/v1 artifact in the same change set. Reuses this same
+      # scope job and the changed-path set computed above; it is not a second
+      # gate job. See docs/architecture/EXTERNAL_REUSE_GATE.md.
+      - name: External reuse gate
+        if: steps.classify.outputs.mode == 'full'
+        shell: bash
+        env:
+          DIFF_KNOWN: ${{ steps.classify.outputs.diff_known }}
+        run: |
+          python3 tools/external_reuse_gate.py check \
+            --repo-root . \
+            --changed "$RUNNER_TEMP/changed-files.txt" \
+            --diff-known "$DIFF_KNOWN"
 
   test:
     name: Test / Windows / Python 3.13
