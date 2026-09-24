@@ -25,7 +25,8 @@ Define the method components needed by the study. For every serious method candi
 7. strengths for this project;
 8. limitations and failure modes;
 9. feasible alternatives;
-10. status: `eligible`, `ineligible`, or `needs_user_source`;
+10. status — one of the four decision outcomes defined by the live provider
+    schema (`eligible`, `ineligible`, `needs_user_source`, `needs_user_data`);
 11. `execution_required`: whether this candidate is a Fisher-declared implementation path needed to cover a required component;
 12. `evidence_card_handles` (for example `E1`) supporting the candidate;
 13. `evidence_gap_handles` (for example `G1`) relevant to the candidate;
@@ -51,6 +52,12 @@ A method name plus a citation is not a sufficient method description.
 ## Source-blocked candidates
 
 Use `needs_user_source` only when a genuinely necessary candidate cannot be audited from the exact sources already attempted by L4B. State which evidence gap or legally obtained local source is needed. Registration alone never satisfies the gate; a later L4B run must produce an accepted evidence card.
+
+## Data-blocked candidates
+
+Use `needs_user_data` only when an otherwise executable candidate lacks required user data (inputs, measurements, or annotations not present in the authorized data binding). List every unavailable input in `missing_inputs`.
+
+`needs_user_source` and `needs_user_data` are orthogonal blockers: the first means exact method evidence is missing, the second means executable data is missing. A candidate may carry both when both hold; a source-blocked candidate must never carry `missing_inputs` (that conflation belongs to `needs_user_data`). The live provider schema is authoritative for the exact fields each status requires.
 
 ## Handoff
 

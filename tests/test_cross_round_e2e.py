@@ -29,7 +29,11 @@ from pathlib import Path
 import pytest
 
 from deep_research_fixtures import persist_synthetic_evidence
-from native_v2_helpers import bootstrap_project_ready, write_catalog_emission_receipts
+from native_v2_helpers import (
+    bootstrap_project_ready,
+    commit_v2,
+    write_catalog_emission_receipts,
+)
 from research_loop import deep_research
 from research_loop.l0_state import write_round_manifest
 from research_loop import l0_contract, l0_data, l0_state
@@ -141,8 +145,18 @@ def _seed_terminal_candidate(proj, loop_type="divergent", source_file=None):
         } for item in l1["hypotheses"]],
         "route_to": "Fisher",
     })
-    emit("L4", "Fisher", {"strategies": [{"strategy_id": "S1",
-         "hypothesis_ids": [hid], "name": "m", "steps": ["measure"]}]})
+    # Native v2.1-catalog-1 L4 emission requires the bundle-bound Fisher
+    # shape (deep_research_run_id + method_components + method_candidates
+    # with local handles); a strategies-only L4 delta is rejected at the
+    # provider wire boundary. These loop-memory tests need no method design,
+    # so L4 scaffolding is seeded through the established direct-commit
+    # helper (canonical validation only) while every other node keeps the
+    # full CLI provider boundary.
+    commit_v2(proj, cand, "L4", "Fisher", {
+        "schema_version": "2.1",
+        "strategies": [{"strategy_id": "S1", "hypothesis_ids": [hid],
+                        "name": "m", "steps": ["measure"]}],
+    })
     emit("L5", "Tukey", {
          "attacks": [{"attack_id": "A1", "strategy_id": "S1", "hypothesis_ids": [hid],
                       "severity": "HIGH", "text": "attack"}],

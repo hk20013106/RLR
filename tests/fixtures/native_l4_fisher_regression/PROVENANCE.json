@@ -1,0 +1,16 @@
+{
+  "description": "Exact raw Fisher provider output that produced the first real cold-start E2E blocker (L4 emit-delta rejected at the L4C reference-handle binder). Frozen byte-exact; do not edit.",
+  "source_run_dir": "<workspace>/cold-start-e2e-20260923-175102-337c785",
+  "source_artifact": "four-species-hhr-rlr/08_Run_Receipts/C20260923175201356493/round_01/L4_Fisher_delta.json",
+  "sha256": "4dbc8faadac4c2e42ab27aba021b7587db294f6e732c27ea37ad22d365347521",
+  "bytes": 18268,
+  "incident": "_runtime/E2E_FIRST_BLOCKER_L4_EMIT_20260923.md",
+  "tested_commit": "337c785d12311b77cb92a6d2be18f13515245fec",
+  "failure_characteristics": {
+    "method_candidates": 5,
+    "statuses": ["needs_user_source", "needs_user_data"],
+    "present": ["method_anchor_handles"],
+    "absent": ["execution_required", "evidence_card_handles", "evidence_gap_handles"]
+  },
+  "expected_repaired_behavior": "validate_provider_submission() FAILs with required-field diagnostics; the binder never executes."
+}

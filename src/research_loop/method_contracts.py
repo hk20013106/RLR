@@ -42,6 +42,20 @@ def _string_array(*, min_items=0):
     }
 
 
+def _require_all(schema: dict, fields) -> None:
+    """Append-only union of ``required`` entries preserving order.
+
+    Existing requirements are never removed or reordered; only genuinely
+    absent field names are appended. Used to tighten a derived projection
+    without touching the canonical schema it was copied from.
+    """
+    required = schema.get("required")
+    if not isinstance(required, list):
+        schema["required"] = list(dict.fromkeys(fields))
+        return
+    schema["required"] = list(dict.fromkeys([*required, *fields]))
+
+
 def validate_input_requirements(candidate: dict) -> None:
     """Keep input classes separate while preserving independent blockers.
 
@@ -244,6 +258,24 @@ def install(contracts_module) -> None:
     provider_candidate = provider_l4["properties"]["method_candidates"]["items"]
     provider_candidate["required"].extend([
         "required_inputs", "optional_diagnostics", "missing_inputs",
+    ])
+    # Native L4C wire is strictly narrower than the canonical persisted v2.1
+    # contract: the deterministic binder (resolve_l4c_reference_handles)
+    # unconditionally requires every staged handle array plus the execution
+    # flag, so a provider payload that omits them must fail here instead of
+    # at the commit boundary. Append-only: every pre-existing requirement
+    # (including schema_version/strategies at the top level and
+    # method_anchor_handles at candidate level, already present via the
+    # canonical-ID to local-handle rename above) is preserved.
+    _require_all(provider_candidate, [
+        "execution_required",
+        "evidence_card_handles",
+        "evidence_gap_handles",
+    ])
+    _require_all(provider_l4, [
+        "deep_research_run_id",
+        "method_components",
+        "method_candidates",
     ])
     hc.PROVIDER_SCHEMA_REGISTRY["v2.1-catalog-1"] = {
         "2.1": {"L4": provider_l4}

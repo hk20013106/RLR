@@ -23,6 +23,16 @@ EVIDENCE_BUNDLE_SCHEMA = "L4BEvidenceBundle/v2"
 EVIDENCE_RECEIPT_SCHEMA = "EvidenceRunReceipt/v1.1"
 DETERMINISTIC_RECEIPT_SCHEMA = "DeterministicResolverReceipt/v2"
 
+# Single owner of the deterministic L4C binder's structural preconditions:
+# every candidate must carry all three handle arrays. The provider-schema
+# projection and the static closure audit both read this constant instead of
+# redeclaring the field list.
+L4C_REFERENCE_BINDING_FIELDS = (
+    ("evidence_card", "evidence_card_handles", "evidence_card_ids"),
+    ("evidence_gap", "evidence_gap_handles", "evidence_gap_ids"),
+    ("method_anchor", "method_anchor_handles", "method_anchor_ids"),
+)
+
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(
@@ -119,11 +129,7 @@ def resolve_l4c_reference_handles(evidence_artifact: dict, delta: dict) -> tuple
     if not isinstance(candidates, list):
         raise deep_research.DeepResearchError("L4C requires method_candidates for reference binding")
     binding_rows = []
-    fields = (
-        ("evidence_card", "evidence_card_handles", "evidence_card_ids"),
-        ("evidence_gap", "evidence_gap_handles", "evidence_gap_ids"),
-        ("method_anchor", "method_anchor_handles", "method_anchor_ids"),
-    )
+    fields = L4C_REFERENCE_BINDING_FIELDS
     for index, candidate in enumerate(candidates):
         if not isinstance(candidate, dict):
             raise deep_research.DeepResearchError("L4C method candidate must be an object")

@@ -5,6 +5,8 @@ import copy
 import json
 from pathlib import Path
 
+from research_loop.compatibility import PROFILE_V21_CATALOG_1
+
 
 _REVIEW_TYPES = {"review", "systematic_review", "meta_analysis"}
 _ANCHOR_FIELDS = {"anchor_id", "method_component_ids", "method_ids", "source_kind"}
@@ -284,6 +286,29 @@ def install(deep_research_module) -> None:
             # Validate the complete provider payload before _split() can hide
             # navigation papers from the frozen-corpus boundary.
             pre_persist_validator(project_dir, candidate_id, payload)
+        if (
+            node == "L4"
+            and payload.get("method_components") is not None
+            and str(profile_id or "") == PROFILE_V21_CATALOG_1
+        ):
+            # Native catalog isolation: the legacy L4 semantic validators
+            # (candidate status/anchor semantics plus review-anchor claims)
+            # are not semantic authorities for native L4C, so they are
+            # explicitly bypassed at this profile-carrying funnel boundary.
+            # The inner method_evidence gate retains base structural
+            # validation before persistence.
+            return original_persist(
+                project_dir,
+                candidate_id,
+                node,
+                payload,
+                receipt,
+                result_context,
+                project_id=project_id,
+                round_id=round_id,
+                profile_id=profile_id,
+                research_persona=research_persona,
+            )
         if node != "L4" or not payload.get("method_components"):
             return original_persist(
                 project_dir,

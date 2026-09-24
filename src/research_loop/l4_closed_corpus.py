@@ -654,6 +654,16 @@ def _asset_for(result, state):
 
 
 def enrich_provider_payload(payload, state):
+    # Scope lock: this transformer serves only the pre-binding closed-corpus
+    # evidence path. A payload that already declares its L4B evidence run
+    # (deep_research_run_id) is a stage-bound Native L4C Fisher delta owned by
+    # the emit-delta/binder boundary; enriching it here would make this module
+    # a hidden second writer of L4C candidate state. The marker is explicit
+    # stage routing (declared by the staged L4 contract, consumed by the L4C
+    # binder), not a payload-shape heuristic, and legacy provider payloads
+    # never carry it because their run identity is assigned at persistence.
+    if payload.get("deep_research_run_id"):
+        return
     resolved = [
         result for result in state.get("resolutions", [])
         if result.get("status") == "resolved"

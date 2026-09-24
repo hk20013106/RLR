@@ -11,6 +11,7 @@ import json
 import re
 from pathlib import Path
 
+from research_loop.compatibility import PROFILE_V21_CATALOG_1
 from research_loop.user_sources import registered_sources, verify_registered_source
 
 
@@ -395,9 +396,18 @@ with a real accepted method anchor, or a truthful source-blocked candidate.
                 project_id=project_id, round_id=round_id, profile_id=profile_id,
                 research_persona=research_persona,
             )
-        validate_payload(
-            payload, node=node, project_dir=project_dir, candidate_id=candidate_id
-        )
+        if str(profile_id or "") == PROFILE_V21_CATALOG_1:
+            # Broadcast-wrapper isolation (native catalog profile): the legacy
+            # L4 semantic validator is not a semantic authority for native L4C
+            # (handle binding plus the v2.1-catalog-1 provider wire schema own
+            # native semantics), so it is explicitly bypassed here at the
+            # nearest boundary that carries profile identity. Base structural
+            # validation and persistence mechanics are unchanged.
+            original_validate_payload(payload)
+        else:
+            validate_payload(
+                payload, node=node, project_dir=project_dir, candidate_id=candidate_id
+            )
         if receipt.get("exit_code") != 0 or not receipt.get("command_hash") or not receipt.get("prompt_hash"):
             raise dr.DeepResearchError("skill receipt is incomplete or records a failed invocation")
         project = Path(project_dir)

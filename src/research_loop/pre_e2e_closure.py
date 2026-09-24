@@ -143,6 +143,249 @@ def _contract_closure(profile_id: str) -> dict[str, dict[str, str]]:
     return result
 
 
+def _unconditional_required_paths(schema: Any, prefix: str = "") -> set[str]:
+    """Required paths guaranteed without satisfying any conditional branch.
+
+    Unlike :func:`_schema_paths` (which also collects names appearing inside
+    ``if``/``then``/``oneOf``/``anyOf`` legs for the legacy canonical<->wire
+    subset check and must stay unchanged), this follows ``required`` at each
+    object level only through ``properties`` and array ``items``. Plain
+    ``allOf`` conjuncts without an ``if`` guard are unconditional and are
+    followed; ``anyOf``/``oneOf``/``if``/``then``/``else`` legs never are, so
+    conditional requirements are never reported as provider guarantees.
+    """
+    required: set[str] = set()
+    if not isinstance(schema, dict):
+        return required
+    names = set(schema.get("required") or [])
+    props = schema.get("properties")
+    if isinstance(props, dict):
+        for name, child in props.items():
+            path = f"{prefix}.{name}" if prefix else str(name)
+            if name in names:
+                required.add(path)
+            child_prefix = path
+            if isinstance(child, dict) and child.get("type") == "array":
+                child_prefix = path + "[]"
+                child = child.get("items")
+            required.update(_unconditional_required_paths(child, child_prefix))
+    branches = schema.get("allOf")
+    if isinstance(branches, list):
+        for branch in branches:
+            if isinstance(branch, dict) and "if" not in branch:
+                required.update(_unconditional_required_paths(branch, prefix))
+    return required
+
+
+# Native L4 status consumers whose vocabulary must stay within the provider
+# status enum. The legacy method_evidence validator is deliberately excluded:
+# it is isolated from the native profile and is not a native consumer.
+_NATIVE_L4_STATUS_CONSUMERS = (
+    ("method_contracts.py", "validate_input_requirements"),
+    ("l4_evidence_bundle.py", "_validate_required_paths"),
+    ("l4_evidence_bundle.py", "resolve_l4c_reference_handles"),
+    ("l4_closed_corpus.py", "required_source_blocked"),
+)
+
+
+def _reads_status(operand: ast.AST) -> bool:
+    """True when an operand reads a method-candidate status value.
+
+    Only ``candidate.get("status")``, ``candidate["status"]``, or a local
+    named ``status`` count. Status reads on other objects (for example
+    ``card.get("status")`` for L4B evidence-card acceptance) belong to a
+    different vocabulary and are excluded.
+    """
+    if isinstance(operand, ast.Name):
+        return operand.id == "status"
+    receiver = None
+    key = None
+    if isinstance(operand, ast.Subscript):
+        receiver, key = operand.value, operand.slice
+    elif isinstance(operand, ast.Call):
+        target = operand.func
+        if (
+            isinstance(target, ast.Attribute)
+            and target.attr == "get"
+            and bool(operand.args)
+        ):
+            receiver, key = target.value, operand.args[0]
+    return (
+        isinstance(receiver, ast.Name)
+        and receiver.id == "candidate"
+        and isinstance(key, ast.Constant)
+        and key.value == "status"
+    )
+
+
+def _status_literals_in_function(tree: ast.AST | None, name: str) -> set[str]:
+    """Collect status literals compared against a status read in one function.
+
+    The vocabulary is read from the actual consumer source (same AST technique
+    as the execution-receipt closure below), so no second handwritten status
+    enum is declared here. Only literals on the non-status side of a
+    comparison are collected; the ``"status"`` key string itself is excluded.
+    """
+    function = _function(tree, name) if tree is not None else None
+    literals: set[str] = set()
+    if function is None:
+        return literals
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Compare):
+            continue
+        operands = [node.left, *node.comparators]
+        if not any(_reads_status(operand) for operand in operands):
+            continue
+        for operand in operands:
+            if _reads_status(operand):
+                continue
+            for child in ast.walk(operand):
+                if isinstance(child, ast.Constant) and isinstance(child.value, str):
+                    literals.add(child.value)
+    return literals
+
+
+def _native_consumer_status_vocabulary() -> set[str]:
+    root = Path(__file__).resolve().parent
+    vocabulary: set[str] = set()
+    for relative, name in _NATIVE_L4_STATUS_CONSUMERS:
+        vocabulary.update(
+            _status_literals_in_function(_source_tree(root / relative), name)
+        )
+    return vocabulary
+
+
+def _conditioned_statuses(candidate_schema: Any) -> set[str]:
+    """Statuses guarded by at least one conditional rule in a candidate schema."""
+    conditioned: set[str] = set()
+    if not isinstance(candidate_schema, dict):
+        return conditioned
+    branches = candidate_schema.get("allOf")
+    if not isinstance(branches, list):
+        return conditioned
+    for branch in branches:
+        if not isinstance(branch, dict):
+            continue
+        status_rule = (
+            branch.get("if", {}).get("properties", {}).get("status", {})
+            if isinstance(branch.get("if"), dict) else {}
+        )
+        if not isinstance(status_rule, dict):
+            continue
+        const = status_rule.get("const")
+        if isinstance(const, str):
+            conditioned.add(const)
+        enum = status_rule.get("enum")
+        if isinstance(enum, list):
+            conditioned.update(
+                value for value in enum if isinstance(value, str)
+            )
+    return conditioned
+
+
+def _native_l4_producer_consumer_closure(provider_l4: dict | None = None) -> dict[str, Any]:
+    """Prove the Native L4 provider wire satisfies deterministic consumer preconditions.
+
+    Reads only existing owners: the live provider projection (or an isolated
+    test copy), the binder-owned field constant, and the native consumer
+    status vocabulary extracted from consumer source. Asserts binder-required
+    fields are unconditionally guaranteed by the provider schema, consumer
+    statuses fit the provider enum, and every emittable status carries at
+    least one conditional rule. ``provider_l4`` exists solely so sensitivity
+    tests can pass an isolated mutated copy; production always passes None.
+    """
+    profile = get_profile(DEFAULT_NATIVE_PROFILE)
+    version = profile.delta_schema_version
+    live = provider_l4 is None
+    if live:
+        provider_l4 = provider_schema_for_profile(
+            DEFAULT_NATIVE_PROFILE, "L4", version
+        )
+    unresolved: list[dict] = []
+    checks: dict[str, bool] = {}
+
+    def fail(check: str, detail: str) -> None:
+        checks[check] = False
+        unresolved.append({
+            "node": "L4", "check": check, "status": "CONTRACT_MISMATCH",
+            "detail": detail,
+        })
+
+    if not isinstance(provider_l4, dict):
+        fail("provider_schema_available", "native L4 provider projection is missing")
+        return {"overall": "CONTRACT_MISMATCH", "checks": checks,
+                "unresolved": unresolved}
+
+    guaranteed = _unconditional_required_paths(provider_l4)
+    missing_fields = [
+        handle for _, handle, _ in l4_evidence_bundle.L4C_REFERENCE_BINDING_FIELDS
+        if f"method_candidates[].{handle}" not in guaranteed
+    ]
+    if "method_candidates" not in guaranteed:
+        missing_fields.append("method_candidates")
+    if missing_fields:
+        fail(
+            "binder_required_subset_of_provider",
+            "binder-required fields lack an unconditional provider guarantee: "
+            + ", ".join(sorted(missing_fields)),
+        )
+    else:
+        checks["binder_required_subset_of_provider"] = True
+
+    candidate_schema = (
+        provider_l4.get("properties", {}).get("method_candidates", {}).get("items", {})
+        if isinstance(provider_l4.get("properties"), dict) else {}
+    )
+    status_rule = (
+        candidate_schema.get("properties", {}).get("status", {})
+        if isinstance(candidate_schema, dict) else {}
+    )
+    provider_enum = status_rule.get("enum") if isinstance(status_rule, dict) else None
+    if not isinstance(provider_enum, list) or not provider_enum:
+        fail("provider_status_enum_available", "native L4 provider status enum is missing")
+        provider_enum = []
+    consumer_vocabulary = _native_consumer_status_vocabulary()
+    if isinstance(provider_enum, list) and provider_enum:
+        outside = sorted(set(consumer_vocabulary) - set(provider_enum))
+        if outside:
+            fail(
+                "consumer_status_subset_of_provider",
+                "native consumer statuses outside the provider enum: "
+                + ", ".join(outside),
+            )
+        else:
+            checks["consumer_status_subset_of_provider"] = True
+
+    if isinstance(provider_enum, list) and provider_enum:
+        conditioned = _conditioned_statuses(candidate_schema)
+        unconditioned = sorted(set(provider_enum) - conditioned)
+        if unconditioned:
+            fail(
+                "every_status_conditionally_constrained",
+                "provider statuses without a conditional rule: "
+                + ", ".join(unconditioned),
+            )
+        else:
+            checks["every_status_conditionally_constrained"] = True
+        dangling = sorted(conditioned - set(provider_enum))
+        if dangling:
+            fail(
+                "no_dangling_status_rules",
+                "conditional rules reference non-emittable statuses: "
+                + ", ".join(dangling),
+            )
+        else:
+            checks["no_dangling_status_rules"] = True
+
+    return {
+        "overall": CLOSED if all(checks.values()) and checks else "CONTRACT_MISMATCH",
+        "checks": checks,
+        "consumer_status_vocabulary": sorted(consumer_vocabulary),
+        "provider_status_enum": list(provider_enum) if isinstance(provider_enum, list) else [],
+        "unresolved": unresolved,
+    }
+
+
 def _authority_closure(node_map: dict[str, dict]) -> tuple[dict[str, str], list[dict]]:
     statuses = {node: CLOSED for node in node_map}
     unresolved: list[dict] = []
@@ -409,6 +652,12 @@ def audit_static_closure(profile_id: str = DEFAULT_NATIVE_PROFILE) -> dict[str, 
             "node": "state_recovery",
             "status": state_recovery["overall"],
         })
+    if profile_id == DEFAULT_NATIVE_PROFILE:
+        producer_consumer = _native_l4_producer_consumer_closure()
+        if producer_consumer["overall"] != CLOSED:
+            unresolved.extend(producer_consumer["unresolved"])
+    else:
+        producer_consumer = {"overall": NA, "checks": {}, "unresolved": []}
 
     return {
         "schema_version": "PreE2EClosureReport/v1",
@@ -417,6 +666,7 @@ def audit_static_closure(profile_id: str = DEFAULT_NATIVE_PROFILE) -> dict[str, 
         "contract_transforms": contracts,
         "execution_receipt": execution_receipt,
         "state_recovery": state_recovery,
+        "l4_producer_consumer": producer_consumer,
         "unresolved_required_paths": unresolved,
         "e2e_start_allowed": not unresolved,
     }

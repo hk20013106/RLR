@@ -1,0 +1,110 @@
+{
+  "schema_version": "ExternalReuseAudit/v1",
+  "change_id": "2026-09-23-native-l4-contract-closure",
+  "EXISTING_IMPLEMENTATIONS_REVIEWED": [
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/method_contracts.py :: install()",
+      "finding": "Single owner of the native v2.1 L4 contract extension and the v2.1-catalog-1 provider projection (canonical-ID to local-handle rename plus conditional staged fields). The repair extends its projection requiredness append-only instead of creating a second Native L4 schema."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/hypothesis_contracts.py :: provider_schema_for_profile / validate_provider_submission / SCHEMA_REGISTRY",
+      "finding": "Existing profile-routed provider lookup with canonical fallback plus the canonical persisted registries. Reused unchanged: the tightened projection flows through the same lookup, and historical canonical readability is preserved by not touching the canonical registry."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/l4_evidence_bundle.py :: resolve_l4c_reference_handles",
+      "finding": "Deterministic binder owning the unconditional three-handle-array precondition (the consumer side of the drift). Its local field tuple is hoisted to a module constant so the closure audit reuses it instead of redeclaring the list; binder inference/defaulting semantics are untouched."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/pre_e2e_closure.py :: audit_static_closure",
+      "finding": "Existing single owner for static producer-to-consumer closure with established fail-closed report conventions. Extended in place (unconditional-required extraction, binder-vs-provider subset, enum subset, conditional-rule coverage) rather than creating a second closure auditor or contract registry."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/method_evidence.py + method_review_navigation.py validate/persist wrappers",
+      "finding": "Broadcast (non-profile-dispatched) legacy L4 validation funnel. Profile identity exists only at the persist boundary, so isolation is implemented there with the explicit PROFILE_V21_CATALOG_1 owner; no new context/profile subsystem is created and no duck-typed shape inference is used."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/l4_closed_corpus.py :: enrich_provider_payload + validate() funnel",
+      "finding": "Sanctioned deterministic transformer for the pre-binding closed-corpus path, reachable only through the frozen-manifest validate funnel. Scope-locked with the explicit L4C stage marker (deep_research_run_id) so it cannot become a second writer of bound Fisher candidate state."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/providers/base.py :: _compose_auto_prompt + src/run_loop.py _provider_output_schema + context CONTRACT block",
+      "finding": "Dynamic schema delivery is verified from source and from the real failed-run Fisher prompt file (live v2.1-catalog-1 L4 schema embedded). Prompt prose therefore keeps only scientific decision guidance while the JSON Schema owns machine shape; no prompt-owned schema is created."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/commands/ledger.py :: _emit_delta_v2 / _bind_l4_delta_for_commit",
+      "finding": "Single canonical commit boundary ordering provider validation before deterministic binding before ledger commit. Reused unchanged; the repair only makes the first gate strict enough that incomplete payloads cannot reach the second."
+    },
+    {
+      "scope": "external",
+      "reference": "https://json-schema.org/",
+      "finding": "Draft 2020-12 semantics (required vs dependentRequired vs if/then/allOf) already enforced at runtime by the jsonschema dependency. The closure audit mirrors exactly these semantics statically (unconditional vs conditional requirements) instead of adopting a new contract stack."
+    },
+    {
+      "scope": "external",
+      "reference": "PaperQA2 retrieval/runtime models at the existing L4B retrieval boundary",
+      "finding": "DIRECT REUSE: frozen evidence authority, ContextManifest validation, hash checks, and deterministic binding are reused unchanged; this repair weakens none of them."
+    }
+  ],
+  "REUSABLE_COMPONENTS": [
+    {
+      "reference": "src/research_loop/method_contracts.py provider projection",
+      "disposition": "EXTEND",
+      "reason": "Append-only requiredness tightening (ordered set-union preserving schema_version/strategies) closes the drift at the existing owner; a separate Native L4 schema would create a second contract source of truth."
+    },
+    {
+      "reference": "src/research_loop/pre_e2e_closure.py closure conventions",
+      "disposition": "EXTEND",
+      "reason": "New producer-vs-consumer checks live in the existing closure module reusing its helpers (AST inspection, CLOSED/CONTRACT_MISMATCH reporting, run_loop gate); no second closure auditor or DAG contract framework is built."
+    },
+    {
+      "reference": "l4_evidence_bundle.L4C_REFERENCE_BINDING_FIELDS (hoisted binder tuple)",
+      "disposition": "REUSE",
+      "reason": "The closure audit reads the binder-owned constant directly, so binder preconditions have exactly one declaration site."
+    },
+    {
+      "reference": "RLR Hypothesis Ledger + frozen evidence authority / ContextManifest / Binder",
+      "disposition": "REUSE",
+      "reason": "Commit path, evidence revalidation, receipt binding, and hash checks are reused unchanged; the repair only moves rejection earlier to the provider boundary."
+    },
+    {
+      "reference": "K-Dense repo-wide contract/meta-test pattern through existing pre_e2e_closure",
+      "disposition": "ADAPT",
+      "reason": "Adopts the repo-wide contract plus static meta-test pattern (live-schema fixtures, isolated-mutation sensitivity tests) inside the existing closure owner and pytest suite rather than importing an external contract framework."
+    },
+    {
+      "reference": "hypothesis-jsonschema (property-based producer/consumer testing)",
+      "disposition": "REJECT",
+      "reason": "EVALUATED / DEFERRED: potentially useful for Phase-2 generated producer-to-consumer property testing, but explicit deterministic boundary cases are sufficient for this repair; rejected for now to avoid a new test dependency (and per task scope, hypothesis-jsonschema must not become required)."
+    },
+    {
+      "reference": "new Pydantic domain hierarchy for L4 deltas",
+      "disposition": "REJECT",
+      "reason": "Would duplicate the JSON-Schema contracts as a second validation owner; explicitly prohibited for this change set."
+    },
+    {
+      "reference": "ORM/database scientific-state registry",
+      "disposition": "REJECT",
+      "reason": "No new persistence is needed; deltas already persist through schema-validated ledger artifacts. Explicitly prohibited."
+    },
+    {
+      "reference": "new contract registry",
+      "disposition": "REJECT",
+      "reason": "SCHEMA_REGISTRY / PROVIDER_SCHEMA_REGISTRY / PERSISTED_SCHEMA_REGISTRY already own registration; explicitly prohibited."
+    },
+    {
+      "reference": "Pact/Schemathesis-style HTTP contract stack",
+      "disposition": "REJECT",
+      "reason": "Provider boundary is in-process JSON-Schema validation, not HTTP; adopting a consumer-driven HTTP contract stack would add a parallel owner and new dependencies for no reachable interface."
+    }
+  ],
+  "ADOPTED_PATTERN": "EXTEND",
+  "WHY_NEW_CODE_IS_NECESSARY": "No existing owner states the producer-to-consumer guarantee: the provider projection only conditionally required the staged fields while the binder unconditionally demands them, and no static check compared the two. The genuinely new code is therefore (a) append-only requiredness in the existing projection, (b) unconditional-vs-conditional plus enum/conditional-rule comparisons inside the existing closure module reading existing owners, (c) explicit profile gates at the existing persist funnel, (d) a stage-marker scope lock on the existing enricher, and (e) deterministic regression tests including the frozen real Fisher payload. Each is an extension of its owner module, which is why no new registry, model hierarchy, database, framework, or dependency is created."
+}
