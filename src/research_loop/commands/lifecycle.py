@@ -1077,8 +1077,6 @@ def cmd_preflight(args):
         return 2
     name = _load_yaml_front(idx).get("project_name", project_dir.name)
     pf = project_dir / "00_Preflight"
-    pf.mkdir(parents=True, exist_ok=True)
-    created, skipped = [], []
     runtime_file = deep_research.runtime_config_path(project_dir)
     receipt_file = pf / "preflight_receipt.json"
     existing_receipt = receipt_file.is_file()
@@ -1086,44 +1084,191 @@ def cmd_preflight(args):
     if existing_receipt and existing_candidates:
         print("ERROR: PROJECT_READY is already consumed by candidate artifacts; refusing to rebind readiness authority", file=sys.stderr)
         return 3
-    if runtime_file.exists() and not args.force:
+
+    paperqa_arguments = (
+        ("paperqa_python", "python_executable"),
+        ("paperqa_bridge", "bridge_script"),
+        ("paperqa_repo", "paperqa_repo"),
+        ("pqa_home", "pqa_home"),
+    )
+    paperqa_values = {
+        destination: getattr(args, destination, None)
+        for destination, _field in paperqa_arguments
+    }
+    paperqa_supplied = sum(value is not None for value in paperqa_values.values())
+    if 0 < paperqa_supplied < len(paperqa_arguments):
+        print(
+            "ERROR: Partial PaperQA2 configuration is forbidden. Provide all four "
+            "flags (--paperqa-python, --paperqa-bridge, --paperqa-repo, --pqa-home) "
+            "or provide none to reuse an existing complete binding.",
+            file=sys.stderr,
+        )
+        return 2
+
+    force = bool(getattr(args, "force", False))
+    if (not runtime_file.exists() or force) and existing_receipt:
+        print("ERROR: refusing to regenerate runtime config after a readiness receipt exists", file=sys.stderr)
+        return 3
+
+    runtime_config = None
+    if runtime_file.exists():
         try:
-            existing_backend = str(json.loads(runtime_file.read_text(encoding="utf-8")).get("backend") or "")
+            loaded_runtime = json.loads(runtime_file.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            print(f"ERROR: runtime config is invalid: {exc}", file=sys.stderr)
-            return 2
+            if not force:
+                print(f"ERROR: runtime config is invalid: {exc}", file=sys.stderr)
+                return 2
+        else:
+            if isinstance(loaded_runtime, dict):
+                runtime_config = loaded_runtime
+            elif not force:
+                print("ERROR: runtime config is invalid: expected a JSON object", file=sys.stderr)
+                return 2
+
+    if runtime_config is not None and not force:
+        existing_backend = str(runtime_config.get("backend") or "")
         if existing_backend != backend:
             print(f"ERROR: backend declaration {backend!r} does not match existing runtime binding {existing_backend!r}", file=sys.stderr)
             return 3
-        skipped.append(runtime_file.name)
+
+    paperqa_fields = tuple(field for _destination, field in paperqa_arguments)
+
+    def paperqa_binding_is_complete(binding):
+        return isinstance(binding, dict) and all(
+            str(binding.get(field) or "").strip() for field in paperqa_fields
+        )
+
+    try:
+        project_binding, _store_path = l0_preflight._load_project_binding(
+            project_dir
+        )
+    except (LedgerError, KeyError, ValueError):
+        paperqa_required = False
     else:
-        if existing_receipt:
-            print("ERROR: refusing to regenerate runtime config after a readiness receipt exists", file=sys.stderr)
-            return 3
+        paperqa_required = (
+            project_binding.get("profile_id")
+            == l0_preflight.PROFILE_V21_CATALOG_1
+        )
+
+    persisted_paperqa = (
+        runtime_config.get("paperqa2") if runtime_config is not None else None
+    )
+    if paperqa_supplied == 0:
+        if paperqa_required and not paperqa_binding_is_complete(persisted_paperqa):
+            print(
+                "ERROR: PaperQA2 host capability is not bound. Run preflight with "
+                "--paperqa-python <path> --paperqa-bridge <path> "
+                "--paperqa-repo <path> --pqa-home <path>.",
+                file=sys.stderr,
+            )
+            return 2
+        if (
+            isinstance(persisted_paperqa, dict)
+            and persisted_paperqa
+            and not paperqa_binding_is_complete(persisted_paperqa)
+        ):
+            print(
+                "ERROR: existing PaperQA2 runtime binding is incomplete; provide "
+                "all four PaperQA2 flags together or repair the existing binding.",
+                file=sys.stderr,
+            )
+            return 2
+        paperqa_binding = (
+            persisted_paperqa
+            if isinstance(persisted_paperqa, dict) and persisted_paperqa
+            else None
+        )
+    else:
+        def normalize_binding_path(value):
+            value = str(value or "")
+            if not value:
+                return value
+            try:
+                return str(Path(value).resolve())
+            except (OSError, RuntimeError):
+                # Leave path semantics to the canonical PaperQA2 runtime validator.
+                return value
+
+        explicit_paperqa = {
+            field: normalize_binding_path(paperqa_values[destination])
+            for destination, field in paperqa_arguments
+        }
+        if runtime_config is not None and not force:
+            if not paperqa_binding_is_complete(persisted_paperqa):
+                print(
+                    "ERROR: existing runtime config is retained; refusing to add "
+                    "a PaperQA2 binding without --force before a readiness receipt "
+                    "exists.",
+                    file=sys.stderr,
+                )
+                return 3
+            if any(
+                str(persisted_paperqa.get(field) or "") != explicit_paperqa[field]
+                for field in paperqa_fields
+            ):
+                print(
+                    "ERROR: refusing to rebind PaperQA2 in an existing runtime "
+                    "config without --force.",
+                    file=sys.stderr,
+                )
+                return 3
+            paperqa_binding = persisted_paperqa
+        else:
+            paperqa_binding = explicit_paperqa
+
+    runtime_config_to_write = None
+    if not runtime_file.exists():
         try:
-            runtime_config = deep_research.default_runtime_config(backend)
+            runtime_config_to_write = deep_research.default_runtime_config(backend)
         except deep_research.DeepResearchError as exc:
             print(f"ERROR: cannot pick a Deep Research backend: {exc}", file=sys.stderr)
             return 2
-        runtime_file.write_text(json.dumps(runtime_config, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        if paperqa_binding is not None:
+            runtime_config_to_write["paperqa2"] = paperqa_binding
+    elif force and paperqa_supplied == len(paperqa_arguments):
+        if runtime_config is None or str(runtime_config.get("backend") or "") != backend:
+            try:
+                runtime_config_to_write = deep_research.default_runtime_config(backend)
+            except deep_research.DeepResearchError as exc:
+                print(f"ERROR: cannot pick a Deep Research backend: {exc}", file=sys.stderr)
+                return 2
+        else:
+            runtime_config_to_write = runtime_config
+        if paperqa_binding is not None:
+            runtime_config_to_write["paperqa2"] = paperqa_binding
+    elif force and runtime_config is not None and str(runtime_config.get("backend") or "") != backend:
+        try:
+            runtime_config_to_write = deep_research.default_runtime_config(backend)
+        except deep_research.DeepResearchError as exc:
+            print(f"ERROR: cannot pick a Deep Research backend: {exc}", file=sys.stderr)
+            return 2
+        if paperqa_binding is not None:
+            runtime_config_to_write["paperqa2"] = paperqa_binding
+
+    pf.mkdir(parents=True, exist_ok=True)
+    created, skipped = [], []
+    if runtime_config_to_write is not None:
+        runtime_file.write_text(json.dumps(runtime_config_to_write, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         created.append(runtime_file.name)
-        if runtime_config["backend"] == "claude":
+        if runtime_config_to_write["backend"] == "claude":
             print("NOTE: native Curie stages use generic structured execution; plugin_dir is historical compatibility only.", file=sys.stderr)
+    elif runtime_file.exists() and not force:
+        skipped.append(runtime_file.name)
     for fname in PREFLIGHT_FILES:
         target = pf / fname
-        if target.exists() and not args.force:
+        if target.exists() and not force:
             skipped.append(fname)
             continue
         target.write_text(_preflight_template(name, fname), encoding="utf-8")
         created.append(fname)
     dep_target = pf / "dependencies.md"
-    if not dep_target.exists() or args.force:
+    if not dep_target.exists() or force:
         dep_target.write_text(_dependencies_md(name), encoding="utf-8")
         created.append("dependencies.md")
     else:
         skipped.append("dependencies.md")
     kb_target = pf / "knowledge_base.md"
-    if not kb_target.exists() or args.force:
+    if not kb_target.exists() or force:
         kb_target.write_text(_knowledge_base_md(name), encoding="utf-8")
         created.append("knowledge_base.md")
     else:

@@ -104,6 +104,14 @@ def build_parser():
     sp.add_argument("--backend", choices=list(SUPPORTED_BACKENDS),
                     help=("Deep Research backend for this project; defaults to the "
                           "detected agent host and fails loud when it is unknown"))
+    sp.add_argument("--paperqa-python", default=None,
+                    help="PaperQA2 Python executable")
+    sp.add_argument("--paperqa-bridge", default=None,
+                    help="PaperQA2 JSON bridge script")
+    sp.add_argument("--paperqa-repo", default=None,
+                    help="PaperQA2 repository checkout")
+    sp.add_argument("--pqa-home", default=None,
+                    help="PaperQA2 PQA_HOME directory")
     sp.set_defaults(func=cmd_preflight)
 
     # check-deps (L0 dependency gate, standalone)

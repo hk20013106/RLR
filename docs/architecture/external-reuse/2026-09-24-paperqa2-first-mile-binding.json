@@ -1,0 +1,75 @@
+{
+  "schema_version": "ExternalReuseAudit/v1",
+  "change_id": "2026-09-24-paperqa2-first-mile-binding",
+  "EXISTING_IMPLEMENTATIONS_REVIEWED": [
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/l05_curie_cli.py :: install()",
+      "finding": "The standalone L0.5 PaperQA2 command already exposes --paperqa-python, --paperqa-bridge, --paperqa-repo, and --pqa-home. Project preflight does not currently expose these operator values, so the existing spellings can be reused without aliases or a second CLI vocabulary."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/deep_research.py :: RuntimeSpec / default_runtime_config() / load_runtime_spec()",
+      "finding": "The project runtime JSON already contains paperqa2 (empty by default), RuntimeSpec already carries paperqa2, and load_runtime_spec() already loads that same object. No new runtime schema or config authority is needed."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/runtime_preflight.py :: require_bound_paperqa2() -> src/research_loop/l05_curie/paperqa2_runtime.py :: runtime_from_config()",
+      "finding": "This is the canonical binding construction and semantic validation path. runtime_from_config() owns the required four fields and constructs the existing PaperQA2SubprocessBackend and PaperQA2CurieRuntime; the backend resolves paths and validates the interpreter, bridge, repository, and PQA home."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/l0_preflight.py :: _runtime_binding_report() / src/research_loop/commands/lifecycle.py :: cmd_preflight()",
+      "finding": "PROJECT_READY already calls require_bound_paperqa2() through the runtime-binding report only for profile v2.1-catalog-1. cmd_preflight() is the sole lifecycle writer and owns the existing --force, receipt, candidate, and runtime-config regeneration guards."
+    },
+    {
+      "scope": "internal",
+      "reference": "tests/native_v2_helpers.py :: ensure_catalog_paperqa2_binding()",
+      "finding": "Legacy unit/integration fixtures write a PaperQA2 object directly to make existing tests ready. This remains test-only fixture setup and is not a legitimate production binding source or dependency of the new subprocess acceptance path."
+    },
+    {
+      "scope": "external",
+      "reference": "https://github.com/Future-House/paper-qa/blob/57e89f7223b0960d5ee5ea048c69e3c47e088572/src/paperqa/settings.py and https://github.com/Future-House/paper-qa/blob/57e89f7223b0960d5ee5ea048c69e3c47e088572/src/paperqa/utils.py",
+      "finding": "At the upstream commit already pinned by RLR, Settings owns PaperQA query/model/index settings and pqa_directory() uses PQA_HOME for PaperQA's own .pqa storage. These APIs do not own an RLR project's interpreter/bridge/repository host binding; introducing them as a project binding source would add the forbidden environment/config authority."
+    }
+  ],
+  "REUSABLE_COMPONENTS": [
+    {
+      "reference": "src/research_loop/l05_curie_cli.py :: install()",
+      "disposition": "REUSE",
+      "reason": "Use the four existing PaperQA2 flag spellings and keep the first-mile operator interface aligned with the standalone PaperQA2 command."
+    },
+    {
+      "reference": "src/research_loop/deep_research.py :: RuntimeSpec / default_runtime_config() / load_runtime_spec()",
+      "disposition": "REUSE",
+      "reason": "Persist the complete binding in the existing deep_research_runtime.json paperqa2 object and load it through the existing RuntimeSpec field."
+    },
+    {
+      "reference": "src/research_loop/runtime_preflight.py :: require_bound_paperqa2() -> paperqa2_runtime.runtime_from_config()",
+      "disposition": "REUSE",
+      "reason": "Delegate actual path/runtime validity to the existing canonical constructor and validator; add no second semantic validator or backend."
+    },
+    {
+      "reference": "src/research_loop/l0_preflight.py :: _runtime_binding_report()",
+      "disposition": "REUSE",
+      "reason": "Keep the existing profile-scoped PROJECT_READY PaperQA2 binding check as the only readiness authority."
+    },
+    {
+      "reference": "src/research_loop/commands/lifecycle.py :: cmd_preflight()",
+      "disposition": "EXTEND",
+      "reason": "Add all-or-nothing source selection and materialize/reuse the existing paperqa2 object inside the current lifecycle owner while retaining its receipt, candidate, --force, and runtime-regeneration guards."
+    },
+    {
+      "reference": "Future-House/paper-qa pinned Settings and pqa_directory() source",
+      "disposition": "REJECT",
+      "reason": "These configure PaperQA's retrieval runtime and PQA_HOME environment behavior, not RLR's project-owned host binding. Reusing them as binding authority would introduce an environment-based configuration path excluded by this task."
+    },
+    {
+      "reference": "tests/native_v2_helpers.py :: ensure_catalog_paperqa2_binding()",
+      "disposition": "REJECT",
+      "reason": "It is a test-only direct state writer; the new acceptance must prove that production new-project and preflight commands create the binding without fixture injection."
+    }
+  ],
+  "ADOPTED_PATTERN": "EXTEND",
+  "WHY_NEW_CODE_IS_NECESSARY": "The standalone L0.5 CLI accepts the four paths, but the public project preflight cannot currently persist them; default_runtime_config() initializes paperqa2 as empty and the existing PROJECT_READY validator correctly requires that binding for v2.1-catalog-1 projects. A narrow extension to the existing CLI and cmd_preflight owner is therefore required to select one complete operator binding for that profile and place it in the existing runtime representation. Other project profiles retain their existing readiness contract. RuntimeSpec.paperqa2, require_bound_paperqa2(), runtime_from_config(), PaperQA2SubprocessBackend, PaperQA2CurieRuntime, and the profile-scoped PROJECT_READY check remain the sole owners. No second config authority, PaperQA2 runtime/backend, environment-variable configuration, automatic discovery mechanism, or Candidate/Receipt/Round hash ownership is introduced or changed."
+}
