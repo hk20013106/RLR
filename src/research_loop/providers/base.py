@@ -46,6 +46,41 @@ class AgentProvider:
             f"provider {self.name!r} does not support free-text execution"
         )
 
+
+def _render_command_template(command, *, prompt_file, output_file, node,
+                             persona, workspace):
+    """Render a command template with the same Python formatting used at runtime."""
+    return command.format(
+        prompt_file=prompt_file,
+        output_file=output_file,
+        node=node,
+        persona=persona,
+        workspace=workspace,
+    )
+
+
+def _validate_command_template(command, provider_name):
+    """Render once with inert strings to catch static template errors only."""
+    if not isinstance(command, str):
+        raise ProviderError(
+            f"invalid command template for {provider_name} provider: "
+            f"expected a string, got {type(command).__name__}"
+        )
+    try:
+        _render_command_template(
+            command,
+            prompt_file="RLR_PREFLIGHT_PROMPT_FILE",
+            output_file="RLR_PREFLIGHT_OUTPUT_FILE",
+            node="RLR_PREFLIGHT_NODE",
+            persona="RLR_PREFLIGHT_PERSONA",
+            workspace="RLR_PREFLIGHT_WORKSPACE",
+        )
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
+        raise ProviderError(
+            f"invalid command template for {provider_name} provider: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
 def _schema_repr(s):
     """Human-readable rendering of a delta schema (turns type objects into
     their names) for inclusion in a manual prompt."""
@@ -144,8 +179,10 @@ def _run_command_agent(command, node, persona, context, output_schema,
     provider.last_timed_out = None
     provider.last_terminal_state = None
     provider.last_execution_status = None
-    cmd = command.format(prompt_file=str(pf), output_file=str(of), node=node,
-                         persona=persona, workspace=workspace or "")
+    cmd = _render_command_template(
+        command, prompt_file=str(pf), output_file=str(of), node=node,
+        persona=persona, workspace=workspace or "",
+    )
 
     def execute_once():
         try:
@@ -203,8 +240,10 @@ def run_text_command(command, prompt, run_dir, tag, timeout=None):
     pf = run_dir / f"{tag}_prompt.txt"
     of = run_dir / f"{tag}_out.md"
     pf.write_text(prompt, encoding="utf-8")
-    cmd = command.format(prompt_file=str(pf), output_file=str(of), node=tag,
-                         persona="Researcher", workspace="")
+    cmd = _render_command_template(
+        command, prompt_file=str(pf), output_file=str(of), node=tag,
+        persona="Researcher", workspace="",
+    )
 
     def execute_once():
         try:

@@ -9,6 +9,7 @@ Guards the split of orchestrator.py -> research_loop.providers:
 """
 import json
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -87,6 +88,70 @@ def test_provider_config_defaults_to_canonical_automatic_provider():
     cfg = orch.ProviderConfig({})
     assert cfg.mode is None
     assert cfg.for_node("L1") == {"type": "headless"}
+
+
+def _preflight_command(command, provider_type="command"):
+    cfg = orch.ProviderConfig({
+        "provider": {
+            "default": {"type": provider_type, "command": command},
+        },
+    })
+    return run_loop.preflight_providers(cfg, SimpleNamespace(provider=None))
+
+
+@pytest.mark.parametrize("provider_type", ["command", "headless"])
+def test_preflight_accepts_renderable_provider_command_templates(provider_type):
+    command = "agent --prompt={prompt_file:>8} --output={output_file!s}"
+
+    assert _preflight_command(command, provider_type)
+
+
+def test_preflight_rejects_unknown_command_placeholder_for_node_override(capsys):
+    cfg = orch.ProviderConfig({
+        "provider": {
+            "default": {
+                "type": "command",
+                "command": "agent {prompt_file} {output_file}",
+            },
+            "nodes": {
+                "L1": {
+                    "type": "command",
+                    "command": "agent {promt} {output_file}",
+                },
+            },
+        },
+    })
+
+    assert not run_loop.preflight_providers(
+        cfg, SimpleNamespace(provider=None)
+    )
+    output = capsys.readouterr().out
+    assert "provider.nodes.L1" in output
+    assert "invalid command template" in output
+    assert "promt" in output
+
+
+def test_preflight_accepts_escaped_braces_in_command_template():
+    command = "agent --literal='{{literal}}' {prompt_file} {output_file}"
+
+    assert _preflight_command(command)
+
+
+def test_preflight_does_not_parse_shell_syntax_in_command_template():
+    command = 'PROMPT={prompt_file} && printf "%s" "{node}" | cat > {output_file}'
+
+    assert _preflight_command(command)
+
+
+def test_preflight_does_not_launch_provider_subprocess(monkeypatch):
+    from research_loop.providers import base as provider_base
+
+    def fail_if_executed(*_args, **_kwargs):
+        raise AssertionError("provider subprocess executed during preflight")
+
+    monkeypatch.setattr(provider_base.DEFAULT_EXECUTOR, "run", fail_if_executed)
+
+    assert _preflight_command("agent {prompt_file} {output_file}")
 
 
 @pytest.mark.parametrize(

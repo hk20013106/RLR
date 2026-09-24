@@ -1,0 +1,55 @@
+{
+  "schema_version": "ExternalReuseAudit/v1",
+  "change_id": "2026-09-24-provider-command-template-preflight",
+  "EXISTING_IMPLEMENTATIONS_REVIEWED": [
+    {
+      "scope": "internal",
+      "reference": "src/run_loop.py::preflight_providers()",
+      "finding": "The existing pre-dispatch provider gate constructs the configured default and node-specific providers through orch.make_provider(), catches ProviderError, and returns before provider startup. Phase 2C reuses this boundary; it does not create another global provider-preflight framework."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/providers/config.py::ProviderConfig; src/research_loop/providers/command.py::CommandProvider.__init__; src/research_loop/providers/headless.py::HeadlessProvider.__init__; src/research_loop/providers/__init__.py::make_provider()",
+      "finding": "ProviderConfig owns default and node configuration, CommandProvider resolves its spec command, HeadlessProvider resolves the spec/environment/detected command, and make_provider() is the canonical factory. Static validation is attached to this existing factory after resolution, adding no second config or Provider authority and no new environment-variable configuration or automatic discovery mechanism."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/providers/base.py::_run_command_agent(); run_text_command()",
+      "finding": "Both runtime paths used the same inline str.format operation with prompt_file, output_file, node, persona, and workspace immediately before shell execution. Phase 2C extracts that exact call into one private renderer and routes both runtime paths and preflight through it; it adds no separate placeholder grammar."
+    },
+    {
+      "scope": "external",
+      "reference": "https://docs.python.org/3.13/library/string.html#format-string-syntax",
+      "finding": "The Python 3.13 documentation defines the replacement-field syntax, escaped braces, conversions, format specifications, and nested format fields accepted by str.format(). Phase 2C preserves these native semantics by invoking str.format directly rather than interpreting shell syntax or defining another grammar."
+    },
+    {
+      "scope": "external",
+      "reference": "https://github.com/python/cpython/blob/3.13/Objects/stringlib/unicode_format.h",
+      "finding": "The CPython 3.13 implementation routes str.format through do_string_format(), build_string(), and the native markup/field rendering path. Reusing the built-in call preserves the runtime's parser and formatting behavior; no shell parser or executable-resolution framework is needed."
+    }
+  ],
+  "REUSABLE_COMPONENTS": [
+    {
+      "reference": "src/run_loop.py::preflight_providers()",
+      "disposition": "REUSE",
+      "reason": "Keep the existing pre-dispatch gate as the sole owner. It already constructs every configured automatic provider and reports ProviderError against provider.default or provider.nodes.<node>."
+    },
+    {
+      "reference": "src/research_loop/providers/__init__.py::make_provider() and the existing CommandProvider/HeadlessProvider resolution",
+      "disposition": "REUSE",
+      "reason": "Validate the already-resolved command in the canonical factory, so config precedence and provider selection remain unchanged and no parallel authority is introduced."
+    },
+    {
+      "reference": "src/research_loop/providers/base.py inline command.format calls",
+      "disposition": "REFACTOR",
+      "reason": "Extract the existing operation into one private renderer and use it for both runtime command paths and static preflight. The rendered command for valid templates retains the same values, formatting call, and shell execution boundary."
+    },
+    {
+      "reference": "Python built-in str.format semantics; CPython 3.13 unicode_format.h",
+      "disposition": "REUSE",
+      "reason": "Call the same built-in formatter with inert string values. This retains escaped braces, conversions, supported format specs, and shell text as unparsed literals, while creating no parser, credential/model/network probe, or executable discovery mechanism."
+    }
+  ],
+  "ADOPTED_PATTERN": "REFACTOR",
+  "WHY_NEW_CODE_IS_NECESSARY": "RLR had no callable render owner or static template preflight: both execution paths contained inline str.format calls, so the existing gate could only verify provider construction. Extracting those calls into one private renderer lets the existing factory render with inert strings before subprocess startup. No shell parser, executable extraction, Provider capability interface, REST or API-key handling, credential validation, model whitelist, model/network/remote-auth probe, second provider/config authority, PaperQA2 or lifecycle change, or Candidate/Receipt/Round hash-owner change is introduced."
+}

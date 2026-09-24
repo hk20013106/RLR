@@ -9,7 +9,8 @@ from research_loop.providers.executor import (
 )
 from research_loop.providers.base import (
     ProviderError, AgentProvider, _schema_repr, _compose_auto_prompt,
-    _run_command_agent, run_text_command, RunReceipt, now,
+    _run_command_agent, _validate_command_template, run_text_command,
+    RunReceipt, now,
 )
 from research_loop.providers.config import (
     _scalar, _mini_yaml, load_config, ProviderConfig,
@@ -24,21 +25,24 @@ def make_provider(spec, override_type=None):
     No silent fallback or second orchestration path."""
     t = override_type or (spec or {}).get("type")
     if t in ("headless", "host", "auto"):
-        return HeadlessProvider(spec)
-    if t == "command":
-        return CommandProvider(spec)
-    if t == "manual":
+        provider = HeadlessProvider(spec)
+    elif t == "command":
+        provider = CommandProvider(spec)
+    elif t == "manual":
         return ManualProvider(spec)
-    if t == "main_agent":
+    elif t == "main_agent":
         raise ProviderError(
             "provider type 'main_agent' is retired; configure provider.default "
             "as headless, host, auto, command, or manual"
         )
-    if t in (None, "none"):
+    elif t in (None, "none"):
         raise ProviderError(
             "no automatic provider is configured. Set provider.default.type "
             "to headless/host/auto/command, or explicitly use manual for debug.")
-    raise ProviderError(f"unknown provider type: {t!r}")
+    else:
+        raise ProviderError(f"unknown provider type: {t!r}")
+    _validate_command_template(provider.command, provider.name)
+    return provider
 
 
 __all__ = [
