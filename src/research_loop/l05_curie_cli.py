@@ -9,6 +9,7 @@ from pathlib import Path
 
 from research_loop.l05_curie import CurieContractError
 from research_loop.l05_curie.europepmc_runtime import (
+    CurieAcquisitionError,
     run_europepmc_acquisition,
     run_paperqa2_europepmc_acquisition,
 )
@@ -37,9 +38,21 @@ def cmd_l05_acquire_europepmc(args) -> int:
             page_size=args.page_size,
             run_id=args.run_id,
             timeout=args.timeout,
-        )
-    except CurieContractError as exc:
+    )
+    except CurieAcquisitionError as exc:
+        print(json.dumps({"status": "ERROR", "error_category": exc.category,
+                          "detail": str(exc)}, ensure_ascii=False))
         print(f"ERROR: L0.5 Europe PMC acquisition -- {exc}", file=sys.stderr)
+        return 2
+    except CurieContractError as exc:
+        print(json.dumps({"status": "ERROR", "error_category": "CONTRACT_ERROR",
+                          "detail": str(exc)}, ensure_ascii=False))
+        print(f"ERROR: L0.5 Europe PMC acquisition -- {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(json.dumps({"status": "ERROR", "error_category": "PERSISTENCE_ERROR",
+                          "detail": str(exc)}, ensure_ascii=False))
+        print(f"ERROR: L0.5 Europe PMC persistence -- {exc}", file=sys.stderr)
         return 2
     print(json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True))
     return 0

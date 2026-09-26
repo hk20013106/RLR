@@ -544,6 +544,8 @@ def test_l05_runner_binds_and_activates_frozen_curie_result(tmp_path, monkeypatc
 
     monkeypatch.setattr(run_loop, "_ctl", fake_ctl)
     monkeypatch.setattr(research_seed, "load_l1_research_seed", lambda *_: seed)
+    monkeypatch.setattr(run_loop, "validate_europepmc_acquisition_result",
+                        lambda _project, _candidate, result: result)
     monkeypatch.setattr(
         research_seed,
         "write_l1_native_evidence_binding",
@@ -565,7 +567,7 @@ def test_l05_runner_binds_and_activates_frozen_curie_result(tmp_path, monkeypatc
         SimpleNamespace(), SimpleNamespace(), tmp_path / "run", 1,
     )
 
-    assert ok is True
+    assert ok["terminal_status"] == "FROZEN"
     assert [item[0] for item in calls] == ["bind", "activate"]
     assert calls[0][1][0:2] == (str(project), seed)
     assert calls[0][1][2:] == (evidence_pack, run_id)
@@ -592,6 +594,108 @@ def test_l05_command_uses_configured_reproducible_queries(tmp_path):
         "--page-size", "10",
         "--timeout", "30",
     ]
+
+
+def test_l05_insufficient_outcome_stops_round_before_downstream(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    calls = []
+    monkeypatch.setattr(run_loop, "_ctl", lambda *args: SimpleNamespace(
+        returncode=0, stderr="", stdout=json.dumps({
+            "status": "INSUFFICIENT_STOP",
+            "terminal_reason": "no_admissible_replan",
+            "run_id": "EMPTY",
+            "acquisition_manifest_path": "08_Audit/l05_acquisition/C1/EMPTY/acquisition_manifest.json",
+            "acquisition_manifest_sha256": "a" * 64,
+            "evidence_pack": None,
+        }),
+    ))
+    monkeypatch.setattr(run_loop, "validate_europepmc_acquisition_result",
+                        lambda _project, _candidate, result: result)
+    monkeypatch.setattr(run_loop.research_seed, "write_l1_native_evidence_binding",
+                        lambda *args: calls.append("bind"))
+    monkeypatch.setattr(run_loop, "next_step", lambda *_: {
+        "node": "L0.5", "persona": "Curie", "terminal": False,
+    })
+    monkeypatch.setattr(run_loop, "_l05_command", lambda *_: ["l05-acquire-europepmc", str(project), "C1"])
+    outcome = run_loop.run_round(
+        str(project), "C1", SimpleNamespace(stop_policy={}), SimpleNamespace(),
+        1, 1, {},
+    )
+    assert outcome["terminal_status"] == "L0_5_INSUFFICIENT_STOP"
+    assert outcome["completed"] is False
+    assert calls == []
+
+
+def test_cmd_run_records_incomplete_l05_stop_without_stop_policy(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    candidate_dir = project / "01_Candidates"
+    candidate_dir.mkdir(parents=True)
+    (candidate_dir / "C1.md").write_text("candidate", encoding="utf-8")
+    config = project / "runner.yaml"
+    config.write_text("provider: fixture", encoding="utf-8")
+    cfg = SimpleNamespace(mode=None, max_rounds=1, review={"enabled": True},
+                          stop_policy={})
+    monkeypatch.setattr(run_loop.l0_preflight, "validate_project_ready",
+                        lambda *args, **kwargs: {"status": "PASS"})
+    monkeypatch.setattr(run_loop, "_formal_runtime_preflight", lambda: True)
+    monkeypatch.setattr(run_loop, "_ctl", lambda *args: SimpleNamespace(
+        returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr(run_loop.orch.ProviderConfig, "load", lambda *_: cfg)
+    monkeypatch.setattr(run_loop, "restore_previous_round",
+                        lambda *_: {"binding_status": "NOT_APPLICABLE"})
+    from research_loop import pre_e2e_closure
+    monkeypatch.setattr(pre_e2e_closure, "audit_static_closure",
+                        lambda *_: {"e2e_start_allowed": True})
+    monkeypatch.setattr(run_loop, "preflight_providers", lambda *_: True)
+    monkeypatch.setattr(run_loop, "run_round", lambda *_: {
+        "terminal_status": "L0_5_INSUFFICIENT_STOP", "completed": False,
+        "full_dag_completed": False, "terminal_reason": "no_admissible_replan",
+        "acquisition_run_id": "EMPTY", "acquisition_manifest_path": "manifest.json",
+        "acquisition_manifest_sha256": "a" * 64,
+    })
+    monkeypatch.setattr(run_loop, "run_review_gate",
+                        lambda *_: pytest.fail("review ran after L0.5 stop"))
+    monkeypatch.setattr(run_loop, "create_child",
+                        lambda *_: pytest.fail("child created after L0.5 stop"))
+    monkeypatch.setattr(run_loop.StopPolicy, "decide",
+                        lambda *_args, **_kwargs: pytest.fail("StopPolicy ran after L0.5 stop"))
+    args = SimpleNamespace(
+        project_dir=str(project), cand_id="C1", knowledge_store=None,
+        dry_run=False, config=str(config), provider=None, max_rounds=1,
+        no_review=False, resume=False,
+    )
+    assert run_loop.cmd_run(args) == 0
+    record = json.loads((project / "08_Run_Receipts" / "C1" / "round_01"
+                         / "stop_decision.json").read_text(encoding="utf-8"))
+    assert record["terminal_status"] == "L0_5_INSUFFICIENT_STOP"
+    assert record["completed"] is False
+    assert record["full_dag_completed"] is False
+    assert record["L1"] == record["REVIEW"] == record["L10b"] == "NOT_ATTEMPTED"
+    assert record["acquisition_manifest_sha256"] == "a" * 64
+
+
+def test_l05_binding_failure_is_typed_error(tmp_path, monkeypatch):
+    result = {
+        "status": "FROZEN", "run_id": "BIND_FAIL", "evidence_pack": {"status": "FROZEN"},
+    }
+    monkeypatch.setattr(run_loop, "_ctl", lambda *_: SimpleNamespace(
+        returncode=0, stdout=json.dumps(result), stderr=""))
+    monkeypatch.setattr(run_loop, "_l05_command", lambda *_: ["l05-acquire-europepmc"])
+    monkeypatch.setattr(run_loop, "validate_europepmc_acquisition_result",
+                        lambda *_: result)
+    monkeypatch.setattr(run_loop.research_seed, "load_l1_research_seed",
+                        lambda *_: {"candidate_id": "C1", "round_id": "1"})
+    monkeypatch.setattr(run_loop.research_seed, "write_l1_native_evidence_binding",
+                        lambda *_: (_ for _ in ()).throw(
+                            run_loop.research_seed.ResearchSeedError("injected bind failure")))
+    monkeypatch.setattr(run_loop, "auto_pitfall", lambda *_args, **_kwargs: None)
+    outcome = run_loop.exec_l05(
+        str(tmp_path), "C1", {"node": "L0.5"}, SimpleNamespace(),
+        SimpleNamespace(), tmp_path / "run", 1,
+    )
+    assert outcome["terminal_status"] == "ERROR"
+    assert outcome["error_category"] == "BINDING_ERROR"
 
 
 def test_native_l1_binding_suppresses_legacy_deep_research(tmp_path, monkeypatch):

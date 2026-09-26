@@ -1,7 +1,11 @@
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlparse
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import pytest
 
@@ -9,6 +13,7 @@ from research_loop import l0_contract, research_seed
 from research_loop.l05_curie import CurieContractError, load_frozen_evidence_pack
 from research_loop.l05_curie import europepmc_runtime
 from research_loop.l05_curie.europepmc_runtime import run_europepmc_acquisition
+from research_loop.l05_curie.multisource import build_multisource_query_plan
 from research_loop.l05_curie.paperqa2_runtime import (
     MIN_SOURCE_TOKEN_COVERAGE,
     PaperQA2CurieRuntime,
@@ -179,6 +184,335 @@ def test_runtime_freezes_end_to_end_europepmc_evidence_pack(tmp_path):
     assert audit["evidence_pack"]["artifact_sha256"] == manifest["artifact_sha256"]
 
 
+def test_two_empty_plans_stop_without_repeating_a_plan(tmp_path):
+    project, _seed = _project(tmp_path)
+    requested = []
+
+    def http_get(url, _timeout):
+        assert "/search?" in url
+        requested.append(parse_qs(urlparse(url).query)["query"][0])
+        return json.dumps({"hitCount": 0, "resultList": {"result": []}}).encode()
+
+    result = run_europepmc_acquisition(
+        project, "C001", run_id="EMPTY_PLANS", http_get=http_get,
+    )
+    manifest_path = project / result["acquisition_manifest_path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert result["status"] == "INSUFFICIENT_STOP"
+    assert result["terminal_reason"] == "no_admissible_replan"
+    assert manifest["schema_version"] == "L05EuropePmcAcquisitionManifest/v2"
+    assert [attempt["attempt_index"] for attempt in manifest["attempts"]] == [1, 2]
+    assert len({attempt["query_plan"]["plan_id"] for attempt in manifest["attempts"]}) == 2
+    assert len(requested) == len(set(requested))
+    assert result["evidence_pack"] is None
+
+
+def test_second_plan_first_success_freezes_canonical_v1(tmp_path):
+    project, seed = _project(tmp_path)
+    queries = []
+
+    def http_get(url, _timeout):
+        if "/search?" in url:
+            query = parse_qs(urlparse(url).query)["query"][0]
+            queries.append(query)
+            if "comparative evidence" in query:
+                return _search_payload()
+            return json.dumps({"hitCount": 0, "resultList": {"result": []}}).encode()
+        if url.endswith("/PMC3257301/fullTextXML"):
+            return XML
+        raise AssertionError(url)
+
+    result = run_europepmc_acquisition(
+        project, "C001", run_id="SECOND_SUCCESS", http_get=http_get,
+    )
+    manifest = json.loads((project / result["acquisition_manifest_path"]).read_text())
+    frozen = load_frozen_evidence_pack(
+        project, result["evidence_pack"], candidate_id="C001", round_id="1",
+        seed_sha256=research_seed.seed_sha256(seed),
+    )
+    assert result["status"] == "FROZEN"
+    assert [attempt["attempt_index"] for attempt in manifest["attempts"]] == [1, 2]
+    assert frozen["version"] == 1
+    assert frozen["coverage"]["round_index"] == 1
+    assert all(plan["round_index"] == 1 for plan in frozen["query_plans"])
+    assert frozen["source_run_id"] == "SECOND_SUCCESS"
+    assert any("comparative evidence" in query for query in queries)
+
+
+def test_second_attempt_keeps_first_source_and_exact_evidence_lineage(tmp_path):
+    project, seed = _project(tmp_path)
+    first_paper = _search_record(
+        pmid="11111111", pmcid="PMC1111111", doi="10.1000/first",
+        title="First source without target sections",
+    )
+    second_paper = _search_record(
+        pmid="22222222", pmcid="PMC2222222", doi="10.1000/second",
+        title="Second source with target results",
+    )
+
+    def http_get(url, _timeout):
+        if "/search?" in url:
+            query = parse_qs(urlparse(url).query)["query"][0]
+            return _search_payload(records=[second_paper if "comparative evidence" in query
+                                            else first_paper])
+        if url.endswith("/PMC1111111/fullTextXML"):
+            return XML_WITHOUT_TARGET_SECTIONS
+        if url.endswith("/PMC2222222/fullTextXML"):
+            return XML
+        raise AssertionError(url)
+
+    result = run_europepmc_acquisition(
+        project, "C001", run_id="SOURCE_ACCUMULATION", http_get=http_get,
+    )
+    manifest = json.loads((project / result["acquisition_manifest_path"]).read_text())
+    frozen = load_frozen_evidence_pack(
+        project, result["evidence_pack"], candidate_id="C001", round_id="1",
+        seed_sha256=research_seed.seed_sha256(seed),
+    )
+    assert [item["coverage_facts"]["verdict"] for item in manifest["attempts"]] == [
+        "INSUFFICIENT_RETRY", "PASS",
+    ]
+    assert {item["pmcid"] for item in manifest["source_snapshots"]} == {
+        "PMC1111111", "PMC2222222",
+    }
+    assert len({item["query_id"] for plan in frozen["query_plans"]
+                for item in plan["queries"]}) == sum(
+                    len(plan["queries"]) for plan in frozen["query_plans"]
+                )
+    assert manifest["verified_evidence_ids"] == [
+        item["evidence_id"] for item in frozen["evidence"]
+    ]
+    assert all(item["retrieval"]["snapshot_path"] for item in frozen["evidence"])
+
+
+def _controlled_three_plan_builder(seed, *, seed_sha256, round_index,
+                                   reformulation_index, query_id_prefix, **_kwargs):
+    return build_multisource_query_plan(
+        seed, seed_sha256=seed_sha256, round_index=round_index,
+        explicit_queries=[f"controlled plan {reformulation_index + 1}"],
+        providers=["europe-pmc"], query_id_prefix=query_id_prefix,
+    )
+
+
+@pytest.mark.parametrize("third_succeeds", [True, False])
+def test_controlled_third_plan_success_or_budget_exhaustion(tmp_path, third_succeeds):
+    project, seed = _project(tmp_path)
+    requests = []
+
+    def http_get(url, _timeout):
+        if "/search?" in url:
+            query = parse_qs(urlparse(url).query)["query"][0]
+            requests.append(query)
+            return (_search_payload() if third_succeeds and query == "controlled plan 3"
+                    else json.dumps({"hitCount": 0, "resultList": {"result": []}}).encode())
+        if url.endswith("/PMC3257301/fullTextXML"):
+            return XML
+        raise AssertionError(url)
+
+    result = run_europepmc_acquisition(
+        project, "C001", run_id=f"THIRD_{third_succeeds}", http_get=http_get,
+        plan_builder=_controlled_three_plan_builder,
+    )
+    audit = json.loads((project / result["acquisition_manifest_path"]).read_text())
+    assert [attempt["attempt_index"] for attempt in audit["attempts"]] == [1, 2, 3]
+    assert requests == ["controlled plan 1", "controlled plan 2", "controlled plan 3"]
+    if third_succeeds:
+        assert result["status"] == "FROZEN"
+        frozen = load_frozen_evidence_pack(
+            project, result["evidence_pack"], candidate_id="C001", round_id="1",
+            seed_sha256=research_seed.seed_sha256(seed),
+        )
+        assert frozen["version"] == 1
+        assert len(frozen["query_plans"]) == 3
+    else:
+        assert result["status"] == "INSUFFICIENT_STOP"
+        assert result["terminal_reason"] == "budget_exhausted"
+        assert result["evidence_pack"] is None
+
+
+def test_frozen_before_manifest_publication_recovers_without_search(tmp_path, monkeypatch):
+    project, seed = _project(tmp_path)
+    original = europepmc_runtime._write_audit_manifest
+
+    def interrupted(*_args, **_kwargs):
+        raise RuntimeError("interrupted before final manifest")
+
+    monkeypatch.setattr(europepmc_runtime, "_write_audit_manifest", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        run_europepmc_acquisition(
+            project, "C001", run_id="RECOVER_ME", explicit_queries=["recovery test"],
+            http_get=lambda url, _: _search_payload() if "/search?" in url else XML,
+        )
+    monkeypatch.setattr(europepmc_runtime, "_write_audit_manifest", original)
+    result = run_europepmc_acquisition(
+        project, "C001", run_id="RECOVER_ME", explicit_queries=["recovery test"],
+        http_get=lambda *_: pytest.fail("recovery performed a search"),
+    )
+    assert result["status"] == "FROZEN"
+    frozen = load_frozen_evidence_pack(
+        project, result["evidence_pack"], candidate_id="C001", round_id="1",
+        seed_sha256=research_seed.seed_sha256(seed),
+    )
+    assert frozen["source_run_id"] == "RECOVER_ME"
+
+
+def test_frozen_checkpoint_recovery_binds_and_reuses_without_search(tmp_path, monkeypatch):
+    import run_loop
+
+    project, seed = _project(tmp_path)
+    original = europepmc_runtime._write_audit_manifest
+    monkeypatch.setattr(
+        europepmc_runtime, "_write_audit_manifest",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("before manifest")),
+    )
+    with pytest.raises(RuntimeError, match="before manifest"):
+        run_europepmc_acquisition(
+            project, "C001", run_id="BIND_RECOVERY", explicit_queries=["bind recovery"],
+            http_get=lambda url, _: _search_payload() if "/search?" in url else XML,
+        )
+    monkeypatch.setattr(europepmc_runtime, "_write_audit_manifest", original)
+
+    def fake_ctl(*_argv):
+        result = run_europepmc_acquisition(
+            project, "C001", run_id="BIND_RECOVERY", explicit_queries=["bind recovery"],
+            http_get=lambda *_: pytest.fail("recovery performed a search"),
+        )
+        return SimpleNamespace(returncode=0, stdout=json.dumps(result), stderr="")
+
+    monkeypatch.setattr(run_loop, "_ctl", fake_ctl)
+    monkeypatch.setattr(run_loop, "_l05_command", lambda *_: ["l05-acquire-europepmc"])
+    for _ in range(2):
+        outcome = run_loop.exec_l05(
+            str(project), "C001", {"node": "L0.5"}, SimpleNamespace(),
+            SimpleNamespace(), tmp_path / "run", 1,
+        )
+        assert outcome["terminal_status"] == "FROZEN"
+        assert research_seed.active_l1_native_evidence_run_id(project, seed) == "BIND_RECOVERY"
+        bound = research_seed.load_l1_native_evidence_binding(
+            project, seed, "BIND_RECOVERY"
+        )
+        assert bound["evidence_pack"]["version"] == 1
+
+
+def test_concurrent_first_acquisition_has_one_writer(tmp_path):
+    project, _seed = _project(tmp_path)
+    entered, release = Event(), Event()
+
+    def http_get(url, _timeout):
+        entered.set()
+        assert release.wait(10)
+        return _search_payload() if "/search?" in url else XML
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(run_europepmc_acquisition, project, "C001",
+                            run_id="ONE_WRITER", explicit_queries=["writer"],
+                            http_get=http_get)
+        assert entered.wait(10)
+        with pytest.raises(CurieContractError, match="active writer"):
+            run_europepmc_acquisition(
+                project, "C001", run_id="ONE_WRITER", explicit_queries=["writer"],
+                http_get=lambda *_: pytest.fail("second writer performed a search"),
+            )
+        release.set()
+        assert first.result()["status"] == "FROZEN"
+
+
+def test_service_failure_is_not_scientific_replan_and_preserves_first_cause(tmp_path):
+    project, _seed = _project(tmp_path)
+    requests = []
+
+    def http_get(url, _timeout):
+        requests.append(url)
+        if "/search?" in url:
+            raise _fulltext_503("SEARCH")
+        raise AssertionError(url)
+
+    with pytest.raises(europepmc_runtime.CurieAcquisitionError,
+                       match="SERVICE_ERROR.*last_valid_attempt"):
+        run_europepmc_acquisition(
+            project, "C001", run_id="SEARCH_OUTAGE", http_get=http_get,
+        )
+    assert requests
+    assert all("/search?" in url for url in requests)
+    failed = project / "08_Audit" / "l05_acquisition" / "C001" / "SEARCH_OUTAGE" / "attempt_001.json"
+    assert json.loads(failed.read_text())["terminal_status"] == "ERROR"
+
+
+def test_recovery_rejects_tampered_checkpoint_source_without_search(tmp_path, monkeypatch):
+    project, _seed = _project(tmp_path)
+    original = europepmc_runtime._write_audit_manifest
+    monkeypatch.setattr(europepmc_runtime, "_write_audit_manifest",
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("interrupt")))
+    with pytest.raises(RuntimeError, match="interrupt"):
+        run_europepmc_acquisition(
+            project, "C001", run_id="TAMPER_RECOVERY", explicit_queries=["tamper"],
+            http_get=lambda url, _: _search_payload() if "/search?" in url else XML,
+        )
+    monkeypatch.setattr(europepmc_runtime, "_write_audit_manifest", original)
+    source = next((project / "09_Literature_Database").rglob("*.xml"))
+    source.write_bytes(b"<changed/>")
+    with pytest.raises(CurieContractError, match="RECOVERY_ERROR"):
+        run_europepmc_acquisition(
+            project, "C001", run_id="TAMPER_RECOVERY", explicit_queries=["tamper"],
+            http_get=lambda *_: pytest.fail("tampered recovery performed search"),
+        )
+
+
+def test_runner_result_boundary_validates_manifest_hash_and_identity(tmp_path):
+    project, _seed = _project(tmp_path)
+    result = run_europepmc_acquisition(
+        project, "C001", run_id="BOUNDARY", explicit_queries=["boundary"],
+        http_get=lambda url, _: _search_payload() if "/search?" in url else XML,
+    )
+    assert europepmc_runtime.validate_europepmc_acquisition_result(
+        project, "C001", result,
+    ) == result
+    altered = dict(result, acquisition_manifest_sha256="0" * 64)
+    with pytest.raises(CurieContractError, match="bytes/hash mismatch"):
+        europepmc_runtime.validate_europepmc_acquisition_result(
+            project, "C001", altered,
+        )
+
+
+def test_terminal_first_acquisition_rejects_new_run_id_without_search(tmp_path):
+    project, _seed = _project(tmp_path)
+    empty = b'{"hitCount":0,"resultList":{"result":[]}}'
+    first = run_europepmc_acquisition(
+        project, "C001", run_id="FIRST", explicit_queries=["first"],
+        http_get=lambda *_: empty,
+    )
+    assert first["status"] == "INSUFFICIENT_STOP"
+    with pytest.raises(CurieContractError, match="owner conflicts"):
+        run_europepmc_acquisition(
+            project, "C001", run_id="SECOND", explicit_queries=["second"],
+            http_get=lambda *_: pytest.fail("second acquisition searched"),
+        )
+
+
+def test_new_query_ids_cannot_disguise_repeated_plan_content(tmp_path):
+    project, _seed = _project(tmp_path)
+    searches = []
+
+    def same_content_builder(seed, *, seed_sha256, round_index,
+                             query_id_prefix, **_kwargs):
+        return build_multisource_query_plan(
+            seed, seed_sha256=seed_sha256, round_index=round_index,
+            explicit_queries=["identical scientific query"],
+            providers=["europe-pmc"], query_id_prefix=query_id_prefix,
+        )
+
+    def http_get(url, _timeout):
+        searches.append(url)
+        return b'{"hitCount":0,"resultList":{"result":[]}}'
+
+    with pytest.raises(CurieContractError, match="repeated executed query content"):
+        run_europepmc_acquisition(
+            project, "C001", run_id="DUPLICATE_CONTENT",
+            plan_builder=same_content_builder, http_get=http_get,
+        )
+    assert len(searches) == 1
+
+
 def test_runtime_does_not_freeze_when_no_oa_full_text_is_available(tmp_path):
     project, _seed = _project(tmp_path)
 
@@ -191,7 +525,7 @@ def test_runtime_does_not_freeze_when_no_oa_full_text_is_available(tmp_path):
         http_get=lambda _url, _timeout: _search_payload(open_access=False),
     )
 
-    assert result["status"] == "INSUFFICIENT_RETRY"
+    assert result["status"] == "INSUFFICIENT_STOP"
     assert result["evidence_pack"] is None
     assert result["coverage"]["verdict"] == "INSUFFICIENT_RETRY"
     assert result["coverage"]["gaps"][0]["gap_id"] == "NO_VERIFIED_FULL_TEXT"
@@ -260,7 +594,7 @@ def test_runtime_routes_all_no_target_sections_through_coverage_gap(tmp_path):
         http_get=http_get,
     )
 
-    assert result["status"] == "INSUFFICIENT_RETRY"
+    assert result["status"] == "INSUFFICIENT_STOP"
     assert result["evidence_pack"] is None
     assert result["coverage"]["verdict"] == "INSUFFICIENT_RETRY"
     assert {gap["gap_id"] for gap in result["coverage"]["gaps"]} == {
@@ -510,6 +844,21 @@ def test_cli_registers_thin_europepmc_acquisition_command(tmp_path, monkeypatch,
     assert seen["cand_id"] == "C001"
     assert seen["explicit_queries"] == ["EXT_ID:22253597 AND SRC:MED"]
     assert seen["run_id"] == "CLI001"
+
+
+def test_cli_reports_persistence_error_with_nonzero_exit(tmp_path, monkeypatch, capsys):
+    project, _seed = _project(tmp_path)
+    parser = cli.build_parser()
+    args = parser.parse_args(["l05-acquire-europepmc", str(project), "C001"])
+    import research_loop.l05_curie_cli as extension
+    monkeypatch.setattr(
+        extension, "run_europepmc_acquisition",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk unavailable")),
+    )
+    assert args.func(args) == 2
+    outcome = json.loads(capsys.readouterr().out)
+    assert outcome["status"] == "ERROR"
+    assert outcome["error_category"] == "PERSISTENCE_ERROR"
 
 
 def test_cli_registers_pinned_paperqa2_production_command(tmp_path, monkeypatch, capsys):

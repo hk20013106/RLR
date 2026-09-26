@@ -1,0 +1,40 @@
+{
+  "schema_version": "ExternalReuseAudit/v1",
+  "change_id": "l05-p0-bounded-first-acquisition",
+  "EXISTING_IMPLEMENTATIONS_REVIEWED": [
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/l05_curie/europepmc_runtime.py; src/research_loop/l05_curie/store.py; src/research_loop/l05_native_binding.py",
+      "finding": "Curie already owns discovery, selection, verification, coverage and immutable EvidencePack freeze. The store validates canonical v1 bytes and identity. Native binding validates the frozen pack and the retry transaction stages durable inputs before atomic publication. The first acquisition currently has a hidden two-plan rewrite but no canonical pre-freeze checkpoint."
+    },
+    {
+      "scope": "external",
+      "reference": "https://github.com/untitaker/python-atomicwrites/blob/master/atomicwrites/__init__.py",
+      "finding": "The actual AtomicWriter source writes and syncs a same-directory temporary file before a no-overwrite move; an existing destination is an error. This informs the bounded publication pattern without adding the archived package as a dependency."
+    },
+    {
+      "scope": "external",
+      "reference": "https://github.com/tox-dev/filelock/blob/main/src/filelock/_api.py",
+      "finding": "The actual BaseFileLock source holds a process-owned lock during a bounded critical section and releases it on context exit. This is relevant to preventing two first freezes while preserving crash recovery."
+    }
+  ],
+  "REUSABLE_COMPONENTS": [
+    {
+      "reference": "src/research_loop/l05_curie/europepmc_runtime.py",
+      "disposition": "REFACTOR",
+      "reason": "Unify the existing one-time acquisition and hidden rewrite under its current runtime owner; preserve the resource failure classifier and reserve promotion."
+    },
+    {
+      "reference": "src/research_loop/l05_curie/store.py",
+      "disposition": "EXTEND",
+      "reason": "Expose the store's existing frozen-byte preparation so the pre-freeze checkpoint and actual publication use the same validated bytes and manifest."
+    },
+    {
+      "reference": "src/research_loop/l05_native_binding.py",
+      "disposition": "REUSE",
+      "reason": "Use the existing validated native bind and activation path for both fresh freeze and recovery; keep gap retry transactions separate."
+    }
+  ],
+  "ADOPTED_PATTERN": "REFACTOR",
+  "WHY_NEW_CODE_IS_NECESSARY": "The existing first acquisition has no terminal outcome, durable pre-freeze input reference, or single-writer guard. Narrow v2 manifest validation and checkpoint publication are required to prove an interrupted first freeze belongs to its acquisition run without changing the shared v1 contracts."
+}

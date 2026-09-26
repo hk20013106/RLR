@@ -1,4 +1,5 @@
 import json
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -85,12 +86,11 @@ def test_initial_zero_discovery_reformulates_once_and_records_both_attempts(tmp_
 
     def http_get(url, _timeout):
         if "/search?" in url:
-            searches.append(url)
-            # The first bounded plan owns exactly three requests; the second
-            # attempt must receive the fixture's qualified record.
-            if len(searches) <= 3:
-                return b'{"hitCount":0,"resultList":{"result":[]}}'
-            return _search_payload()
+            query = parse_qs(urlparse(url).query)["query"][0]
+            searches.append(query)
+            if "comparative evidence" in query:
+                return _search_payload()
+            return b'{"hitCount":0,"resultList":{"result":[]}}'
         if url.endswith("/PMC3257301/fullTextXML"):
             return XML
         raise AssertionError(url)
@@ -103,8 +103,9 @@ def test_initial_zero_discovery_reformulates_once_and_records_both_attempts(tmp_
     audit = json.loads(
         (project / result["acquisition_manifest_path"]).read_text(encoding="utf-8")
     )
-    assert audit["initial_acquisition"]["reformulated"] is True
-    assert len(audit["initial_acquisition"]["attempts"]) == 2
+    assert audit["schema_version"] == "L05EuropePmcAcquisitionManifest/v2"
+    assert [item["attempt_index"] for item in audit["attempts"]] == [1, 2]
+    assert len(searches) == len(set(searches))
     assert len(audit["query_plans"]) == 2
 
 

@@ -8,17 +8,26 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from research_loop import research_seed
 from research_loop.external_resilience import classify_http_failure
 
-from .contracts import CurieContractError, judge_coverage, validate_query_plan
-from .europepmc import EuropePmcEvidenceRetriever, EuropePmcEvidenceVerifier, EuropePmcTransport
+from .contracts import (
+    CurieContractError, judge_coverage, validate_coverage_decision,
+    validate_evidence_extract, validate_query_plan,
+)
+from .europepmc import (
+    EuropePmcEvidenceRetriever, EuropePmcEvidenceVerifier, EuropePmcTransport,
+    _default_http_get,
+)
 from .multisource import (
     build_multisource_query_plan,
     # Keep legacy module-level re-exports; production calls the strict sibling below.
@@ -34,10 +43,14 @@ from .paperqa2_runtime import (
 from .semantic_verifier import SemanticEvidenceVerifier, admit_reasoning_evidence
 # Keep the legacy selector re-export for callers that imported it here.
 from .selector import select_candidates, select_candidates_strict
-from .store import build_evidence_pack, freeze_evidence_pack
+from .store import (
+    build_evidence_pack, freeze_evidence_pack, initial_evidence_pack_path,
+    load_frozen_evidence_pack,
+    preview_frozen_evidence_pack,
+)
 
 RESULT_SCHEMA_VERSION = "L05EuropePmcAcquisitionResult/v1"
-AUDIT_SCHEMA_VERSION = "L05EuropePmcAcquisitionManifest/v1"
+AUDIT_SCHEMA_VERSION = "L05EuropePmcAcquisitionManifest/v2"
 PAPERQA2_RESULT_SCHEMA_VERSION = "L05PaperQA2EuropePmcAcquisitionResult/v1"
 PAPERQA2_AUDIT_SCHEMA_VERSION = "L05PaperQA2EuropePmcAcquisitionManifest/v1"
 _PAPERQA2_MAX_INTENT_CHARS = 320
@@ -143,7 +156,21 @@ def _write_audit_manifest(
                 f"Europe PMC acquisition manifest already exists with different content: {relative.as_posix()}"
             )
     else:
-        path.write_bytes(raw)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".acquisition-", delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if path.exists():
+                if path.read_bytes() != raw:
+                    raise CurieContractError("Europe PMC acquisition manifest publication collision")
+            else:
+                os.replace(temporary, path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
     return relative.as_posix(), hashlib.sha256(raw).hexdigest()
 
 
@@ -393,6 +420,7 @@ def _prepare_europepmc_acquisition(
     round_index: int,
     reformulation_index: int = 0,
     query_id_prefix: str = "Q",
+    prebuilt_query_plan: dict | None = None,
 ) -> dict:
     """Discover and select Europe PMC records once for each acquisition mode."""
     try:
@@ -405,15 +433,17 @@ def _prepare_europepmc_acquisition(
     # selection remain in Curie's provider-neutral planner/orchestrator path.
     # The declared one-provider plan is deliberate: every selected record must
     # be retrievable from the exact Europe PMC OA full-text source below.
-    query_plan = build_multisource_query_plan(
-        seed,
-        seed_sha256=seed_digest,
-        round_index=round_index,
-        explicit_queries=explicit_queries,
-        providers=["europe-pmc"],
-        reformulation_index=reformulation_index,
-        query_id_prefix=query_id_prefix,
-    )
+    query_plan = prebuilt_query_plan
+    if query_plan is None:
+        query_plan = build_multisource_query_plan(
+            seed,
+            seed_sha256=seed_digest,
+            round_index=round_index,
+            explicit_queries=explicit_queries,
+            providers=["europe-pmc"],
+            reformulation_index=reformulation_index,
+            query_id_prefix=query_id_prefix,
+        )
     validate_query_plan(query_plan, seed_sha256=seed_digest)
     transport = EuropePmcTransport(
         project,
@@ -457,16 +487,6 @@ def _prepare_europepmc_acquisition(
             "selector_artifact_sha256": generic_selection.get("artifact_sha256"),
         },
     }
-
-
-def _initial_acquisition_outcome(prepared: dict) -> tuple[bool, str | None]:
-    """Classify only the bounded first-attempt outcomes eligible to reformulate."""
-    records = prepared["discovery"]["records"]
-    if not records:
-        return True, "zero_discovery_records"
-    if not prepared["selection"]["selected"]:
-        return True, "no_source_qualified_records"
-    return False, None
 
 
 def _paperqa_pdf_path(pdf_paths: object, paper_id: str) -> tuple[Path, str]:
@@ -580,77 +600,292 @@ def _admit_paperqa2_semantic_evidence(
     return admitted, admitted_semantics, all_semantics
 
 
-def run_europepmc_acquisition(
-    project_dir: str | Path,
-    cand_id: str,
-    *,
-    explicit_queries: list[str] | None = None,
-    max_papers: int = 3,
-    page_size: int = 25,
-    run_id: str | None = None,
-    http_get: Callable[[str, int], bytes] | None = None,
-    timeout: int = 20,
-    round_index: int = 1,
-) -> dict:
-    """Execute one auditable Europe PMC acquisition round through FREEZE."""
-    project = Path(project_dir)
-    candidate_id = str(cand_id)
-    prepared = _prepare_europepmc_acquisition(
-        project,
-        candidate_id,
-        explicit_queries=explicit_queries,
-        max_papers=max_papers,
-        page_size=page_size,
-        run_id=run_id,
-        http_get=http_get,
-        timeout=timeout,
-        round_index=round_index,
-    )
-    query_plans = [prepared["query_plan"]]
-    discovery_batches = list(prepared["discovery_batches"])
-    initial_attempts = [{
-        "attempt_index": 0,
-        "query_plan_id": prepared["query_plan"]["plan_id"],
-        "discovery_outcome": {
-            "record_count": len(prepared["discovery"]["records"]),
-            "source_qualified_record_count": len(prepared["selection"]["selected"]),
-        },
-    }]
-    needs_reformulation, reformulation_reason = _initial_acquisition_outcome(prepared)
-    if explicit_queries is None and needs_reformulation:
-        prepared = _prepare_europepmc_acquisition(
-            project,
-            candidate_id,
-            explicit_queries=None,
-            max_papers=max_papers,
-            page_size=page_size,
-            # Each bounded attempt persists its own immutable discovery and
-            # selector receipts; reusing the first attempt's path would turn a
-            # truthful reformulation into an overwrite attempt.
-            run_id=f"{prepared['run_id']}_reformulated",
-            http_get=http_get,
-            timeout=timeout,
-            round_index=round_index,
-            reformulation_index=1,
-            query_id_prefix="R",
-        )
-        query_plans.append(prepared["query_plan"])
-        discovery_batches.extend(prepared["discovery_batches"])
-        initial_attempts.append({
-            "attempt_index": 1,
-            "query_plan_id": prepared["query_plan"]["plan_id"],
-            "discovery_outcome": {
-                "record_count": len(prepared["discovery"]["records"]),
-                "source_qualified_record_count": len(prepared["selection"]["selected"]),
-            },
-        })
-    seed = prepared["seed"]
-    seed_digest = prepared["seed_sha256"]
-    run_id = prepared["run_id"]
-    query_plan = prepared["query_plan"]
-    handshake = prepared["transport_handshake"]
-    selection = prepared["selection"]
+class CurieAcquisitionError(CurieContractError):
+    """Typed first-acquisition failure passed through the CLI to the runner."""
 
+    def __init__(self, category: str, detail: str):
+        self.category = category
+        super().__init__(f"{category}: {detail}")
+
+
+def _typed_attempt_error(exc: CurieContractError, attempts: list[dict]) -> CurieAcquisitionError:
+    root = _root_cause(exc)
+    category = (
+        "SERVICE_ERROR" if isinstance(root, (URLError, TimeoutError, ConnectionError))
+        or "SOURCE_LEVEL" in str(exc) else "CONTRACT_ERROR"
+    )
+    last = attempts[-1]["artifact"] if attempts else None
+    return CurieAcquisitionError(
+        category, f"{exc}; last_valid_attempt={last!r}"
+    )
+
+
+@contextmanager
+def _first_acquisition_writer(project: Path, candidate_id: str, round_id: str):
+    """Hold one OS-owned candidate/round lock; a crash releases the OS lock."""
+    lock_path = (project / "08_Audit" / "l05_acquisition"
+                 / _safe_token(candidate_id, "candidate_id")
+                 / f"first_{_safe_token(round_id, 'round_id')}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as stream:
+        if stream.tell() == 0:
+            stream.write(b"0")
+            stream.flush()
+        try:
+            if os.name == "nt":
+                import msvcrt
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise CurieAcquisitionError(
+                "PERSISTENCE_ERROR", "first acquisition already has an active writer"
+            ) from exc
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def _write_immutable(path: Path, payload: dict) -> str:
+    raw = _canonical_bytes(payload)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("xb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except FileExistsError as exc:
+        raise CurieAcquisitionError(
+            "PERSISTENCE_ERROR", f"acquisition artifact already exists: {path}"
+        ) from exc
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _read_object(path: Path) -> dict:
+    try:
+        value = json.loads(path.read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CurieAcquisitionError(
+            "RECOVERY_ERROR", f"acquisition artifact is unreadable: {path}: {exc}"
+        ) from exc
+    if not isinstance(value, dict):
+        raise CurieAcquisitionError("RECOVERY_ERROR", f"acquisition artifact is not an object: {path}")
+    return value
+
+
+def _verify_acquisition_reference(project: Path, relative: str, digest: str,
+                                  run_id: str, candidate_id: str) -> None:
+    candidate_root = (project / "08_Audit" / "l05_acquisition").resolve()
+    source_root = (project / "09_Literature_Database").resolve()
+    path = (project / str(relative)).resolve()
+    if not (path.is_relative_to(candidate_root) or path.is_relative_to(source_root)):
+        raise CurieAcquisitionError("RECOVERY_ERROR", f"source reference escapes acquisition roots: {relative}")
+    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        raise CurieAcquisitionError("RECOVERY_ERROR", f"source reference bytes/hash mismatch: {relative}")
+    if run_id not in path.parts or _safe_token(candidate_id, "candidate_id") not in path.parts:
+        raise CurieAcquisitionError("RECOVERY_ERROR", f"source reference run provenance mismatch: {relative}")
+
+
+def _validate_acquisition_manifest(project: Path, manifest: dict, *,
+                                   candidate_id: str, round_id: str,
+                                   seed_sha256: str, run_id: str) -> None:
+    """One validation owner for new v2 first-acquisition manifests."""
+    expected = {
+        "schema_version": AUDIT_SCHEMA_VERSION,
+        "candidate_id": candidate_id, "round_id": round_id,
+        "seed_sha256": seed_sha256, "acquisition_run_id": run_id,
+        "target_pack_version": 1, "max_attempts": 3,
+    }
+    if any(manifest.get(key) != value for key, value in expected.items()):
+        raise CurieAcquisitionError("RECOVERY_ERROR", "v2 acquisition manifest identity/contract mismatch")
+    owner_path = (project / "08_Audit" / "l05_acquisition"
+                  / _safe_token(candidate_id, "candidate_id")
+                  / f"first_{_safe_token(round_id, 'round_id')}.json")
+    if _read_object(owner_path) != {
+        "schema_version": "L05FirstAcquisitionOwner/v1",
+        "candidate_id": candidate_id, "round_id": round_id,
+        "seed_sha256": seed_sha256, "acquisition_run_id": run_id,
+    }:
+        raise CurieAcquisitionError("RECOVERY_ERROR", "first acquisition owner mismatch")
+    attempts = manifest.get("attempts")
+    if not isinstance(attempts, list) or not 1 <= len(attempts) <= 3:
+        raise CurieAcquisitionError("RECOVERY_ERROR", "v2 acquisition attempts are missing or out of bounds")
+    plan_ids: set[str] = set()
+    query_ids: set[str] = set()
+    all_evidence: dict[str, dict] = {}
+    all_papers: dict[str, dict] = {}
+    all_batches: list[dict] = []
+    for index, attempt in enumerate(attempts, 1):
+        if attempt.get("attempt_index") != index:
+            raise CurieAcquisitionError("RECOVERY_ERROR", "v2 acquisition attempt indexes are not contiguous")
+        plan = validate_query_plan(attempt.get("query_plan"), seed_sha256=seed_sha256)
+        if plan["candidate_id"] != candidate_id or plan["round_id"] != round_id or plan["round_index"] != 1:
+            raise CurieAcquisitionError("RECOVERY_ERROR", "v2 acquisition QueryPlan identity mismatch")
+        if plan["plan_id"] in plan_ids:
+            raise CurieAcquisitionError("RECOVERY_ERROR", "v2 acquisition repeats a QueryPlan ID")
+        plan_ids.add(plan["plan_id"])
+        local_queries = {query["query_id"] for query in plan["queries"]}
+        if local_queries & query_ids:
+            raise CurieAcquisitionError("RECOVERY_ERROR", "v2 acquisition repeats a query ID")
+        query_ids.update(local_queries)
+        artifact = attempt.get("artifact")
+        if not isinstance(artifact, dict):
+            raise CurieAcquisitionError("RECOVERY_ERROR", "v2 attempt artifact reference is missing")
+        relative = artifact.get("path")
+        digest = artifact.get("sha256")
+        if not isinstance(relative, str) or not isinstance(digest, str):
+            raise CurieAcquisitionError("RECOVERY_ERROR", "v2 attempt artifact reference is invalid")
+        expected_attempt = (project / "08_Audit" / "l05_acquisition"
+                            / _safe_token(candidate_id, "candidate_id") / run_id
+                            / f"attempt_{index:03d}.json").resolve()
+        if (project / relative).resolve() != expected_attempt:
+            raise CurieAcquisitionError("RECOVERY_ERROR", "v2 attempt artifact path mismatch")
+        _verify_acquisition_reference(project, relative, digest, run_id, candidate_id)
+        persisted = _read_object(project / relative)
+        if persisted != {key: value for key, value in attempt.items() if key != "artifact"}:
+            raise CurieAcquisitionError("RECOVERY_ERROR", "v2 attempt artifact content mismatch")
+        http_hashes = {
+            request.get("response_sha256") for request in attempt.get("http_requests", [])
+            if isinstance(request, dict) and request.get("response_sha256")
+        }
+        for batch in attempt.get("discovery_batches", []):
+            if batch.get("query_id") not in local_queries:
+                raise CurieAcquisitionError("RECOVERY_ERROR", "discovery batch belongs to another attempt")
+            receipt = batch.get("receipt") or {}
+            if receipt.get("response_sha256") not in http_hashes:
+                raise CurieAcquisitionError("RECOVERY_ERROR", "discovery response lacks an actual HTTP request")
+            _verify_acquisition_reference(
+                project, receipt.get("response_path"), receipt.get("response_sha256"),
+                f"{run_id}_A{index}", candidate_id,
+            )
+            all_batches.append(batch)
+        for snapshot in attempt.get("source_snapshots", []):
+            if (snapshot.get("run_id") != f"{run_id}_A{index}"
+                    or snapshot.get("artifact_sha256") not in http_hashes):
+                raise CurieAcquisitionError("RECOVERY_ERROR", "source snapshot lacks attempt HTTP provenance")
+            _verify_acquisition_reference(
+                project, snapshot.get("artifact_path"), snapshot.get("artifact_sha256"),
+                f"{run_id}_A{index}", candidate_id,
+            )
+        validate_coverage_decision(attempt.get("coverage_facts"))
+        for paper in attempt.get("acquired_papers", []):
+            all_papers.setdefault(paper["paper_id"], paper)
+        for evidence in attempt.get("verified_evidence", []):
+            evidence = validate_evidence_extract(evidence)
+            previous = all_evidence.setdefault(evidence["evidence_id"], evidence)
+            if previous != evidence:
+                raise CurieAcquisitionError("RECOVERY_ERROR", "evidence ID collision across attempts")
+        if attempt.get("cumulative_verified_evidence_ids") != list(all_evidence):
+            raise CurieAcquisitionError("RECOVERY_ERROR", "cumulative evidence IDs do not match attempts")
+    if (manifest.get("query_plans") != [item["query_plan"] for item in attempts]
+            or manifest.get("discovery_batches") != all_batches
+            or manifest.get("coverage") != attempts[-1]["coverage_facts"]):
+        raise CurieAcquisitionError("RECOVERY_ERROR", "v2 manifest cumulative facts do not match attempts")
+    status = manifest.get("terminal_status")
+    if status not in {"FROZEN", "INSUFFICIENT_STOP"}:
+        raise CurieAcquisitionError("RECOVERY_ERROR", "v2 acquisition terminal status is invalid")
+    if manifest.get("status") != status:
+        raise CurieAcquisitionError("RECOVERY_ERROR", "v2 acquisition status fields disagree")
+    if status == "FROZEN":
+        evidence_pack = manifest.get("evidence_pack")
+        checkpoint = manifest.get("checkpoint")
+        if not isinstance(evidence_pack, dict) or not isinstance(checkpoint, dict):
+            raise CurieAcquisitionError("RECOVERY_ERROR", "frozen v2 acquisition lacks checkpoint/pack")
+        _verify_acquisition_reference(
+            project, checkpoint.get("path"), checkpoint.get("sha256"),
+            run_id, candidate_id,
+        )
+        expected_checkpoint = (project / "08_Audit" / "l05_acquisition"
+                               / _safe_token(candidate_id, "candidate_id") / run_id
+                               / "freeze_input.json").resolve()
+        if (project / str(checkpoint.get("path"))).resolve() != expected_checkpoint:
+            raise CurieAcquisitionError("RECOVERY_ERROR", "freeze checkpoint path mismatch")
+        frozen_input = _read_object(expected_checkpoint)
+        ready_pack = frozen_input.get("ready_pack")
+        if (frozen_input.get("schema_version") != "L05EuropePmcFreezeInput/v1"
+                or not isinstance(ready_pack, dict)
+                or preview_frozen_evidence_pack(project, ready_pack) != evidence_pack
+                or frozen_input.get("expected_evidence_pack") != evidence_pack
+                or frozen_input.get("manifest") != {
+                    key: value for key, value in manifest.items() if key != "checkpoint"
+                }):
+            raise CurieAcquisitionError("RECOVERY_ERROR", "freeze checkpoint input/provenance mismatch")
+        pack = load_frozen_evidence_pack(
+            project, evidence_pack, candidate_id=candidate_id,
+            round_id=round_id, seed_sha256=seed_sha256,
+        )
+        if pack.get("source_run_id") != run_id or pack["version"] != 1:
+            raise CurieAcquisitionError("RECOVERY_ERROR", "frozen pack acquisition provenance mismatch")
+        if (pack["query_plans"] != manifest["query_plans"]
+                or pack["discovery_receipts"] != all_batches
+                or pack["selected_papers"] != list(all_papers.values())
+                or pack["evidence"] != list(all_evidence.values())
+                or pack["coverage"] != manifest["coverage"]):
+            raise CurieAcquisitionError("RECOVERY_ERROR", "frozen pack content does not match v2 attempts")
+    elif manifest.get("evidence_pack") is not None:
+        raise CurieAcquisitionError("RECOVERY_ERROR", "insufficient acquisition carries a frozen pack")
+    elif manifest.get("terminal_reason") not in {"budget_exhausted", "no_admissible_replan"}:
+        raise CurieAcquisitionError("RECOVERY_ERROR", "insufficient acquisition reason is invalid")
+
+
+def _result_from_manifest(manifest: dict, relative: str, digest: str) -> dict:
+    return {
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "candidate_id": manifest["candidate_id"],
+        "round_id": manifest["round_id"],
+        "run_id": manifest["acquisition_run_id"],
+        "status": manifest["terminal_status"],
+        "terminal_reason": manifest.get("terminal_reason"),
+        "coverage": manifest["coverage"],
+        "evidence_pack": manifest.get("evidence_pack"),
+        "acquisition_manifest_path": relative,
+        "acquisition_manifest_sha256": digest,
+    }
+
+
+def validate_europepmc_acquisition_result(project_dir: str | Path,
+                                          candidate_id: str, result: dict) -> dict:
+    """Revalidate the exact v2 result at the CLI-to-runner use boundary."""
+    if not isinstance(result, dict):
+        raise CurieAcquisitionError("CONTRACT_ERROR", "acquisition result is not an object")
+    project = Path(project_dir).resolve()
+    seed = research_seed.load_l1_research_seed(project, candidate_id)
+    run_id = _safe_token(result.get("run_id"), "acquisition run_id")
+    relative = Path(str(result.get("acquisition_manifest_path") or ""))
+    expected = (project / "08_Audit" / "l05_acquisition"
+                / _safe_token(candidate_id, "candidate_id") / run_id
+                / "acquisition_manifest.json").resolve()
+    if relative.is_absolute() or (project / relative).resolve() != expected:
+        raise CurieAcquisitionError("CONTRACT_ERROR", "acquisition manifest path/identity mismatch")
+    raw = expected.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != result.get("acquisition_manifest_sha256"):
+        raise CurieAcquisitionError("CONTRACT_ERROR", "acquisition manifest bytes/hash mismatch")
+    manifest = _read_object(expected)
+    _validate_acquisition_manifest(
+        project, manifest, candidate_id=str(candidate_id),
+        round_id=str(seed["round_id"]), seed_sha256=research_seed.seed_sha256(seed),
+        run_id=run_id,
+    )
+    canonical = _result_from_manifest(manifest, relative.as_posix(), digest)
+    if result != canonical:
+        raise CurieAcquisitionError("CONTRACT_ERROR", "acquisition result differs from v2 manifest")
+    return canonical
+
+
+def _execute_europepmc_attempt(prepared: dict, project: Path, candidate_id: str,
+                               http_get: Callable[[str, int], bytes] | None,
+                               timeout: int) -> dict:
+    seed = prepared["seed"]
+    run_id = prepared["run_id"]
+    selection = prepared["selection"]
     source_snapshots: list[dict] = []
     verified_evidence: list[dict] = []
     acquired_papers: list[dict] = []
@@ -727,75 +962,344 @@ def run_europepmc_acquisition(
                 })
                 if retrieve_one(promoted):
                     break
-
-    coverage = _coverage_for(
-        source_snapshots,
-        verified_evidence,
-        round_index=round_index,
-    )
-
-    evidence_pack_manifest = None
-    status = coverage["verdict"]
-    if coverage["verdict"] == "PASS":
-        pack = build_evidence_pack(
-            candidate_id=candidate_id,
-            round_id=str(seed["round_id"]),
-            seed_sha256=seed_digest,
-            version=1,
-            query_plans=query_plans,
-            discovery_receipts=discovery_batches,
-            selected_papers=acquired_papers,
-            evidence=verified_evidence,
-            coverage=coverage,
-            gaps=coverage["gaps"],
-            source_run_id=run_id,
-        )
-        evidence_pack_manifest = freeze_evidence_pack(project, pack)
-        status = "FROZEN"
-
-    audit_payload = {
-        "schema_version": AUDIT_SCHEMA_VERSION,
-        "candidate_id": candidate_id,
-        "round_id": str(seed["round_id"]),
-        "run_id": run_id,
-        "seed_sha256": seed_digest,
-        "transport_handshake": handshake,
-        "query_plan": query_plan,
-        "query_plans": query_plans,
-        "queries_executed": [item for plan in query_plans for item in plan["queries"]],
-        "final_executed_queries": list(query_plan["queries"]),
-        "initial_acquisition": {
-            "reformulated": len(initial_attempts) > 1,
-            "reformulation_reason": reformulation_reason if len(initial_attempts) > 1 else None,
-            "attempts": initial_attempts,
-        },
-        "discovery_batches": discovery_batches,
-        "selection": selection,
+    return {
         "source_snapshots": source_snapshots,
+        "verified_evidence": verified_evidence,
+        "acquired_papers": acquired_papers,
         "paper_failures": paper_failures,
         "reserve_promotions": reserve_promotions,
-        "verified_evidence_ids": [item["evidence_id"] for item in verified_evidence],
-        "coverage": coverage,
-        "evidence_pack": evidence_pack_manifest,
-        "status": status,
     }
-    audit_path, audit_sha = _write_audit_manifest(
-        project,
-        candidate_id=candidate_id,
-        run_id=run_id,
-        payload=audit_payload,
+
+
+def run_europepmc_acquisition(
+    project_dir: str | Path,
+    cand_id: str,
+    *,
+    explicit_queries: list[str] | None = None,
+    max_papers: int = 3,
+    page_size: int = 25,
+    run_id: str | None = None,
+    http_get: Callable[[str, int], bytes] | None = None,
+    timeout: int = 20,
+    round_index: int = 1,
+    plan_builder: Callable | None = None,
+) -> dict:
+    """Run the bounded first acquisition and publish one terminal v2 manifest."""
+    if round_index != 1:
+        raise CurieAcquisitionError("CONTRACT_ERROR", "first acquisition round_index must be 1")
+    project = Path(project_dir)
+    candidate_id = str(cand_id)
+    try:
+        seed = research_seed.load_l1_research_seed(project, candidate_id)
+    except research_seed.ResearchSeedError as exc:
+        raise CurieAcquisitionError("CONTRACT_ERROR", f"canonical ResearchSeed is invalid: {exc}") from exc
+    seed_digest = research_seed.seed_sha256(seed)
+    round_id = str(seed["round_id"])
+    acquisition_run_id = _safe_token(
+        run_id or f"EPMC_{seed_digest[:24]}", "acquisition_run_id"
     )
-    return {
-        "schema_version": RESULT_SCHEMA_VERSION,
-        "candidate_id": candidate_id,
-        "round_id": str(seed["round_id"]),
-        "run_id": run_id,
-        "status": status,
-        "coverage": coverage,
-        "evidence_pack": evidence_pack_manifest,
-        "acquisition_manifest_path": audit_path,
-        "acquisition_manifest_sha256": audit_sha,
-    }
+    run_root = (project / "08_Audit" / "l05_acquisition"
+                / _safe_token(candidate_id, "candidate_id") / acquisition_run_id)
+    final_path = run_root / "acquisition_manifest.json"
+    checkpoint_path = run_root / "freeze_input.json"
+    with _first_acquisition_writer(project, candidate_id, round_id):
+        owner_path = (project / "08_Audit" / "l05_acquisition"
+                      / _safe_token(candidate_id, "candidate_id")
+                      / f"first_{_safe_token(round_id, 'round_id')}.json")
+        owner = {
+            "schema_version": "L05FirstAcquisitionOwner/v1",
+            "candidate_id": candidate_id, "round_id": round_id,
+            "seed_sha256": seed_digest, "acquisition_run_id": acquisition_run_id,
+        }
+        created_owner = not owner_path.exists()
+        if created_owner:
+            if initial_evidence_pack_path(project, candidate_id, round_id).exists():
+                raise CurieAcquisitionError(
+                    "RECOVERY_ERROR", "legacy frozen first pack lacks v2 recovery owner"
+                )
+            _write_immutable(owner_path, owner)
+        elif _read_object(owner_path) != owner:
+            raise CurieAcquisitionError(
+                "RECOVERY_ERROR", "first acquisition owner conflicts with candidate/round/seed/run"
+            )
+        if final_path.exists():
+            manifest = _read_object(final_path)
+            try:
+                _validate_acquisition_manifest(
+                    project, manifest, candidate_id=candidate_id, round_id=round_id,
+                    seed_sha256=seed_digest, run_id=acquisition_run_id,
+                )
+            except CurieContractError as exc:
+                raise CurieAcquisitionError("RECOVERY_ERROR", str(exc)) from exc
+            relative = final_path.relative_to(project).as_posix()
+            return _result_from_manifest(
+                manifest, relative, hashlib.sha256(final_path.read_bytes()).hexdigest()
+            )
+        if checkpoint_path.exists():
+            checkpoint = _read_object(checkpoint_path)
+            manifest = checkpoint.get("manifest")
+            ready_pack = checkpoint.get("ready_pack")
+            expected_pack = checkpoint.get("expected_evidence_pack")
+            if not isinstance(manifest, dict) or not isinstance(ready_pack, dict) or not isinstance(expected_pack, dict):
+                raise CurieAcquisitionError("RECOVERY_ERROR", "freeze checkpoint is incomplete")
+            try:
+                if preview_frozen_evidence_pack(project, ready_pack) != expected_pack:
+                    raise CurieAcquisitionError(
+                        "RECOVERY_ERROR", "freeze checkpoint canonical pack mismatch"
+                    )
+            except CurieContractError as exc:
+                raise CurieAcquisitionError("RECOVERY_ERROR", str(exc)) from exc
+            if manifest.get("evidence_pack") != expected_pack:
+                raise CurieAcquisitionError("RECOVERY_ERROR", "freeze checkpoint manifest/pack mismatch")
+            manifest = dict(manifest)
+            manifest["checkpoint"] = {
+                "path": checkpoint_path.relative_to(project).as_posix(),
+                "sha256": hashlib.sha256(checkpoint_path.read_bytes()).hexdigest(),
+            }
+            try:
+                _validate_acquisition_manifest(
+                    project, manifest, candidate_id=candidate_id, round_id=round_id,
+                    seed_sha256=seed_digest, run_id=acquisition_run_id,
+                )
+            except CurieContractError as exc:
+                raise CurieAcquisitionError("RECOVERY_ERROR", str(exc)) from exc
+            relative, digest = _write_audit_manifest(
+                project, candidate_id=candidate_id,
+                run_id=acquisition_run_id, payload=manifest,
+            )
+            return _result_from_manifest(manifest, relative, digest)
+        if not created_owner or run_root.exists() or initial_evidence_pack_path(
+            project, candidate_id, round_id
+        ).exists():
+            raise CurieAcquisitionError(
+                "RECOVERY_ERROR", "incomplete or conflicting first acquisition; preserved for inspection"
+            )
+        run_root.mkdir(parents=True)
+        builder = plan_builder or build_multisource_query_plan
+        attempts: list[dict] = []
+        plans: list[dict] = []
+        discovery_batches: list[dict] = []
+        source_snapshots: list[dict] = []
+        verified_evidence: list[dict] = []
+        acquired_papers: list[dict] = []
+        paper_failures: list[dict] = []
+        reserve_promotions: list[dict] = []
+        seen_evidence: dict[str, dict] = {}
+        seen_papers: set[str] = set()
+        coverage = None
+        terminal_reason = None
+        for attempt_index in range(1, 4):
+            if attempt_index > 1 and (explicit_queries is not None or
+                                      (plan_builder is None and attempt_index > 2)):
+                terminal_reason = "no_admissible_replan"
+                break
+            prefix = f"{acquisition_run_id}_A{attempt_index}_Q"
+            plan = builder(
+                seed, seed_sha256=seed_digest, round_index=1,
+                explicit_queries=explicit_queries, providers=["europe-pmc"],
+                reformulation_index=attempt_index - 1, query_id_prefix=prefix,
+            )
+            if plan is None:
+                terminal_reason = "no_admissible_replan"
+                break
+            plan = validate_query_plan(plan, seed_sha256=seed_digest)
+            if plan["candidate_id"] != candidate_id or plan["round_id"] != round_id or plan["round_index"] != 1:
+                raise CurieAcquisitionError("CONTRACT_ERROR", "planner returned a plan for another first acquisition")
+            if any(plan["plan_id"] == old["plan_id"] for old in plans):
+                raise CurieAcquisitionError("CONTRACT_ERROR", "planner repeated an executed plan")
+            rendered_queries = tuple(
+                query["query"].strip().casefold() for query in plan["queries"]
+            )
+            if any(rendered_queries == tuple(
+                query["query"].strip().casefold() for query in old["queries"]
+            ) for old in plans):
+                raise CurieAcquisitionError(
+                    "CONTRACT_ERROR", "planner repeated executed query content"
+                )
+            if {q["query_id"] for q in plan["queries"]} & {
+                q["query_id"] for old in plans for q in old["queries"]
+            }:
+                raise CurieAcquisitionError("CONTRACT_ERROR", "planner repeated an executed query ID")
+            plans.append(plan)
+            http_requests: list[dict] = []
+            underlying_get = http_get or _default_http_get
+
+            def recorded_get(url: str, request_timeout: int) -> bytes:
+                try:
+                    response = underlying_get(url, request_timeout)
+                except Exception as request_exc:
+                    http_requests.append({
+                        "url": url, "timeout": request_timeout,
+                        "failure_type": type(request_exc).__name__,
+                        "failure_detail": str(request_exc),
+                    })
+                    raise
+                if not isinstance(response, (bytes, bytearray)):
+                    raise CurieAcquisitionError(
+                        "CONTRACT_ERROR", "Europe PMC HTTP response must be bytes"
+                    )
+                http_requests.append({
+                    "url": url, "timeout": request_timeout,
+                    "response_sha256": hashlib.sha256(response).hexdigest(),
+                })
+                return response
+
+            attempt_path = run_root / f"attempt_{attempt_index:03d}.json"
+            try:
+                prepared = _prepare_europepmc_acquisition(
+                    project, candidate_id, explicit_queries=explicit_queries,
+                    max_papers=max_papers, page_size=page_size,
+                    run_id=f"{acquisition_run_id}_A{attempt_index}",
+                    http_get=recorded_get, timeout=timeout, round_index=1,
+                    prebuilt_query_plan=plan,
+                )
+                actual = _execute_europepmc_attempt(
+                    prepared, project, candidate_id, recorded_get, timeout,
+                )
+            except CurieContractError as exc:
+                failed_attempt = {
+                    "attempt_index": attempt_index, "query_plan": plan,
+                    "http_requests": http_requests,
+                    "terminal_status": "ERROR", "error_detail": str(exc),
+                }
+                failed_sha = _write_immutable(attempt_path, failed_attempt)
+                attempts.append({
+                    "artifact": {
+                        "path": attempt_path.relative_to(project).as_posix(),
+                        "sha256": failed_sha,
+                    },
+                })
+                raise _typed_attempt_error(exc, attempts) from exc
+            discovery_batches.extend(prepared["discovery_batches"])
+            source_snapshots.extend(actual["source_snapshots"])
+            paper_failures.extend(actual["paper_failures"])
+            reserve_promotions.extend(actual["reserve_promotions"])
+            for paper in actual["acquired_papers"]:
+                if paper["paper_id"] not in seen_papers:
+                    seen_papers.add(paper["paper_id"])
+                    acquired_papers.append(paper)
+            for evidence in actual["verified_evidence"]:
+                key = evidence["evidence_id"]
+                if key in seen_evidence:
+                    if seen_evidence[key] != evidence:
+                        raise CurieAcquisitionError("CONTRACT_ERROR", f"evidence ID collision: {key}")
+                    continue
+                seen_evidence[key] = evidence
+                verified_evidence.append(evidence)
+            coverage = _coverage_for(source_snapshots, verified_evidence, round_index=1)
+            current_evidence_ids = {
+                item["evidence_id"] for item in actual["verified_evidence"]
+            }
+            if coverage["verdict"] == "PASS":
+                next_reason = None
+            elif attempt_index == 3:
+                next_reason = "budget_exhausted"
+            elif explicit_queries is not None or (plan_builder is None and attempt_index == 2):
+                next_reason = "no_admissible_replan"
+            else:
+                next_reason = "coverage_insufficient_replan"
+            attempt = {
+                "attempt_index": attempt_index,
+                "query_plan": plan,
+                "http_requests": http_requests,
+                "transport_handshake": prepared["transport_handshake"],
+                "discovery_batches": prepared["discovery_batches"],
+                "discovery_outcome": {
+                    "record_count": len(prepared["discovery"]["records"]),
+                    "source_qualified_record_count": len(prepared["selection"]["selected"]),
+                },
+                "selection": prepared["selection"],
+                "acquired_papers": actual["acquired_papers"],
+                "source_snapshots": actual["source_snapshots"],
+                "paper_failures": actual["paper_failures"],
+                "reserve_promotions": actual["reserve_promotions"],
+                "verified_evidence_ids": [item["evidence_id"] for item in actual["verified_evidence"]],
+                "verified_evidence": actual["verified_evidence"],
+                "cumulative_verified_evidence_ids": [
+                    item["evidence_id"] for item in verified_evidence
+                ],
+                "reused_evidence_ids": [
+                    item["evidence_id"] for item in verified_evidence
+                    if item["evidence_id"] not in current_evidence_ids
+                ],
+                "coverage_facts": coverage,
+                "next_reason": next_reason,
+            }
+            attempt_sha = _write_immutable(attempt_path, attempt)
+            attempt["artifact"] = {
+                "path": attempt_path.relative_to(project).as_posix(),
+                "sha256": attempt_sha,
+            }
+            attempts.append(attempt)
+            if coverage["verdict"] == "PASS":
+                break
+            if attempt_index == 3:
+                terminal_reason = "budget_exhausted"
+                break
+        if coverage is None:
+            raise CurieAcquisitionError("CONTRACT_ERROR", "planner produced no initial plan")
+        frozen = coverage["verdict"] == "PASS"
+        evidence_pack = None
+        if frozen:
+            pack = build_evidence_pack(
+                candidate_id=candidate_id, round_id=round_id,
+                seed_sha256=seed_digest, version=1, query_plans=plans,
+                discovery_receipts=discovery_batches,
+                selected_papers=acquired_papers, evidence=verified_evidence,
+                coverage=coverage, gaps=coverage["gaps"],
+                source_run_id=acquisition_run_id,
+            )
+            evidence_pack = preview_frozen_evidence_pack(project, pack)
+        manifest = {
+            "schema_version": AUDIT_SCHEMA_VERSION,
+            "candidate_id": candidate_id, "round_id": round_id,
+            "seed_sha256": seed_digest,
+            "acquisition_run_id": acquisition_run_id,
+            "run_id": acquisition_run_id,
+            "target_pack_version": 1, "max_attempts": 3,
+            "attempts": attempts,
+            "query_plans": plans, "discovery_batches": discovery_batches,
+            "selection": attempts[-1]["selection"],
+            "source_snapshots": source_snapshots,
+            "paper_failures": paper_failures,
+            "reserve_promotions": reserve_promotions,
+            "verified_evidence_ids": [item["evidence_id"] for item in verified_evidence],
+            "coverage": coverage, "evidence_pack": evidence_pack,
+            "terminal_status": "FROZEN" if frozen else "INSUFFICIENT_STOP",
+            "terminal_reason": None if frozen else terminal_reason,
+            "status": "FROZEN" if frozen else "INSUFFICIENT_STOP",
+        }
+        if frozen:
+            checkpoint = {
+                "schema_version": "L05EuropePmcFreezeInput/v1",
+                "candidate_id": candidate_id, "round_id": round_id,
+                "seed_sha256": seed_digest, "acquisition_run_id": acquisition_run_id,
+                "ready_pack": pack, "expected_evidence_pack": evidence_pack,
+                "manifest": manifest,
+            }
+            checkpoint_sha = _write_immutable(checkpoint_path, checkpoint)
+            try:
+                actual_manifest = freeze_evidence_pack(project, pack)
+            except (CurieContractError, OSError) as exc:
+                raise CurieAcquisitionError("PERSISTENCE_ERROR", str(exc)) from exc
+            if actual_manifest != evidence_pack:
+                raise CurieAcquisitionError("PERSISTENCE_ERROR", "frozen pack differs from pre-freeze checkpoint")
+            manifest["checkpoint"] = {
+                "path": checkpoint_path.relative_to(project).as_posix(),
+                "sha256": checkpoint_sha,
+            }
+        _validate_acquisition_manifest(
+            project, manifest, candidate_id=candidate_id, round_id=round_id,
+            seed_sha256=seed_digest, run_id=acquisition_run_id,
+        )
+        try:
+            relative, digest = _write_audit_manifest(
+                project, candidate_id=candidate_id,
+                run_id=acquisition_run_id, payload=manifest,
+            )
+        except (CurieContractError, OSError) as exc:
+            raise CurieAcquisitionError("PERSISTENCE_ERROR", str(exc)) from exc
+        return _result_from_manifest(manifest, relative, digest)
 
 
 def run_paperqa2_europepmc_acquisition(

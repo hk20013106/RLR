@@ -4,7 +4,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
+import tempfile
 from pathlib import Path
 
 from .contracts import (
@@ -52,6 +54,14 @@ def _pack_filename(candidate_id: str, round_id: str, version: int) -> str:
     if not round_token.upper().startswith("R"):
         round_token = f"R{round_token}"
     return f"EP_{candidate}_{round_token}_v{version}.json"
+
+
+def initial_evidence_pack_path(project_dir: str | Path, candidate_id: str,
+                               round_id: str) -> Path:
+    """Return the canonical first-pack location without inferring from directories."""
+    return (Path(project_dir) / _L05_ROOT
+            / _safe_token(candidate_id, "candidate_id")
+            / _pack_filename(candidate_id, round_id, 1))
 
 
 def _validate_selected_papers(selected_papers: object) -> list[dict]:
@@ -316,8 +326,8 @@ def build_evidence_pack(*, candidate_id: str, round_id: str, seed_sha256: str,
     return _validate_pack_structure(pack, expected_status="READY_TO_FREEZE")
 
 
-def freeze_evidence_pack(project_dir: str | Path, pack: dict) -> dict:
-    """Persist one immutable FROZEN pack and return its exact artifact manifest."""
+def _prepared_freeze(project_dir: str | Path, pack: dict) -> tuple[Path, bytes, dict]:
+    """Compute the one canonical frozen byte sequence before publication."""
     _validate_semantic_pack(pack)
     ready = _validate_pack_structure(pack, expected_status="READY_TO_FREEZE")
     if ready["coverage"]["verdict"] != "PASS":
@@ -334,12 +344,8 @@ def freeze_evidence_pack(project_dir: str | Path, pack: dict) -> dict:
         / _pack_filename(frozen["candidate_id"], frozen["round_id"], frozen["version"])
     )
     path = project_dir / relative_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        raise CurieContractError(f"frozen EvidencePack already exists: {relative_path.as_posix()}")
     raw = _canonical_bytes(frozen)
-    path.write_bytes(raw)
-    return {
+    manifest = {
         "schema_version": EVIDENCE_PACK_MANIFEST_SCHEMA_VERSION,
         "candidate_id": frozen["candidate_id"],
         "round_id": frozen["round_id"],
@@ -351,6 +357,36 @@ def freeze_evidence_pack(project_dir: str | Path, pack: dict) -> dict:
         "content_sha256": frozen["content_sha256"],
         "status": "FROZEN",
     }
+    return path, raw, manifest
+
+
+def preview_frozen_evidence_pack(project_dir: str | Path, pack: dict) -> dict:
+    """Expose the exact future artifact identity for a durable acquisition checkpoint."""
+    return _prepared_freeze(project_dir, pack)[2]
+
+
+def freeze_evidence_pack(project_dir: str | Path, pack: dict) -> dict:
+    """Persist one immutable FROZEN pack and return its exact artifact manifest."""
+    path, raw, manifest = _prepared_freeze(project_dir, pack)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent, prefix=".evidence-pack-", delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, path)
+    except FileExistsError as exc:
+        raise CurieContractError(
+            f"frozen EvidencePack already exists: {manifest['artifact_path']}"
+        ) from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return manifest
 
 
 def _validated_manifest_identity(manifest: dict, *, candidate_id: str,

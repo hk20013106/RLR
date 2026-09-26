@@ -54,6 +54,9 @@ from research_loop.delta import artifact_for_node
 from research_loop.hypothesis_contracts import provider_schema_for_profile
 from research_loop.l0_state import L0StateError, restore_previous_round
 from research_loop import research_seed
+from research_loop.l05_curie.europepmc_runtime import (
+    CurieAcquisitionError, validate_europepmc_acquisition_result,
+)
 from research_loop.topology import topology_for_profile
 
 ENGINE = EngineAPI()
@@ -873,39 +876,54 @@ def _l05_command(project, cand, cfg):
 
 
 def exec_l05(project, cand, step, cfg, args, run_dir, round_id):
-    """Run the native Curie acquisition boundary before dispatching L1.
-
-    L0.5 is a first-class research phase, not a delta-producing persona.  Its
-    command owns discovery, verification, and EvidencePack freeze; the runner
-    owns the final ResearchSeed -> native binding handoff so the next-step
-    router can authorize L1 from the exact frozen pack.
-    """
+    """Return a typed first-acquisition outcome to the DAG runner."""
     try:
         command = _l05_command(project, cand, cfg)
     except ValueError as exc:
-        detail = f"invalid L0.5 Curie configuration: {exc}"
+        return {"terminal_status": "ERROR", "error_category": "CONTRACT_ERROR",
+                "detail": f"invalid L0.5 Curie configuration: {exc}"}
+    result = _ctl(*command)
+    if result.returncode != 0:
+        try:
+            failure = json.loads(result.stdout)
+        except (ValueError, TypeError):
+            failure = {}
+        category = failure.get("error_category", "ERROR") if isinstance(failure, dict) else "ERROR"
+        detail = (failure.get("detail") if isinstance(failure, dict) else None) or (
+            result.stderr.strip() or result.stdout.strip() or "L0.5 Curie acquisition failed"
+        )
+        log(f"L0.5 Curie {category}: {detail}")
+        auto_pitfall(project, cand, "L0.5", "evidence_acquisition_failure",
+                     detail, provider="curie-europe-pmc", evidence=str(run_dir))
+        return {"terminal_status": "ERROR", "error_category": category, "detail": detail}
+    try:
+        acquisition = json.loads(result.stdout)
+        acquisition = validate_europepmc_acquisition_result(project, cand, acquisition)
+    except (ValueError, OSError, CurieAcquisitionError,
+            research_seed.ResearchSeedError) as exc:
+        detail = f"L0.5 Curie result invalid: {exc}"
         log(detail)
         auto_pitfall(project, cand, "L0.5", "evidence_acquisition_failure",
                      detail, provider="curie-europe-pmc", evidence=str(run_dir))
-        return False
-    result = _ctl(*command)
-    if result.returncode != 0:
-        detail = (result.stderr.strip() or result.stdout.strip()
-                  or "L0.5 Curie acquisition failed")
-        log(f"L0.5 Curie acquisition failed closed: {detail}")
-        auto_pitfall(project, cand, "L0.5", "evidence_acquisition_failure",
-                     detail, provider="curie-europe-pmc", evidence=str(run_dir))
-        return False
+        category = exc.category if isinstance(exc, CurieAcquisitionError) else "CONTRACT_ERROR"
+        return {"terminal_status": "ERROR", "error_category": category,
+                "detail": detail}
+    if acquisition["status"] == "INSUFFICIENT_STOP":
+        log(f"L0.5 Curie insufficient: {acquisition['terminal_reason']}")
+        return {
+            "terminal_status": "L0_5_INSUFFICIENT_STOP",
+            "completed": False, "full_dag_completed": False,
+            "terminal_reason": acquisition["terminal_reason"],
+            "acquisition_run_id": acquisition["run_id"],
+            "acquisition_manifest_path": acquisition["acquisition_manifest_path"],
+            "acquisition_manifest_sha256": acquisition["acquisition_manifest_sha256"],
+        }
+    if acquisition["status"] != "FROZEN":
+        return {"terminal_status": "ERROR", "error_category": "CONTRACT_ERROR",
+                "detail": f"unexpected L0.5 status: {acquisition['status']}"}
+    acquisition_run_id = acquisition["run_id"]
+    evidence_pack = acquisition["evidence_pack"]
     try:
-        acquisition = json.loads(result.stdout)
-        if acquisition.get("status") != "FROZEN":
-            raise ValueError(
-                f"acquisition status is {acquisition.get('status')!r}, expected 'FROZEN'"
-            )
-        acquisition_run_id = str(acquisition.get("run_id") or "").strip()
-        evidence_pack = acquisition.get("evidence_pack")
-        if not acquisition_run_id or not isinstance(evidence_pack, dict):
-            raise ValueError("FROZEN acquisition result lacks run_id or evidence_pack")
         seed = research_seed.load_l1_research_seed(project, cand)
         research_seed.write_l1_native_evidence_binding(
             project, seed, evidence_pack, acquisition_run_id
@@ -915,18 +933,16 @@ def exec_l05(project, cand, step, cfg, args, run_dir, round_id):
         )
         active_run_id = research_seed.active_l1_native_evidence_run_id(project, seed)
         if str(active_run_id or "") != acquisition_run_id:
-            raise ValueError(
-                "native L1 activation did not select the acquired run "
-                f"{acquisition_run_id!r}"
-            )
-    except (ValueError, json.JSONDecodeError, research_seed.ResearchSeedError) as exc:
-        detail = f"L0.5 Curie result/binding invalid: {exc}"
+            raise ValueError("native L1 activation did not select the acquired run")
+    except (ValueError, research_seed.ResearchSeedError) as exc:
+        detail = f"L0.5 Curie binding invalid: {exc}"
         log(detail)
         auto_pitfall(project, cand, "L0.5", "evidence_acquisition_failure",
                      detail, provider="curie-europe-pmc", evidence=str(run_dir))
-        return False
+        return {"terminal_status": "ERROR", "error_category": "BINDING_ERROR",
+                "detail": detail}
     log(f"L0.5 Curie: frozen EvidencePack bound and activated for {acquisition_run_id}")
-    return True
+    return {"terminal_status": "FROZEN", "acquisition_run_id": acquisition_run_id}
 
 
 def _deep_research_config(cfg):
@@ -1173,8 +1189,11 @@ def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
         node = step["node"]
         if node == "L0.5":
             log("node L0.5 (Curie) [research acquisition / FREEZE]")
-            if not exec_l05(project, cand, step, cfg, args, run_dir, round_id):
-                return "node_failed:L0.5"
+            l05_outcome = exec_l05(project, cand, step, cfg, args, run_dir, round_id)
+            if l05_outcome["terminal_status"] == "L0_5_INSUFFICIENT_STOP":
+                return l05_outcome
+            if l05_outcome["terminal_status"] != "FROZEN":
+                return l05_outcome
             continue
         recovered = _recover_committed_advance(project, cand, step)
         if recovered is not None:
@@ -1545,6 +1564,38 @@ def cmd_run(args):
         exec_state = {"l7_failures": 0, "node_failures": {}}
         outcome = run_round(project, cur, cfg, args, round_id, max_rounds,
                             exec_state)
+        if isinstance(outcome, dict):
+            if outcome.get("terminal_status") == "L0_5_INSUFFICIENT_STOP":
+                run_dir = (Path(project) / "08_Run_Receipts" / cur
+                           / f"round_{round_id:02d}")
+                run_dir.mkdir(parents=True, exist_ok=True)
+                stop_record = {
+                    **outcome,
+                    "node": "L0.5",
+                    "downstream": "NOT_ATTEMPTED",
+                    "L1": "NOT_ATTEMPTED",
+                    "REVIEW": "NOT_ATTEMPTED",
+                    "L10b": "NOT_ATTEMPTED",
+                    "not_attempted_nodes": {
+                        node: "NOT_ATTEMPTED" for node in (
+                            "L1", "L2", "L3", "L4", "L5", "L6", "L7",
+                            "L8", "L8.5", "L9a", "L9b", "L10a", "L10b", "L10c",
+                            "REVIEW",
+                        )
+                    },
+                }
+                stop_path = run_dir / "stop_decision.json"
+                raw_stop = json.dumps(stop_record, indent=2, ensure_ascii=False)
+                if stop_path.exists() and stop_path.read_text(encoding="utf-8") != raw_stop:
+                    log("L0.5 stop record conflicts with existing run decision")
+                    return 4
+                if not stop_path.exists():
+                    stop_path.write_text(raw_stop, encoding="utf-8")
+                log("L0.5 insufficient stop recorded; full DAG incomplete")
+                return 0
+            log(f"ABORTING RUN: L0.5 {outcome.get('error_category', 'CONTRACT_ERROR')}: "
+                f"{outcome.get('detail', 'invalid outcome')}")
+            return 4
         if outcome == "stopped_after_node":
             log("halted per --stop-after-node (no stop decision taken)")
             return 0
