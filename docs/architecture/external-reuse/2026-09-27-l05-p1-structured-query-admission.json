@@ -1,0 +1,50 @@
+{
+  "schema_version": "ExternalReuseAudit/v1",
+  "change_id": "2026-09-27-l05-p1-structured-query-admission",
+  "EXISTING_IMPLEMENTATIONS_REVIEWED": [
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/l05_curie/query_planner.py and src/research_loop/l05_curie/multisource.py",
+      "finding": "The existing scientific planner owns L05ScientificQueryPlan/v1 and the multisource adapter embeds its result in shared QueryPlan/v1. P1 extends that same planner with a source-bound v2 validator and finite Boolean compiler, then uses the existing adapter; it does not introduce a parallel planner or change the shared query contract."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/structured_execution.py, src/research_loop/deep_research.py, and src/research_loop/providers/executor.py",
+      "finding": "The structured command helper, project runtime spec, CLI output parser, subprocess invocation and provider executor already exist. P1 closes schema validation, controlled invocation, and receipt persistence in the generic helper while retaining the existing configuration and execution owners."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/l05_curie/europepmc_runtime.py, src/research_loop/l05_curie/semantic_verifier.py, and src/research_loop/l05_curie/store.py",
+      "finding": "The P0 runtime already owns the only bounded acquisition loop, immutable attempts, cumulative coverage, checkpoint and freeze. The semantic verifier and store already own admission policy and optional verification-to-evidence equality. P1 wires those owners into the ordinary Europe PMC path without changing shared EvidencePack/v1 or CoverageDecision/v1 semantics."
+    },
+    {
+      "scope": "external",
+      "reference": "https://github.com/ropensci/europepmc/blob/master/R/epmc_search.r",
+      "finding": "The primary source forwards a caller-supplied query to the Europe PMC REST search endpoint and handles cursor pagination and result parsing. It is useful as a transport-boundary comparison, but contains no RLR ResearchSeed authority, feedback-driven plan contract, semantic admission, or freeze provenance to reuse."
+    }
+  ],
+  "REUSABLE_COMPONENTS": [
+    {
+      "reference": "src/research_loop/l05_curie/query_planner.py",
+      "disposition": "EXTEND",
+      "reason": "Retain one scientific plan owner and version-dispatch validation while adding the authorized v2 behavior."
+    },
+    {
+      "reference": "src/research_loop/structured_execution.py",
+      "disposition": "REFACTOR",
+      "reason": "Complete the existing command helper with the already available runtime spec, executor, JSON Schema validator, and auditable receipt."
+    },
+    {
+      "reference": "src/research_loop/l05_curie/europepmc_runtime.py",
+      "disposition": "EXTEND",
+      "reason": "Keep P0 as the sole attempt, feedback, coverage and freeze owner; connect generated plans and the existing semantic verifier there."
+    },
+    {
+      "reference": "src/research_loop/l05_curie/semantic_verifier.py and src/research_loop/l05_curie/store.py",
+      "disposition": "REUSE",
+      "reason": "Their admission policy and verification-to-evidence equality already meet the required authority boundary."
+    }
+  ],
+  "ADOPTED_PATTERN": "EXTEND",
+  "WHY_NEW_CODE_IS_NECESSARY": "The existing v1 planner cannot express source-bound CORE anchors, deterministic Boolean content identities, or validated feedback replan. The generic structured helper stops at command construction, and the ordinary acquisition path does not yet apply semantic admission. Narrow additions inside these existing owners connect those missing behaviors without a new provider, configuration authority, acquisition loop, shared v1 contract, or external dependency."
+}

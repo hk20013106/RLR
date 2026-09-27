@@ -530,7 +530,11 @@ def test_l05_runner_binds_and_activates_frozen_curie_result(tmp_path, monkeypatc
     seed = {"candidate_id": candidate, "round_id": "1"}
 
     def fake_ctl(*argv):
-        assert argv == ("l05-acquire-europepmc", str(project), candidate)
+        assert argv == (
+            "l05-acquire-europepmc", str(project), candidate,
+            "--semantic-assessor-command", "fixture {prompt_file} {output_file}",
+            "--semantic-assessor-timeout", "300",
+        )
         return SimpleNamespace(
             returncode=0,
             stdout=json.dumps({
@@ -564,7 +568,9 @@ def test_l05_runner_binds_and_activates_frozen_curie_result(tmp_path, monkeypatc
 
     ok = run_loop.exec_l05(
         str(project), candidate, {"node": "L0.5", "persona": "Curie"},
-        SimpleNamespace(), SimpleNamespace(), tmp_path / "run", 1,
+        run_loop.orch.ProviderConfig({"provider": {"default": {
+            "type": "command", "command": "fixture {prompt_file} {output_file}",
+        }}}), SimpleNamespace(), tmp_path / "run", 1,
     )
 
     assert ok["terminal_status"] == "FROZEN"
@@ -574,7 +580,10 @@ def test_l05_runner_binds_and_activates_frozen_curie_result(tmp_path, monkeypatc
 
 
 def test_l05_command_uses_configured_reproducible_queries(tmp_path):
-    cfg = SimpleNamespace(data={
+    cfg = run_loop.orch.ProviderConfig({
+        "provider": {"default": {
+            "type": "command", "command": "fixture {prompt_file} {output_file}",
+        }},
         "l05_acquisition": {
             "queries": [
                 "bat cardiac transcriptome",
@@ -593,6 +602,8 @@ def test_l05_command_uses_configured_reproducible_queries(tmp_path):
         "--max-papers", "2",
         "--page-size", "10",
         "--timeout", "30",
+        "--semantic-assessor-command", "fixture {prompt_file} {output_file}",
+        "--semantic-assessor-timeout", "300",
     ]
 
 

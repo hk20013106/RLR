@@ -16,8 +16,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlparse
 
-from research_loop import research_seed
+from research_loop import deep_research, research_seed, structured_execution
 from research_loop.external_resilience import classify_http_failure
 
 from .contracts import (
@@ -40,7 +41,13 @@ from .paperqa2_runtime import (
     PaperQA2CurieRuntime,
     validate_pinned_paperqa2_runtime,
 )
-from .semantic_verifier import SemanticEvidenceVerifier, admit_reasoning_evidence
+from .semantic_verifier import (
+    SemanticEvidenceVerifier, admit_reasoning_evidence, validate_semantic_verification,
+)
+from .query_planner import (
+    SCIENTIFIC_QUERY_PLAN_V2, compile_scientific_query_plan,
+    propose_scientific_query_plan, validate_scientific_query_plan,
+)
 # Keep the legacy selector re-export for callers that imported it here.
 from .selector import select_candidates, select_candidates_strict
 from .store import (
@@ -609,6 +616,8 @@ class CurieAcquisitionError(CurieContractError):
 
 
 def _typed_attempt_error(exc: CurieContractError, attempts: list[dict]) -> CurieAcquisitionError:
+    if isinstance(exc, CurieAcquisitionError):
+        return exc
     root = _root_cause(exc)
     category = (
         "SERVICE_ERROR" if isinstance(root, (URLError, TimeoutError, ConnectionError))
@@ -693,9 +702,39 @@ def _verify_acquisition_reference(project: Path, relative: str, digest: str,
         raise CurieAcquisitionError("RECOVERY_ERROR", f"source reference run provenance mismatch: {relative}")
 
 
+def _validated_planner_proposal(
+    project: Path, candidate_id: str, run_id: str, planner_index: int,
+    receipt: dict, proposal_sha256: str,
+) -> dict:
+    expected_dir = (project / "08_Audit" / "l05_acquisition" / candidate_id
+                    / run_id / f"planner_{planner_index:03d}").resolve()
+    if (not isinstance(receipt, dict)
+            or receipt.get("schema_version") != structured_execution.SCHEMA_VERSION
+            or receipt.get("validation_status") != "PASS"):
+        raise CurieAcquisitionError("RECOVERY_ERROR", "structured planner receipt is invalid")
+    for path_key, hash_key, expected_hash in (
+        ("output_path", "stdout_hash", proposal_sha256),
+        ("prompt_path", "prompt_hash", receipt.get("prompt_hash")),
+        ("schema_path", "schema_sha256", receipt.get("schema_sha256")),
+    ):
+        path = Path(str(receipt.get(path_key) or "")).resolve()
+        digest = receipt.get(hash_key)
+        if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or digest != expected_hash or not path.is_file()
+                or not path.is_relative_to(expected_dir)
+                or hashlib.sha256(path.read_bytes()).hexdigest() != digest):
+            raise CurieAcquisitionError("RECOVERY_ERROR", f"structured planner {path_key} provenance mismatch")
+    try:
+        raw = Path(receipt["output_path"]).read_text(encoding="utf-8")
+        return deep_research._parse_cli_output(raw)
+    except (UnicodeError, deep_research.DeepResearchError) as exc:
+        raise CurieAcquisitionError("RECOVERY_ERROR", f"structured planner proposal invalid: {exc}") from exc
+
+
 def _validate_acquisition_manifest(project: Path, manifest: dict, *,
-                                   candidate_id: str, round_id: str,
-                                   seed_sha256: str, run_id: str) -> None:
+                                    candidate_id: str, round_id: str,
+                                    seed_sha256: str, run_id: str,
+                                    seed: dict) -> None:
     """One validation owner for new v2 first-acquisition manifests."""
     expected = {
         "schema_version": AUDIT_SCHEMA_VERSION,
@@ -719,13 +758,59 @@ def _validate_acquisition_manifest(project: Path, manifest: dict, *,
         raise CurieAcquisitionError("RECOVERY_ERROR", "v2 acquisition attempts are missing or out of bounds")
     plan_ids: set[str] = set()
     query_ids: set[str] = set()
+    generated_content_hashes: set[str] = set()
+    generated_plan_hashes: set[str] = set()
     all_evidence: dict[str, dict] = {}
+    all_semantics: dict[str, dict] = {}
     all_papers: dict[str, dict] = {}
     all_batches: list[dict] = []
     for index, attempt in enumerate(attempts, 1):
         if attempt.get("attempt_index") != index:
             raise CurieAcquisitionError("RECOVERY_ERROR", "v2 acquisition attempt indexes are not contiguous")
         plan = validate_query_plan(attempt.get("query_plan"), seed_sha256=seed_sha256)
+        planning = plan.get("planning")
+        if isinstance(planning, dict) and planning.get("schema_version") == SCIENTIFIC_QUERY_PLAN_V2:
+            validated_planning = validate_scientific_query_plan(planning, seed=seed)
+            if index > 1:
+                prior = attempts[index - 2]
+                prior_plan = prior["query_plan"].get("planning") or {}
+                prior_feedback = prior.get("planner_feedback")
+                if (not isinstance(prior_feedback, dict)
+                        or validated_planning["parent_plan_content_hash"] != prior_plan.get("plan_content_hash")
+                        or validated_planning["feedback_sha256"] != hashlib.sha256(
+                            json.dumps(prior_feedback, ensure_ascii=False, sort_keys=True,
+                                       separators=(",", ":")).encode("utf-8")
+                        ).hexdigest()
+                        or validated_planning["feedback_gap_ids"] != sorted(
+                            item["gap_id"] for item in prior_feedback["validated_coverage_gaps"]
+                        )):
+                    raise CurieAcquisitionError("RECOVERY_ERROR", "scientific replan parent/feedback mismatch")
+            compiled = compile_scientific_query_plan(validated_planning, seed=seed)
+            if len(plan["queries"]) != len(compiled):
+                raise CurieAcquisitionError("RECOVERY_ERROR", "generated query count differs from compiler output")
+            for query, expected_query in zip(plan["queries"], compiled):
+                if (query.get("query") != expected_query["query"]
+                        or query.get("query_content_hash") != expected_query["query_content_hash"]
+                        or query.get("origin") != "generated"):
+                    raise CurieAcquisitionError("RECOVERY_ERROR", "generated query differs from validated compiler output")
+                if query["query_content_hash"] in generated_content_hashes:
+                    raise CurieAcquisitionError("RECOVERY_ERROR", "generated query content repeats across attempts")
+                generated_content_hashes.add(query["query_content_hash"])
+            if validated_planning["plan_content_hash"] in generated_plan_hashes:
+                raise CurieAcquisitionError("RECOVERY_ERROR", "generated plan content repeats across attempts")
+            generated_plan_hashes.add(validated_planning["plan_content_hash"])
+            provenance = plan.get("planning_provenance")
+            if not isinstance(provenance, dict):
+                raise CurieAcquisitionError("RECOVERY_ERROR", "generated plan lacks structured planning provenance")
+            receipt = provenance.get("receipt") or {}
+            proposal = _validated_planner_proposal(
+                project, candidate_id, run_id, index, receipt, provenance.get("proposal_sha256"),
+            )
+            model_plan = proposal.get("plan") if isinstance(proposal, dict) else None
+            if (proposal.get("status") != "PLAN" or not isinstance(model_plan, dict)
+                    or proposal.get("reason") != provenance.get("reason")
+                    or any(validated_planning.get(key) != value for key, value in model_plan.items())):
+                raise CurieAcquisitionError("RECOVERY_ERROR", "validated scientific plan differs from model proposal")
         if plan["candidate_id"] != candidate_id or plan["round_id"] != round_id or plan["round_index"] != 1:
             raise CurieAcquisitionError("RECOVERY_ERROR", "v2 acquisition QueryPlan identity mismatch")
         if plan["plan_id"] in plan_ids:
@@ -765,6 +850,17 @@ def _validate_acquisition_manifest(project: Path, manifest: dict, *,
                 project, receipt.get("response_path"), receipt.get("response_sha256"),
                 f"{run_id}_A{index}", candidate_id,
             )
+            if isinstance(planning, dict) and planning.get("schema_version") == SCIENTIFIC_QUERY_PLAN_V2:
+                matching = [item for item in plan["queries"] if item["query_id"] == batch["query_id"]]
+                matching_requests = [
+                    request for request in attempt.get("http_requests", [])
+                    if request.get("response_sha256") == receipt.get("response_sha256")
+                    and "/search?" in str(request.get("url") or "")
+                ]
+                if (len(matching) != 1 or not matching_requests
+                        or not any(parse_qs(urlparse(request["url"]).query).get("query") == [matching[0]["query"]]
+                                   for request in matching_requests)):
+                    raise CurieAcquisitionError("RECOVERY_ERROR", "actual Europe PMC request differs from compiled query")
             all_batches.append(batch)
         for snapshot in attempt.get("source_snapshots", []):
             if (snapshot.get("run_id") != f"{run_id}_A{index}"
@@ -775,6 +871,14 @@ def _validate_acquisition_manifest(project: Path, manifest: dict, *,
                 f"{run_id}_A{index}", candidate_id,
             )
         validate_coverage_decision(attempt.get("coverage_facts"))
+        planner_feedback = attempt.get("planner_feedback")
+        if planner_feedback is not None:
+            if (not isinstance(planner_feedback, dict)
+                    or planner_feedback.get("previous_plan") != planning
+                    or planner_feedback.get("previous_plan_id") != plan["plan_id"]
+                    or planner_feedback.get("validated_coverage_gaps") != attempt["coverage_facts"]["gaps"]
+                    or planner_feedback.get("cumulative_admitted_evidence_ids") != attempt.get("cumulative_verified_evidence_ids")):
+                raise CurieAcquisitionError("RECOVERY_ERROR", "persisted planner feedback differs from attempt facts")
         for paper in attempt.get("acquired_papers", []):
             all_papers.setdefault(paper["paper_id"], paper)
         for evidence in attempt.get("verified_evidence", []):
@@ -782,6 +886,19 @@ def _validate_acquisition_manifest(project: Path, manifest: dict, *,
             previous = all_evidence.setdefault(evidence["evidence_id"], evidence)
             if previous != evidence:
                 raise CurieAcquisitionError("RECOVERY_ERROR", "evidence ID collision across attempts")
+        if "located_evidence" in attempt or "semantic_verifications" in attempt:
+            located = [validate_evidence_extract(item) for item in attempt.get("located_evidence", [])]
+            semantics = [validate_semantic_verification(item) for item in attempt.get("semantic_verifications", [])]
+            admitted = admit_reasoning_evidence(located, semantics)
+            if admitted != attempt.get("verified_evidence"):
+                raise CurieAcquisitionError("RECOVERY_ERROR", "semantic admission differs from attempt evidence")
+            admitted_ids = {item["evidence_id"] for item in admitted}
+            for verification in semantics:
+                if verification["evidence_id"] not in admitted_ids:
+                    continue
+                prior = all_semantics.setdefault(verification["evidence_id"], verification)
+                if prior != verification:
+                    raise CurieAcquisitionError("RECOVERY_ERROR", "semantic verification collision across attempts")
         if attempt.get("cumulative_verified_evidence_ids") != list(all_evidence):
             raise CurieAcquisitionError("RECOVERY_ERROR", "cumulative evidence IDs do not match attempts")
     if (manifest.get("query_plans") != [item["query_plan"] for item in attempts]
@@ -829,10 +946,27 @@ def _validate_acquisition_manifest(project: Path, manifest: dict, *,
                 or pack["evidence"] != list(all_evidence.values())
                 or pack["coverage"] != manifest["coverage"]):
             raise CurieAcquisitionError("RECOVERY_ERROR", "frozen pack content does not match v2 attempts")
+        if all_semantics and pack.get("semantic_verifications") != list(all_semantics.values()):
+            raise CurieAcquisitionError("RECOVERY_ERROR", "frozen pack semantic verification mismatch")
     elif manifest.get("evidence_pack") is not None:
         raise CurieAcquisitionError("RECOVERY_ERROR", "insufficient acquisition carries a frozen pack")
     elif manifest.get("terminal_reason") not in {"budget_exhausted", "no_admissible_replan"}:
         raise CurieAcquisitionError("RECOVERY_ERROR", "insufficient acquisition reason is invalid")
+    planner_terminal = manifest.get("planner_terminal")
+    if planner_terminal is not None:
+        if not isinstance(planner_terminal, dict):
+            raise CurieAcquisitionError("RECOVERY_ERROR", "terminal planner provenance is invalid")
+        receipt = planner_terminal.get("receipt")
+        terminal_proposal = _validated_planner_proposal(
+            project, candidate_id, run_id, len(attempts) + 1,
+            receipt, planner_terminal.get("proposal_sha256"),
+        )
+        if (manifest.get("terminal_reason") != "no_admissible_replan"
+                or planner_terminal.get("status") != "NO_ADMISSIBLE_REPLAN"
+                or terminal_proposal.get("status") != "NO_ADMISSIBLE_REPLAN"
+                or terminal_proposal.get("plan") is not None
+                or terminal_proposal.get("reason") != planner_terminal.get("reason")):
+            raise CurieAcquisitionError("RECOVERY_ERROR", "terminal planner proposal/receipt mismatch")
 
 
 def _result_from_manifest(manifest: dict, relative: str, digest: str) -> dict:
@@ -872,7 +1006,7 @@ def validate_europepmc_acquisition_result(project_dir: str | Path,
     _validate_acquisition_manifest(
         project, manifest, candidate_id=str(candidate_id),
         round_id=str(seed["round_id"]), seed_sha256=research_seed.seed_sha256(seed),
-        run_id=run_id,
+        run_id=run_id, seed=seed,
     )
     canonical = _result_from_manifest(manifest, relative.as_posix(), digest)
     if result != canonical:
@@ -983,6 +1117,8 @@ def run_europepmc_acquisition(
     timeout: int = 20,
     round_index: int = 1,
     plan_builder: Callable | None = None,
+    semantic_assessor: Callable | None = None,
+    semantic_assessor_id: str | None = None,
 ) -> dict:
     """Run the bounded first acquisition and publish one terminal v2 manifest."""
     if round_index != 1:
@@ -1002,6 +1138,28 @@ def run_europepmc_acquisition(
                 / _safe_token(candidate_id, "candidate_id") / acquisition_run_id)
     final_path = run_root / "acquisition_manifest.json"
     checkpoint_path = run_root / "freeze_input.json"
+    semantic_verifier = None
+    model_spec = None
+    if not final_path.exists() and not checkpoint_path.exists():
+        if (not callable(semantic_assessor) or not isinstance(semantic_assessor_id, str)
+                or not semantic_assessor_id.strip()):
+            raise CurieAcquisitionError("MODEL_CONTRACT_ERROR", "ordinary Europe PMC requires a bound semantic assessor")
+        semantic_verifier = SemanticEvidenceVerifier(
+            assessor=semantic_assessor, assessor_id=semantic_assessor_id,
+        )
+        if plan_builder is None and explicit_queries is None:
+            try:
+                model_spec, _ = deep_research.load_runtime_spec(project)
+                for valid, reason in (
+                    deep_research.host_matches(model_spec),
+                    deep_research.validate_spec_consistency(model_spec),
+                    structured_execution.runtime_ready(model_spec),
+                ):
+                    if not valid:
+                        raise CurieAcquisitionError("MODEL_CONFIG_ERROR", reason)
+            except deep_research.DeepResearchError as exc:
+                raise CurieAcquisitionError("MODEL_CONFIG_ERROR", str(exc)) from exc
+    semantic_target = _paperqa2_semantic_target(seed)
     with _first_acquisition_writer(project, candidate_id, round_id):
         owner_path = (project / "08_Audit" / "l05_acquisition"
                       / _safe_token(candidate_id, "candidate_id")
@@ -1028,6 +1186,7 @@ def run_europepmc_acquisition(
                 _validate_acquisition_manifest(
                     project, manifest, candidate_id=candidate_id, round_id=round_id,
                     seed_sha256=seed_digest, run_id=acquisition_run_id,
+                    seed=seed,
                 )
             except CurieContractError as exc:
                 raise CurieAcquisitionError("RECOVERY_ERROR", str(exc)) from exc
@@ -1060,6 +1219,7 @@ def run_europepmc_acquisition(
                 _validate_acquisition_manifest(
                     project, manifest, candidate_id=candidate_id, round_id=round_id,
                     seed_sha256=seed_digest, run_id=acquisition_run_id,
+                    seed=seed,
                 )
             except CurieContractError as exc:
                 raise CurieAcquisitionError("RECOVERY_ERROR", str(exc)) from exc
@@ -1075,34 +1235,99 @@ def run_europepmc_acquisition(
                 "RECOVERY_ERROR", "incomplete or conflicting first acquisition; preserved for inspection"
             )
         run_root.mkdir(parents=True)
-        builder = plan_builder or build_multisource_query_plan
+        planner_terminal = None
+
+        def production_plan_builder(seed, *, seed_sha256, round_index,
+                                    explicit_queries, providers,
+                                    reformulation_index, query_id_prefix,
+                                    feedback=None):
+            nonlocal planner_terminal
+            planner_dir = run_root / f"planner_{reformulation_index + 1:03d}"
+            try:
+                decision = propose_scientific_query_plan(
+                    seed, spec=model_spec, work_dir=planner_dir,
+                    reformulation_index=reformulation_index, feedback=feedback,
+                )
+            except (structured_execution.StructuredExecutionError, CurieContractError) as exc:
+                category = (exc.category if isinstance(exc, structured_execution.StructuredExecutionError)
+                            else "MODEL_CONTRACT_ERROR")
+                planner_dir.mkdir(parents=True, exist_ok=True)
+                _write_immutable(planner_dir / "error.json", {
+                    "category": category, "detail": str(exc),
+                    "receipt": getattr(exc, "receipt", None),
+                    "feedback_sha256": hashlib.sha256(_canonical_bytes(feedback)).hexdigest()
+                    if feedback is not None else None,
+                })
+                raise CurieAcquisitionError(category, f"planner attempt {reformulation_index + 1}: {exc}") from exc
+            if decision["status"] == "NO_ADMISSIBLE_REPLAN":
+                planner_terminal = {key: value for key, value in decision.items() if key != "plan"}
+                return None
+            return build_multisource_query_plan(
+                seed, seed_sha256=seed_sha256, round_index=round_index,
+                explicit_queries=explicit_queries, providers=providers,
+                reformulation_index=reformulation_index, query_id_prefix=query_id_prefix,
+                scientific_plan=decision["plan"],
+                planning_provenance={
+                    "proposal_sha256": decision["proposal_sha256"],
+                    "receipt": decision["receipt"],
+                    "reason": decision["reason"],
+                },
+            )
+
+        builder = plan_builder or (production_plan_builder if model_spec is not None else build_multisource_query_plan)
         attempts: list[dict] = []
         plans: list[dict] = []
         discovery_batches: list[dict] = []
         source_snapshots: list[dict] = []
         verified_evidence: list[dict] = []
+        semantic_verifications: list[dict] = []
         acquired_papers: list[dict] = []
         paper_failures: list[dict] = []
         reserve_promotions: list[dict] = []
         seen_evidence: dict[str, dict] = {}
+        seen_semantics: dict[str, dict] = {}
         seen_papers: set[str] = set()
         coverage = None
         terminal_reason = None
+        feedback = None
         for attempt_index in range(1, 4):
-            if attempt_index > 1 and (explicit_queries is not None or
-                                      (plan_builder is None and attempt_index > 2)):
+            if attempt_index > 1 and explicit_queries is not None:
                 terminal_reason = "no_admissible_replan"
                 break
             prefix = f"{acquisition_run_id}_A{attempt_index}_Q"
-            plan = builder(
-                seed, seed_sha256=seed_digest, round_index=1,
+            builder_args = dict(
+                seed_sha256=seed_digest, round_index=1,
                 explicit_queries=explicit_queries, providers=["europe-pmc"],
                 reformulation_index=attempt_index - 1, query_id_prefix=prefix,
             )
+            if feedback is not None:
+                builder_args["feedback"] = feedback
+            plan = builder(seed, **builder_args)
             if plan is None:
                 terminal_reason = "no_admissible_replan"
                 break
             plan = validate_query_plan(plan, seed_sha256=seed_digest)
+            planning = plan.get("planning")
+            if isinstance(planning, dict) and planning.get("schema_version") == SCIENTIFIC_QUERY_PLAN_V2:
+                validated_planning = validate_scientific_query_plan(planning, seed=seed)
+                compiled = compile_scientific_query_plan(validated_planning, seed=seed)
+                if (len(compiled) != len(plan["queries"]) or any(
+                    item["query"] != compiled[index]["query"]
+                    or item.get("query_content_hash") != compiled[index]["query_content_hash"]
+                    for index, item in enumerate(plan["queries"])
+                )):
+                    raise CurieAcquisitionError("CONTRACT_ERROR", "generated QueryPlan differs from validated compiler output")
+                if validated_planning["plan_content_hash"] in {
+                    prior["planning"]["plan_content_hash"] for prior in plans
+                    if isinstance(prior.get("planning"), dict)
+                    and prior["planning"].get("schema_version") == SCIENTIFIC_QUERY_PLAN_V2
+                }:
+                    raise CurieAcquisitionError("CONTRACT_ERROR", "planner repeated generated plan content")
+                executed_content = {
+                    item.get("query_content_hash") for prior in plans for item in prior["queries"]
+                }
+                if any(item["query_content_hash"] in executed_content for item in plan["queries"]):
+                    raise CurieAcquisitionError("CONTRACT_ERROR", "planner repeated generated query content")
             if plan["candidate_id"] != candidate_id or plan["round_id"] != round_id or plan["round_index"] != 1:
                 raise CurieAcquisitionError("CONTRACT_ERROR", "planner returned a plan for another first acquisition")
             if any(plan["plan_id"] == old["plan_id"] for old in plans):
@@ -1145,6 +1370,8 @@ def run_europepmc_acquisition(
                 return response
 
             attempt_path = run_root / f"attempt_{attempt_index:03d}.json"
+            actual = None
+            semantic_results: list[dict] = []
             try:
                 prepared = _prepare_europepmc_acquisition(
                     project, candidate_id, explicit_queries=explicit_queries,
@@ -1156,10 +1383,39 @@ def run_europepmc_acquisition(
                 actual = _execute_europepmc_attempt(
                     prepared, project, candidate_id, recorded_get, timeout,
                 )
+                located = actual["verified_evidence"]
+                for extract in located:
+                    try:
+                        semantic_results.append(semantic_verifier.verify(extract, claim=semantic_target))
+                    except CurieAcquisitionError:
+                        raise
+                    except CurieContractError as exc:
+                        source_error = exc.__cause__
+                        while source_error is not None and not isinstance(source_error, CurieAcquisitionError):
+                            source_error = source_error.__cause__
+                        category = (
+                            source_error.category if isinstance(source_error, CurieAcquisitionError)
+                            else "MODEL_EXECUTION_ERROR" if str(exc).startswith("semantic assessor failed:")
+                            else "MODEL_CONTRACT_ERROR"
+                        )
+                        raise CurieAcquisitionError(category, str(exc)) from exc
+                    except Exception as exc:
+                        raise CurieAcquisitionError("MODEL_EXECUTION_ERROR", str(exc)) from exc
+                admitted = admit_reasoning_evidence(located, semantic_results)
+                admitted_ids = {item["evidence_id"] for item in admitted}
+                actual["located_evidence"] = located
+                actual["verified_evidence"] = admitted
+                actual["semantic_verifications"] = semantic_results
+                actual["admitted_semantic_verifications"] = [
+                    item for item in semantic_results if item["evidence_id"] in admitted_ids
+                ]
             except CurieContractError as exc:
                 failed_attempt = {
                     "attempt_index": attempt_index, "query_plan": plan,
                     "http_requests": http_requests,
+                    "source_snapshots": actual["source_snapshots"] if actual else [],
+                    "located_evidence": actual["verified_evidence"] if actual else [],
+                    "semantic_verifications": semantic_results,
                     "terminal_status": "ERROR", "error_detail": str(exc),
                 }
                 failed_sha = _write_immutable(attempt_path, failed_attempt)
@@ -1186,6 +1442,14 @@ def run_europepmc_acquisition(
                     continue
                 seen_evidence[key] = evidence
                 verified_evidence.append(evidence)
+            for verification in actual["admitted_semantic_verifications"]:
+                key = verification["evidence_id"]
+                if key in seen_semantics:
+                    if seen_semantics[key] != verification:
+                        raise CurieAcquisitionError("CONTRACT_ERROR", f"semantic verification collision: {key}")
+                    continue
+                seen_semantics[key] = verification
+                semantic_verifications.append(verification)
             coverage = _coverage_for(source_snapshots, verified_evidence, round_index=1)
             current_evidence_ids = {
                 item["evidence_id"] for item in actual["verified_evidence"]
@@ -1194,7 +1458,7 @@ def run_europepmc_acquisition(
                 next_reason = None
             elif attempt_index == 3:
                 next_reason = "budget_exhausted"
-            elif explicit_queries is not None or (plan_builder is None and attempt_index == 2):
+            elif explicit_queries is not None:
                 next_reason = "no_admissible_replan"
             else:
                 next_reason = "coverage_insufficient_replan"
@@ -1211,6 +1475,8 @@ def run_europepmc_acquisition(
                 "selection": prepared["selection"],
                 "acquired_papers": actual["acquired_papers"],
                 "source_snapshots": actual["source_snapshots"],
+                "located_evidence": actual["located_evidence"],
+                "semantic_verifications": actual["semantic_verifications"],
                 "paper_failures": actual["paper_failures"],
                 "reserve_promotions": actual["reserve_promotions"],
                 "verified_evidence_ids": [item["evidence_id"] for item in actual["verified_evidence"]],
@@ -1225,6 +1491,44 @@ def run_europepmc_acquisition(
                 "coverage_facts": coverage,
                 "next_reason": next_reason,
             }
+            feedback = {
+                "previous_plan": plan.get("planning"),
+                "previous_plan_id": plan["plan_id"],
+                "executed_plans": [
+                    {"plan_id": previous["plan_id"],
+                     "plan_content_hash": (previous.get("planning") or {}).get("plan_content_hash"),
+                     "attempt_index": index}
+                    for index, previous in enumerate(plans, 1)
+                ],
+                "executed_queries": [
+                    {"query_id": item["query_id"],
+                     "query_content_hash": item.get("query_content_hash"),
+                     "query": item["query"]}
+                    for previous in plans for item in previous["queries"]
+                ],
+                "attempt_outcome": {
+                    **attempt["discovery_outcome"],
+                    "located_count": len(actual["located_evidence"]),
+                    "semantic_admitted_count": len(actual["verified_evidence"]),
+                    "semantic_rejected_count": len(actual["located_evidence"]) - len(actual["verified_evidence"]),
+                    "type": (
+                        "ZERO_DISCOVERY" if not prepared["discovery"]["records"] else
+                        "NO_SOURCE_QUALIFIED_FULLTEXT" if not prepared["selection"]["selected"] else
+                        "NO_LOCATED_EVIDENCE" if not actual["located_evidence"] else
+                        "COVERAGE_GAP"
+                    ),
+                },
+                "cumulative_admitted_evidence_ids": [item["evidence_id"] for item in verified_evidence],
+                "validated_coverage_gaps": coverage["gaps"],
+                "semantic_rejections": [
+                    {"evidence_id": item["evidence_id"],
+                     "entailment": item["entailment"], "reason": item["reason"],
+                     "verification_id": item["verification_id"]}
+                    for item in actual["semantic_verifications"]
+                    if item["evidence_id"] not in current_evidence_ids
+                ],
+            }
+            attempt["planner_feedback"] = feedback
             attempt_sha = _write_immutable(attempt_path, attempt)
             attempt["artifact"] = {
                 "path": attempt_path.relative_to(project).as_posix(),
@@ -1248,6 +1552,7 @@ def run_europepmc_acquisition(
                 selected_papers=acquired_papers, evidence=verified_evidence,
                 coverage=coverage, gaps=coverage["gaps"],
                 source_run_id=acquisition_run_id,
+                semantic_verifications=semantic_verifications,
             )
             evidence_pack = preview_frozen_evidence_pack(project, pack)
         manifest = {
@@ -1258,6 +1563,7 @@ def run_europepmc_acquisition(
             "run_id": acquisition_run_id,
             "target_pack_version": 1, "max_attempts": 3,
             "attempts": attempts,
+            **({"planner_terminal": planner_terminal} if planner_terminal else {}),
             "query_plans": plans, "discovery_batches": discovery_batches,
             "selection": attempts[-1]["selection"],
             "source_snapshots": source_snapshots,
@@ -1291,6 +1597,7 @@ def run_europepmc_acquisition(
         _validate_acquisition_manifest(
             project, manifest, candidate_id=candidate_id, round_id=round_id,
             seed_sha256=seed_digest, run_id=acquisition_run_id,
+            seed=seed,
         )
         try:
             relative, digest = _write_audit_manifest(

@@ -17,7 +17,7 @@ from research_loop.l05_curie.paperqa2_runtime import (
     PaperQA2CurieRuntime,
     PaperQA2SubprocessBackend,
 )
-from research_loop.providers import CommandProvider, ProviderError
+from research_loop.providers import ProviderError, make_provider
 
 _SEMANTIC_ASSESSMENT_SCHEMA = {
     "entailment": "SUPPORTED | CONTRADICTED | AMBIGUOUS | UNRELATED",
@@ -30,6 +30,12 @@ _SEMANTIC_ASSESSMENT_SCHEMA = {
 
 def cmd_l05_acquire_europepmc(args) -> int:
     try:
+        semantic_assessor, semantic_assessor_id = _semantic_assessor_from_command(
+            args.semantic_assessor_command,
+            run_dir=Path(args.project_dir) / "08_Audit" / "l05_acquisition"
+            / str(args.cand_id) / "semantic-assessor",
+            timeout=args.semantic_assessor_timeout,
+        )
         result = run_europepmc_acquisition(
             args.project_dir,
             args.cand_id,
@@ -38,6 +44,8 @@ def cmd_l05_acquire_europepmc(args) -> int:
             page_size=args.page_size,
             run_id=args.run_id,
             timeout=args.timeout,
+            semantic_assessor=semantic_assessor,
+            semantic_assessor_id=semantic_assessor_id,
     )
     except CurieAcquisitionError as exc:
         print(json.dumps({"status": "ERROR", "error_category": exc.category,
@@ -87,8 +95,12 @@ def _semantic_assessor_from_command(
     command = str(command or "").strip()
     if not command:
         raise CurieContractError("PaperQA2 semantic assessor command must be non-empty")
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+        raise CurieContractError("semantic assessor timeout must be a positive integer")
+    if "{prompt_file}" not in command or "{output_file}" not in command:
+        raise CurieContractError("semantic assessor command must bind prompt_file and output_file")
     try:
-        provider = CommandProvider({"command": command, "timeout": timeout})
+        provider = make_provider({"type": "command", "command": command, "timeout": timeout})
     except ProviderError as exc:
         raise CurieContractError(f"PaperQA2 semantic assessor is invalid: {exc}") from exc
     root = Path(run_dir)
@@ -118,11 +130,11 @@ def _semantic_assessor_from_command(
                 run_dir=root / f"assessment_{counter:04d}",
             )
         except Exception as exc:
-            raise CurieContractError(
+            raise CurieAcquisitionError("MODEL_EXECUTION_ERROR",
                 f"PaperQA2 semantic assessor command failed: {exc}"
             ) from exc
         if not isinstance(result, dict):
-            raise CurieContractError("PaperQA2 semantic assessor command must return JSON object")
+            raise CurieAcquisitionError("MODEL_CONTRACT_ERROR", "semantic assessor command must return JSON object")
         return result
 
     command_sha = hashlib.sha256(command.encode("utf-8")).hexdigest()
@@ -193,6 +205,8 @@ def install(cli_module) -> None:
         command.add_argument("--page-size", type=int, default=25)
         command.add_argument("--timeout", type=int, default=20)
         command.add_argument("--run-id", default=None)
+        command.add_argument("--semantic-assessor-command", required=True)
+        command.add_argument("--semantic-assessor-timeout", type=int, default=300)
         command.set_defaults(func=cmd_l05_acquire_europepmc)
 
         paperqa = subparsers.add_parser(

@@ -30,7 +30,11 @@ from .contracts import (
     validate_record_query_provenance,
     validate_transport_handshake,
 )
-from .query_planner import SCIENTIFIC_QUERY_PLANNER_VERSION, build_scientific_query_plan, validate_scientific_query_plan
+from .query_planner import (
+    SCIENTIFIC_QUERY_PLAN_V2, SCIENTIFIC_QUERY_PLANNER_V2,
+    SCIENTIFIC_QUERY_PLANNER_VERSION, build_scientific_query_plan,
+    compile_scientific_query_plan, validate_scientific_query_plan,
+)
 HttpGet = Callable[[str, int], bytes]
 _PROVIDERS = ("europe-pmc", "pubmed", "openalex", "crossref", "semantic-scholar")
 _CANONICAL_ID_NAMESPACES = ("doi", "pmid", "pmcid")
@@ -527,6 +531,8 @@ def build_multisource_query_plan(
     providers: list[str] | None = None,
     reformulation_index: int = 0,
     query_id_prefix: str = "Q",
+    scientific_plan: dict | None = None,
+    planning_provenance: dict | None = None,
 ) -> dict:
     if not isinstance(seed, dict):
         raise CurieContractError("ResearchSeed must be an object")
@@ -545,14 +551,22 @@ def build_multisource_query_plan(
     if unknown:
         raise CurieContractError(f"unsupported discovery providers: {unknown}")
     if explicit_queries is None:
-        planning = build_scientific_query_plan(seed, reformulation_index=reformulation_index)
-        query_items = [{"query_id": f"{query_id_prefix}{index:03d}", "intent": item["intent"], "query": item["query"], "concepts": list(item["concepts"]), "providers": list(provider_list)} for index, item in enumerate(planning["queries"], 1)]
-        planner = SCIENTIFIC_QUERY_PLANNER_VERSION
+        if scientific_plan is None:
+            planning = build_scientific_query_plan(seed, reformulation_index=reformulation_index)
+            query_items = [{"query_id": f"{query_id_prefix}{index:03d}", "intent": item["intent"], "query": item["query"], "concepts": list(item["concepts"]), "providers": list(provider_list)} for index, item in enumerate(planning["queries"], 1)]
+            planner = SCIENTIFIC_QUERY_PLANNER_VERSION
+        else:
+            planning = validate_scientific_query_plan(scientific_plan, seed=seed)
+            if planning["schema_version"] != SCIENTIFIC_QUERY_PLAN_V2 or planning["reformulation_index"] != reformulation_index:
+                raise CurieContractError("scientific planner v2 index or schema mismatch")
+            compiled = compile_scientific_query_plan(planning, seed=seed)
+            query_items = [{"query_id": f"{query_id_prefix}{index:03d}", "intent": item["intent"], "query": item["query"], "concepts": list(item["concepts"]), "providers": list(provider_list), "query_content_hash": item["query_content_hash"], "origin": "generated"} for index, item in enumerate(compiled, 1)]
+            planner = SCIENTIFIC_QUERY_PLANNER_V2
     else:
         if not isinstance(explicit_queries, list) or not explicit_queries:
             raise CurieContractError("explicit_queries must be a non-empty list")
         queries = [_require_text(item, "explicit query") for item in explicit_queries]
-        query_items = [{"query_id": f"{query_id_prefix}{index:03d}", "intent": "operator_reproducible_query", "query": query, "providers": list(provider_list)} for index, query in enumerate(queries, 1)]
+        query_items = [{"query_id": f"{query_id_prefix}{index:03d}", "intent": "operator_reproducible_query", "query": query, "providers": list(provider_list), "origin": "explicit"} for index, query in enumerate(queries, 1)]
         planner = "curie-multisource-explicit-query/v1"
         planning = None
     identity = {
@@ -576,9 +590,11 @@ def build_multisource_query_plan(
     if planning is not None:
         plan["reformulation_index"] = reformulation_index
         plan["planning"] = planning
+        if planning_provenance is not None:
+            plan["planning_provenance"] = planning_provenance
     validate_query_plan(plan, seed_sha256=str(seed_sha256))
     if planning is not None:
-        validate_scientific_query_plan(planning)
+        validate_scientific_query_plan(planning, seed=seed)
     return plan
 
 

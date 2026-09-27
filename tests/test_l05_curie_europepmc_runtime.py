@@ -10,9 +10,12 @@ from threading import Event
 import pytest
 
 from research_loop import l0_contract, research_seed
+from research_loop import deep_research, structured_execution
 from research_loop.l05_curie import CurieContractError, load_frozen_evidence_pack
 from research_loop.l05_curie import europepmc_runtime
-from research_loop.l05_curie.europepmc_runtime import run_europepmc_acquisition
+from research_loop.l05_curie.europepmc_runtime import (
+    run_europepmc_acquisition as _run_europepmc_acquisition,
+)
 from research_loop.l05_curie.multisource import build_multisource_query_plan
 from research_loop.l05_curie.paperqa2_runtime import (
     MIN_SOURCE_TOKEN_COVERAGE,
@@ -285,6 +288,332 @@ def test_second_attempt_keeps_first_source_and_exact_evidence_lineage(tmp_path):
     assert all(item["retrieval"]["snapshot_path"] for item in frozen["evidence"])
 
 
+def _structured_fixture_receipt(work_dir, *, prompt, schema, raw):
+    work_dir.mkdir(parents=True, exist_ok=True)
+    files = {
+        "output_path": ("structured_model_stdout.txt", raw),
+        "prompt_path": ("structured_model_prompt.txt", prompt),
+        "schema_path": ("structured_model_output.schema.json", json.dumps(schema, sort_keys=True)),
+    }
+    receipt = {"schema_version": structured_execution.SCHEMA_VERSION,
+               "validation_status": "PASS"}
+    for path_key, (name, content) in files.items():
+        path = work_dir / name
+        path.write_bytes(content.encode("utf-8"))
+        receipt[path_key] = str(path)
+        receipt[{"output_path": "stdout_hash", "prompt_path": "prompt_hash",
+                 "schema_path": "schema_sha256"}[path_key]] = hashlib.sha256(content.encode()).hexdigest()
+    return receipt
+
+
+def run_europepmc_acquisition(*args, **kwargs):
+    """Exercise P0 lifecycle with a controlled planner and semantic assessor."""
+    kwargs.setdefault("semantic_assessor", _supported_semantic_assessment)
+    kwargs.setdefault("semantic_assessor_id", "fixture-semantic-assessor/v1")
+    if kwargs.get("explicit_queries") is None and kwargs.get("plan_builder") is None:
+        def legacy_p0_builder(seed, *, reformulation_index, **builder_kwargs):
+            if reformulation_index >= 2:
+                return None
+            builder_kwargs.pop("feedback", None)
+            return build_multisource_query_plan(
+                seed, reformulation_index=reformulation_index, **builder_kwargs,
+            )
+
+        kwargs["plan_builder"] = legacy_p0_builder
+    return _run_europepmc_acquisition(*args, **kwargs)
+
+
+def test_explicit_query_origin_survives_manifest_without_model_rewrite(
+    tmp_path, monkeypatch,
+):
+    project, _seed = _project(tmp_path)
+    explicit_query = "EXT_ID:22253597 AND   SRC:MED"
+    sent_queries = []
+
+    def http_get(url, _timeout):
+        if "/search?" in url:
+            sent_queries.append(parse_qs(urlparse(url).query)["query"][0])
+            return b'{"hitCount":0,"resultList":{"result":[]}}'
+        raise AssertionError(url)
+
+    def forbidden_model_path(*_args, **_kwargs):
+        raise AssertionError("explicit query must not enter structured planning")
+
+    monkeypatch.setattr(
+        europepmc_runtime.deep_research, "load_runtime_spec", forbidden_model_path,
+    )
+    monkeypatch.setattr(
+        europepmc_runtime, "propose_scientific_query_plan", forbidden_model_path,
+    )
+
+    result = run_europepmc_acquisition(
+        project, "C001", explicit_queries=[explicit_query],
+        max_papers=1, run_id="EXPLICIT_ORIGIN", http_get=http_get,
+    )
+
+    manifest = json.loads(
+        (project / result["acquisition_manifest_path"]).read_text(encoding="utf-8")
+    )
+    attempt = manifest["attempts"][0]
+    persisted_attempt = json.loads(
+        (project / attempt["artifact"]["path"]).read_text(encoding="utf-8")
+    )
+    for query_plan in (
+        manifest["query_plans"][0],
+        attempt["query_plan"],
+        persisted_attempt["query_plan"],
+    ):
+        query_record = query_plan["queries"][0]
+        assert query_record["origin"] == "explicit"
+        assert query_record["query"] == explicit_query
+    assert sent_queries == [explicit_query]
+    assert manifest["query_plans"][0]["planner"] == "curie-multisource-explicit-query/v1"
+
+
+@pytest.mark.parametrize("entailment,expected_status", [
+    ("SUPPORTED", "FROZEN"),
+    ("CONTRADICTED", "FROZEN"),
+    ("UNRELATED", "INSUFFICIENT_STOP"),
+    ("AMBIGUOUS", "INSUFFICIENT_STOP"),
+])
+def test_ordinary_europepmc_semantic_admission_preserves_located_audit(
+    tmp_path, entailment, expected_status,
+):
+    project, seed = _project(tmp_path)
+
+    def http_get(url, _timeout):
+        if "/search?" in url:
+            return _search_payload()
+        if url.endswith("/PMC3257301/fullTextXML"):
+            return XML
+        raise AssertionError(url)
+
+    def assessor(*, extract, claim):
+        result = _supported_semantic_assessment(extract=extract, claim=claim)
+        result["entailment"] = entailment
+        return result
+
+    result = run_europepmc_acquisition(
+        project, "C001", explicit_queries=["EXT_ID:22253597 AND SRC:MED"],
+        run_id=f"SEMANTIC_{entailment}", http_get=http_get,
+        semantic_assessor=assessor, semantic_assessor_id="fixture-semantic/v1",
+    )
+    assert result["status"] == expected_status
+    manifest = json.loads((project / result["acquisition_manifest_path"]).read_text(encoding="utf-8"))
+    attempt = manifest["attempts"][0]
+    assert len(attempt["located_evidence"]) == 3
+    assert len(attempt["semantic_verifications"]) == 3
+    assert all(item["entailment"] == entailment for item in attempt["semantic_verifications"])
+    snapshot = attempt["source_snapshots"][0]
+    assert (project / snapshot["artifact_path"]).read_bytes() == XML
+    if expected_status == "FROZEN":
+        frozen = load_frozen_evidence_pack(
+            project, result["evidence_pack"], candidate_id="C001",
+            round_id="1", seed_sha256=research_seed.seed_sha256(seed),
+        )
+        assert len(frozen["evidence"]) == len(frozen["semantic_verifications"]) == 3
+    else:
+        assert attempt["verified_evidence"] == []
+        assert result["evidence_pack"] is None
+
+
+def test_semantic_assessor_execution_failure_keeps_error_category_and_located_audit(tmp_path):
+    project, _seed = _project(tmp_path)
+
+    def http_get(url, _timeout):
+        return _search_payload() if "/search?" in url else XML
+
+    def failed_assessor(**_kwargs):
+        raise europepmc_runtime.CurieAcquisitionError("MODEL_EXECUTION_ERROR", "assessor process failed")
+
+    with pytest.raises(europepmc_runtime.CurieAcquisitionError) as caught:
+        _run_europepmc_acquisition(
+            project, "C001", run_id="ASSESSOR_FAILURE",
+            explicit_queries=["EXT_ID:22253597 AND SRC:MED"], http_get=http_get,
+            semantic_assessor=failed_assessor, semantic_assessor_id="failed-assessor/v1",
+        )
+    assert caught.value.category == "MODEL_EXECUTION_ERROR"
+    root = project / "08_Audit" / "l05_acquisition" / "C001" / "ASSESSOR_FAILURE"
+    failed = json.loads((root / "attempt_001.json").read_text(encoding="utf-8"))
+    assert failed["source_snapshots"]
+    assert failed["located_evidence"]
+    assert (project / failed["source_snapshots"][0]["artifact_path"]).read_bytes() == XML
+    assert not (root / "acquisition_manifest.json").exists()
+
+
+def test_production_structured_feedback_replan_uses_query_content(tmp_path, monkeypatch):
+    project, seed = _project(tmp_path)
+    (project / "L4_PRIVATE.txt").write_text("UNAUTHORIZED_L4_SENTINEL_7c9a", encoding="utf-8")
+    prompts = []
+    from test_l05_curie_p1_planning import _anchor
+
+    def fake_model(_spec, *, prompt, schema, work_dir, purpose):
+        prompts.append(prompt)
+        index = len(prompts) - 1
+        plan = {
+            "schema_version": "L05ScientificQueryPlan/v2",
+            "planner": "scientific-query-planner/v2",
+            "seed_sha256": research_seed.seed_sha256(seed),
+            "reformulation_index": index,
+            "core_anchors": [
+                _anchor(seed, "scientific_question", "carbon dioxide", "co2"),
+                _anchor(seed, "hypothesis_seed", "Rca1p", "rca1p"),
+            ],
+            "optional_concepts": [
+                _anchor(seed, "hypothesis_seed", "transcriptional", "transcriptional"),
+            ],
+            "unresolved_entities": [], "advisory_search_constraints": [],
+            "intents": [{"intent_id": "question", "core_concept_ids": ["co2", "rca1p"],
+                         "optional_concept_ids": ["transcriptional"] if index == 0 else []}],
+        }
+        payload = {"status": "PLAN", "reason": "validated gap", "plan": plan}
+        raw = json.dumps(payload)
+        return {"payload": payload,
+                "receipt": _structured_fixture_receipt(work_dir, prompt=prompt, schema=schema, raw=raw),
+                "raw_output": raw}
+
+    monkeypatch.setattr(deep_research, "load_runtime_spec", lambda *_: (object(), "fixture"))
+    monkeypatch.setattr(deep_research, "host_matches", lambda *_: (True, ""))
+    monkeypatch.setattr(deep_research, "validate_spec_consistency", lambda *_: (True, ""))
+    monkeypatch.setattr(structured_execution, "runtime_ready", lambda *_: (True, ""))
+    monkeypatch.setattr(structured_execution, "run_structured_model", fake_model)
+
+    def http_get(url, _timeout):
+        if "/search?" in url:
+            query = parse_qs(urlparse(url).query)["query"][0]
+            return b'{"hitCount":0,"resultList":{"result":[]}}' if "transcriptional" in query else _search_payload()
+        if url.endswith("/PMC3257301/fullTextXML"):
+            return XML
+        raise AssertionError(url)
+
+    result = _run_europepmc_acquisition(
+        project, "C001", run_id="P1_FEEDBACK", http_get=http_get,
+        semantic_assessor=_supported_semantic_assessment,
+        semantic_assessor_id="fixture-semantic/v1",
+    )
+    assert result["status"] == "FROZEN"
+    manifest = json.loads((project / result["acquisition_manifest_path"]).read_text(encoding="utf-8"))
+    assert len(manifest["attempts"]) == len(prompts) == 2
+    assert "ZERO_DISCOVERY" in prompts[1]
+    assert all("UNAUTHORIZED_L4_SENTINEL_7c9a" not in prompt for prompt in prompts)
+    assert "transcriptional" in manifest["attempts"][0]["query_plan"]["queries"][0]["query"]
+    assert "transcriptional" not in manifest["attempts"][1]["query_plan"]["queries"][0]["query"]
+
+
+def test_production_model_failure_is_typed_and_never_becomes_scientific_retry(tmp_path, monkeypatch):
+    project, _seed = _project(tmp_path)
+    monkeypatch.setattr(deep_research, "load_runtime_spec", lambda *_: (object(), "fixture"))
+    monkeypatch.setattr(deep_research, "host_matches", lambda *_: (True, ""))
+    monkeypatch.setattr(deep_research, "validate_spec_consistency", lambda *_: (True, ""))
+    monkeypatch.setattr(structured_execution, "runtime_ready", lambda *_: (True, ""))
+
+    def failed_model(*_args, **_kwargs):
+        raise structured_execution.StructuredExecutionError(
+            "provider unavailable", category="MODEL_EXECUTION_ERROR",
+            receipt={"validation_status": "EXECUTION_ERROR"},
+        )
+
+    monkeypatch.setattr(structured_execution, "run_structured_model", failed_model)
+    with pytest.raises(europepmc_runtime.CurieAcquisitionError, match="MODEL_EXECUTION_ERROR"):
+        _run_europepmc_acquisition(
+            project, "C001", run_id="MODEL_FAILURE",
+            semantic_assessor=_supported_semantic_assessment,
+            semantic_assessor_id="fixture-semantic/v1",
+            http_get=lambda *_: pytest.fail("model failure reached Europe PMC"),
+        )
+    root = project / "08_Audit" / "l05_acquisition" / "C001" / "MODEL_FAILURE"
+    failed = json.loads((root / "planner_001" / "error.json").read_text(encoding="utf-8"))
+    assert failed["category"] == "MODEL_EXECUTION_ERROR"
+    assert not (root / "attempt_001.json").exists()
+
+
+def test_missing_model_configuration_fails_before_search_or_owner_write(tmp_path, monkeypatch):
+    project, _seed = _project(tmp_path)
+    monkeypatch.setattr(deep_research, "load_runtime_spec",
+                        lambda *_: (_ for _ in ()).throw(deep_research.DeepResearchError("missing runtime")))
+    with pytest.raises(europepmc_runtime.CurieAcquisitionError) as caught:
+        _run_europepmc_acquisition(
+            project, "C001", run_id="NO_MODEL_CONFIG",
+            semantic_assessor=_supported_semantic_assessment,
+            semantic_assessor_id="fixture-semantic/v1",
+            http_get=lambda *_: pytest.fail("missing config reached Europe PMC"),
+        )
+    assert caught.value.category == "MODEL_CONFIG_ERROR"
+    assert not (project / "08_Audit" / "l05_acquisition" / "C001" / "first_1.json").exists()
+
+
+def test_explicit_query_keeps_model_planner_out_of_ordinary_path(tmp_path, monkeypatch):
+    project, _seed = _project(tmp_path)
+    monkeypatch.setattr(deep_research, "load_runtime_spec",
+                        lambda *_: pytest.fail("explicit query entered model planner"))
+    result = _run_europepmc_acquisition(
+        project, "C001", run_id="EXPLICIT_NO_MODEL",
+        explicit_queries=["EXT_ID:22253597 AND SRC:MED"],
+        semantic_assessor=_supported_semantic_assessment,
+        semantic_assessor_id="fixture-semantic/v1",
+        http_get=lambda url, _: _search_payload() if "/search?" in url else XML,
+    )
+    assert result["status"] == "FROZEN"
+
+
+def test_production_no_admissible_replan_stops_after_real_zero_discovery(tmp_path, monkeypatch):
+    project, seed = _project(tmp_path)
+    from test_l05_curie_p1_planning import _anchor
+
+    monkeypatch.setattr(deep_research, "load_runtime_spec", lambda *_: (object(), "fixture"))
+    monkeypatch.setattr(deep_research, "host_matches", lambda *_: (True, ""))
+    monkeypatch.setattr(deep_research, "validate_spec_consistency", lambda *_: (True, ""))
+    monkeypatch.setattr(structured_execution, "runtime_ready", lambda *_: (True, ""))
+    prompts = []
+
+    def fake_model(_spec, *, prompt, schema, work_dir, purpose):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            plan = {
+                "schema_version": "L05ScientificQueryPlan/v2",
+                "planner": "scientific-query-planner/v2",
+                "seed_sha256": research_seed.seed_sha256(seed),
+                "reformulation_index": 0,
+                "core_anchors": [
+                    _anchor(seed, "scientific_question", "carbon dioxide", "co2"),
+                    _anchor(seed, "hypothesis_seed", "Rca1p", "rca1p"),
+                ],
+                "optional_concepts": [], "unresolved_entities": [],
+                "advisory_search_constraints": [],
+                "intents": [{"intent_id": "question", "core_concept_ids": ["co2", "rca1p"],
+                             "optional_concept_ids": []}],
+            }
+            payload = {"status": "PLAN", "reason": "initial", "plan": plan}
+        else:
+            assert "ZERO_DISCOVERY" in prompt
+            payload = {"status": "NO_ADMISSIBLE_REPLAN", "reason": "finite variants exhausted", "plan": None}
+        raw = json.dumps(payload)
+        return {"payload": payload,
+                "receipt": _structured_fixture_receipt(work_dir, prompt=prompt, schema=schema, raw=raw),
+                "raw_output": raw}
+
+    monkeypatch.setattr(structured_execution, "run_structured_model", fake_model)
+    searches = []
+
+    def http_get(url, _timeout):
+        searches.append(url)
+        assert "/search?" in url
+        return b'{"hitCount":0,"resultList":{"result":[]}}'
+
+    result = _run_europepmc_acquisition(
+        project, "C001", run_id="NO_REPLAN", http_get=http_get,
+        semantic_assessor=_supported_semantic_assessment,
+        semantic_assessor_id="fixture-semantic/v1",
+    )
+    assert result["status"] == "INSUFFICIENT_STOP"
+    assert result["terminal_reason"] == "no_admissible_replan"
+    assert len(prompts) == 2
+    assert len(searches) == 1
+    manifest = json.loads((project / result["acquisition_manifest_path"]).read_text(encoding="utf-8"))
+    assert len(manifest["attempts"]) == 1
+    assert manifest["planner_terminal"]["status"] == "NO_ADMISSIBLE_REPLAN"
+
+
 def _controlled_three_plan_builder(seed, *, seed_sha256, round_index,
                                    reformulation_index, query_id_prefix, **_kwargs):
     return build_multisource_query_plan(
@@ -354,6 +683,19 @@ def test_frozen_before_manifest_publication_recovers_without_search(tmp_path, mo
         seed_sha256=research_seed.seed_sha256(seed),
     )
     assert frozen["source_run_id"] == "RECOVER_ME"
+
+
+def test_frozen_recovery_does_not_require_new_model_or_assessor_configuration(tmp_path):
+    project, _seed = _project(tmp_path)
+    first = run_europepmc_acquisition(
+        project, "C001", run_id="NO_MODEL_RECOVERY", explicit_queries=["recovery test"],
+        http_get=lambda url, _: _search_payload() if "/search?" in url else XML,
+    )
+    recovered = _run_europepmc_acquisition(
+        project, "C001", run_id="NO_MODEL_RECOVERY", explicit_queries=["recovery test"],
+        http_get=lambda *_: pytest.fail("frozen recovery performed a search"),
+    )
+    assert recovered == first
 
 
 def test_frozen_checkpoint_recovery_binds_and_reuses_without_search(tmp_path, monkeypatch):
@@ -828,6 +1170,7 @@ def test_cli_registers_thin_europepmc_acquisition_command(tmp_path, monkeypatch,
         "--page-size", "5",
         "--timeout", "7",
         "--run-id", "CLI001",
+        "--semantic-assessor-command", "fixture {prompt_file} {output_file}",
     ])
 
     seen = {}
@@ -849,7 +1192,10 @@ def test_cli_registers_thin_europepmc_acquisition_command(tmp_path, monkeypatch,
 def test_cli_reports_persistence_error_with_nonzero_exit(tmp_path, monkeypatch, capsys):
     project, _seed = _project(tmp_path)
     parser = cli.build_parser()
-    args = parser.parse_args(["l05-acquire-europepmc", str(project), "C001"])
+    args = parser.parse_args([
+        "l05-acquire-europepmc", str(project), "C001",
+        "--semantic-assessor-command", "fixture {prompt_file} {output_file}",
+    ])
     import research_loop.l05_curie_cli as extension
     monkeypatch.setattr(
         extension, "run_europepmc_acquisition",

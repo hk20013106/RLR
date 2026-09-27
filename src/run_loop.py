@@ -847,6 +847,20 @@ def _l05_command(project, cand, cfg):
     if not isinstance(settings, dict):
         raise ValueError("l05_acquisition configuration must be a mapping")
 
+    try:
+        selected = orch.make_provider(cfg.for_node("L0.5"))
+    except (AttributeError, orch.ProviderError) as exc:
+        raise ValueError(f"L0.5 semantic assessor provider is invalid: {exc}") from exc
+    assessor_command = getattr(selected, "command", None)
+    assessor_timeout = getattr(selected, "timeout", None)
+    if not isinstance(assessor_command, str) or not assessor_command.strip():
+        raise ValueError("L0.5 semantic assessor requires a headless command")
+    if assessor_timeout is None:
+        assessor_timeout = 300
+    if (not isinstance(assessor_timeout, int) or isinstance(assessor_timeout, bool)
+            or assessor_timeout <= 0):
+        raise ValueError("L0.5 semantic assessor timeout must be a positive integer")
+
     command = ["l05-acquire-europepmc", str(project), str(cand)]
     queries = settings.get("queries", settings.get("explicit_queries"))
     if queries is not None:
@@ -872,6 +886,10 @@ def _l05_command(project, cand, cfg):
                 f"l05_acquisition.{key} must be an integer in [{minimum}{limit}]"
             )
         command.extend([f"--{key.replace('_', '-')}", str(value)])
+    command.extend([
+        "--semantic-assessor-command", assessor_command,
+        "--semantic-assessor-timeout", str(assessor_timeout),
+    ])
     return command
 
 

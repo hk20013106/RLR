@@ -11,7 +11,9 @@ from research_loop.l05_curie.query_planner import (
     MAX_QUERY_CHARS,
     build_scientific_query_plan,
 )
-from tests.test_l05_curie_europepmc_runtime import XML, _project, _search_payload
+from tests.test_l05_curie_europepmc_runtime import (
+    XML, _project, _search_payload, _supported_semantic_assessment,
+)
 
 
 def test_real_long_research_seed_keeps_final_queries_bounded_and_unique():
@@ -80,6 +82,26 @@ def test_default_curie_plan_is_bounded_and_keeps_planner_provenance():
     assert all(item["concepts"] for item in plan["queries"])
 
 
+def test_explicit_query_plan_records_origin_without_rewriting():
+    seed = {
+        "candidate_id": "C001",
+        "round_id": "1",
+        "scientific_question": "How do high-heart-rate mammals avoid cardiac injury?",
+        "hypothesis_seed": "Calcium handling and cardiac remodeling preserve function.",
+    }
+    explicit_query = "EXT_ID:22253597 AND   SRC:MED"
+
+    plan = build_multisource_query_plan(
+        seed,
+        seed_sha256=research_seed.seed_sha256(seed),
+        explicit_queries=[explicit_query],
+        providers=["europe-pmc"],
+    )
+
+    assert plan["queries"][0]["query"] == explicit_query
+    assert plan["queries"][0]["origin"] == "explicit"
+
+
 def test_initial_zero_discovery_reformulates_once_and_records_both_attempts(tmp_path):
     project, _seed = _project(tmp_path)
     searches = []
@@ -95,8 +117,17 @@ def test_initial_zero_discovery_reformulates_once_and_records_both_attempts(tmp_
             return XML
         raise AssertionError(url)
 
+    def controlled_v1_builder(seed, *, reformulation_index, **kwargs):
+        kwargs.pop("feedback", None)
+        return build_multisource_query_plan(
+            seed, reformulation_index=reformulation_index, **kwargs,
+        )
+
     result = europepmc_runtime.run_europepmc_acquisition(
-        project, "C001", max_papers=1, run_id="REPLAN", http_get=http_get
+        project, "C001", max_papers=1, run_id="REPLAN", http_get=http_get,
+        plan_builder=controlled_v1_builder,
+        semantic_assessor=_supported_semantic_assessment,
+        semantic_assessor_id="fixture-semantic/v1",
     )
 
     assert result["status"] == "FROZEN"
