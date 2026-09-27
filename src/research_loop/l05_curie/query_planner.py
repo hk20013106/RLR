@@ -10,6 +10,7 @@ import unicodedata
 import hashlib
 import json
 import copy
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
@@ -352,8 +353,17 @@ def _gap_seed_spans(seed: dict, gaps: list[dict]):
         yield match
 
 
+def _project_optional_intent(previous: dict, intent_index: int, kept_ids: tuple[str, ...]) -> dict:
+    """Project one intent without changing any mandatory CORE anchor."""
+    candidate = copy.deepcopy(previous)
+    candidate.pop("plan_content_hash", None)
+    candidate["intents"] = [candidate["intents"][intent_index]]
+    candidate["intents"][0]["optional_concept_ids"] = list(kept_ids)
+    return candidate
+
+
 def _replan_candidates(previous: dict, seed: dict, feedback: dict, index: int):
-    """Finite, source-bound operations that can disprove a no-plan proposal."""
+    """Enumerate every authorized transformation class in one fixed order."""
     provenance = {
         "reformulation_index": index,
         "parent_plan_content_hash": previous["plan_content_hash"],
@@ -361,74 +371,149 @@ def _replan_candidates(previous: dict, seed: dict, feedback: dict, index: int):
         "feedback_gap_ids": sorted(gap["gap_id"] for gap in feedback["validated_coverage_gaps"]),
     }
 
-    def prepared(candidate: dict) -> dict:
+    def prepared(source_intent_id: str | None, candidate: dict):
         candidate.pop("plan_content_hash", None)
         candidate.update(provenance)
-        return candidate
+        return source_intent_id, candidate
 
-    for intent_index, intent in enumerate(previous["intents"]):
-        for optional_id in intent.get("optional_concept_ids", []):
-            candidate = copy.deepcopy(previous)
-            candidate["intents"][intent_index]["optional_concept_ids"].remove(optional_id)
-            candidate["intents"] = [candidate["intents"][intent_index]]
-            yield "optional/design constraint removal", prepared(candidate)
-    for operation, candidate in _seed_synonym_candidates(previous, seed):
-        yield operation, prepared(candidate)
+    optional_by_id = {item["concept_id"]: item for item in previous["optional_concepts"]}
 
-    if (feedback.get("attempt_outcome") or {}).get("type") != "COVERAGE_GAP":
-        return
-    core_terms = {
-        _normalized_term(value["term"])
-        for anchor in previous["core_anchors"]
-        for value in [anchor, *anchor.get("synonyms", [])]
-    }
-    for field, start, end, span in _gap_seed_spans(
-        seed, feedback.get("validated_coverage_gaps", [])
-    ):
-        if _normalized_term(span) in core_terms:
-            continue
-        existing = next((item for item in previous["optional_concepts"]
-                         if item["source_field"] == field and item["start"] == start
-                         and item["end"] == end), None)
-        optional_id = (existing or {}).get("concept_id") or "gap-" + _sha(
-            {"field": field, "start": start, "end": end}
-        )[:16]
-        for intent in previous["intents"]:
-            if optional_id in intent.get("optional_concept_ids", []):
+    def optional_intents():
+        for intent_index, intent in enumerate(previous["intents"]):
+            ids = tuple(sorted(intent.get("optional_concept_ids", []), key=lambda key: (
+                optional_by_id[key]["source_field"], optional_by_id[key]["start"],
+                optional_by_id[key]["end"], _normalized_term(optional_by_id[key]["term"]), key,
+            )))
+            if ids:
+                yield intent_index, intent, ids
+
+    def removals():
+        for intent_index, intent, ids in optional_intents():
+            for removed in ids:
+                yield prepared(intent["intent_id"], _project_optional_intent(
+                    previous, intent_index, tuple(key for key in ids if key != removed)
+                ))
+            if len(ids) > 1:
+                yield prepared(intent["intent_id"], _project_optional_intent(
+                    previous, intent_index, ()
+                ))
+
+    def synonyms():
+        for _operation, candidate in _seed_synonym_candidates(previous, seed):
+            yield prepared(None, candidate)
+
+    def gap_targets():
+        if (feedback.get("attempt_outcome") or {}).get("type") != "COVERAGE_GAP":
+            return
+        core_terms = {
+            _normalized_term(value["term"])
+            for anchor in previous["core_anchors"]
+            for value in [anchor, *anchor.get("synonyms", [])]
+        }
+        for field, start, end, span in _gap_seed_spans(
+            seed, feedback.get("validated_coverage_gaps", [])
+        ):
+            if _normalized_term(span) in core_terms:
                 continue
-            candidate = copy.deepcopy(previous)
-            if existing is None:
-                candidate["optional_concepts"].append({
-                    "concept_id": optional_id, "term": span,
-                    "source_type": "QUESTION" if field == "scientific_question" else "INITIAL_HYPOTHESIS",
-                    "source_field": field, "text_snippet": span,
-                    "source_hash": hashlib.sha256(seed[field].encode("utf-8")).hexdigest(),
-                    "start": start, "end": end,
-                })
-            narrowed = copy.deepcopy(intent)
-            narrowed["optional_concept_ids"].append(optional_id)
-            candidate["intents"] = [narrowed]
-            yield "validated gap targeted intent", prepared(candidate)
+            existing = next((item for item in previous["optional_concepts"]
+                             if item["source_field"] == field and item["start"] == start
+                             and item["end"] == end), None)
+            optional_id = (existing or {}).get("concept_id") or "gap-" + _sha(
+                {"field": field, "start": start, "end": end}
+            )[:16]
+            for intent in previous["intents"]:
+                if optional_id in intent.get("optional_concept_ids", []):
+                    continue
+                candidate = copy.deepcopy(previous)
+                if existing is None:
+                    candidate["optional_concepts"].append({
+                        "concept_id": optional_id, "term": span,
+                        "source_type": "QUESTION" if field == "scientific_question" else "INITIAL_HYPOTHESIS",
+                        "source_field": field, "text_snippet": span,
+                        "source_hash": hashlib.sha256(seed[field].encode("utf-8")).hexdigest(),
+                        "start": start, "end": end,
+                    })
+                narrowed = copy.deepcopy(intent)
+                narrowed["optional_concept_ids"].append(optional_id)
+                candidate["intents"] = [narrowed]
+                yield prepared(intent["intent_id"], candidate)
+
+    def splits():
+        for intent_index, intent, ids in optional_intents():
+            if len(ids) < 2:
+                continue
+            for size in range(1, len(ids)):
+                for kept_ids in combinations(ids, size):
+                    yield prepared(intent["intent_id"], _project_optional_intent(
+                        previous, intent_index, kept_ids
+                    ))
+
+    operations = (
+        ("optional removal", "no OPTIONAL term is used by a prior intent",
+         "prior intent uses source-bound OPTIONAL terms", removals),
+        ("grounded core synonym expansion", "no new authorized seed parenthetical mapping",
+         "new parenthetical mapping is present in an authorized seed field", synonyms),
+        ("non-essential design constraint removal", "no OPTIONAL constraint is used by a prior intent",
+         "non-essential constraints are represented by OPTIONAL terms", removals),
+        ("validated gap targeted intent", "no source-bound target applies to the validated gap",
+         "validated gap names a source-bound seed span", gap_targets),
+        ("composite intent split", "no prior intent has at least two OPTIONAL terms",
+         "prior intent has multiple source-bound OPTIONAL terms", splits),
+    )
+    for kind, empty_reason, applicable_reason, generate in operations:
+        yield kind, empty_reason, applicable_reason, generate()
 
 
-def _admissible_replan_candidates(previous: dict, seed: dict, feedback: dict, index: int) -> list[tuple[str, dict]]:
+def _admissible_replan_candidates(previous: dict, seed: dict, feedback: dict, index: int):
+    """Validate and deduplicate every class before proving exhaustion."""
     executed_queries = {item.get("query_content_hash") for item in feedback.get("executed_queries", [])}
     executed_plans = {item.get("plan_content_hash") for item in feedback.get("executed_plans", [])}
     candidates: list[tuple[str, dict]] = []
     seen_plans: set[str] = set()
-    for operation, candidate in _replan_candidates(previous, seed, feedback, index):
-        try:
+    seen_queries: set[str] = set()
+    audit = {
+        "parent_plan_content_hash": previous["plan_content_hash"],
+        "feedback_sha256": _sha(feedback),
+        "feedback_gap_ids": sorted(gap["gap_id"] for gap in feedback["validated_coverage_gaps"]),
+        "attempt_outcome_type": (feedback.get("attempt_outcome") or {}).get("type"),
+        "transformations": [],
+    }
+    for operation, empty_reason, applicable_reason, generated in _replan_candidates(
+        previous, seed, feedback, index
+    ):
+        record = {"kind": operation, "applicable": False, "reason": empty_reason,
+                  "candidates": []}
+        for source_intent_id, candidate in generated:
+            record["applicable"] = True
+            record["reason"] = applicable_reason
             validated = validate_scientific_query_plan(candidate, seed=seed)
             compiled = compile_scientific_query_plan(validated, seed=seed)
-        except CurieContractError:
-            continue
-        identity = validated["plan_content_hash"]
-        if (identity in seen_plans or identity in executed_plans
-                or any(item["query_content_hash"] in executed_queries for item in compiled)):
-            continue
-        seen_plans.add(identity)
-        candidates.append((operation, validated))
-    return candidates
+            identity = validated["plan_content_hash"]
+            query_hashes = [item["query_content_hash"] for item in compiled]
+            if identity in seen_plans:
+                outcome = "duplicate_candidate"
+            elif identity in executed_plans:
+                outcome = "executed_plan"
+            elif any(value in executed_queries for value in query_hashes):
+                outcome = "executed_query"
+            elif any(value in seen_queries for value in query_hashes):
+                outcome = "duplicate_candidate_query"
+            else:
+                outcome = "admissible"
+                seen_queries.update(query_hashes)
+                candidates.append((operation, validated))
+            seen_plans.add(identity)
+            record["candidates"].append({
+                "source_intent_id": source_intent_id,
+                "parent_plan_content_hash": previous["plan_content_hash"],
+                "feedback_sha256": audit["feedback_sha256"],
+                "feedback_gap_ids": audit["feedback_gap_ids"],
+                "plan_content_hash": identity,
+                "query_content_hashes": query_hashes,
+                "outcome": outcome,
+            })
+        audit["transformations"].append(record)
+    return candidates, audit
 
 
 def _source_bound_term(item: dict, seed: dict, *, expected_role: str | None = None) -> str:
@@ -696,7 +781,9 @@ def propose_scientific_query_plan(
         if reformulation_index == 0 or feedback is None or proposal["plan"] is not None:
             raise CurieContractError("initial or malformed no_admissible_replan proposal")
         previous = validate_scientific_query_plan(feedback["previous_plan"], seed=seed)
-        candidates = _admissible_replan_candidates(previous, seed, feedback, reformulation_index)
+        candidates, enumeration = _admissible_replan_candidates(
+            previous, seed, feedback, reformulation_index
+        )
         if not candidates:
             gaps = feedback.get("validated_coverage_gaps", [])
             if ((feedback.get("attempt_outcome") or {}).get("type") == "COVERAGE_GAP"
@@ -706,7 +793,8 @@ def propose_scientific_query_plan(
                     "no_admissible_replan cannot prove applicable gap-targeted plans are exhausted"
                 )
             return {"status": "NO_ADMISSIBLE_REPLAN", "plan": None,
-                    "reason": proposal["reason"], "receipt": receipt,
+                    "reason": proposal["reason"],
+                    "receipt": {**receipt, "replan_enumeration": enumeration},
                     "proposal_sha256": proposal_hash}
         first_hash, first_receipt = proposal_hash, receipt
         retry_prompt = prompt + "\nThe no-plan proposal is invalid: the following validated, " \
@@ -719,7 +807,8 @@ def propose_scientific_query_plan(
             retry_prompt, Path(work_dir) / "reproposal"
         )
         receipt = {**receipt, "prior_proposal_sha256": first_hash,
-                   "prior_proposal_receipt": first_receipt}
+                   "prior_proposal_receipt": first_receipt,
+                   "replan_enumeration": enumeration}
         if proposal["status"] == "NO_ADMISSIBLE_REPLAN":
             raise CurieContractError(
                 f"no_admissible_replan ignores an {candidates[0][0]} candidate"

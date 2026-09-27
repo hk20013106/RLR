@@ -3,6 +3,7 @@
 import hashlib
 import copy
 import json
+from itertools import combinations
 
 import pytest
 
@@ -66,6 +67,49 @@ def _plan(seed):
             "optional_concept_ids": [],
         }],
     }
+
+
+def _composite_replan_fixture(*, execute_last_singleton=False):
+    seed = _seed()
+    seed["scientific_question"] = (
+        "Does carbon dioxide (CO2) alter yeast sensing under nutrient limitation?"
+    )
+    previous = _plan(seed)
+    synonym = _anchor(seed, "scientific_question", "CO2", "unused")
+    synonym.pop("concept_id")
+    evidence = "carbon dioxide (CO2)"
+    synonym.update({
+        "mapping_source": "authorized_seed_parenthetical",
+        "mapping_version": "v1",
+        "mapping_evidence": evidence,
+        "mapping_evidence_start": seed["scientific_question"].index(evidence),
+        "mapping_key": hashlib.sha256(evidence.encode()).hexdigest(),
+    })
+    previous["core_anchors"][0]["synonyms"] = [synonym]
+    optional_ids = ("yeast", "sensing", "nutrient")
+    previous["optional_concepts"] = [
+        _anchor(seed, "scientific_question", term, term) for term in optional_ids
+    ]
+    previous["intents"][0]["optional_concept_ids"] = list(optional_ids)
+    previous = validate_scientific_query_plan(previous, seed=seed)
+    executed = []
+    for size in range(4):
+        for subset in combinations(optional_ids, size):
+            if subset == ("nutrient",) and not execute_last_singleton:
+                continue
+            variant = copy.deepcopy(previous)
+            variant.pop("plan_content_hash")
+            variant["intents"][0]["optional_concept_ids"] = list(subset)
+            executed.extend(compile_scientific_query_plan(variant, seed=seed))
+    feedback = {
+        "previous_plan": previous,
+        "executed_queries": executed,
+        "executed_plans": [{"plan_content_hash": previous["plan_content_hash"]}],
+        "validated_coverage_gaps": [{"gap_id": "G1"}],
+        "semantic_rejections": [],
+        "attempt_outcome": {"type": "COVERAGE_GAP"},
+    }
+    return seed, previous, feedback
 
 
 def test_v2_compiler_uses_authorized_core_and_stable_boolean_groups():
@@ -322,6 +366,154 @@ def test_no_admissible_replan_cannot_claim_exhaustion_for_generic_coverage_gap(t
         "raw_output": json.dumps(payload),
     })
     with pytest.raises(CurieContractError, match="cannot prove.*exhausted"):
+        propose_scientific_query_plan(
+            seed, spec=object(), work_dir=tmp_path,
+            reformulation_index=1, feedback=feedback,
+        )
+
+
+def test_composite_split_prevents_premature_no_admissible_replan(tmp_path, monkeypatch):
+    seed, previous, feedback = _composite_replan_fixture()
+    calls = []
+
+    def fake_structured(*_args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            payload = {"status": "NO_ADMISSIBLE_REPLAN", "reason": "exhausted", "plan": None}
+        else:
+            offered = json.loads(kwargs["prompt"].rsplit("\n", 1)[-1])
+            split = [item for item in offered if item["operation"] == "composite intent split"]
+            assert split, "the correction prompt must contain a validated split"
+            assert all(item["plan"]["core_anchors"] == previous["core_anchors"] for item in split)
+            assert all(item["plan"]["intents"][0]["core_concept_ids"] ==
+                       previous["intents"][0]["core_concept_ids"] for item in split)
+            selected = next(item["plan"] for item in split
+                            if item["plan"]["intents"][0]["optional_concept_ids"] == ["nutrient"])
+            payload = {"status": "PLAN", "reason": "split composite", "plan": selected}
+        return {"payload": payload, "receipt": {"validation_status": "PASS"},
+                "raw_output": json.dumps(payload)}
+
+    monkeypatch.setattr(structured_execution, "run_structured_model", fake_structured)
+    decision = propose_scientific_query_plan(
+        seed, spec=object(), work_dir=tmp_path,
+        reformulation_index=1, feedback=feedback,
+    )
+    assert decision["status"] == "PLAN"
+    assert len(calls) == 2
+    assert decision["plan"]["core_anchors"] == previous["core_anchors"]
+    assert compile_scientific_query_plan(decision["plan"], seed=seed)[0]["query_content_hash"] not in {
+        item["query_content_hash"] for item in feedback["executed_queries"]
+    }
+    audit = decision["receipt"]["replan_enumeration"]
+    assert [item["kind"] for item in audit["transformations"]] == [
+        "optional removal", "grounded core synonym expansion",
+        "non-essential design constraint removal", "validated gap targeted intent",
+        "composite intent split",
+    ]
+    assert audit["transformations"][-1]["applicable"] is True
+
+
+def test_composite_split_executed_content_is_not_new(tmp_path, monkeypatch):
+    seed, _previous, feedback = _composite_replan_fixture(execute_last_singleton=True)
+    for index, item in enumerate(feedback["executed_queries"]):
+        item["query_id"] = f"renamed-execution-{index}"
+    payload = {"status": "NO_ADMISSIBLE_REPLAN", "reason": "exhausted", "plan": None}
+    calls = []
+
+    def fake_structured(*_args, **_kwargs):
+        calls.append(1)
+        return {"payload": payload, "receipt": {"validation_status": "PASS"},
+                "raw_output": json.dumps(payload)}
+
+    monkeypatch.setattr(structured_execution, "run_structured_model", fake_structured)
+    decision = propose_scientific_query_plan(
+        seed, spec=object(), work_dir=tmp_path,
+        reformulation_index=1, feedback=feedback,
+    )
+    assert decision["status"] == "NO_ADMISSIBLE_REPLAN"
+    assert len(calls) == 1
+    audit = decision["receipt"]["replan_enumeration"]
+    assert all(item["outcome"] != "admissible" for transformation in audit["transformations"]
+               for item in transformation["candidates"])
+
+
+def test_replan_without_optional_has_explicit_inapplicable_split(tmp_path, monkeypatch):
+    seed = _seed()
+    previous = validate_scientific_query_plan(_plan(seed), seed=seed)
+    feedback = {
+        "previous_plan": previous,
+        "executed_queries": compile_scientific_query_plan(previous, seed=seed),
+        "executed_plans": [{"plan_content_hash": previous["plan_content_hash"]}],
+        "validated_coverage_gaps": [{"gap_id": "G1"}],
+        "semantic_rejections": [],
+        "attempt_outcome": {"type": "COVERAGE_GAP"},
+    }
+    payload = {"status": "NO_ADMISSIBLE_REPLAN", "reason": "exhausted", "plan": None}
+    monkeypatch.setattr(structured_execution, "run_structured_model", lambda *_args, **_kwargs: {
+        "payload": payload, "receipt": {"validation_status": "PASS"},
+        "raw_output": json.dumps(payload),
+    })
+    decision = propose_scientific_query_plan(
+        seed, spec=object(), work_dir=tmp_path,
+        reformulation_index=1, feedback=feedback,
+    )
+    split = next(item for item in decision["receipt"]["replan_enumeration"]["transformations"]
+                 if item["kind"] == "composite intent split")
+    assert split["applicable"] is False
+    assert split["candidates"] == []
+    assert split["reason"]
+
+
+def test_replan_candidate_contract_error_is_not_exhaustion(tmp_path, monkeypatch):
+    seed, _previous, feedback = _composite_replan_fixture()
+    payload = {"status": "NO_ADMISSIBLE_REPLAN", "reason": "exhausted", "plan": None}
+    monkeypatch.setattr(structured_execution, "run_structured_model", lambda *_args, **_kwargs: {
+        "payload": payload, "receipt": {"validation_status": "PASS"},
+        "raw_output": json.dumps(payload),
+    })
+    original_validator = query_planner.validate_scientific_query_plan
+
+    def fail_candidate(plan, *, seed):
+        if plan["reformulation_index"] == 1:
+            raise CurieContractError("candidate invariant failed")
+        return original_validator(plan, seed=seed)
+
+    monkeypatch.setattr(query_planner, "validate_scientific_query_plan", fail_candidate)
+    with pytest.raises(CurieContractError, match="candidate invariant failed"):
+        propose_scientific_query_plan(
+            seed, spec=object(), work_dir=tmp_path,
+            reformulation_index=1, feedback=feedback,
+        )
+
+
+def test_split_content_identity_ignores_ids_order_and_term_formatting():
+    seed, previous, _feedback = _composite_replan_fixture()
+    first = copy.deepcopy(previous)
+    first.pop("plan_content_hash")
+    first["intents"][0]["optional_concept_ids"] = ["nutrient"]
+    changed = copy.deepcopy(first)
+    changed["intents"][0]["intent_id"] = "renamed-split"
+    changed["intents"][0]["core_concept_ids"].reverse()
+    changed["core_anchors"].reverse()
+    changed["optional_concepts"].reverse()
+    next(item for item in changed["optional_concepts"]
+         if item["concept_id"] == "nutrient")["term"] = "  NUTRIENT  "
+    assert validate_scientific_query_plan(first, seed=seed)["plan_content_hash"] == \
+        validate_scientific_query_plan(changed, seed=seed)["plan_content_hash"]
+    assert compile_scientific_query_plan(first, seed=seed)[0]["query_content_hash"] == \
+        compile_scientific_query_plan(changed, seed=seed)[0]["query_content_hash"]
+
+
+def test_replan_model_error_is_not_no_admissible(tmp_path, monkeypatch):
+    seed, _previous, feedback = _composite_replan_fixture()
+
+    def fail_model(*_args, **_kwargs):
+        raise structured_execution.StructuredExecutionError(
+            "model service failed", category="SERVICE_ERROR"
+        )
+
+    monkeypatch.setattr(structured_execution, "run_structured_model", fail_model)
+    with pytest.raises(structured_execution.StructuredExecutionError, match="model service failed"):
         propose_scientific_query_plan(
             seed, spec=object(), work_dir=tmp_path,
             reformulation_index=1, feedback=feedback,
