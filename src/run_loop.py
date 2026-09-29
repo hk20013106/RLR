@@ -29,6 +29,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Literal
 
 HERE = Path(__file__).resolve().parent
 CONTROLLER = HERE / "research_loop_v04.py"
@@ -43,7 +45,14 @@ from research_loop.api import (  # noqa: E402
 from research_loop.context import DEFAULT_CONTEXT_TOKEN_BUDGET
 from research_loop.compatibility import PROFILE_V20, PROFILE_V21_CATALOG_1, get_profile
 from research_loop.code_state import capture_code_state
-from research_loop import deep_research, l0_preflight, runtime_preflight
+from research_loop.persona_catalog import (
+    PersonaCatalogError,
+    resolve_persona_template,
+)
+from research_loop import (
+    deep_research, l0_preflight, runtime_preflight,
+)
+from research_loop.l05_curie import europepmc_runtime
 from research_loop.loopx_policy import LoopXRetryPolicy
 from research_loop.providers.base import (
     ProviderOutputContractError,
@@ -60,6 +69,7 @@ from research_loop.l05_curie.europepmc_runtime import (
 from research_loop.topology import topology_for_profile
 
 ENGINE = EngineAPI()
+ExecutionMode = Literal["headless", "agent_native"]
 
 
 DEFAULT_CONFIG = """\
@@ -327,6 +337,43 @@ def _context_token_budget(cfg):
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError("context_token_budget must be a non-negative integer")
     return value
+
+
+def agent_native_capabilities(profile_id: str) -> dict[str, bool]:
+    """Report whether every cognition seam reachable in a profile is host-backed."""
+    try:
+        profile = get_profile(str(profile_id))
+        _, node_map, _ = topology_for_profile(profile.profile_id)
+    except (KeyError, TypeError, ValueError):
+        return {}
+    host_prepare = callable(globals().get("prepare_host_step"))
+    host_submit = callable(globals().get("submit_host_step"))
+    deep_receipt = callable(getattr(deep_research, "_host_literature_payload", None))
+    literature_prepare = callable(globals().get("_prepare_host_literature"))
+    literature_submit = callable(globals().get("_submit_host_literature"))
+    deep_persist = callable(getattr(deep_research, "persist_run", None))
+    deep_audit = callable(getattr(deep_research, "audit_evidence_pack", None))
+    return {
+        "L1_native_binding": bool(
+            "L1" in node_map
+            and callable(globals().get("_native_l1_binding_ready"))
+            and callable(globals().get("_ensure_native_l1_recall"))
+        ),
+        "L4_literature": bool(
+            "L4" in node_map and host_prepare and host_submit and deep_receipt
+        ),
+        "L8.5_literature": bool(
+            "L8.5" in node_map and host_prepare and host_submit
+            and literature_prepare and literature_submit and deep_receipt
+            and deep_persist and deep_audit
+        ),
+        "pre_research_text": bool(host_prepare and host_submit),
+        "L7_text_preparation": bool(
+            "L7" in node_map and host_prepare and host_submit
+        ),
+        "L7_delta": bool("L7" in node_map and host_prepare and host_submit),
+        "REVIEW": bool(host_prepare and host_submit and callable(_validate_review_response)),
+    }
 
 
 def _provider_output_schema(project, node, step):
@@ -1045,6 +1092,14 @@ def ensure_pre_research(project, cand, node, cfg, args, run_dir):
             return False
         log("native L1 binding already active; independent literature search is not applicable")
         return True
+    if getattr(args, "mode", None) == "agent_native" and node in {
+        "L4", "L8.5", *rl.PRE_RESEARCH_MAP.keys()
+    }:
+        log(
+            f"ERROR: agent-native {node} pre-research requires the current action "
+            "and cursor; use prepare_host_step instead of ensure_pre_research"
+        )
+        return False
     if native_catalog and node in {"L4", "L8.5"}:
         existing = _ctl("audit-literature-evidence", project, cand, "--node", node)
         if existing.returncode == 0:
@@ -1156,18 +1211,1702 @@ def _bump_node_failure(exec_state, node, max_node_failures):
     return counts[node] >= max_node_failures
 
 
-def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
+def _step_action_kind(step):
+    if step.get("terminal"):
+        return "terminal"
+    if step.get("is_parallel"):
+        return "cognitive"
+    node = step.get("node")
+    if node == "L0.5":
+        return "l05"
+    if node == "L7":
+        return "l7"
+    if node == "L10c":
+        return "report"
+    if node == "REVIEW":
+        return "review"
+    return "cognitive"
+
+
+def current_action(project, cand, cfg, args, round_id, exec_state) -> dict:
+    """Return the shared RLR action for the current authoritative next-step."""
+    mode = getattr(args, "mode", "headless")
+    if mode not in ("headless", "agent_native"):
+        raise ValueError(f"unsupported execution mode: {mode!r}")
+
+    step = next_step(project, cand)
+    profile_id = step.get("profile_id") or _bound_profile_id(project) or PROFILE_V20
+    expected_cursor = exec_state.get("cursor")
+    cursor = None
+    if (profile_id == PROFILE_V21_CATALOG_1 and
+            (expected_cursor is not None or _bound_profile_id(project) == profile_id)):
+        ledger = rl._ledger_for(
+            project, getattr(args, "knowledge_store", None), readonly=True
+        )
+        cursor = ledger.snapshot_candidate(project, cand, str(round_id))
+        if expected_cursor is not None and expected_cursor != cursor:
+            raise RuntimeError(
+                f"stale cursor for {cand} round {round_id}: expected caller cursor "
+                "does not match the current authoritative ledger snapshot"
+            )
+
+    nodes = step.get("nodes") or []
+    action_identity = {
+        "profile_id": profile_id,
+        "round_id": str(round_id),
+        "cursor": cursor,
+        "nodes": [item.get("node") for item in nodes] if nodes
+        else [step.get("node")],
+    }
+    kind = _step_action_kind(step)
+    if (mode == "agent_native" and exec_state.get("host_review_pending")
+            and step.get("terminal")):
+        step = {
+            "node": "REVIEW", "persona": "Reviewer",
+            "profile_id": profile_id, "schema_version": "2.1",
+        }
+        action_identity["nodes"] = ["REVIEW"]
+        kind = "review"
+    needs_pre_research = (
+        kind != "terminal" and not nodes and step.get("node") in rl.PRE_RESEARCH_MAP
+    )
+    if (needs_pre_research and
+            exec_state.get("prepared_action_identity") != action_identity):
+        kind = "pre_research"
+
+    return {
+        "kind": kind,
+        "step": step,
+        "profile_id": profile_id,
+        "cursor": cursor,
+        "identity": action_identity,
+    }
+
+
+def _host_step_json_bytes(value):
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
+def _host_step_marker_path(project, cand, round_id, request_id):
+    return (
+        Path(project) / "08_Run_Receipts" / str(cand)
+        / f"round_{int(round_id):02d}" / f"host_commit_{request_id}.json"
+    )
+
+
+def _read_host_step_marker(path):
+    try:
+        marker = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"host step commit marker is invalid: {exc}") from exc
+    if not isinstance(marker, dict):
+        raise RuntimeError("host step commit marker must contain an object")
+    return marker
+
+
+def _write_host_step_marker(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(_host_step_json_bytes(value) + b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _validate_host_step_request(project, cand, round_id, action, request):
+    """Bind a persisted ordinary-node request to current RLR context owners."""
+    identity = request.get("identity") or {}
+    inputs = request.get("inputs") or {}
+    step = action["step"]
+    manifest_arg = inputs.get("context_manifest_path")
+    rendered_arg = inputs.get("rendered_context_path")
+    if not manifest_arg or not rendered_arg:
+        raise RuntimeError("host request lacks context manifest or rendered context")
+    manifest_path = Path(str(manifest_arg)).resolve(strict=True)
+    rendered_path = Path(str(rendered_arg)).resolve(strict=True)
+    try:
+        manifest_path.relative_to(Path(project).resolve(strict=True))
+        rendered_path.relative_to(Path(project).resolve(strict=True))
+    except ValueError as exc:
+        raise RuntimeError("host request context artifact path escapes the project") from exc
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"host request context manifest is invalid: {exc}") from exc
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != "ContextManifest/v2":
+        raise RuntimeError("host request requires ContextManifest/v2")
+    rendered_hash = hashlib.sha256(rendered_path.read_bytes()).hexdigest()
+    manifest_hash = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    expected = {
+        "project_id": manifest.get("project_id"),
+        "candidate_id": str(cand),
+        "round_id": str(round_id),
+        "node": step.get("node"),
+        "persona": step.get("persona"),
+        "profile_id": action.get("profile_id"),
+    }
+    for field, value in expected.items():
+        if identity.get(field) != value or manifest.get(field) != value:
+            raise RuntimeError(f"host request {field} does not match current RLR action")
+    if manifest.get("rendered_context_path") != str(rendered_path):
+        raise RuntimeError("host request rendered-context path differs from manifest")
+    if manifest.get("rendered_context_sha256") != rendered_hash:
+        raise RuntimeError("host request rendered-context hash differs from manifest bytes")
+    if manifest_hash != inputs.get("context_manifest_sha256"):
+        raise RuntimeError("host request context-manifest hash differs from manifest bytes")
+    if rendered_hash != inputs.get("rendered_context_sha256"):
+        raise RuntimeError("host request rendered-context hash differs from request")
+    if inputs.get("context_hash") != rendered_hash:
+        raise RuntimeError("host request context hash differs from rendered context")
+    config_path = Path(str(inputs.get("runner_config_path") or "")).resolve(strict=True)
+    if hashlib.sha256(config_path.read_bytes()).hexdigest() != inputs.get(
+        "runner_config_sha256"
+    ):
+        raise RuntimeError("host request runner config changed since preparation")
+    if identity.get("cursor") != action.get("cursor"):
+        raise RuntimeError("host request cursor is stale against current next-step")
+    if not isinstance(identity.get("cursor"), dict):
+        raise RuntimeError("agent-native host request requires an authoritative ledger cursor")
+    persona_hashes = {
+        "persona_catalog_sha256": "catalog_sha256",
+        "persona_catalog_entry_sha256": "entry_sha256",
+        "persona_template_sha256": "template_sha256",
+        "persona_body_sha256": "body_sha256",
+    }
+    try:
+        resolved = resolve_persona_template(
+            get_profile(str(action.get("profile_id"))), str(step.get("persona"))
+        )
+    except (KeyError, ValueError, PersonaCatalogError) as exc:
+        raise RuntimeError(f"host request persona binding is invalid: {exc}") from exc
+    for manifest_field, resolution_field in persona_hashes.items():
+        expected_hash = getattr(resolved, resolution_field)
+        if (
+            manifest.get(manifest_field) != expected_hash
+            or inputs.get(manifest_field) != expected_hash
+        ):
+            raise RuntimeError(
+                f"host request {manifest_field} differs from current persona template"
+            )
+    tools_policy = request.get("tools_policy")
+    if (
+        not tools_policy
+        or tools_policy != manifest.get("tools_policy")
+        or (step.get("tools_policy") and step.get("tools_policy") != tools_policy)
+    ):
+        raise RuntimeError("host request tool policy differs from current context")
+    for field, value in {
+        "context_manifest_path": str(manifest_path),
+        "context_manifest_sha256": manifest_hash,
+        "rendered_context_path": str(rendered_path),
+        "rendered_context_sha256": rendered_hash,
+    }.items():
+        if inputs.get(field) != value:
+            raise RuntimeError(f"host request {field} does not match context artifacts")
+    return manifest, manifest_path, rendered_path, rendered_hash
+
+
+def _prepare_host_literature(project, cand, cfg, args, round_id, exec_state, action):
+    """Prepare a host literature response from the existing pre-research prompt."""
+    step = action["step"]
+    node = str(step.get("node") or "")
+    if node not in {"L4", "L8.5"}:
+        return None
+    audit = _ctl("audit-literature-evidence", project, cand, "--node", node)
+    target = (Path(project) / "02_Agent_Notes" / "_pre_research"
+              / f"{node}_research.md")
+    if audit.returncode == 0 and target.is_file():
+        try:
+            run_id = str(json.loads(audit.stdout).get("run_id") or "")
+        except (TypeError, json.JSONDecodeError):
+            run_id = ""
+        if run_id:
+            args.evidence_run_ids = getattr(args, "evidence_run_ids", {})
+            args.evidence_run_ids[node] = run_id
+            exec_state["prepared_action_identity"] = action["identity"]
+            return {"kind": "deterministic", "action": action, "evidence_run_id": run_id}
+
+    prompt_result = _ctl("pre-research", project, cand, "--node", node)
+    if prompt_result.returncode != 0 or not str(prompt_result.stdout or "").strip():
+        return {
+            "kind": "blocked", "step": step,
+            "reason": "existing pre-research prompt owner did not provide a host task",
+        }
+    prompt = str(prompt_result.stdout)
+    prompt_bytes = prompt.encode("utf-8")
+    store = getattr(args, "knowledge_store", None)
+    ledger = rl._ledger_for(project, store, readonly=True)
+    binding = ledger.require_binding(project)
+    if not isinstance(action.get("cursor"), dict):
+        return {"kind": "blocked", "step": step,
+                "reason": "host literature request requires authoritative v2.1 cursor"}
+    profile_id = str(action["profile_id"])
+    attempt = int(exec_state.get("host_attempts", {}).get(f"{node}:literature", 1))
+    request = ENGINE.prepare_host_request(
+        project,
+        kind="literature",
+        identity={
+            "project_id": str(binding["project_id"]),
+            "candidate_id": str(cand), "round_id": str(round_id),
+            "node": node, "persona": "Curie", "profile_id": profile_id,
+            "stage": "literature_review", "attempt": attempt,
+            "cursor": action["cursor"],
+        },
+        inputs={
+            "literature_prompt": prompt,
+            "literature_prompt_sha256": hashlib.sha256(prompt_bytes).hexdigest(),
+            "authorized_by": "RLR pre-research prompt owner",
+        },
+        tools_policy="literature-only",
+        output_contract={
+            "type": "object", "schema_version": deep_research.SCHEMA_VERSION,
+            "schema": deep_research._runtime_schema(node),
+        },
+    )
+    return {"kind": "needs_host", "step": step, "request": request,
+            "request_id": request["request_id"], "request_path": request["request_path"]}
+
+
+def _prepare_host_pre_research_text(project, cand, args, round_id, exec_state, action):
+    """Prepare a host response for existing non-literature pre-research text."""
+    step = action["step"]
+    node = str(step.get("node") or "")
+    if node not in rl.PRE_RESEARCH_MAP or node in {"L1", "L4", "L8.5"}:
+        return None
+    target = (Path(project) / "02_Agent_Notes" / "_pre_research"
+              / f"{node}_research.md")
+    if target.is_file():
+        request = _pending_pre_research_text_request(
+            project, cand, args, round_id, exec_state, action
+        )
+        if request is not None:
+            marker_path = _host_step_marker_path(
+                project, cand, round_id, request["request_id"]
+            )
+            marker = _read_host_step_marker(marker_path)
+            if marker and marker.get("phase") == "committed":
+                loader = getattr(ENGINE, "load_host_response_receipt", None)
+                if not callable(loader):
+                    raise RuntimeError("committed text response receipt loader is unavailable")
+                receipt = loader(
+                    project, request["request_id"],
+                    expected_cursor=(request.get("identity") or {}).get("cursor"),
+                )
+                if receipt is None:
+                    raise RuntimeError("committed text response receipt is missing")
+                _validate_committed_pre_research_text(
+                    project, cand, request, marker, receipt
+                )
+        exec_state["prepared_action_identity"] = action["identity"]
+        return {"kind": "deterministic", "action": action, "target": str(target)}
+    prompt_result = _ctl("pre-research", project, cand, "--node", node)
+    if prompt_result.returncode != 0 or not str(prompt_result.stdout or "").strip():
+        return {"kind": "blocked", "step": step,
+                "reason": "existing pre-research prompt owner did not provide a host task"}
+    prompt = str(prompt_result.stdout)
+    store = getattr(args, "knowledge_store", None)
+    binding = rl._ledger_for(project, store, readonly=True).require_binding(project)
+    if not isinstance(action.get("cursor"), dict):
+        return {"kind": "blocked", "step": step,
+                "reason": "host text request requires authoritative v2.1 cursor"}
+    profile_id = str(action["profile_id"])
+    request = ENGINE.prepare_host_request(
+        project,
+        kind="pre_research_text",
+        identity={
+            "project_id": str(binding["project_id"]),
+            "candidate_id": str(cand), "round_id": str(round_id),
+            "node": node, "persona": str(step.get("persona") or "Researcher"),
+            "profile_id": profile_id, "stage": "pre_research_text",
+            "attempt": int(exec_state.get("host_attempts", {}).get(
+                f"{node}:pre_research_text", 1)),
+            "cursor": action["cursor"],
+        },
+        inputs={
+            "prompt": prompt,
+            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "target_path": str(target.resolve()),
+        },
+        tools_policy="no-fs",
+        output_contract={"type": "object", "required": ["text"],
+                         "properties": {"text": {"type": "string"}}},
+    )
+    return {"kind": "needs_host", "step": step, "request": request,
+            "request_id": request["request_id"], "request_path": request["request_path"]}
+
+
+def _validate_committed_pre_research_text(project, cand, request, marker, receipt):
+    """Verify the existing committed text marker still names the exact target bytes."""
+    identity = request.get("identity") or {}
+    inputs = request.get("inputs") or {}
+    node = str(identity.get("node") or "")
+    root = Path(project).resolve(strict=True)
+    expected = (root / "02_Agent_Notes" / "_pre_research"
+                / f"{node}_research.md").resolve(strict=False)
+    target = Path(str(inputs.get("target_path") or "")).resolve(strict=False)
+    marker_target = Path(str(marker.get("target") or "")).resolve(strict=False)
+    if (request.get("kind") != "pre_research_text"
+            or str(identity.get("candidate_id")) != str(cand)
+            or node not in rl.PRE_RESEARCH_MAP
+            or target != expected or marker_target != expected
+            or str(marker.get("request_id") or "") != str(request.get("request_id") or "")
+            or marker.get("phase") != "committed"):
+        raise RuntimeError("committed pre-research text target binding is invalid")
+    target_bytes = expected.read_bytes()
+    target_hash = hashlib.sha256(target_bytes).hexdigest()
+    if (not marker.get("text_sha256")
+            or target_hash != marker.get("text_sha256")
+            or marker.get("raw_response_sha256")
+            != receipt.get("raw_response_sha256")):
+        raise RuntimeError("committed pre-research text target bytes differ from receipt")
+    return expected
+
+
+def _review_context_snapshot(project, cand, profile_id):
+    report_path = Path(project) / "FINAL_REPORT.md"
+    if not report_path.is_file():
+        raise RuntimeError("REVIEW requires FINAL_REPORT.md")
+    profile = get_profile(str(profile_id))
+    l8_key = artifact_for_node(profile, "L8").storage_key
+    parts = ["=== FINAL_REPORT.md ===", report_path.read_text(encoding="utf-8")]
+    source_hashes = {
+        str(report_path.resolve()): hashlib.sha256(report_path.read_bytes()).hexdigest()
+    }
+    cn_path = Path(project) / "FINAL_REPORT_CN.md"
+    if cn_path.is_file():
+        parts += ["=== FINAL_REPORT_CN.md ===", cn_path.read_text(encoding="utf-8")]
+        source_hashes[str(cn_path.resolve())] = hashlib.sha256(cn_path.read_bytes()).hexdigest()
+    for delta_key in (l8_key, "L9a_feynman", "L9b_darwin", "L10b_oppenheimer"):
+        delta = load_delta(project, cand, delta_key)
+        if delta is not None:
+            parts += [f"=== {delta_key} ===", json.dumps(
+                delta, indent=2, ensure_ascii=False
+            )]
+    context = "\n\n".join(parts)
+    return context, hashlib.sha256(context.encode("utf-8")).hexdigest(), source_hashes
+
+
+def _validate_review_response(value):
+    """Validate reviewer output against the existing REVIEW_SCHEMA contract."""
+    if not isinstance(value, dict) or set(value) != set(REVIEW_SCHEMA):
+        raise ValueError("REVIEW response does not match required schema fields")
+    if value.get("review_verdict") not in {
+        "accept", "weak_accept", "major_revision", "reject"
+    }:
+        raise ValueError("REVIEW response has an invalid review_verdict")
+    for field, expected in REVIEW_SCHEMA.items():
+        if field == "review_verdict":
+            continue
+        actual = value.get(field)
+        if expected is int:
+            if not isinstance(actual, int) or isinstance(actual, bool):
+                raise ValueError(f"REVIEW response field {field} must be an integer")
+        elif not isinstance(actual, expected):
+            raise ValueError(f"REVIEW response field {field} has the wrong schema type")
+    if not value["reason"].strip():
+        raise ValueError("REVIEW response reason must not be empty")
+    return value
+
+
+def _submit_host_literature(project, cand, request, action, response_receipt,
+                            session_identity):
+    """Persist host literature through the existing Deep Research owner."""
+    identity = request.get("identity") or {}
+    inputs = request.get("inputs") or {}
+    node = str(identity.get("node") or "")
+    if (node not in {"L4", "L8.5"} or action.get("kind") != "pre_research"
+            or str(action["step"].get("node")) != node):
+        raise RuntimeError("host literature response no longer names L4/L8.5 pre-research")
+    if (identity.get("cursor") != action.get("cursor")
+            or str(identity.get("candidate_id")) != str(cand)
+            or str(identity.get("profile_id")) != str(action.get("profile_id"))
+            or identity.get("stage") != "literature_review"):
+        raise RuntimeError("host literature request identity or cursor is stale")
+    prompt_bytes = str(inputs.get("literature_prompt") or "").encode("utf-8")
+    if (not prompt_bytes or hashlib.sha256(prompt_bytes).hexdigest()
+            != inputs.get("literature_prompt_sha256")):
+        raise RuntimeError("host literature prompt differs from its immutable request")
+    request_path = Path(request["request_path"]).resolve(strict=True)
+    response_path = Path(response_receipt["raw_response_path"]).resolve(strict=True)
+    project_root = Path(project).resolve(strict=True)
+    for path, label in ((request_path, "request"), (response_path, "response")):
+        try:
+            path.relative_to(project_root)
+        except ValueError as exc:
+            raise RuntimeError(f"host literature {label} path escapes project") from exc
+    request_hash = hashlib.sha256(request_path.read_bytes()).hexdigest()
+    response_hash = hashlib.sha256(response_path.read_bytes()).hexdigest()
+    if (request_hash != request.get("request_sha256")
+            or response_hash != response_receipt.get("raw_response_sha256")):
+        raise RuntimeError("host literature request/response bytes changed")
+    try:
+        payload = json.loads(response_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"host literature response is not valid JSON: {exc}") from exc
+    host_receipt = {
+        "schema_version": deep_research.HOST_RECEIPT_SCHEMA,
+        "source": "host_session", "request_id": request["request_id"],
+        "host_request_path": str(request_path),
+        "host_request_sha256": request_hash,
+        "raw_response_path": str(response_path),
+        "raw_response_sha256": response_hash,
+        "host_session_id": session_identity.get("session_id"),
+        "host_session_id_source": session_identity.get("source", "unavailable"),
+    }
+    artifact = deep_research.persist_run(
+        project, cand, node, payload, host_receipt,
+        project_id=str(identity["project_id"]),
+        round_id=str(identity["round_id"]),
+        profile_id=str(identity["profile_id"]), research_persona="Curie",
+    )
+    valid, reason = deep_research.audit_evidence_pack(
+        project, cand, node, run_id=artifact["run_id"]
+    )
+    if not valid:
+        raise RuntimeError(f"host literature evidence pack failed existing audit: {reason}")
+    target = (Path(project) / "02_Agent_Notes" / "_pre_research"
+              / f"{node}_research.md")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(deep_research.render_pre_research_markdown(artifact),
+                      encoding="utf-8")
+    audited = _ctl("audit-literature-evidence", project, cand, "--node", node)
+    if audited.returncode != 0:
+        raise RuntimeError("RLR literature audit rejected the host evidence pack")
+    try:
+        audited_run_id = str(json.loads(audited.stdout).get("run_id") or "")
+    except (TypeError, json.JSONDecodeError):
+        audited_run_id = ""
+    if audited_run_id != artifact["run_id"]:
+        raise RuntimeError("RLR literature audit selected a different evidence run")
+    return artifact
+
+
+def _validate_l7_workspace_request(project, cand, request):
+    """Revalidate the exact execution workspace manifest before L7 emission."""
+    inputs = request.get("inputs") or {}
+    root = Path(project).resolve(strict=True)
+    workspace = Path(str(inputs.get("workspace_path") or "")).resolve(strict=True)
+    manifest_path = Path(
+        str(inputs.get("workspace_manifest_path") or "")
+    ).resolve(strict=True)
+    try:
+        workspace.relative_to(root)
+        manifest_path.relative_to(workspace)
+    except ValueError as exc:
+        raise RuntimeError("L7 host workspace manifest escapes its controlled workspace") from exc
+    raw = manifest_path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != inputs.get("workspace_manifest_sha256"):
+        raise RuntimeError("L7 host workspace manifest changed after request preparation")
+    try:
+        manifest = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"L7 host workspace manifest is invalid: {exc}") from exc
+    if manifest != inputs.get("workspace_manifest"):
+        raise RuntimeError("L7 host workspace manifest differs from immutable request")
+    if (manifest.get("candidate_id") != str(cand)
+            or manifest.get("node") != "L7" or manifest.get("missing")):
+        raise RuntimeError("L7 host workspace manifest is incomplete or misbound")
+    for item in manifest.get("staged_files") or []:
+        staged_path = Path(str(item.get("workspace_path") or item.get("path") or ""))
+        if not staged_path.is_absolute():
+            staged_path = workspace / staged_path
+        staged_path = staged_path.resolve(strict=True)
+        try:
+            staged_path.relative_to(workspace)
+        except ValueError as exc:
+            raise RuntimeError("L7 host staged file escapes its workspace") from exc
+        if hashlib.sha256(staged_path.read_bytes()).hexdigest() != item.get("sha256"):
+            raise RuntimeError("L7 host staged script/output changed after authorization")
+    return workspace, manifest_path, digest
+
+
+def _submit_host_pre_research_text(project, cand, request, action,
+                                   response_receipt):
+    identity = request.get("identity") or {}
+    inputs = request.get("inputs") or {}
+    node = str(identity.get("node") or "")
+    if (action.get("kind") != "pre_research"
+            or str(action["step"].get("node")) != node
+            or node not in rl.PRE_RESEARCH_MAP
+            or node in {"L1", "L4", "L8.5"}):
+        raise RuntimeError("host text response no longer names a text pre-research step")
+    if (identity.get("cursor") != action.get("cursor")
+            or str(identity.get("candidate_id")) != str(cand)
+            or str(identity.get("profile_id")) != str(action.get("profile_id"))
+            or identity.get("stage") != "pre_research_text"):
+        raise RuntimeError("host text request identity or cursor is stale")
+    prompt = str(inputs.get("prompt") or "")
+    if (not prompt or hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            != inputs.get("prompt_sha256")):
+        raise RuntimeError("host text prompt differs from immutable request")
+    try:
+        payload = json.loads(Path(response_receipt["raw_response_path"])
+                             .read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"host pre-research response is invalid JSON: {exc}") from exc
+    text = payload.get("text") if isinstance(payload, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        raise RuntimeError("host pre-research response requires non-empty text")
+    root = Path(project).resolve(strict=True)
+    target = Path(str(inputs.get("target_path") or "")).resolve(strict=False)
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeError("host pre-research output path escapes project") from exc
+    if target != (root / "02_Agent_Notes" / "_pre_research"
+                  / f"{node}_research.md").resolve(strict=False):
+        raise RuntimeError("host pre-research output target differs from node owner")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    text_bytes = text.encode("utf-8")
+    fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=str(target.parent))
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(text_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+    return {"target": str(target), "text_sha256": hashlib.sha256(
+        text_bytes).hexdigest()}
+
+
+def prepare_host_step(project, cand, cfg, args, round_id, exec_state) -> dict:
+    """Prepare exactly one current ordinary cognitive step for the host session."""
+    args.mode = "agent_native"
+    action = current_action(project, cand, cfg, args, round_id, exec_state)
+    step = action["step"]
+    if action["kind"] == "terminal":
+        return {"kind": "terminal", "step": step}
+    host_l7_workspace = None
+    if action["kind"] == "l05":
+        return {
+            "kind": "blocked",
+            "step": step,
+            "reason": f"{step.get('node')} host handoff is not implemented in this phase",
+        }
+    if action["kind"] == "review":
+        profile_id = str(action["profile_id"])
+        try:
+            review_context, review_context_hash, source_hashes = (
+                _review_context_snapshot(project, cand, profile_id)
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            return {"kind": "blocked", "step": step, "reason": str(exc)}
+        binding = rl._ledger_for(
+            project, getattr(args, "knowledge_store", None), readonly=True
+        ).require_binding(project)
+        if not isinstance(action.get("cursor"), dict):
+            return {"kind": "blocked", "step": step,
+                    "reason": "REVIEW host request requires authoritative v2.1 cursor"}
+        review_properties = {}
+        for field, value_type in REVIEW_SCHEMA.items():
+            if field == "review_verdict":
+                review_properties[field] = {
+                    "type": "string",
+                    "enum": ["accept", "weak_accept", "major_revision", "reject"],
+                }
+            else:
+                review_properties[field] = {
+                    "type": "integer" if value_type is int else "array"
+                    if value_type is list else "string"
+                }
+        request = ENGINE.prepare_host_request(
+            project,
+            kind="review",
+            identity={
+                "project_id": str(binding["project_id"]),
+                "candidate_id": str(cand), "round_id": str(round_id),
+                "node": "REVIEW", "persona": "Reviewer", "profile_id": profile_id,
+                "stage": "review", "attempt": int(
+                    exec_state.get("host_attempts", {}).get("REVIEW", 1)
+                ), "cursor": action["cursor"],
+            },
+            inputs={
+                "review_context": review_context,
+                "review_context_sha256": review_context_hash,
+                "source_hashes": source_hashes,
+            },
+            tools_policy="review-read-only",
+            output_contract={
+                "type": "object",
+                "schema": {
+                    "type": "object", "required": list(REVIEW_SCHEMA),
+                    "properties": review_properties,
+                },
+            },
+        )
+        return {"kind": "needs_host", "step": step, "request": request,
+                "request_id": request["request_id"],
+                "request_path": request["request_path"]}
+    if action["kind"] == "l7":
+        if status_of(project, cand) == "METHOD_APPROVED":
+            gate = _ctl("execution-gate", project, cand)
+            if gate.returncode != 0:
+                return {"kind": "blocked", "step": step,
+                        "reason": f"execution-gate rejected: {gate.stdout.strip()}"}
+        prepared = _ctl("prepare-turing-workspace", project, cand, "--clean")
+        if prepared.returncode != 0:
+            return {"kind": "blocked", "step": step,
+                    "reason": "controlled Turing workspace preparation failed"}
+        workspace = next((line.split("ready:", 1)[1].strip()
+                          for line in prepared.stdout.splitlines()
+                          if "Turing workspace ready:" in line), "")
+        if not workspace:
+            return {"kind": "blocked", "step": step,
+                    "reason": "Turing workspace owner returned no workspace path"}
+        workspace_path = Path(workspace).resolve(strict=True)
+        try:
+            workspace_path.relative_to(Path(project).resolve(strict=True))
+        except ValueError:
+            return {"kind": "blocked", "step": step,
+                    "reason": "controlled Turing workspace escapes the project"}
+        workspace_manifest_path = workspace_path / "WORKSPACE_MANIFEST.json"
+        workspace_manifest_bytes = workspace_manifest_path.read_bytes()
+        workspace_manifest = json.loads(workspace_manifest_bytes.decode("utf-8"))
+        if (workspace_manifest.get("candidate_id") != str(cand)
+                or workspace_manifest.get("node") != "L7"
+                or workspace_manifest.get("missing")):
+            return {"kind": "blocked", "step": step,
+                    "reason": "Turing workspace manifest is invalid or incomplete"}
+        exec_state.setdefault("host_l7_workspaces", {})[str(cand)] = {
+            "path": str(workspace_path),
+            "manifest_path": str(workspace_manifest_path.resolve()),
+            "manifest_sha256": hashlib.sha256(workspace_manifest_bytes).hexdigest(),
+        }
+        host_l7_workspace = {
+            "path": str(workspace_path),
+            "manifest_path": str(workspace_manifest_path.resolve()),
+            "manifest_sha256": hashlib.sha256(workspace_manifest_bytes).hexdigest(),
+            "manifest": workspace_manifest,
+        }
+    if step.get("is_parallel") or step.get("nodes"):
+        return {
+            "kind": "blocked",
+            "step": step,
+            "reason": "parallel host handoff requires a node-specific authorization",
+        }
+    if action["kind"] == "report":
+        result = execute_deterministic_action(
+            action, project, cand, cfg, args,
+            Path(project) / "08_Run_Receipts" / cand / f"round_{int(round_id):02d}",
+            round_id, exec_state,
+        )
+        return {"kind": "deterministic", "action": action, "result": result}
+    if action["kind"] == "pre_research":
+        recovered = _recover_committed_advance(project, cand, step)
+        if recovered:
+            return {"kind": "deterministic", "action": action, "advanced": True}
+        if (str(step.get("node") or "") == "L1"
+                and action.get("profile_id") == PROFILE_V21_CATALOG_1):
+            ok = ensure_pre_research(
+                project, cand, "L1", cfg, args,
+                Path(project) / "08_Run_Receipts" / cand
+                / f"round_{int(round_id):02d}",
+            )
+            return {
+                "kind": "deterministic" if ok else "blocked",
+                "action": action,
+                "result": {"kind": "pre_research", "ok": bool(ok)},
+                **({} if ok else {
+                    "step": step,
+                    "reason": "native L1 binding/recall owner failed closed",
+                }),
+            }
+        literature = _prepare_host_literature(
+            project, cand, cfg, args, round_id, exec_state, action
+        )
+        if literature is not None:
+            return literature
+        try:
+            text_handoff = _prepare_host_pre_research_text(
+                project, cand, args, round_id, exec_state, action
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            return {"kind": "blocked", "step": step, "reason": str(exc)}
+        if text_handoff is not None:
+            return text_handoff
+        return {
+            "kind": "blocked",
+            "step": step,
+            "reason": "agent-native pre-research handoff is not implemented in this phase",
+        }
+
+    recovered = _recover_committed_advance(project, cand, step)
+    if recovered is True:
+        return {"kind": "deterministic", "action": action, "advanced": True}
+    if recovered is False:
+        return {"kind": "blocked", "step": step, "reason": "committed delta advance failed"}
+
+    node, persona = str(step["node"]), str(step["persona"])
+    evidence_run_id = getattr(args, "evidence_run_ids", {}).get(node)
+    context, manifest_path = assemble_context(
+        project, cand, node,
+        getattr(args, "authorization_ids", {}).get(node),
+        evidence_run_id,
+        _context_token_budget(cfg),
+    )
+    config_value = getattr(cfg, "source_path", None) or getattr(args, "config", None)
+    if not config_value:
+        return {
+            "kind": "blocked",
+            "step": step,
+            "reason": "agent-native host receipt requires the exact runner config path",
+        }
+    config_path = Path(config_value).resolve(strict=True)
+    config_hash = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    manifest_path = Path(manifest_path).resolve(strict=True)
+    manifest, rendered_path, rendered_bytes, _rendered_text = load_rendered_context_artifact(
+        manifest_path
+    )
+    rendered_path = rendered_path.resolve(strict=True)
+    rendered_hash = hashlib.sha256(rendered_bytes).hexdigest()
+    if context.encode("utf-8") != rendered_bytes:
+        raise RuntimeError("assembled host context differs from persisted context bytes")
+    if manifest.get("node") != node or manifest.get("persona") != persona:
+        raise RuntimeError("context manifest identity differs from current host step")
+    tools_policy = step.get("tools_policy") or manifest.get("tools_policy")
+    if not tools_policy or tools_policy != manifest.get("tools_policy"):
+        raise RuntimeError("current host step has no matching context tool policy")
+    if not isinstance(action.get("cursor"), dict):
+        return {
+            "kind": "blocked",
+            "step": step,
+            "reason": "agent-native host request requires an authoritative v2.1 ledger cursor",
+        }
+    identity = {
+        "project_id": str(manifest["project_id"]),
+        "candidate_id": str(cand),
+        "round_id": str(round_id),
+        "node": node,
+        "persona": persona,
+        "profile_id": str(action["profile_id"]),
+        "stage": "cognitive",
+        "attempt": int(exec_state.get("host_attempts", {}).get(node, 1)),
+        "cursor": action["cursor"],
+    }
+    inputs = {
+        "context_manifest_path": str(manifest_path.resolve()),
+        "context_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        "rendered_context_path": str(rendered_path.resolve()),
+        "rendered_context_sha256": rendered_hash,
+        "context_hash": rendered_hash,
+        "allowed_inputs": list(manifest.get("allowed_inputs") or []),
+        "persona_catalog_sha256": manifest.get("persona_catalog_sha256"),
+        "persona_catalog_entry_sha256": manifest.get("persona_catalog_entry_sha256"),
+        "persona_template_sha256": manifest.get("persona_template_sha256"),
+        "persona_body_sha256": manifest.get("persona_body_sha256"),
+        "runner_config_path": str(config_path),
+        "runner_config_sha256": config_hash,
+    }
+    if host_l7_workspace is not None:
+        inputs.update({
+            "workspace_path": host_l7_workspace["path"],
+            "workspace_manifest_path": host_l7_workspace["manifest_path"],
+            "workspace_manifest_sha256": host_l7_workspace["manifest_sha256"],
+            "workspace_manifest": host_l7_workspace["manifest"],
+        })
+    # L0's strict contract is re-read immediately before creating the durable
+    # host request so changes during context preparation fail closed.
+    if node == "L0":
+        ok, reason = rl._audit_l0_contract(Path(project), cand)
+        if not ok:
+            return {"kind": "blocked", "step": step,
+                    "reason": f"L0 input-contract gate before host request: {reason}"}
+    request = ENGINE.prepare_host_request(
+        project,
+        kind="cognitive",
+        identity=identity,
+        inputs=inputs,
+        tools_policy=tools_policy,
+        output_contract={
+            "type": "object",
+            "schema_version": step.get("schema_version"),
+            "schema": _provider_output_schema(project, node, step),
+        },
+    )
+    return {
+        "kind": "needs_host",
+        "step": step,
+        "request": request,
+        "request_id": request["request_id"],
+        "request_path": request["request_path"],
+        "context_manifest_path": str(manifest_path),
+        "rendered_context_path": str(rendered_path),
+    }
+
+
+def submit_host_step(project, cand, request_id, response_path, *,
+                     session_identity=None):
+    """Validate one host response, emit it, record v3-host provenance, and advance."""
+    session_identity = dict(session_identity or {})
+    session_source = session_identity.get("source", "unavailable")
+    session_id = session_identity.get("session_id")
+    if session_source not in {"verified", "declared", "unavailable"}:
+        raise ValueError("host session identity source must be verified, declared, or unavailable")
+    if session_source == "verified":
+        raise ValueError(
+            "verified host session identity requires a trusted verifier; "
+            "this boundary accepts declared or unavailable"
+        )
+    if session_source in {"verified", "declared"} and not str(session_id or "").strip():
+        raise ValueError("verified or declared host session identity requires session_id")
+    if session_source == "unavailable" and session_id not in (None, ""):
+        raise ValueError("unavailable host session identity cannot claim session_id")
+
+    with ENGINE.host_step_commit_lock(project, request_id):
+        request = ENGINE.load_host_request(project, request_id)
+        if request.get("request_id") != request_id:
+            raise RuntimeError("host request ID does not match requested submission")
+        identity = request.get("identity") or {}
+        expected_cursor = identity.get("cursor")
+        if not isinstance(expected_cursor, dict):
+            raise RuntimeError("host request has no authoritative ledger cursor")
+        marker_path = _host_step_marker_path(
+            project, cand, identity["round_id"], request_id
+        )
+        marker = _read_host_step_marker(marker_path)
+        if marker is not None and marker.get("phase") == "committed":
+            response_receipt = ENGINE.submit_host_response(
+                project, request_id, response_path, expected_cursor=expected_cursor
+            )
+            if (
+                marker.get("request_id") != request_id
+                or marker.get("raw_response_sha256")
+                != response_receipt.get("raw_response_sha256")
+            ):
+                raise RuntimeError(
+                    "host request was already committed with different response bytes"
+                )
+            if request.get("kind") == "pre_research_text":
+                _validate_committed_pre_research_text(
+                    project, cand, request, marker, response_receipt
+                )
+            return {"kind": "committed", "duplicate": True, **marker}
+
+        action = current_action(
+            project, cand, SimpleNamespace(stop_policy={}),
+            SimpleNamespace(mode="agent_native", knowledge_store=None),
+            str(identity["round_id"]), {
+                "cursor": expected_cursor,
+                "host_review_pending": request.get("kind") == "review",
+            },
+        )
+        if (request.get("kind") == "cognitive" and marker
+                and marker.get("phase") == "delta_committed"):
+            response_receipt = ENGINE.submit_host_response(
+                project, request_id, response_path, expected_cursor=expected_cursor
+            )
+            response_hash = response_receipt.get("raw_response_sha256")
+            if (marker.get("request_id") != request_id
+                    or marker.get("raw_response_sha256") != response_hash):
+                raise RuntimeError(
+                    "host request was already committed with different response bytes"
+                )
+            response_bytes_path = Path(
+                response_receipt.get("raw_response_path") or ""
+            ).resolve(strict=True)
+            canonical_delta_path = Path(
+                marker.get("canonical_delta_path") or ""
+            ).resolve(strict=True)
+            raw_hash = hashlib.sha256(response_bytes_path.read_bytes()).hexdigest()
+            if (response_bytes_path != canonical_delta_path
+                    or raw_hash != response_hash
+                    or raw_hash != marker.get("canonical_delta_sha256")):
+                raise RuntimeError(
+                    "persisted host response or canonical delta differs from commit marker"
+                )
+            host_receipt_path = Path(
+                marker.get("host_receipt_path") or ""
+            ).resolve(strict=True)
+            host_receipt = orch.RunReceipt.read(host_receipt_path)
+            if (host_receipt.schema_version != "RunReceipt/v3-host"
+                    or Path(str(host_receipt.host_request_path)).resolve(strict=True)
+                    != Path(str(request["request_path"])).resolve(strict=True)
+                    or host_receipt.host_request_hash != request.get("request_sha256")
+                    or Path(str(host_receipt.raw_response_path)).resolve(strict=True)
+                    != response_bytes_path
+                    or host_receipt.raw_response_hash != response_hash
+                    or Path(str(host_receipt.canonical_delta_path)).resolve(strict=True)
+                    != canonical_delta_path
+                    or host_receipt.canonical_delta_hash != raw_hash):
+                raise RuntimeError("persisted host RunReceipt differs from commit marker")
+
+            current_step = action.get("step") or {}
+            still_current = (
+                str(current_step.get("node")) == str(identity.get("node"))
+                and str(current_step.get("persona")) == str(identity.get("persona"))
+            )
+            if still_current:
+                advance(project, cand, current_step)
+            marker["phase"] = "committed"
+            _write_host_step_marker(marker_path, marker)
+            return {"kind": "committed", "duplicate": True, **marker}
+
+        step = action["step"]
+        if request.get("kind") == "review":
+            if (action.get("kind") != "review"
+                    or str(cand) != str(identity.get("candidate_id"))
+                    or str(action.get("profile_id")) != str(identity.get("profile_id"))
+                    or action.get("cursor") != expected_cursor
+                    or str(step.get("node")) != "REVIEW"):
+                raise RuntimeError("host REVIEW response is stale or names another stage")
+            current_context, current_context_hash, current_sources = (
+                _review_context_snapshot(project, cand, identity["profile_id"])
+            )
+            request_inputs = request.get("inputs") or {}
+            if (request_inputs.get("review_context") != current_context
+                    or request_inputs.get("review_context_sha256") != current_context_hash
+                    or request_inputs.get("source_hashes") != current_sources):
+                raise RuntimeError("host REVIEW request context or source hashes changed")
+            response_receipt = ENGINE.submit_host_response(
+                project, request_id, response_path, expected_cursor=expected_cursor
+            )
+            raw_response_path = Path(response_receipt["raw_response_path"]).resolve(strict=True)
+            raw_bytes = raw_response_path.read_bytes()
+            raw_hash = hashlib.sha256(raw_bytes).hexdigest()
+            if raw_hash != response_receipt.get("raw_response_sha256"):
+                raise RuntimeError("host REVIEW response receipt differs from exact bytes")
+            try:
+                review = json.loads(raw_bytes.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(f"host REVIEW response is invalid JSON: {exc}") from exc
+            review = _validate_review_response(review)
+            marker = {
+                "schema_version": "HostStepCommit/v1", "phase": "committed",
+                "request_id": request_id, "raw_response_sha256": raw_hash,
+                "review": review,
+                "host_receipt": {
+                    "schema_version": "HostResponseReceipt/v1",
+                    "request_id": request_id,
+                    "request_path": request["request_path"],
+                    "request_sha256": hashlib.sha256(
+                        Path(request["request_path"]).read_bytes()
+                    ).hexdigest(),
+                    "raw_response_path": str(raw_response_path),
+                    "raw_response_sha256": raw_hash,
+                },
+            }
+            _write_host_step_marker(marker_path, marker)
+            return {"kind": "committed", "duplicate": False, **marker,
+                    "response_receipt": response_receipt}
+        if request.get("kind") == "pre_research_text":
+            response_receipt = ENGINE.submit_host_response(
+                project, request_id, response_path, expected_cursor=expected_cursor
+            )
+            text_result = _submit_host_pre_research_text(
+                project, cand, request, action, response_receipt
+            )
+            marker = {
+                "schema_version": "HostStepCommit/v1",
+                "phase": "committed", "request_id": request_id,
+                "raw_response_sha256": response_receipt["raw_response_sha256"],
+                **text_result,
+            }
+            _write_host_step_marker(marker_path, marker)
+            return {"kind": "committed", "duplicate": False, **marker}
+        if request.get("kind") == "literature":
+            if action.get("kind") != "pre_research":
+                raise RuntimeError("host literature response is stale outside pre-research")
+            response_receipt = ENGINE.submit_host_response(
+                project, request_id, response_path, expected_cursor=expected_cursor
+            )
+            artifact = _submit_host_literature(
+                project, cand, request, action, response_receipt, session_identity
+            )
+            marker = {
+                "schema_version": "HostStepCommit/v1",
+                "phase": "committed",
+                "request_id": request_id,
+                "raw_response_sha256": response_receipt["raw_response_sha256"],
+                "evidence_run_id": artifact["run_id"],
+                "host_receipt_schema": deep_research.HOST_RECEIPT_SCHEMA,
+            }
+            _write_host_step_marker(marker_path, marker)
+            return {"kind": "committed", "duplicate": False, **marker}
+        if action["kind"] == "terminal":
+            if marker and marker.get("phase") == "delta_committed":
+                response_receipt = ENGINE.submit_host_response(
+                    project, request_id, response_path,
+                    expected_cursor=expected_cursor,
+                )
+                if (
+                    marker.get("request_id") != request_id
+                    or marker.get("raw_response_sha256")
+                    != response_receipt.get("raw_response_sha256")
+                ):
+                    raise RuntimeError(
+                        "host request was already committed with different response bytes"
+                    )
+                marker["phase"] = "committed"
+                _write_host_step_marker(marker_path, marker)
+                return {"kind": "committed", "duplicate": True, **marker}
+            raise RuntimeError("host response is stale because RLR is already terminal")
+        if action.get("kind") != "cognitive" or step.get("is_parallel"):
+            raise RuntimeError("host request no longer names an ordinary cognitive step")
+        if (
+            str(cand) != str(identity.get("candidate_id"))
+            or str(action.get("profile_id")) != str(identity.get("profile_id"))
+            or str(step.get("node")) != str(identity.get("node"))
+            or str(step.get("persona")) != str(identity.get("persona"))
+            or action.get("cursor") != expected_cursor
+        ):
+            raise RuntimeError("host response request node, persona, profile, or cursor is stale")
+        manifest, manifest_path, rendered_path, rendered_hash = _validate_host_step_request(
+            project, cand, identity["round_id"], action, request
+        )
+        workspace = None
+        workspace_manifest_hash = None
+        if str(identity.get("node")) == "L7":
+            workspace, _workspace_manifest_path, workspace_manifest_hash = (
+                _validate_l7_workspace_request(project, cand, request)
+            )
+
+        response_receipt = ENGINE.submit_host_response(
+            project, request_id, response_path, expected_cursor=expected_cursor
+        )
+        response_hash = response_receipt["raw_response_sha256"]
+        raw_response_path = Path(response_receipt["raw_response_path"]).resolve(strict=True)
+        raw_response_hash = hashlib.sha256(raw_response_path.read_bytes()).hexdigest()
+        if response_hash != raw_response_hash:
+            raise RuntimeError("host response receipt does not match exact response bytes")
+        if marker is not None and (
+            marker.get("request_id") != request_id
+            or marker.get("raw_response_sha256") != response_hash
+        ):
+            raise RuntimeError("host request was already committed with different response bytes")
+        if marker and marker.get("phase") == "delta_committed":
+            if action["kind"] == "terminal":
+                marker["phase"] = "committed"
+                _write_host_step_marker(marker_path, marker)
+                return {"kind": "committed", "duplicate": True, **marker}
+            advance(project, cand, step)
+            marker["phase"] = "committed"
+            _write_host_step_marker(marker_path, marker)
+            return {"kind": "committed", "duplicate": True, **marker}
+
+        request_path = Path(request["request_path"]).resolve(strict=True)
+        request_hash = hashlib.sha256(request_path.read_bytes()).hexdigest()
+        run_dir = (
+            Path(project) / "08_Run_Receipts" / str(cand)
+            / f"round_{int(identity['round_id']):02d}"
+        )
+        inputs = request.get("inputs") or {}
+        config_path = inputs.get("runner_config_path")
+        if not config_path:
+            raise RuntimeError("host request lacks its exact runner config path")
+        code_state = capture_code_state(HERE, config_path)
+        receipt = orch.RunReceipt(
+            node=str(identity["node"]),
+            persona=str(identity["persona"]),
+            provider="host_session",
+            timestamp=orch.now(),
+            context_hash=rendered_hash,
+            prompt_file=None,
+            prompt_hash=None,
+            provider_delta_path=str(raw_response_path),
+            provider_delta_hash=raw_response_hash,
+            allowed_tools=[request["tools_policy"]],
+            everos_scope=step.get("everos_read_scopes"),
+            fresh_session=None,
+            project_id=str(identity["project_id"]),
+            candidate_id=str(cand),
+            round_id=str(identity["round_id"]),
+            profile_id=str(identity["profile_id"]),
+            context_manifest_path=str(manifest_path),
+            context_manifest_hash=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+            rendered_context_path=str(rendered_path),
+            rendered_context_hash=rendered_hash,
+            git_head=code_state["git_head"],
+            git_dirty=code_state["git_dirty"],
+            working_tree_diff_sha256=code_state["working_tree_diff_sha256"],
+            config_sha256=code_state["config_sha256"],
+            code_state_id=code_state["code_state_id"],
+            host_request_path=str(request_path),
+            host_request_hash=request_hash,
+            raw_response_path=str(raw_response_path),
+            raw_response_hash=raw_response_hash,
+            canonical_delta_path=str(raw_response_path),
+            canonical_delta_hash=raw_response_hash,
+            host_session_id=session_id,
+            host_session_id_source=session_source,
+            schema_version="RunReceipt/v3-host",
+            workspace=str(workspace) if workspace is not None else None,
+            exit_code=None,
+            timed_out=None,
+            terminal_state=None,
+            execution_status=None,
+        )
+        attempt = int(identity.get("attempt", 1))
+        receipt_path = provider_attempt_path(
+            run_dir, step["node"], step["persona"], "receipt", ".json", attempt
+        )
+        receipt.write(receipt_path)
+        if not emit_delta(
+            project, cand, step["node"], step["persona"], raw_response_path,
+            run_dir, receipt=manifest_path, provider_receipt=receipt_path,
+        ):
+            raise RuntimeError(f"emit-delta rejected host response for {step['node']}")
+        marker = {
+            "schema_version": "HostStepCommit/v1",
+            "phase": "delta_committed",
+            "request_id": request_id,
+            "raw_response_sha256": raw_response_hash,
+            "host_receipt_path": str(receipt_path),
+            "canonical_delta_path": str(raw_response_path),
+            "canonical_delta_sha256": raw_response_hash,
+        }
+        if workspace is not None:
+            marker["workspace_manifest_sha256"] = workspace_manifest_hash
+        _write_host_step_marker(marker_path, marker)
+        advance(project, cand, step)
+        marker["phase"] = "committed"
+        _write_host_step_marker(marker_path, marker)
+        return {"kind": "committed", "duplicate": False, **marker}
+
+
+def _host_protocol_action(prepared):
+    """Translate one existing owner result into the host CLI protocol shape."""
+    kind = prepared.get("kind")
+    if kind == "needs_host":
+        request = prepared.get("request") or {}
+        request_id = prepared.get("request_id") or request.get("request_id")
+        request_path = prepared.get("request_path") or request.get("request_path")
+        if not request_id or not request_path:
+            return {"status": "blocked", "reason": "host owner returned an incomplete request"}
+        try:
+            request_bytes = Path(request_path).read_bytes()
+        except OSError as exc:
+            return {"status": "blocked", "reason": f"host request bytes are unavailable: {exc}"}
+        request_hash = hashlib.sha256(request_bytes).hexdigest()
+        expected_hash = request.get("request_sha256")
+        if not expected_hash or expected_hash != request_hash:
+            return {"status": "blocked", "reason": "host request bytes do not match its persisted hash"}
+        return {
+            "status": "needs_host",
+            "request_id": str(request_id),
+            "request_path": str(request_path),
+            "request_sha256": request_hash,
+        }
+    if kind == "terminal":
+        return {"status": "terminal", "step": prepared.get("step")}
+    terminal_status = prepared.get("terminal_status") or prepared.get("status")
+    if terminal_status == "L0_5_INSUFFICIENT_STOP":
+        return {"status": "terminal", "result": prepared}
+    if terminal_status in {"FROZEN", "NO_ADMISSIBLE_REPLAN"}:
+        return {"status": "continued", "result": prepared}
+    if terminal_status == "INSUFFICIENT_STOP":
+        return {"status": "terminal", "result": prepared}
+    if kind == "blocked":
+        return {"status": "blocked", "reason": str(prepared.get("reason") or "host step is blocked")}
+    if kind in {"deterministic", "continued"}:
+        return {"status": "continued", "result": prepared.get("result")}
+    return {"status": "blocked", "reason": f"unsupported host owner result: {kind!r}"}
+
+
+def _resume_recorded_host_response(project, cand, prepared):
+    """Commit a verified response receipt through the original stage owner."""
+    if prepared.get("kind") != "needs_host":
+        return None
+    request = prepared.get("request") or {}
+    if request.get("kind") not in {
+        "cognitive", "review", "pre_research_text", "literature"
+    }:
+        return None
+    request_id = prepared.get("request_id") or request.get("request_id")
+    identity = request.get("identity") or {}
+    cursor = identity.get("cursor")
+    loader = getattr(ENGINE, "load_host_response_receipt", None)
+    if not request_id or not isinstance(cursor, dict) or not callable(loader):
+        return {"status": "blocked", "reason": "persisted host response loader is unavailable"}
+    try:
+        receipt = loader(project, request_id, expected_cursor=cursor)
+        if receipt is None:
+            return None
+        response_path = receipt.get("raw_response_path")
+        if not response_path:
+            raise ValueError("persisted response receipt has no raw response path")
+        outcome = host_protocol_submit(project, cand, request_id, response_path)
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
+        return {"status": "blocked", "reason": f"persisted host response is invalid: {exc}"}
+    if outcome.get("status") != "committed":
+        return {"status": "blocked", "reason": "persisted host response did not commit"}
+    return {"status": "committed", "receipt": receipt, "outcome": outcome}
+
+
+def _continue_after_host_response(project, cand, cfg, args, round_id,
+                                  exec_state, action):
+    if action.get("kind") == "pre_research":
+        exec_state["prepared_action_identity"] = action.get("identity")
+    next_action = current_action(project, cand, cfg, args, round_id, exec_state)
+    if (next_action.get("kind") == action.get("kind")
+            and next_action.get("identity") == action.get("identity")):
+        return {"status": "blocked",
+                "reason": "host response committed but shared next-step did not advance"}
+    return host_protocol_next(project, cand, cfg, args, round_id, exec_state)
+
+
+def _pending_pre_research_text_request(project, cand, args, round_id,
+                                      exec_state, action):
+    step = action.get("step") or {}
+    node = str(step.get("node") or "")
+    if node not in rl.PRE_RESEARCH_MAP or node in {"L1", "L4", "L8.5"}:
+        return None
+    if not isinstance(action.get("cursor"), dict):
+        raise RuntimeError("host text recovery requires an authoritative ledger cursor")
+    binding = rl._ledger_for(
+        project, getattr(args, "knowledge_store", None), readonly=True
+    ).require_binding(project)
+    identity = {
+        "project_id": str(binding["project_id"]),
+        "candidate_id": str(cand), "round_id": str(round_id),
+        "node": node, "persona": str(step.get("persona") or "Researcher"),
+        "profile_id": str(action["profile_id"]),
+        "stage": "pre_research_text",
+        "attempt": int(exec_state.get("host_attempts", {}).get(
+            f"{node}:pre_research_text", 1)),
+        "cursor": action["cursor"],
+    }
+    return ENGINE.load_host_request_for_identity(project, identity)
+
+
+def host_protocol_next(project, cand, cfg, args, round_id, exec_state):
+    """Return one action from the existing RLR/owner state machines."""
+    args.mode = "agent_native"
+    run_dir = Path(project) / "08_Run_Receipts" / str(cand) / f"round_{int(round_id):02d}"
+    stop_path = run_dir / "stop_decision.json"
+
+    def round_result(decision):
+        if decision.get("stop"):
+            return {"status": "terminal", "stop_decision": decision}
+        child = decision.get("next_candidate_id")
+        if not child:
+            return {"status": "blocked",
+                    "reason": "round continuation has no persisted child candidate"}
+        return {"status": "continued", "next_candidate_id": child,
+                "stop_decision": decision}
+
+    if stop_path.is_file():
+        try:
+            persisted = json.loads(stop_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            return {"status": "blocked", "reason": f"persisted stop decision is invalid: {exc}"}
+        if isinstance(persisted, dict) and (
+            persisted.get("stop") is True or persisted.get("next_candidate_id")
+        ):
+            return round_result(persisted)
+        if (isinstance(persisted, dict)
+                and persisted.get("terminal_status") == "L0_5_INSUFFICIENT_STOP"):
+            try:
+                relative = Path(str(persisted.get("acquisition_manifest_path") or ""))
+                if relative.is_absolute():
+                    raise ValueError("acquisition manifest path must be project-relative")
+                project_path = Path(project).resolve()
+                manifest_path = (project_path / relative).resolve(strict=True)
+                manifest_path.relative_to(project_path)
+                manifest = json.loads(manifest_path.read_bytes().decode("utf-8"))
+                if not isinstance(manifest, dict):
+                    raise ValueError("acquisition manifest must be an object")
+                manifest_digest = str(persisted.get("acquisition_manifest_sha256") or "")
+                result = europepmc_runtime._result_from_manifest(
+                    manifest, relative.as_posix(), manifest_digest
+                )
+                validated = validate_europepmc_acquisition_result(
+                    project_path, str(cand), result
+                )
+                if (validated.get("status") != "INSUFFICIENT_STOP"
+                        or validated.get("run_id") != persisted.get("acquisition_run_id")
+                        or validated.get("terminal_reason") != persisted.get("terminal_reason")
+                        or validated.get("acquisition_manifest_path") != relative.as_posix()
+                        or validated.get("acquisition_manifest_sha256") != manifest_digest):
+                    raise ValueError("persisted L0.5 stop differs from validated acquisition manifest")
+                expected_record = _l05_insufficient_stop_record({
+                    "terminal_status": "L0_5_INSUFFICIENT_STOP",
+                    "completed": False,
+                    "full_dag_completed": False,
+                    "terminal_reason": validated["terminal_reason"],
+                    "acquisition_run_id": validated["run_id"],
+                    "acquisition_manifest_path": validated["acquisition_manifest_path"],
+                    "acquisition_manifest_sha256": validated[
+                        "acquisition_manifest_sha256"
+                    ],
+                })
+                if persisted != expected_record:
+                    raise ValueError("persisted L0.5 stop record fields are not canonical")
+            except (OSError, UnicodeError, ValueError, KeyError, TypeError,
+                    RuntimeError, CurieAcquisitionError) as exc:
+                return {"status": "blocked",
+                        "reason": f"persisted L0.5 acquisition manifest is invalid: {exc}"}
+            return {"status": "terminal", "result": persisted}
+
+    action = current_action(project, cand, cfg, args, round_id, exec_state)
+    terminal_round = action.get("kind") == "terminal"
+    review_enabled = (
+        not getattr(args, "no_review", False)
+        and bool((getattr(cfg, "review", {}) or {}).get("enabled", True))
+    )
+    has_report = (Path(project) / "FINAL_REPORT.md").is_file()
+    if terminal_round and review_enabled and has_report:
+        exec_state["host_review_pending"] = True
+        action = current_action(project, cand, cfg, args, round_id, exec_state)
+        if action.get("kind") != "review":
+            return {"status": "blocked",
+                    "reason": "shared controller could not prepare the round-end REVIEW action"}
+
+    if action.get("kind") == "review":
+        prepared = prepare_host_step(project, cand, cfg, args, round_id, exec_state)
+        if prepared.get("kind") == "blocked":
+            return _host_protocol_action(prepared)
+        if prepared.get("kind") != "needs_host":
+            return {"status": "blocked", "reason": "REVIEW owner did not return a host request"}
+        request = prepared.get("request") or {}
+        request_id = prepared.get("request_id") or request.get("request_id")
+        marker_path = _host_step_marker_path(project, cand, round_id, request_id)
+        marker = _read_host_step_marker(marker_path)
+        if not marker or marker.get("phase") != "committed":
+            resumed = _resume_recorded_host_response(project, cand, prepared)
+            if resumed and resumed.get("status") == "blocked":
+                return resumed
+            if resumed is None:
+                return _host_protocol_action(prepared)
+            marker = _read_host_step_marker(marker_path)
+            if not marker or marker.get("phase") != "committed":
+                return {"status": "blocked",
+                        "reason": "persisted REVIEW response did not produce a commit marker"}
+        identity = request.get("identity") or {}
+        if (identity.get("stage") != "review"
+                or identity.get("candidate_id") != str(cand)
+                or identity.get("round_id") != str(round_id)
+                or identity.get("cursor") != action.get("cursor")):
+            return {"status": "blocked", "reason": "persisted REVIEW request identity is stale"}
+        context, context_hash, sources = _review_context_snapshot(
+            project, cand, action["profile_id"]
+        )
+        inputs = request.get("inputs") or {}
+        if (inputs.get("review_context") != context
+                or inputs.get("review_context_sha256") != context_hash
+                or inputs.get("source_hashes") != sources):
+            return {"status": "blocked", "reason": "persisted REVIEW context or source hashes changed"}
+        receipt_data = marker.get("host_receipt") or {}
+        if (receipt_data.get("schema_version") != "HostResponseReceipt/v1"
+                or receipt_data.get("request_id") != request_id):
+            return {"status": "blocked", "reason": "persisted REVIEW response receipt is invalid"}
+        raw_path = Path(str(receipt_data.get("raw_response_path") or "")).resolve(strict=True)
+        request_path = Path(str(request.get("request_path") or "")).resolve(strict=True)
+        raw_bytes = raw_path.read_bytes()
+        request_hash = hashlib.sha256(request_path.read_bytes()).hexdigest()
+        raw_hash = hashlib.sha256(raw_bytes).hexdigest()
+        if (request_hash != receipt_data.get("request_sha256")
+                or raw_hash != receipt_data.get("raw_response_sha256")
+                or raw_hash != marker.get("raw_response_sha256")):
+            return {"status": "blocked", "reason": "persisted REVIEW bytes differ from receipt"}
+        try:
+            response_receipt = ENGINE.submit_host_response(
+                project, request_id, raw_path, expected_cursor=action["cursor"]
+            )
+            if response_receipt.get("raw_response_sha256") != raw_hash:
+                raise RuntimeError("host response receipt hash changed")
+            review = _validate_review_response(json.loads(raw_bytes.decode("utf-8")))
+        except (ValueError, RuntimeError, UnicodeError, json.JSONDecodeError) as exc:
+            return {"status": "blocked", "reason": f"persisted REVIEW response is invalid: {exc}"}
+        decision = _finalize_round(
+            project, cand, cfg, round_id, review,
+            l7_failures=int(exec_state.get("l7_failures", 0)),
+            reuse_persisted=True,
+        )
+        return round_result(decision)
+
+    if terminal_round:
+        decision = _finalize_round(
+            project, cand, cfg, round_id, None,
+            l7_failures=int(exec_state.get("l7_failures", 0)),
+            reuse_persisted=True,
+        )
+        return round_result(decision)
+    if action.get("kind") == "l05":
+        prepared = europepmc_runtime.prepare_acquisition_host_step(
+            project, cand
+        )
+        if prepared.get("kind") == "deterministic":
+            prepared = europepmc_runtime.continue_acquisition(project, cand)
+        outcome = _host_protocol_action(prepared)
+        terminal = outcome.get("result") or {}
+        if (outcome.get("status") == "terminal"
+                and terminal.get("terminal_status") == "L0_5_INSUFFICIENT_STOP"):
+            try:
+                stop_record, _stop_path = _persist_l05_insufficient_stop(
+                    project, cand, round_id, terminal
+                )
+            except (OSError, RuntimeError, UnicodeError) as exc:
+                return {"status": "blocked", "reason": str(exc)}
+            return {"status": "terminal", "result": stop_record}
+        return outcome
+    if action.get("kind") == "pre_research":
+        try:
+            pending_text_request = _pending_pre_research_text_request(
+                project, cand, args, round_id, exec_state, action
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            return {"status": "blocked",
+                    "reason": f"persisted pre-research text request is invalid: {exc}"}
+        if pending_text_request is not None:
+            pending = {
+                "kind": "needs_host", "step": action["step"],
+                "request": pending_text_request,
+                "request_id": pending_text_request["request_id"],
+                "request_path": pending_text_request["request_path"],
+            }
+            resumed = _resume_recorded_host_response(project, cand, pending)
+            if resumed and resumed.get("status") == "blocked":
+                return resumed
+            if resumed is not None:
+                return _continue_after_host_response(
+                    project, cand, cfg, args, round_id, exec_state, action
+                )
+    if action.get("kind") == "l7":
+        load_pending = getattr(ENGINE, "load_host_request_for_identity", None)
+        if not callable(load_pending):
+            return {"status": "blocked",
+                    "reason": "host request slot recovery is unavailable for L7"}
+        try:
+            binding = rl._ledger_for(
+                project, getattr(args, "knowledge_store", None), readonly=True
+            ).require_binding(project)
+            identity = {
+                "project_id": str(binding["project_id"]),
+                "candidate_id": str(cand), "round_id": str(round_id),
+                "node": "L7", "persona": "Turing",
+                "profile_id": str(action["profile_id"]),
+                "stage": "cognitive", "attempt": int(
+                    exec_state.get("host_attempts", {}).get("L7", 1)
+                ), "cursor": action.get("cursor"),
+            }
+            pending_request = load_pending(project, identity)
+            if pending_request is not None:
+                _validate_host_step_request(
+                    project, cand, round_id, action, pending_request
+                )
+                _validate_l7_workspace_request(project, cand, pending_request)
+                pending = {
+                    "kind": "needs_host", "step": action["step"],
+                    "request": pending_request,
+                    "request_id": pending_request["request_id"],
+                    "request_path": pending_request["request_path"],
+                }
+                resumed = _resume_recorded_host_response(project, cand, pending)
+                if resumed and resumed.get("status") == "blocked":
+                    return resumed
+                if resumed is not None:
+                    return _continue_after_host_response(
+                        project, cand, cfg, args, round_id, exec_state, action
+                    )
+                return _host_protocol_action(pending)
+        except (KeyError, OSError, RuntimeError, ValueError) as exc:
+            return {"status": "blocked",
+                    "reason": f"persisted L7 host request is invalid: {exc}"}
+    prepared = prepare_host_step(project, cand, cfg, args, round_id, exec_state)
+    if prepared.get("kind") == "needs_host":
+        resumed = _resume_recorded_host_response(project, cand, prepared)
+        if resumed and resumed.get("status") == "blocked":
+            return resumed
+        if resumed is not None:
+            return _continue_after_host_response(
+                project, cand, cfg, args, round_id, exec_state, action
+            )
+    if action.get("kind") == "pre_research" and prepared.get("kind") == "deterministic":
+        # The completed pre-research artifact is the durable completion signal.
+        # Reconstruct the in-memory prepared marker after a process restart and
+        # return the next action in this same call, so a fresh CLI invocation
+        # cannot loop on the already-completed pre-research owner.
+        exec_state["prepared_action_identity"] = action["identity"]
+        next_action = current_action(project, cand, cfg, args, round_id, exec_state)
+        if next_action.get("kind") == "pre_research":
+            return {"status": "blocked",
+                    "reason": "pre-research completion did not advance the shared next-step owner"}
+        prepared = prepare_host_step(project, cand, cfg, args, round_id, exec_state)
+    return _host_protocol_action(prepared)
+
+
+def host_protocol_submit(project, cand, request_id, response_path, *,
+                         session_identity=None):
+    """Submit through the owning handoff boundary, then return its exact outcome."""
+    request = ENGINE.load_host_request(project, request_id)
+    identity = request.get("identity") or {}
+    stage = str(identity.get("stage") or "")
+    if stage == "planner" or stage == "semantic" or stage.startswith("semantic:"):
+        receipt = europepmc_runtime.submit_acquisition_host_response(
+            project, cand, request_id, response_path
+        )
+        continued = europepmc_runtime.continue_acquisition(project, cand)
+        result = _host_protocol_action(continued)
+        return {"status": "committed", "response_receipt": receipt,
+                "continuation": result}
+    if session_identity is None:
+        committed = submit_host_step(project, cand, request_id, response_path)
+    else:
+        committed = submit_host_step(
+            project, cand, request_id, response_path,
+            session_identity=session_identity,
+        )
+    return {"status": "committed", **committed}
+
+
+def _host_command_configuration(args):
+    project = Path(args.project_dir).resolve()
+    cand = str(args.cand_id)
+    if getattr(args, "knowledge_store", None):
+        os.environ["RLR_HYPOTHESIS_STORE"] = str(Path(args.knowledge_store).resolve())
+    if (not rl._candidate_file(project, cand).exists()
+            and not (project / "99_Archive" / f"{cand}.md").exists()):
+        raise ValueError(f"no candidate {cand} in {project}")
+    if not (project / "99_Archive" / f"{cand}.md").exists():
+        ready = l0_preflight.validate_project_ready(
+            str(project), candidate_path=rl._candidate_file(project, cand)
+        )
+        if ready.get("status") != "PASS":
+            raise ValueError(
+                f"PROJECT_NOT_READY {ready.get('code')}: {ready.get('reason')}"
+            )
+    if not _formal_runtime_preflight():
+        raise ValueError("formal runtime preflight failed")
+    dep = _ctl("check-deps", str(project))
+    if dep.returncode != 0:
+        raise ValueError("L0 dependency gate failed: " +
+                         str(dep.stderr or dep.stdout).strip())
+    config_path = Path(args.config or project / "rlr_runner.yaml")
+    if not config_path.exists():
+        config_path.write_text(DEFAULT_CONFIG, encoding="utf-8")
+    cfg = orch.ProviderConfig.load(str(config_path))
+    if cfg.mode == "main_agent":
+        raise ValueError("configuration uses retired mode: main_agent")
+    if cfg.mode not in (None, ""):
+        log(f"WARNING: top-level mode={cfg.mode!r} is deprecated and inert")
+    profile_id = _bound_profile_id(project) or PROFILE_V20
+    try:
+        from research_loop import pre_e2e_closure
+        closure = pre_e2e_closure.audit_static_closure(profile_id)
+    except Exception as exc:
+        raise ValueError(f"static closure audit failed: {exc}") from exc
+    if not closure.get("e2e_start_allowed", False):
+        raise ValueError("static closure gate is open: " +
+                         json.dumps(closure.get("unresolved_required_paths") or [],
+                                    ensure_ascii=False, sort_keys=True))
+    capabilities = agent_native_capabilities(profile_id)
+    missing = sorted(name for name, implemented in capabilities.items()
+                     if implemented is not True)
+    if not capabilities or missing:
+        raise ValueError("agent-native capability gate failed: " +
+                         (", ".join(missing) if missing else "empty capability map"))
+    return project, cand, cfg
+
+
+def _host_command_round_id(project, cand, resume):
+    candidate_path = rl._candidate_file(Path(project), cand)
+    frontmatter = rl._load_yaml_front(candidate_path) if candidate_path.exists() else {}
+    return str(frontmatter.get("round_id", 1) or 1) if resume else "1"
+
+
+def cmd_host_next(args):
+    try:
+        project, cand, cfg = _host_command_configuration(args)
+        round_id = _host_command_round_id(project, cand, args.resume)
+        restore_previous_round(str(project), cand)
+        args.mode = "agent_native"
+        exec_state = {}
+        action = host_protocol_next(
+            str(project), cand, cfg, args, round_id, exec_state
+        )
+        print(json.dumps(action, ensure_ascii=False, sort_keys=True))
+        return 3 if action.get("status") == "blocked" else 0
+    except (ValueError, RuntimeError, OSError, L0StateError) as exc:
+        log(f"HOST NEXT BLOCKED: {exc}")
+        return 3
+
+
+def cmd_host_submit(args):
+    try:
+        project, cand, _cfg = _host_command_configuration(args)
+        submitted = host_protocol_submit(
+            str(project), cand, args.request_id, args.response_path
+        )
+        print(json.dumps(submitted, ensure_ascii=False, sort_keys=True))
+        continuation = submitted.get("continuation") or {}
+        if continuation.get("status") == "blocked":
+            return 3
+        return 0
+    except (ValueError, RuntimeError, OSError, L0StateError) as exc:
+        log(f"HOST SUBMIT BLOCKED: {exc}")
+        return 3
+
+
+def execute_deterministic_action(action, project, cand, cfg, args, run_dir,
+                                 round_id, exec_state) -> dict:
+    """Execute existing deterministic runner/controller owners for an action."""
+    kind = action["kind"]
+    step = action["step"]
+    if kind == "pre_research":
+        ok = ensure_pre_research(
+            project, cand, step["node"], cfg, args, run_dir
+        )
+        return {"kind": kind, "ok": bool(ok)}
+    if kind == "report":
+        result = _ctl("aggregate-report", project, cand)
+        return {"kind": kind, "ok": result.returncode == 0, "result": result}
+    raise ValueError(f"action {kind!r} is not a deterministic runner action")
+
+
+def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state,
+              *, mode: ExecutionMode = "headless"):
     """Drive one full DAG pass for a candidate. Returns an outcome string."""
+    if mode not in ("headless", "agent_native"):
+        raise ValueError(f"unsupported execution mode: {mode!r}")
+    args.mode = mode
     run_dir = Path(project) / "08_Run_Receipts" / cand / f"round_{round_id:02d}"
     max_l7 = int(cfg.stop_policy.get("max_l7_failures", 2))
     max_node = int(cfg.stop_policy.get("max_node_failures", 2))
     retry_threshold = int(cfg.stop_policy.get("loopx_retry_threshold", 2))
     exec_state.setdefault("loopx_policy", LoopXRetryPolicy(retry_threshold))
     while True:
-        step = next_step(project, cand)
-        if step.get("terminal"):
+        action = current_action(project, cand, cfg, args, round_id, exec_state)
+        step = action["step"]
+        if action["kind"] == "terminal":
             log(f"terminal status: {step.get('status')}")
             return "terminal"
+        if mode == "agent_native":
+            return "agent_native_handoff_required"
+        if action["kind"] == "pre_research":
+            node = step["node"]
+            recovered = _recover_committed_advance(project, cand, step)
+            if recovered is not None:
+                if not recovered:
+                    return f"node_failed:{node}"
+                continue
+            prepared = execute_deterministic_action(
+                action, project, cand, cfg, args, run_dir, round_id, exec_state
+            )
+            if not prepared["ok"]:
+                return f"node_failed:{node}"
+            exec_state["prepared_action_identity"] = action["identity"]
+            continue
         if step.get("is_parallel"):
             authorization_ids = {}
             if (Path(project) / "00_Preflight" /
@@ -1205,7 +2944,7 @@ def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
                     return f"node_failed:{sub['node']}"
             continue
         node = step["node"]
-        if node == "L0.5":
+        if action["kind"] == "l05":
             log("node L0.5 (Curie) [research acquisition / FREEZE]")
             l05_outcome = exec_l05(project, cand, step, cfg, args, run_dir, round_id)
             if l05_outcome["terminal_status"] == "L0_5_INSUFFICIENT_STOP":
@@ -1218,18 +2957,19 @@ def run_round(project, cand, cfg, args, round_id, max_rounds, exec_state):
             if not recovered:
                 return f"node_failed:{node}"
             continue
-        if not ensure_pre_research(project, cand, node, cfg, args, run_dir):
-            return f"node_failed:{node}"
-        if node == "L10c":
-            report = _ctl("aggregate-report", project, cand)
-            if report.returncode != 0:
-                detail = (report.stderr.strip() or report.stdout.strip()
+        if action["kind"] == "report":
+            report = execute_deterministic_action(
+                action, project, cand, cfg, args, run_dir, round_id, exec_state
+            )
+            if not report["ok"]:
+                result = report["result"]
+                detail = (result.stderr.strip() or result.stdout.strip()
                           or "aggregate-report failed")
                 log(f"L10c finalization failed: {detail}")
                 return "node_failed:L10c"
             log("L10c: report + required Obsidian projection + round manifest complete")
             return "completed"
-        if node == "L7":
+        if action["kind"] == "l7":
             log("node L7 (Turing) [execution / Path A]")
             exec_state.pop("last_loopx_failure", None)
             if not exec_turing(project, cand, step, cfg, args, run_dir,
@@ -1283,11 +3023,12 @@ def run_review_gate(project, cand, cfg, args, run_dir):
         prov = provider_for("REVIEW", cfg, args)
         out = prov.run_agent("REVIEW", "Reviewer", context,
                              output_schema=REVIEW_SCHEMA, run_dir=str(run_dir))
-        log(f"review verdict: {out.get('review_verdict')}")
-        return out
     except Exception as e:
         log(f"review gate skipped ({e})")
         return None
+    out = _validate_review_response(out)
+    log(f"review verdict: {out.get('review_verdict')}")
+    return out
 
 
 class StopPolicy:
@@ -1378,6 +3119,175 @@ class StopPolicy:
         if status == "KEEP":
             return self._stop("KEEP (no review verdict; nothing to continue on)")
         return self._stop("no continue condition met (default stop)")
+
+
+def _stop_policy_for_config(cfg, max_rounds=None):
+    data = getattr(cfg, "data", None) or {}
+    return StopPolicy(
+        max_rounds=int(max_rounds or getattr(cfg, "max_rounds", None)
+                       or data.get("max_rounds", 0) or 3),
+        marginal_gain_stop_threshold=int(
+            cfg.stop_policy.get("marginal_gain_stop_threshold", 2)),
+        keep_requires_review_accept=bool(
+            cfg.stop_policy.get("keep_requires_review_accept", True)),
+        max_l7_failures=int(cfg.stop_policy.get("max_l7_failures", 2)),
+    )
+
+
+def _l05_insufficient_stop_record(outcome):
+    stop_record = {
+        **outcome,
+        "node": "L0.5",
+        "downstream": "NOT_ATTEMPTED",
+        "L1": "NOT_ATTEMPTED",
+        "REVIEW": "NOT_ATTEMPTED",
+        "L10b": "NOT_ATTEMPTED",
+        "not_attempted_nodes": {
+            node: "NOT_ATTEMPTED" for node in (
+                "L1", "L2", "L3", "L4", "L5", "L6", "L7",
+                "L8", "L8.5", "L9a", "L9b", "L10a", "L10b", "L10c",
+                "REVIEW",
+            )
+        },
+    }
+    return stop_record
+
+
+def _persist_l05_insufficient_stop(project, cand, round_id, outcome):
+    """Persist the shared downstream-NOT_ATTEMPTED terminal record for L0.5."""
+    run_dir = (Path(project) / "08_Run_Receipts" / str(cand)
+               / f"round_{int(round_id):02d}")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    stop_record = _l05_insufficient_stop_record(outcome)
+    stop_path = run_dir / "stop_decision.json"
+    raw_stop = json.dumps(stop_record, indent=2, ensure_ascii=False)
+    if stop_path.exists() and stop_path.read_text(encoding="utf-8") != raw_stop:
+        raise RuntimeError("L0.5 stop record conflicts with existing run decision")
+    if not stop_path.exists():
+        fd, temporary = tempfile.mkstemp(
+            prefix=f".{stop_path.name}.", dir=str(run_dir)
+        )
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(raw_stop.encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, stop_path)
+            temporary = None
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+    return stop_record, stop_path
+
+
+def _round_summary_history(project, cand, round_id):
+    summaries = []
+    project_path = Path(project)
+    current_candidate = str(cand)
+    try:
+        current_frontmatter = rl._load_yaml_front(
+            rl._candidate_file(project_path, current_candidate)
+        )
+    except (OSError, ValueError):
+        current_frontmatter = {}
+
+    # Continuation candidates record their direct parent. Walk that explicit
+    # lineage, retaining each ancestor's own round_id, then read summaries in
+    # chronological order. Round numbers alone cannot identify which candidate
+    # owned a prior round after a continuation.
+    ancestors = []
+    visited = {current_candidate}
+    previous_candidate = str(
+        current_frontmatter.get("previous_candidate_id") or ""
+    ).strip()
+    while previous_candidate and previous_candidate not in visited:
+        visited.add(previous_candidate)
+        try:
+            frontmatter = rl._load_yaml_front(
+                rl._candidate_file(project_path, previous_candidate)
+            )
+        except (OSError, ValueError):
+            break
+        try:
+            ancestor_round = int(frontmatter.get("round_id"))
+        except (TypeError, ValueError):
+            break
+        if ancestor_round < int(round_id):
+            ancestors.append((previous_candidate, ancestor_round))
+        previous_candidate = str(
+            frontmatter.get("previous_candidate_id") or ""
+        ).strip()
+
+    for ancestor_candidate, ancestor_round in reversed(ancestors):
+        path = (project_path / "08_Run_Receipts" / ancestor_candidate
+                / f"round_{ancestor_round:02d}" / "stop_decision.json")
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"prior stop decision is invalid: {path}: {exc}") from exc
+        summary = record.get("round_summary") if isinstance(record, dict) else None
+        if isinstance(summary, dict):
+            summaries.append(summary)
+    return summaries
+
+
+def _finalize_round(project, cand, cfg, round_id, review, *,
+                    prev_summaries=(), l7_failures=0, reuse_persisted=False,
+                    max_rounds=None):
+    """Use the shared StopPolicy and terminal artifact owner for one round."""
+    run_dir = Path(project) / "08_Run_Receipts" / str(cand) / f"round_{int(round_id):02d}"
+    stop_path = run_dir / "stop_decision.json"
+    if reuse_persisted and stop_path.is_file():
+        try:
+            existing = json.loads(stop_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"persisted stop decision is invalid: {exc}") from exc
+        if isinstance(existing, dict) and (
+            existing.get("stop") is True or existing.get("next_candidate_id")
+        ):
+            return existing
+
+    status = status_of(project, cand)
+    l10b = load_delta(project, cand, "L10b_oppenheimer")
+    summary = {
+        "round": int(round_id), "candidate": str(cand), "status": status,
+        "evidence_sig": evidence_sig(project, cand),
+        "review_verdict": (review or {}).get("review_verdict"),
+    }
+    summaries = list(prev_summaries)
+    if reuse_persisted and not summaries:
+        summaries = _round_summary_history(project, cand, round_id)
+    summaries.append(summary)
+    parent_fm = rl._load_yaml_front(rl._candidate_file(Path(project), cand))
+    decision = _stop_policy_for_config(cfg, max_rounds).decide(
+        status=status, l10b=l10b, review=review, round_id=int(round_id),
+        prev_summaries=summaries, l7_failures=int(l7_failures),
+        parent_fm=parent_fm,
+    )
+    record = {**decision, "round_summary": summary}
+    run_dir.mkdir(parents=True, exist_ok=True)
+    if not decision["stop"]:
+        child = create_child(project, cand, decision, int(round_id) + 1)
+        record["next_candidate_id"] = child
+    fd, temp_name = tempfile.mkstemp(prefix=f".{stop_path.name}.", dir=str(run_dir))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(record, handle, indent=2, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, stop_path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+    return record
 
 
 def evidence_sig(project, cand):
@@ -1478,7 +3388,9 @@ def dry_run_plan(project, cand, cfg, max_rounds, review_on):
     return 0
 
 
-def cmd_run(args):
+def cmd_run(args, *, mode: ExecutionMode = "headless"):
+    if mode not in ("headless", "agent_native"):
+        raise ValueError(f"unsupported execution mode: {mode!r}")
     project, cand = args.project_dir, args.cand_id
     if getattr(args, "knowledge_store", None):
         os.environ["RLR_HYPOTHESIS_STORE"] = str(
@@ -1559,17 +3471,21 @@ def cmd_run(args):
             log(f"  {json.dumps(item, ensure_ascii=False, sort_keys=True)}")
         return 3
 
-    if not preflight_providers(cfg, args):
+    if mode == "agent_native":
+        capabilities = agent_native_capabilities(profile_id)
+        missing = sorted(
+            name for name, implemented in capabilities.items() if implemented is not True
+        )
+        if not capabilities or missing:
+            log(
+                "AGENT-NATIVE CAPABILITY GATE FAILED -- halting before first round: "
+                + (", ".join(missing) if missing else "capability map is empty")
+            )
+            return 3
+
+    if mode == "headless" and not preflight_providers(cfg, args):
         log("aborting: no runnable provider configured under provider.default/provider.nodes.")
         return 2
-
-    sp = StopPolicy(
-        max_rounds=max_rounds,
-        marginal_gain_stop_threshold=int(
-            cfg.stop_policy.get("marginal_gain_stop_threshold", 2)),
-        keep_requires_review_accept=bool(
-            cfg.stop_policy.get("keep_requires_review_accept", True)),
-        max_l7_failures=int(cfg.stop_policy.get("max_l7_failures", 2)))
 
     summaries = []
     cur = cand
@@ -1581,34 +3497,19 @@ def cmd_run(args):
         log(f"================ ROUND {round_id} | candidate {cur} ================")
         exec_state = {"l7_failures": 0, "node_failures": {}}
         outcome = run_round(project, cur, cfg, args, round_id, max_rounds,
-                            exec_state)
+                            exec_state, mode=mode)
+        if outcome == "agent_native_handoff_required":
+            log("agent-native step requires the host handoff path; refusing headless fallback")
+            return 2
         if isinstance(outcome, dict):
             if outcome.get("terminal_status") == "L0_5_INSUFFICIENT_STOP":
-                run_dir = (Path(project) / "08_Run_Receipts" / cur
-                           / f"round_{round_id:02d}")
-                run_dir.mkdir(parents=True, exist_ok=True)
-                stop_record = {
-                    **outcome,
-                    "node": "L0.5",
-                    "downstream": "NOT_ATTEMPTED",
-                    "L1": "NOT_ATTEMPTED",
-                    "REVIEW": "NOT_ATTEMPTED",
-                    "L10b": "NOT_ATTEMPTED",
-                    "not_attempted_nodes": {
-                        node: "NOT_ATTEMPTED" for node in (
-                            "L1", "L2", "L3", "L4", "L5", "L6", "L7",
-                            "L8", "L8.5", "L9a", "L9b", "L10a", "L10b", "L10c",
-                            "REVIEW",
-                        )
-                    },
-                }
-                stop_path = run_dir / "stop_decision.json"
-                raw_stop = json.dumps(stop_record, indent=2, ensure_ascii=False)
-                if stop_path.exists() and stop_path.read_text(encoding="utf-8") != raw_stop:
+                try:
+                    _stop_record, _stop_path = _persist_l05_insufficient_stop(
+                        project, cur, round_id, outcome
+                    )
+                except (OSError, RuntimeError, UnicodeError):
                     log("L0.5 stop record conflicts with existing run decision")
                     return 4
-                if not stop_path.exists():
-                    stop_path.write_text(raw_stop, encoding="utf-8")
                 log("L0.5 insufficient stop recorded; full DAG incomplete")
                 return 0
             log(f"ABORTING RUN: L0.5 {outcome.get('error_category', 'CONTRACT_ERROR')}: "
@@ -1627,23 +3528,17 @@ def cmd_run(args):
         if not args.no_review and cfg.review.get("enabled", True):
             review = run_review_gate(project, cur, cfg, args, run_dir)
 
-        st = status_of(project, cur)
-        l10b = load_delta(project, cur, "L10b_oppenheimer")
-        summaries.append({"round": round_id, "candidate": cur, "status": st,
-                          "evidence_sig": evidence_sig(project, cur),
-                          "review_verdict": (review or {}).get("review_verdict")})
-        parent_fm = rl._load_yaml_front(rl._candidate_file(Path(project), cur))
-        decision = sp.decide(status=st, l10b=l10b, review=review,
-                             round_id=round_id, prev_summaries=summaries,
-                             l7_failures=exec_state["l7_failures"],
-                             parent_fm=parent_fm)
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "stop_decision.json").write_text(
-            json.dumps(decision, indent=2, ensure_ascii=False), encoding="utf-8")
+        decision = _finalize_round(
+            project, cur, cfg, round_id, review,
+            prev_summaries=summaries,
+            l7_failures=exec_state["l7_failures"],
+            max_rounds=max_rounds,
+        )
+        summaries.append(decision["round_summary"])
         log(f"STOP DECISION: stop={decision['stop']} — {decision['reason']}")
         if decision["stop"]:
             break
-        cur = create_child(project, cur, decision, round_id + 1)
+        cur = decision["next_candidate_id"]
         log(f"opening next round on child candidate: {cur}")
         round_id += 1
 
@@ -1704,6 +3599,32 @@ def build_parser():
     sp.add_argument("--shadow-timeout", type=int, default=60,
                     help="per-run advisory ranking timeout in seconds (1-600)")
     sp.set_defaults(func=cmd_run)
+
+    hn = sub.add_parser(
+        "host-next", help="return one agent-native host action without invoking a model"
+    )
+    hn.add_argument("project_dir")
+    hn.add_argument("cand_id")
+    hn.add_argument("--config", help="runner config (default: PROJECT_DIR/rlr_runner.yaml)")
+    hn.add_argument("--knowledge-store",
+                    help="shared hypothesis SQLite store (or use RLR_HYPOTHESIS_STORE)")
+    hn.add_argument("--resume", action="store_true",
+                    help="restore and continue from the candidate's recorded round")
+    hn.set_defaults(func=cmd_host_next)
+
+    hs = sub.add_parser(
+        "host-submit", help="submit one host response to the existing RLR owner"
+    )
+    hs.add_argument("project_dir")
+    hs.add_argument("cand_id")
+    hs.add_argument("request_id", metavar="REQUEST_ID")
+    hs.add_argument("response_path", metavar="RESPONSE_PATH")
+    hs.add_argument("--config", help="runner config (default: PROJECT_DIR/rlr_runner.yaml)")
+    hs.add_argument("--knowledge-store",
+                    help="shared hypothesis SQLite store (or use RLR_HYPOTHESIS_STORE)")
+    hs.add_argument("--resume", action="store_true",
+                    help="restore and continue from the candidate's recorded round")
+    hs.set_defaults(func=cmd_host_submit)
     return p
 
 

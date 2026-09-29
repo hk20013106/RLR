@@ -43,7 +43,15 @@ def install(deep_research_module) -> None:
             raise dr.DeepResearchError(f"unsupported Deep Research stage {node!r}")
         payload, rejected_papers = dr._filter_unidentifiable_papers(payload)
         dr.validate_payload(payload)
-        if (
+        if receipt.get("schema_version") == dr.HOST_RECEIPT_SCHEMA:
+            host_payload = dr._host_literature_payload(
+                Path(project_dir), candidate_id, node, receipt
+            )
+            if host_payload != payload:
+                raise dr.DeepResearchError(
+                    "host literature response payload differs from submitted content"
+                )
+        elif (
             receipt.get("exit_code") != 0
             or not receipt.get("command_hash")
             or not receipt.get("prompt_hash")

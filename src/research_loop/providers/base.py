@@ -3,6 +3,7 @@
 This module does not import the engine. External execution delegates retry
 mechanics to the existing :mod:`research_loop.external_resilience` owner.
 """
+import hashlib
 import json
 import re
 from dataclasses import dataclass, asdict, field
@@ -306,6 +307,14 @@ class RunReceipt:
     working_tree_diff_sha256: str | None = None
     config_sha256: str | None = None
     code_state_id: str | None = None
+    host_request_path: str | None = None
+    host_request_hash: str | None = None
+    raw_response_path: str | None = None
+    raw_response_hash: str | None = None
+    canonical_delta_path: str | None = None
+    canonical_delta_hash: str | None = None
+    host_session_id: str | None = None
+    host_session_id_source: str | None = None
     schema_version: str = "RunReceipt/v1"
     exit_code: int | None = None
     timed_out: bool | None = None
@@ -313,15 +322,23 @@ class RunReceipt:
     execution_status: str | None = None
 
     def validate(self):
-        if self.schema_version not in {"RunReceipt/v1", "RunReceipt/v2"}:
-            raise ValueError("RunReceipt schema_version must be 'RunReceipt/v1' or 'RunReceipt/v2'")
-        for name in (
+        if self.schema_version not in {
+            "RunReceipt/v1", "RunReceipt/v2", "RunReceipt/v3-host"
+        }:
+            raise ValueError(
+                "RunReceipt schema_version must be 'RunReceipt/v1', "
+                "'RunReceipt/v2', or 'RunReceipt/v3-host'"
+            )
+        common_required = (
             "node", "persona", "provider", "timestamp", "context_hash",
             "project_id", "candidate_id", "round_id", "profile_id",
             "context_manifest_path", "context_manifest_hash",
             "rendered_context_path", "rendered_context_hash",
-            "prompt_file", "prompt_hash",
-        ):
+        )
+        required = common_required if self.schema_version == "RunReceipt/v3-host" else (
+            *common_required, "prompt_file", "prompt_hash"
+        )
+        for name in required:
             if not str(getattr(self, name, "") or "").strip():
                 raise ValueError(f"RunReceipt {name} is required")
         has_provider_delta = bool(str(self.provider_delta_path or "").strip())
@@ -345,6 +362,7 @@ class RunReceipt:
             "context_hash", "context_manifest_hash", "rendered_context_hash",
             "prompt_hash", "delta_hash", "provider_delta_hash",
             "raw_provider_delta_hash", "transformation_receipt_hash",
+            "host_request_hash", "raw_response_hash", "canonical_delta_hash",
         ):
             value = getattr(self, name, None)
             if value is not None and (
@@ -378,14 +396,192 @@ class RunReceipt:
                         raise ValueError(
                             f"RunReceipt {name} is required when provider delta is transformed"
                         )
+        if self.schema_version == "RunReceipt/v3-host":
+            for name in (
+                "host_request_path", "host_request_hash", "raw_response_path",
+                "raw_response_hash", "canonical_delta_path",
+                "canonical_delta_hash",
+                "host_session_id_source", "git_head",
+                "working_tree_diff_sha256", "config_sha256", "code_state_id",
+            ):
+                if not str(getattr(self, name, "") or "").strip():
+                    raise ValueError(f"RunReceipt {name} is required for v3-host")
+            if self.host_session_id_source not in {
+                "verified", "declared", "unavailable"
+            }:
+                raise ValueError(
+                    "RunReceipt host_session_id_source must be verified, declared, or unavailable"
+                )
+            if self.host_session_id_source in {"verified", "declared"}:
+                if not str(self.host_session_id or "").strip():
+                    raise ValueError(
+                        "RunReceipt host_session_id is required for verified or declared source"
+                    )
+            elif self.host_session_id is not None and str(self.host_session_id).strip():
+                raise ValueError(
+                    "RunReceipt unavailable host_session_id_source cannot claim a session ID"
+                )
+            if self.provider != "host_session":
+                raise ValueError("RunReceipt v3-host provider must be host_session")
+            if self.fresh_session is not None:
+                raise ValueError(
+                    "RunReceipt v3-host cannot claim physical fresh-session state"
+                )
+            if not isinstance(self.git_dirty, bool):
+                raise ValueError("RunReceipt git_dirty must be a bool for v3-host")
+            if re.fullmatch(r"[0-9a-f]{40,64}", str(self.git_head)) is None:
+                raise ValueError("RunReceipt git_head must be a Git object ID for v3-host")
+            for name in (
+                "working_tree_diff_sha256", "config_sha256", "code_state_id"
+            ):
+                if re.fullmatch(r"[0-9a-f]{64}", str(getattr(self, name))) is None:
+                    raise ValueError(
+                        f"RunReceipt {name} must be a SHA-256 hex digest for v3-host"
+                    )
+            if self.exit_code is not None or self.timed_out is not None:
+                raise ValueError(
+                    "RunReceipt v3-host cannot claim subprocess exit or timeout data"
+                )
+            if self.terminal_state is not None or self.execution_status is not None:
+                raise ValueError(
+                    "RunReceipt v3-host cannot claim subprocess execution state"
+                )
+            if (
+                self.provider_delta_path != self.canonical_delta_path
+                or self.provider_delta_hash != self.canonical_delta_hash
+            ):
+                raise ValueError(
+                    "RunReceipt v3-host canonical delta must match provider delta"
+                )
+            self._validate_host_artifacts()
         return self
+
+    def _validate_host_artifacts(self):
+        """Bind v3-host identity and hashes to the exact persisted artifacts."""
+        artifacts = (
+            ("context manifest", self.context_manifest_path,
+             self.context_manifest_hash),
+            ("host request", self.host_request_path, self.host_request_hash),
+            ("raw response", self.raw_response_path, self.raw_response_hash),
+            ("canonical delta", self.canonical_delta_path,
+             self.canonical_delta_hash),
+            ("rendered context", self.rendered_context_path,
+             self.rendered_context_hash),
+        )
+        for label, raw_path, expected_hash in artifacts:
+            try:
+                raw = Path(str(raw_path)).read_bytes()
+            except OSError as exc:
+                raise ValueError(
+                    f"RunReceipt {label} is missing or unreadable"
+                ) from exc
+            if hashlib.sha256(raw).hexdigest() != expected_hash:
+                raise ValueError(
+                    f"RunReceipt {label} hash does not match artifact bytes"
+                )
+
+        def read_json(path, label):
+            try:
+                value = json.loads(Path(str(path)).read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"RunReceipt {label} is unreadable: {exc}"
+                ) from exc
+            if not isinstance(value, dict):
+                raise ValueError(f"RunReceipt {label} must contain a JSON object")
+            return value
+
+        request = read_json(self.host_request_path, "host request")
+        manifest = read_json(self.context_manifest_path, "context manifest")
+        request_body_fields = (
+            "schema_version", "kind", "identity", "inputs", "tools_policy",
+            "output_contract",
+        )
+        if (
+            any(name not in request for name in request_body_fields)
+            or set(request) != {*request_body_fields, "request_id"}
+        ):
+            raise ValueError("RunReceipt v3-host request lacks canonical request fields")
+        request_body = {name: request[name] for name in request_body_fields}
+        expected_request_id = hashlib.sha256(json.dumps(
+            request_body, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")).hexdigest()
+        if request.get("request_id") != expected_request_id:
+            raise ValueError(
+                "RunReceipt v3-host request ID does not match canonical request content"
+            )
+        identity = request.get("identity") or request
+        inputs = request.get("inputs") or {}
+        expected = {
+            "project_id": self.project_id,
+            "candidate_id": self.candidate_id,
+            "round_id": self.round_id,
+            "node": self.node,
+            "persona": self.persona,
+            "profile_id": self.profile_id,
+        }
+        for field_name, expected_value in expected.items():
+            if (
+                identity.get(field_name) != expected_value
+                or manifest.get(field_name) != expected_value
+            ):
+                raise ValueError(
+                    f"RunReceipt v3-host {field_name} does not match request/context"
+                )
+        request_context_hash = (
+            request.get("context_hash")
+            or inputs.get("context_hash")
+            or inputs.get("rendered_context_sha256")
+        )
+        if request_context_hash != self.context_hash:
+            raise ValueError(
+                "RunReceipt v3-host context hash does not match host request"
+            )
+        if manifest.get("rendered_context_sha256") != self.context_hash:
+            raise ValueError(
+                "RunReceipt v3-host context hash does not match manifest"
+            )
+        request_policy = request.get("tools_policy")
+        if (
+            request_policy is not None
+            and (
+                self.allowed_tools != [request_policy]
+                or manifest.get("tools_policy") != request_policy
+            )
+        ):
+            raise ValueError(
+                "RunReceipt v3-host tool policy does not match request/context"
+            )
+        for field_name, expected_value in {
+            "context_manifest_path": self.context_manifest_path,
+            "context_manifest_sha256": self.context_manifest_hash,
+            "rendered_context_path": self.rendered_context_path,
+            "rendered_context_sha256": self.rendered_context_hash,
+        }.items():
+            if field_name not in inputs:
+                raise ValueError(
+                    f"RunReceipt v3-host host request lacks {field_name} binding"
+                )
+            if str(inputs[field_name]) != str(expected_value):
+                raise ValueError(
+                    f"RunReceipt v3-host {field_name} does not match host request"
+                )
 
     def write(self, path):
         self.validate()
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(asdict(self), indent=2, ensure_ascii=False),
-                     encoding="utf-8")
+        value = asdict(self)
+        if self.schema_version != "RunReceipt/v3-host":
+            for name in (
+                "host_request_path", "host_request_hash", "raw_response_path",
+                "raw_response_hash", "canonical_delta_path",
+                "canonical_delta_hash", "host_session_id",
+                "host_session_id_source",
+            ):
+                value.pop(name, None)
+        p.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
         return str(p)
 
     @classmethod

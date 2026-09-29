@@ -419,9 +419,92 @@ def _validate_native_receipts(
                     raise LedgerError(
                         f"provider transformation receipt {field} does not match emitted artifacts"
                     )
-    prompt_path = Path(str(provider.prompt_file or ""))
-    if not prompt_path.is_file() or _sha256(prompt_path) != provider.prompt_hash:
-        raise LedgerError("provider receipt prompt file is missing or changed")
+    if provider.schema_version == "RunReceipt/v3-host":
+        request_path = Path(str(provider.host_request_path or ""))
+        raw_response_path = Path(str(provider.raw_response_path or ""))
+        project_root = Path(args.project_dir).resolve()
+        for label, artifact_path in (
+            ("host request", request_path),
+            ("host response", raw_response_path),
+        ):
+            try:
+                artifact_path.resolve().relative_to(project_root)
+            except ValueError as exc:
+                raise LedgerError(
+                    f"provider receipt {label} path escapes the project"
+                ) from exc
+        try:
+            host_request = json.loads(request_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise LedgerError(f"invalid host request receipt binding: {exc}") from exc
+        host_identity = host_request.get("identity") or {}
+        host_inputs = host_request.get("inputs") or {}
+        for field, value in expected.items():
+            if host_identity.get(field) != value:
+                raise LedgerError(f"host request {field} does not match emission")
+        host_context_hash = (
+            host_request.get("context_hash")
+            or host_inputs.get("context_hash")
+            or host_inputs.get("rendered_context_sha256")
+        )
+        if host_context_hash != rendered_hash:
+            raise LedgerError("host request does not bind the exact rendered context")
+        for field, value in {
+            "context_manifest_path": str(manifest_path),
+            "context_manifest_sha256": _sha256(manifest_path),
+            "rendered_context_path": str(rendered_path),
+            "rendered_context_sha256": rendered_hash,
+        }.items():
+            if field not in host_inputs:
+                raise LedgerError(
+                    f"host request lacks context artifact binding {field}"
+                )
+            if str(host_inputs[field]) != str(value):
+                raise LedgerError(f"host request {field} does not match context artifacts")
+        host_tools_policy = host_request.get("tools_policy")
+        if (
+            not host_tools_policy
+            or manifest.get("tools_policy") != host_tools_policy
+            or provider.allowed_tools != [host_tools_policy]
+        ):
+            raise LedgerError("host receipt tool policy changed since request preparation")
+        current_cursor = ledger.snapshot_candidate(
+            args.project_dir, str(args.cand_id), str(round_id)
+        )
+        if host_identity.get("cursor") != current_cursor:
+            raise LedgerError("host request cursor is stale against snapshot_candidate")
+        current_cursor_token = json.dumps(
+            current_cursor, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        response_receipt_path = raw_response_path.with_suffix(".json")
+        try:
+            response_receipt = json.loads(
+                response_receipt_path.read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise LedgerError(f"host response receipt is missing or invalid: {exc}") from exc
+        if (
+            response_receipt.get("request_id") != host_request.get("request_id")
+            or Path(str(response_receipt.get("request_path") or "")).resolve()
+            != request_path.resolve()
+            or response_receipt.get("request_sha256") != provider.host_request_hash
+            or response_receipt.get("raw_response_sha256") != provider.raw_response_hash
+            or Path(str(response_receipt.get("raw_response_path") or "")).resolve()
+            != raw_response_path.resolve()
+            or response_receipt.get("cursor") != host_identity.get("cursor")
+            or json.dumps(
+                response_receipt.get("cursor"), sort_keys=True,
+                separators=(",", ":"), ensure_ascii=False,
+            ) != current_cursor_token
+        ):
+            raise LedgerError(
+                "host response receipt does not bind the exact request and raw response"
+            )
+    else:
+        prompt_path = Path(str(provider.prompt_file or ""))
+        if not prompt_path.is_file() or _sha256(prompt_path) != provider.prompt_hash:
+            raise LedgerError("provider receipt prompt file is missing or changed")
     return {
         "context_manifest_path": str(manifest_path),
         "context_manifest_sha256": _sha256(manifest_path),
@@ -438,11 +521,18 @@ def _validate_native_receipts(
             "working_tree_diff_sha256": provider.working_tree_diff_sha256,
             "config_sha256": provider.config_sha256,
             "code_state_id": provider.code_state_id,
-        } if provider.schema_version == "RunReceipt/v2" else None),
+        } if provider.schema_version in {
+            "RunReceipt/v2", "RunReceipt/v3-host"
+        } else None),
         "evidence_artifacts": recorded_evidence,
         "native_evidence_binding": native_binding,
         "authorization_id": snapshot["authorization_id"],
         "authorization_artifact_sha256": snapshot["artifact_hash"],
+        "host_request_sha256": provider.host_request_hash,
+        "raw_response_sha256": provider.raw_response_hash,
+        "canonical_delta_sha256": provider.canonical_delta_hash,
+        "host_session_id": provider.host_session_id,
+        "host_session_id_source": provider.host_session_id_source,
     }
 
 

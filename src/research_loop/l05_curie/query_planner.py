@@ -808,36 +808,27 @@ def compile_scientific_query_plan(plan: dict, *, seed: dict) -> list[dict]:
     return result
 
 
-def propose_scientific_query_plan(
-    seed: dict, *, spec: Any, work_dir: str | Path,
-    reformulation_index: int, feedback: dict | None = None,
-) -> dict:
-    """Request schema-checked proposals; the Curie validator remains authoritative."""
-    from research_loop import deep_research, structured_execution
-
-    if reformulation_index == 0:
-        if feedback is not None:
-            raise CurieContractError("initial scientific plan cannot use feedback")
-    elif reformulation_index in (1, 2):
-        if not isinstance(feedback, dict) or not feedback.get("previous_plan"):
-            raise CurieContractError("scientific replan requires validated prior plan and feedback")
-    else:
-        raise CurieContractError("scientific planner index exceeds the P0 attempt budget")
+def _planner_prompt(seed: dict, *, reformulation_index: int,
+                    feedback: dict | None) -> str:
     authorized = {
         "candidate_id": seed.get("candidate_id"),
         "round_id": seed.get("round_id"),
         "scientific_question": seed.get("scientific_question"),
         "hypothesis_seed": seed.get("hypothesis_seed"),
         "seed_sha256": research_seed.seed_sha256(seed),
-        "question_sha256": hashlib.sha256(str(seed.get("scientific_question") or "").encode("utf-8")).hexdigest(),
-        "hypothesis_sha256": hashlib.sha256(str(seed.get("hypothesis_seed") or "").encode("utf-8")).hexdigest(),
+        "question_sha256": hashlib.sha256(
+            str(seed.get("scientific_question") or "").encode("utf-8")
+        ).hexdigest(),
+        "hypothesis_sha256": hashlib.sha256(
+            str(seed.get("hypothesis_seed") or "").encode("utf-8")
+        ).hexdigest(),
     }
     context = {
         "authorized_seed": authorized,
         "reformulation_index": reformulation_index,
         "validated_feedback": feedback,
     }
-    prompt = (
+    return (
         "Propose only a L05ScientificQueryPlan/v2 for Europe PMC. Use CORE terms "
         "only as exact spans of the supplied question or initial hypothesis; mark "
         "source field, source type, snippet, source hash and span. Do not invent "
@@ -849,22 +840,100 @@ def propose_scientific_query_plan(
         "NO_ADMISSIBLE_REPLAN only after feedback. Return the schema object.\n"
         + json.dumps(context, ensure_ascii=False, sort_keys=True)
     )
-    def checked_proposal(model_prompt: str, directory: str | Path) -> tuple[dict, dict, str]:
-        result = structured_execution.run_structured_model(
-            spec, prompt=model_prompt, schema=_PROPOSAL_SCHEMA,
-            work_dir=directory, purpose="l05_scientific_query_planning",
-        )
-        proposal = result["payload"]
-        try:
-            raw_proposal = deep_research._parse_cli_output(result["raw_output"])
-        except deep_research.DeepResearchError as exc:
-            raise CurieContractError(f"structured planner raw proposal is invalid: {exc}") from exc
-        if raw_proposal != proposal:
-            raise CurieContractError("structured planner raw proposal differs from validated payload")
-        proposal_hash = hashlib.sha256(result["raw_output"].encode("utf-8")).hexdigest()
-        return proposal, result["receipt"], proposal_hash
 
-    proposal, receipt, proposal_hash = checked_proposal(prompt, work_dir)
+
+def _planner_request_hash(request: dict) -> str:
+    return _sha({key: value for key, value in request.items() if key != "request_sha256"})
+
+
+def _check_planner_context(seed: dict, *, reformulation_index: int,
+                           feedback: dict | None) -> None:
+    if reformulation_index == 0:
+        if feedback is not None:
+            raise CurieContractError("initial scientific plan cannot use feedback")
+    elif reformulation_index in (1, 2):
+        if not isinstance(feedback, dict) or not feedback.get("previous_plan"):
+            raise CurieContractError("scientific replan requires validated prior plan and feedback")
+        previous = validate_scientific_query_plan(feedback["previous_plan"], seed=seed)
+        if feedback["previous_plan"].get("plan_content_hash") != previous["plan_content_hash"]:
+            raise CurieContractError("scientific planner prior plan hash is stale")
+    else:
+        raise CurieContractError("scientific planner index exceeds the P0 attempt budget")
+
+
+def prepare_scientific_query_plan_request(
+    seed: dict, *, reformulation_index: int, feedback: dict | None,
+) -> dict:
+    """Freeze the authorized seed, feedback, prompt, and schema for one proposal."""
+    _check_planner_context(seed, reformulation_index=reformulation_index, feedback=feedback)
+    seed_snapshot = json.loads(json.dumps(seed, ensure_ascii=False, sort_keys=True))
+    feedback_snapshot = (
+        json.loads(json.dumps(feedback, ensure_ascii=False, sort_keys=True))
+        if feedback is not None else None
+    )
+    previous_hash = (
+        feedback_snapshot["previous_plan"]["plan_content_hash"]
+        if feedback_snapshot is not None else None
+    )
+    request = {
+        "schema_version": "L05ScientificQueryPlanRequest/v1",
+        "seed": seed_snapshot,
+        "seed_sha256": research_seed.seed_sha256(seed_snapshot),
+        "reformulation_index": reformulation_index,
+        "feedback": feedback_snapshot,
+        "feedback_sha256": _sha(feedback_snapshot) if feedback_snapshot is not None else None,
+        "previous_plan_content_hash": previous_hash,
+        "prompt": _planner_prompt(
+            seed_snapshot, reformulation_index=reformulation_index,
+            feedback=feedback_snapshot,
+        ),
+        "schema": copy.deepcopy(_PROPOSAL_SCHEMA),
+    }
+    request["request_sha256"] = _planner_request_hash(request)
+    return request
+
+
+def _check_planner_request(seed: dict, request: dict) -> tuple[dict, int, dict | None]:
+    if not isinstance(request, dict) or request.get(
+        "schema_version"
+    ) != "L05ScientificQueryPlanRequest/v1":
+        raise CurieContractError("scientific planner request schema is invalid")
+    if not isinstance(request.get("prompt"), str) or not request["prompt"].strip():
+        raise CurieContractError("scientific planner request prompt is missing")
+    if request.get("schema") != _PROPOSAL_SCHEMA:
+        raise CurieContractError("scientific planner request schema bytes are missing or changed")
+    if request.get("seed") != seed or request.get("seed_sha256") != research_seed.seed_sha256(seed):
+        raise CurieContractError("scientific planner request seed identity/hash is stale")
+    feedback = request.get("feedback")
+    if request.get("feedback_sha256") != (_sha(feedback) if feedback is not None else None):
+        raise CurieContractError("scientific planner request feedback hash is stale")
+    index = request.get("reformulation_index")
+    _check_planner_context(seed, reformulation_index=index, feedback=feedback)
+    previous_hash = feedback["previous_plan"]["plan_content_hash"] if feedback else None
+    if request.get("previous_plan_content_hash") != previous_hash:
+        raise CurieContractError("scientific planner request previous-plan hash is stale")
+    if request.get("request_sha256") != _planner_request_hash(request):
+        raise CurieContractError("scientific planner request hash does not match its bytes")
+    return seed, index, feedback
+
+
+def _validated_plan_result(seed: dict, request: dict, proposal: dict,
+                            proposal_sha256: str, *,
+                            schema_validated: bool = False) -> dict:
+    _seed, reformulation_index, feedback = _check_planner_request(seed, request)
+    if not isinstance(proposal, dict):
+        raise CurieContractError("scientific planner response must be an object")
+    if not schema_validated:
+        schema_errors = sorted(
+            Draft202012Validator(_PROPOSAL_SCHEMA).iter_errors(proposal),
+            key=lambda error: list(error.absolute_path),
+        )
+        if schema_errors:
+            error = schema_errors[0]
+            field = ".".join(str(item) for item in error.absolute_path) or "response"
+            raise CurieContractError(
+                f"scientific planner response schema invalid at {field}: {error.message}"
+            )
     if proposal["status"] == "NO_ADMISSIBLE_REPLAN":
         if reformulation_index == 0 or feedback is None or proposal["plan"] is not None:
             raise CurieContractError("initial or malformed no_admissible_replan proposal")
@@ -880,30 +949,39 @@ def propose_scientific_query_plan(
                 raise CurieContractError(
                     "no_admissible_replan cannot prove applicable gap-targeted plans are exhausted"
                 )
-            return {"status": "NO_ADMISSIBLE_REPLAN", "plan": None,
-                    "reason": proposal["reason"],
-                    "receipt": {**receipt, "replan_enumeration": enumeration},
-                    "proposal_sha256": proposal_hash}
-        first_hash, first_receipt = proposal_hash, receipt
-        retry_prompt = prompt + "\nThe no-plan proposal is invalid: the following validated, " \
-            "unexecuted candidates exist. Return one admissible PLAN with the same CORE " \
-            "and feedback provenance. Do not return NO_ADMISSIBLE_REPLAN.\n" + json.dumps(
-                [{"operation": operation, "plan": candidate} for operation, candidate in candidates],
-                ensure_ascii=False, sort_keys=True,
-            )
-        proposal, receipt, proposal_hash = checked_proposal(
-            retry_prompt, Path(work_dir) / "reproposal"
+            return {
+                "status": "NO_ADMISSIBLE_REPLAN", "plan": None,
+                "reason": proposal["reason"],
+                "replan_enumeration": enumeration,
+                "proposal_sha256": proposal_sha256,
+            }
+        candidate_set = [
+            {"operation": operation, "plan": candidate}
+            for operation, candidate in candidates
+        ]
+        next_prompt = request["prompt"] + (
+            "\nThe no-plan proposal is invalid: the following validated, unexecuted "
+            "candidates exist. Return one admissible PLAN with the same CORE and "
+            "feedback provenance. Do not return NO_ADMISSIBLE_REPLAN.\n"
+            + json.dumps(candidate_set, ensure_ascii=False, sort_keys=True)
         )
-        receipt = {**receipt, "prior_proposal_sha256": first_hash,
-                   "prior_proposal_receipt": first_receipt,
-                   "replan_enumeration": enumeration}
-        if proposal["status"] == "NO_ADMISSIBLE_REPLAN":
-            raise CurieContractError(
-                f"no_admissible_replan ignores an {candidates[0][0]} candidate"
-            )
+        return {
+            "status": "REPROPOSAL_REQUIRED",
+            "plan": None,
+            "reason": proposal["reason"],
+            "candidates": candidate_set,
+            "replan_enumeration": enumeration,
+            "next_request_prompt": next_prompt,
+            "proposal_sha256": proposal_sha256,
+        }
     if proposal["status"] != "PLAN" or not isinstance(proposal["plan"], dict):
         raise CurieContractError("structured planner did not return a plan object")
     proposed_plan = copy.deepcopy(proposal["plan"])
+    authorized = {
+        "question_sha256": hashlib.sha256(
+            str(seed.get("scientific_question") or "").encode("utf-8")
+        ).hexdigest(),
+    }
     expected_provenance = {
         "target_question_sha256": authorized["question_sha256"],
         "parent_plan_content_hash": feedback["previous_plan"]["plan_content_hash"] if feedback else None,
@@ -960,8 +1038,92 @@ def propose_scientific_query_plan(
                     raise CurieContractError("scientific replan must broaden a zero-yield Boolean query")
     elif validated["advisory_search_constraints"]:
         raise CurieContractError("initial plan cannot invent negative search feedback")
-    return {"status": "PLAN", "plan": validated, "reason": proposal["reason"],
-            "receipt": receipt, "proposal_sha256": proposal_hash}
+    return {
+        "status": "PLAN", "plan": validated, "reason": proposal["reason"],
+        "compiled_queries": compile_scientific_query_plan(validated, seed=seed),
+        "proposal_sha256": proposal_sha256,
+    }
+
+
+def validate_scientific_query_plan_response(
+    seed: dict, *, request: dict, raw_response: bytes,
+) -> dict:
+    """Validate raw host proposal bytes through the authoritative Curie owners."""
+    from research_loop import deep_research
+
+    _check_planner_request(seed, request)
+    if not isinstance(raw_response, bytes) or not raw_response:
+        raise CurieContractError("scientific planner raw response bytes are missing")
+    try:
+        raw_text = raw_response.decode("utf-8")
+        proposal = deep_research._parse_cli_output(raw_text)
+    except (UnicodeDecodeError, deep_research.DeepResearchError) as exc:
+        raise CurieContractError(f"scientific planner raw proposal is invalid: {exc}") from exc
+    proposal_sha256 = hashlib.sha256(raw_response).hexdigest()
+    return _validated_plan_result(seed, request, proposal, proposal_sha256)
+
+
+def _request_with_prompt(request: dict, prompt: str) -> dict:
+    next_request = copy.deepcopy(request)
+    next_request["prompt"] = prompt
+    next_request["request_sha256"] = _planner_request_hash(next_request)
+    return next_request
+
+
+def propose_scientific_query_plan(
+    seed: dict, *, spec: Any, work_dir: str | Path,
+    reformulation_index: int, feedback: dict | None = None,
+) -> dict:
+    """Headless adapter over the shared pure request and response owners."""
+    from research_loop import deep_research, structured_execution
+
+    request = prepare_scientific_query_plan_request(
+        seed, reformulation_index=reformulation_index, feedback=feedback
+    )
+
+    def checked_proposal(active_request: dict, directory: str | Path):
+        result = structured_execution.run_structured_model(
+            spec, prompt=active_request["prompt"], schema=active_request["schema"],
+            work_dir=directory, purpose="l05_scientific_query_planning",
+        )
+        try:
+            raw_proposal = deep_research._parse_cli_output(result["raw_output"])
+        except deep_research.DeepResearchError as exc:
+            raise CurieContractError(f"structured planner raw proposal is invalid: {exc}") from exc
+        if raw_proposal != result["payload"]:
+            raise CurieContractError("structured planner raw proposal differs from validated payload")
+        raw_bytes = result["raw_output"].encode("utf-8")
+        _check_planner_request(seed, active_request)
+        decision = _validated_plan_result(
+            seed, active_request, raw_proposal,
+            hashlib.sha256(raw_bytes).hexdigest(), schema_validated=True,
+        )
+        return decision, result["receipt"]
+
+    decision, receipt = checked_proposal(request, work_dir)
+    if decision["status"] == "REPROPOSAL_REQUIRED":
+        retry_request = _request_with_prompt(request, decision["next_request_prompt"])
+        second, second_receipt = checked_proposal(
+            retry_request, Path(work_dir) / "reproposal"
+        )
+        if second["status"] != "PLAN":
+            operation = second.get("candidates", [])[0].get("operation", "candidate")
+            raise CurieContractError(
+                f"no_admissible_replan ignores an {operation} candidate"
+            )
+        receipt = {
+            **second_receipt,
+            "prior_proposal_sha256": decision["proposal_sha256"],
+            "prior_proposal_receipt": receipt,
+            "replan_enumeration": decision["replan_enumeration"],
+        }
+        decision = second
+    else:
+        receipt = {**receipt, **({
+            "replan_enumeration": decision["replan_enumeration"]
+        } if "replan_enumeration" in decision else {})}
+    decision["receipt"] = receipt
+    return decision
 
 
 def _append_query(

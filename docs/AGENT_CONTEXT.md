@@ -54,6 +54,10 @@ micromamba run -n rlr python run_loop.py --help
 micromamba run -n rlr python run_loop.py run PROJECT CANDIDATE
 ```
 
+For agent-native cognition, use the persisted `host-next` / `host-submit`
+protocol in [`AGENT_NATIVE_RUN.md`](AGENT_NATIVE_RUN.md). `run` is the explicit
+headless path and dispatches its configured provider.
+
 The historical `research_loop_v04.py` filename is an intentional compatibility
 surface. Do not silently change CLI spelling, public shims, schema meaning,
 artifact locations, or provider interfaces.

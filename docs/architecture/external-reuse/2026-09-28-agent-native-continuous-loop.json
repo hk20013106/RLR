@@ -1,0 +1,90 @@
+{
+  "schema_version": "ExternalReuseAudit/v1",
+  "change_id": "2026-09-28-agent-native-continuous-loop",
+  "EXISTING_IMPLEMENTATIONS_REVIEWED": [
+    {
+      "scope": "internal",
+      "reference": "src/run_loop.py",
+      "finding": "run_round already consumes EngineAPI next-step packets, performs node-specific pre-research and L0.5/L7/report dispatch, and advances through existing controller commands. Its stage selection is currently embedded in the loop."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/api.py and src/research_loop/commands/lifecycle.py",
+      "finding": "EngineAPI.next_step delegates to the existing lifecycle next-step authority, which selects the bound profile and returns the native v2.1 action packet, including the declared L9a then L9b order."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/hypothesis_ledger.py",
+      "finding": "HypothesisLedger.snapshot_candidate returns the fixed candidate and round ledger cursor with finalized event references and projection hash; this is the authoritative v2.1 cursor source."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/compatibility.py and src/research_loop/topology.py",
+      "finding": "The compatibility profile and topology owners define native profile identity and node order; the runner can carry their next-step packet without maintaining another DAG or advance map."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/host_handoff.py and src/research_loop/providers/base.py",
+      "finding": "The shared HostRequest/v1, immutable raw response receipt, request identity and v3-host RunReceipt boundary already provide transport and truthful host-session provenance for additional cognition stages."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/deep_research.py",
+      "finding": "persist_run() and its audit own literature/text persistence and currently validate headless command receipts; extend this receipt dispatch while preserving the command branch and existing persisted evidence."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/l4_evidence_bundle.py and src/research_loop/l85_literature_verification.py",
+      "finding": "These modules own native L4B/L8.5 evidence validation and provenance; host-generated assessments must return through these validators rather than create an alternate evidence authority."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/commands/research.py and src/run_loop.py",
+      "finding": "The research command owns L7 execution-gate/workspace/script/output checks; run_loop owns REVIEW, StopPolicy and native node sequencing. Extend their existing host boundaries without changing execution or decision authority."
+    },
+    {
+      "scope": "external",
+      "reference": "https://github.com/langchain-ai/langgraph/blob/main/libs/langgraph/langgraph/types.py",
+      "finding": "The actual interrupt()/Command source demonstrates checkpointed pause/resume and a typed continuation value. Its node resumes by re-executing node logic, so RLR reuses only the handoff concept and keeps exact committed-action recovery in its existing immutable request/receipt/checkpoint owners."
+    }
+  ],
+  "REUSABLE_COMPONENTS": [
+    {
+      "reference": "src/run_loop.py",
+      "disposition": "EXTEND",
+      "reason": "Extract the existing stage dispatch into a shared action projection and delegate deterministic actions to the same runner/controller owners."
+    },
+    {
+      "reference": "src/research_loop/api.py and src/research_loop/commands/lifecycle.py",
+      "disposition": "REUSE",
+      "reason": "Keep next-step as the only DAG/profile decision owner and carry its complete result into both execution modes."
+    },
+    {
+      "reference": "src/research_loop/hypothesis_ledger.py",
+      "disposition": "REUSE",
+      "reason": "Use the existing snapshot_candidate result for v2.1 cursor identity and fail closed when the caller's expected cursor is stale."
+    },
+    {
+      "reference": "src/research_loop/topology.py",
+      "disposition": "REUSE",
+      "reason": "Preserve the native profile topology and serial L9a/L9b packet order without copying topology or advance mapping into the runner."
+    },
+    {
+      "reference": "src/research_loop/host_handoff.py and src/research_loop/providers/base.py",
+      "disposition": "REUSE",
+      "reason": "Carry every additional host cognition stage through the existing immutable request, raw response and truthful host receipt contract."
+    },
+    {
+      "reference": "src/research_loop/deep_research.py, src/research_loop/l4_evidence_bundle.py, and src/research_loop/l85_literature_verification.py",
+      "disposition": "EXTEND",
+      "reason": "Add host receipt dispatch and preparation/submission seams at current persistence and evidence validation owners; preserve their existing scientific and provenance validators."
+    },
+    {
+      "reference": "src/research_loop/commands/research.py and src/run_loop.py",
+      "disposition": "EXTEND",
+      "reason": "Route L7 and REVIEW through their current execution gate, delta and StopPolicy owners while the same runner remains the only loop controller."
+    }
+  ],
+  "ADOPTED_PATTERN": "EXTEND",
+  "WHY_NEW_CODE_IS_NECESSARY": "The existing runner does not expose its current stage decision as a shared value, so an agent-native host cannot consume the same authorized action as headless execution. Extracting that projection and carrying the existing ledger cursor closes the seam while preserving next-step, ledger, and command owners."
+}

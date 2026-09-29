@@ -41,6 +41,165 @@ def _prepare_runner_boundary(project, monkeypatch):
     monkeypatch.setattr(run_loop, "_ctl", lambda *_a: _Result(0, "", ""))
 
 
+def _native_v21_step(**overrides):
+    step = {
+        "node": "L3",
+        "persona": "Oppenheimer",
+        "profile_id": "v2.1-catalog-1",
+        "schema_version": "2.1",
+        "topology_version": "v2.1",
+        "advance_command": "triage-idea",
+    }
+    step.update(overrides)
+    return step
+
+
+def _candidate_cursor(commit_seq):
+    return {
+        "store_id": "STORE:1",
+        "project_id": "PROJECT:1",
+        "candidate_id": "C1",
+        "round_id": "1",
+        "as_of_commit_seq": commit_seq,
+        "authorized_events": [],
+        "projection_hash": "a" * 64,
+    }
+
+
+def _use_authoritative_cursor(monkeypatch, cursor):
+    calls = []
+
+    class Ledger:
+        def snapshot_candidate(self, project, candidate_id, round_id):
+            calls.append((project, candidate_id, round_id))
+            return cursor
+
+    monkeypatch.setattr(run_loop.rl, "_ledger_for", lambda *_a, **_k: Ledger())
+    return calls
+
+
+def test_current_action_preserves_same_native_v21_next_step_for_each_mode(
+    monkeypatch, tmp_path
+):
+    step = _native_v21_step()
+    cursor = _candidate_cursor(17)
+    snapshot_calls = _use_authoritative_cursor(monkeypatch, cursor)
+    monkeypatch.setattr(run_loop, "next_step", lambda *_args: step)
+    actions = [
+        run_loop.current_action(
+            str(tmp_path), "C1", SimpleNamespace(),
+            SimpleNamespace(mode=mode, knowledge_store=None), 1,
+            {"cursor": cursor},
+        )
+        for mode in ("headless", "agent_native")
+    ]
+
+    assert actions[0] == actions[1]
+    assert actions[0]["kind"] == "cognitive"
+    assert actions[0]["step"] == step
+    assert actions[0]["profile_id"] == "v2.1-catalog-1"
+    assert actions[0]["cursor"] == cursor
+    assert snapshot_calls == [(str(tmp_path), "C1", "1")] * 2
+
+
+def test_current_action_rejects_native_v21_step_at_stale_cursor(
+    monkeypatch, tmp_path
+):
+    _use_authoritative_cursor(monkeypatch, _candidate_cursor(17))
+    monkeypatch.setattr(
+        run_loop, "next_step", lambda *_args: _native_v21_step()
+    )
+
+    with pytest.raises(RuntimeError, match="stale.*cursor"):
+        run_loop.current_action(
+            str(tmp_path), "C1", SimpleNamespace(),
+            SimpleNamespace(mode="agent_native", knowledge_store=None), 1,
+            {"cursor": _candidate_cursor(16)},
+        )
+
+
+def test_current_action_preserves_authorized_l9a_then_l9b_order(
+    monkeypatch, tmp_path
+):
+    cursor = _candidate_cursor(21)
+    step = {
+        "is_parallel": True,
+        "profile_id": "v2.1-catalog-1",
+        "schema_version": "2.1",
+        "nodes": [
+            {"node": "L9a", "persona": "Feynman"},
+            {"node": "L9b", "persona": "Darwin"},
+        ],
+    }
+    _use_authoritative_cursor(monkeypatch, cursor)
+    monkeypatch.setattr(run_loop, "next_step", lambda *_args: step)
+    actions = [
+        run_loop.current_action(
+            str(tmp_path), "C1", SimpleNamespace(),
+            SimpleNamespace(mode=mode, knowledge_store=None), 1,
+            {"cursor": cursor},
+        )
+        for mode in ("headless", "agent_native")
+    ]
+
+    assert actions[0] == actions[1]
+    for action in actions:
+        assert action["kind"] == "cognitive"
+        assert action["step"] is step
+        assert [item["node"] for item in action["step"]["nodes"]] == [
+            "L9a", "L9b",
+        ]
+
+
+def test_headless_parallel_action_authorizes_fixed_l9_snapshots_before_dispatch(
+    monkeypatch, tmp_path
+):
+    project = tmp_path / "project"
+    binding = project / "00_Preflight" / "hypothesis_store_binding.json"
+    binding.parent.mkdir(parents=True)
+    binding.write_text("{}", encoding="utf-8")
+    parallel = {
+        "is_parallel": True,
+        "profile_id": "v2.1-catalog-1",
+        "schema_version": "2.1",
+        "nodes": [
+            {"node": "L9a", "persona": "Feynman"},
+            {"node": "L9b", "persona": "Darwin"},
+        ],
+    }
+    steps = iter([parallel, {"terminal": True, "status": "KEEP"}])
+    calls = []
+
+    def ctl(*args):
+        calls.append(("authorize", args))
+        return _Result(0, '[{"node":"L9a","authorization_id":"A9a"},'
+                       '{"node":"L9b","authorization_id":"A9b"}]', "")
+
+    def exec_cognitive(_project, _cand, step, *_args, **kwargs):
+        calls.append(("execute", step["node"], kwargs["authorization_id"]))
+        return True
+
+    monkeypatch.setattr(run_loop, "next_step", lambda *_args: next(steps))
+    monkeypatch.setattr(run_loop, "_ctl", ctl)
+    monkeypatch.setattr(run_loop, "exec_cognitive", exec_cognitive)
+
+    outcome = run_loop.run_round(
+        str(project), "C1",
+        SimpleNamespace(stop_policy={"max_l7_failures": 2, "max_node_failures": 2}),
+        SimpleNamespace(), 1, 1, {"l7_failures": 0, "node_failures": {}},
+    )
+
+    assert outcome == "terminal"
+    assert calls == [
+        ("authorize", (
+            "hypothesis-authorize-context", str(project), "C1",
+            "--node", "L9a", "--node", "L9b", "--round-id", "1",
+        )),
+        ("execute", "L9a", "A9a"),
+        ("execute", "L9b", "A9b"),
+    ]
+
+
 @pytest.mark.parametrize("backend", ["headless", "host", "auto", "command"])
 def test_backend_choice_does_not_change_canonical_run_round_path(
     tmp_path, monkeypatch, backend
@@ -79,7 +238,13 @@ def test_review_uses_the_same_canonical_per_node_provider_resolver(
     class Provider:
         def run_agent(self, *args, **kwargs):
             calls.append((args, kwargs))
-            return {"review_verdict": "accept"}
+            return {
+                "review_verdict": "accept", "evidence_score": 4,
+                "method_validity_score": 4, "novelty_score": 4,
+                "falsification_risk_score": 1, "marginal_gain_score": 0,
+                "required_revisions": [], "executable_next_actions": [],
+                "reason": "reviewed",
+            }
 
     monkeypatch.setattr(run_loop, "next_step", lambda *_a: {"profile_id": "profile"})
     monkeypatch.setattr(run_loop, "get_profile", lambda *_a: object())
@@ -107,7 +272,7 @@ def test_review_uses_the_same_canonical_per_node_provider_resolver(
         tmp_path / "run",
     )
 
-    assert result == {"review_verdict": "accept"}
+    assert result["review_verdict"] == "accept"
     assert resolved == ["REVIEW"]
     assert len(calls) == 1
 
@@ -155,6 +320,43 @@ def test_retired_main_agent_cli_override_fails_with_new_config(
         _runner_args(project, config, provider="main_agent")
     ) == 2
     assert "retired mode: main_agent" in capsys.readouterr().out
+
+
+def test_agent_native_run_skips_headless_provider_preflight(
+    tmp_path, monkeypatch
+):
+    project = tmp_path / "project"
+    _prepare_runner_boundary(project, monkeypatch)
+    config = tmp_path / "runner.yaml"
+    config.write_text(
+        "provider:\n  default:\n    type: command\n    command: unused\n"
+        "review:\n  enabled: false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(run_loop, "restore_previous_round", lambda *_args: {})
+    from research_loop import pre_e2e_closure
+    monkeypatch.setattr(
+        pre_e2e_closure, "audit_static_closure",
+        lambda *_args: {"e2e_start_allowed": True},
+    )
+    provider_preflight_calls = []
+    monkeypatch.setattr(
+        run_loop, "preflight_providers",
+        lambda *args: provider_preflight_calls.append(args) or False,
+    )
+    monkeypatch.setattr(
+        run_loop, "run_round",
+        lambda *_args, **_kwargs: "agent_native_handoff_required",
+    )
+    monkeypatch.setattr(
+        run_loop, "agent_native_capabilities",
+        lambda *_args: {"test capability": True},
+    )
+
+    assert run_loop.cmd_run(
+        _runner_args(project, config), mode="agent_native"
+    ) == 2
+    assert provider_preflight_calls == []
 
 
 def test_assemble_context_raises_when_controller_fails():

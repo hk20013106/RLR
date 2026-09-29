@@ -27,6 +27,7 @@ import contextlib
 import hashlib
 import io
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -165,14 +166,14 @@ class EngineAPI:
                    context_manifest=None, provider_receipt=None) -> CtlResult:
         """cmd_emit_delta: validate+save a delta JSON file. Returns the raw
         CtlResult; the caller decides success by `returncode == 0` as before."""
-        args = ["emit-delta", project, cand, "--node", node, "--persona", persona,
+        args = ["emit-delta", str(project), cand, "--node", node, "--persona", persona,
                 "--file", str(file)]
         if context_manifest:
-            args += ["--context-manifest", context_manifest]
+            args += ["--context-manifest", str(context_manifest)]
         elif receipt:
-            args += ["--receipt", receipt]
+            args += ["--receipt", str(receipt)]
         if provider_receipt:
-            args += ["--provider-receipt", provider_receipt]
+            args += ["--provider-receipt", str(provider_receipt)]
         return self.run_cli(*args)
 
     def decision(self, project, cand, status, reason, route=None) -> CtlResult:
@@ -190,3 +191,72 @@ class EngineAPI:
 
     def emit_loop_memory(self, project, cand) -> CtlResult:
         return self.run_cli("emit-loop-memory", project, cand)
+
+    # --- durable current-host handoff --------------------------------------
+
+    def prepare_host_request(self, project, *, kind, identity, inputs,
+                             tools_policy, output_contract) -> dict:
+        """Persist one immutable request through the host-handoff owner."""
+        from research_loop.host_handoff import prepare_request
+
+        return prepare_request(
+            project,
+            kind=kind,
+            identity=identity,
+            inputs=inputs,
+            tools_policy=tools_policy,
+            output_contract=output_contract,
+        )
+
+    def load_host_request(self, project, request_id) -> dict:
+        """Reload one already-persisted host request by its stable ID."""
+        from research_loop.host_handoff import load_request
+
+        return load_request(project, request_id)
+
+    def load_host_request_for_identity(self, project, identity) -> dict | None:
+        """Reload the immutable request already occupying an action's slot."""
+        from research_loop.host_handoff import load_request_for_identity
+
+        return load_request_for_identity(project, identity)
+
+    def load_host_response_receipt(self, project, request_id, *, expected_cursor) -> dict | None:
+        """Reload a response only when its request binding and raw bytes still verify."""
+        from research_loop.host_handoff import load_response_receipt
+
+        return load_response_receipt(
+            project, request_id, expected_cursor=expected_cursor
+        )
+
+    def submit_host_response(self, project, request_id, response_path, *,
+                             expected_cursor) -> dict:
+        """Persist an exact host response under the request's compare-and-set."""
+        from research_loop.host_handoff import submit_response
+
+        return submit_response(
+            project,
+            request_id,
+            response_path,
+            expected_cursor=expected_cursor,
+        )
+
+    @contextlib.contextmanager
+    def host_step_commit_lock(self, project, request_id):
+        """Serialize short native validation/emit/advance commits per request."""
+        from research_loop.host_handoff import HostHandoffError, _short_lock
+
+        if not re.fullmatch(r"[0-9a-f]{64}", str(request_id)):
+            raise HostHandoffError("host request ID must be a SHA-256 digest")
+        root = Path(project).resolve(strict=True)
+        lock_path = (
+            root / "08_Audit" / "host_handoff" / "locks"
+            / f"commit-{request_id}.lock"
+        ).resolve(strict=False)
+        try:
+            lock_path.relative_to(root)
+        except ValueError as exc:
+            raise HostHandoffError(
+                "host step commit lock path escapes the project"
+            ) from exc
+        with _short_lock(lock_path):
+            yield

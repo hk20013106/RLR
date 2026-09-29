@@ -746,3 +746,198 @@ def test_content_identity_ignores_intent_id_and_core_order():
     renamed["intents"][0]["core_concept_ids"].reverse()
     renamed["core_anchors"].reverse()
     assert validate_scientific_query_plan(renamed, seed=seed)["plan_content_hash"] == original["plan_content_hash"]
+
+
+def _host_planner_seams():
+    prepare = getattr(query_planner, "prepare_scientific_query_plan_request", None)
+    assert callable(prepare), (
+        "PLANNER_HANDOFF_MISSING: prepare_scientific_query_plan_request is absent"
+    )
+    submit = getattr(query_planner, "validate_scientific_query_plan_response", None)
+    assert callable(submit), (
+        "PLANNER_HANDOFF_MISSING: validate_scientific_query_plan_response is absent"
+    )
+    return prepare, submit
+
+
+def _planner_response(status, plan=None, reason="proposal"):
+    return json.dumps(
+        {"status": status, "reason": reason, "plan": plan},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _planner_schema_plan(plan):
+    """Return the model proposal shape, omitting RLR-owned provenance fields."""
+    proposal = copy.deepcopy(plan)
+    for key in (
+        "target_question_sha256", "parent_plan_content_hash", "feedback_sha256",
+        "feedback_gap_ids", "plan_content_hash",
+    ):
+        proposal.pop(key, None)
+    for anchor in proposal.get("core_anchors", []) + proposal.get("optional_concepts", []):
+        anchor.setdefault("synonyms", [])
+    return proposal
+
+
+def test_host_planner_plan_uses_existing_validator_and_compiler():
+    prepare, submit = _host_planner_seams()
+    seed = _seed()
+    request = prepare(seed, reformulation_index=0, feedback=None)
+
+    assert request["schema"] == query_planner._PROPOSAL_SCHEMA
+    assert isinstance(request["prompt"], str) and request["prompt"].strip()
+    assert request["seed_sha256"] == research_seed.seed_sha256(seed)
+    result = submit(
+        seed,
+        request=request,
+        raw_response=_planner_response("PLAN", _planner_schema_plan(_plan(seed))),
+    )
+
+    assert result["status"] == "PLAN"
+    assert result["plan"] == validate_scientific_query_plan(result["plan"], seed=seed)
+    assert result["compiled_queries"] == compile_scientific_query_plan(
+        result["plan"], seed=seed
+    )
+
+
+def test_host_planner_feedback_replan_binds_feedback_and_previous_plan_hash():
+    prepare, submit = _host_planner_seams()
+    seed, previous, feedback = _composite_replan_fixture()
+    proposal = _planner_schema_plan(previous)
+    proposal["reformulation_index"] = 1
+    proposal["intents"][0]["optional_concept_ids"] = ["nutrient"]
+    request = prepare(seed, reformulation_index=1, feedback=feedback)
+
+    assert request["feedback_sha256"] == query_planner._sha(feedback)
+    assert request["previous_plan_content_hash"] == previous["plan_content_hash"]
+    result = submit(
+        seed,
+        request=request,
+        raw_response=_planner_response("PLAN", proposal),
+    )
+
+    assert result["status"] == "PLAN"
+    assert result["plan"]["parent_plan_content_hash"] == previous["plan_content_hash"]
+    assert result["plan"]["feedback_sha256"] == query_planner._sha(feedback)
+    assert result["compiled_queries"] == compile_scientific_query_plan(
+        result["plan"], seed=seed
+    )
+
+
+def test_host_planner_allows_no_admissible_only_after_exhausted_replan():
+    prepare, submit = _host_planner_seams()
+    seed, _previous, feedback = _composite_replan_fixture(
+        execute_last_singleton=True
+    )
+    request = prepare(seed, reformulation_index=1, feedback=feedback)
+
+    result = submit(
+        seed,
+        request=request,
+        raw_response=_planner_response(
+            "NO_ADMISSIBLE_REPLAN", None, "all finite candidates were executed"
+        ),
+    )
+
+    assert result["status"] == "NO_ADMISSIBLE_REPLAN"
+    assert result["plan"] is None
+    assert result["replan_enumeration"]
+
+
+def test_host_planner_returns_reproposal_checkpoint_when_candidates_remain():
+    prepare, submit = _host_planner_seams()
+    seed, _previous, feedback = _composite_replan_fixture()
+    request = prepare(seed, reformulation_index=1, feedback=feedback)
+    result = submit(
+        seed,
+        request=request,
+        raw_response=_planner_response(
+            "NO_ADMISSIBLE_REPLAN", None, "no plan proposed"
+        ),
+    )
+
+    assert result["status"] == "REPROPOSAL_REQUIRED"
+    assert result["candidates"]
+    assert all(item.get("operation") and isinstance(item.get("plan"), dict)
+               for item in result["candidates"])
+    assert isinstance(result["next_request_prompt"], str)
+    assert result["next_request_prompt"].strip()
+    assert result["next_request_prompt"] != request["prompt"]
+
+
+def test_host_planner_rejects_no_admissible_for_initial_plan():
+    prepare, submit = _host_planner_seams()
+    seed = _seed()
+    request = prepare(seed, reformulation_index=0, feedback=None)
+
+    with pytest.raises(CurieContractError, match="(?i)(initial|feedback|replan)"):
+        submit(
+            seed,
+            request=request,
+            raw_response=_planner_response("NO_ADMISSIBLE_REPLAN", None),
+        )
+
+
+def test_host_planner_rejects_repeated_query_content():
+    prepare, submit = _host_planner_seams()
+    seed, previous, feedback = _composite_replan_fixture()
+    repeated = _planner_schema_plan(previous)
+    repeated["reformulation_index"] = 1
+    request = prepare(seed, reformulation_index=1, feedback=feedback)
+
+    with pytest.raises(CurieContractError, match="(?i)(repeat|executed|query content)"):
+        submit(
+            seed,
+            request=request,
+            raw_response=_planner_response("PLAN", repeated),
+        )
+
+
+def test_host_planner_rejects_model_supplied_false_rlr_provenance():
+    prepare, submit = _host_planner_seams()
+    seed = _seed()
+    forged = _planner_schema_plan(_plan(seed))
+    forged["seed_sha256"] = "0" * 64
+    request = prepare(seed, reformulation_index=0, feedback=None)
+
+    with pytest.raises(CurieContractError, match="(?i)(seed|identity|provenance)"):
+        submit(
+            seed,
+            request=request,
+            raw_response=_planner_response("PLAN", forged),
+        )
+
+
+def test_host_planner_rejects_request_with_stale_feedback_snapshot():
+    prepare, submit = _host_planner_seams()
+    seed, previous, feedback = _composite_replan_fixture()
+    proposal = _planner_schema_plan(previous)
+    proposal["reformulation_index"] = 1
+    proposal["intents"][0]["optional_concept_ids"] = ["nutrient"]
+    request = prepare(seed, reformulation_index=1, feedback=feedback)
+    request["feedback"]["validated_coverage_gaps"][0]["gap_id"] = "G_CHANGED"
+
+    with pytest.raises(CurieContractError, match="(?i)(feedback|hash|stale)"):
+        submit(
+            seed,
+            request=request,
+            raw_response=_planner_response("PLAN", proposal),
+        )
+
+
+@pytest.mark.parametrize("field,bad_value", [("prompt", ""), ("schema", None)])
+def test_host_planner_rejects_request_missing_prompt_or_schema_bytes(field, bad_value):
+    prepare, submit = _host_planner_seams()
+    seed = _seed()
+    request = prepare(seed, reformulation_index=0, feedback=None)
+    request[field] = bad_value
+
+    with pytest.raises(CurieContractError, match="(?i)(prompt|schema|request)"):
+        submit(
+            seed,
+            request=request,
+            raw_response=_planner_response("PLAN", _plan(seed)),
+        )

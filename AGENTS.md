@@ -24,6 +24,12 @@ Primary priorities, in order:
 
 Do not trade a higher-priority property for a lower-priority one.
 
+## Running RLR
+
+For agent-native cognition, follow [`docs/AGENT_NATIVE_RUN.md`](docs/AGENT_NATIVE_RUN.md)
+and use the `host-next` / `host-submit` protocol. The explicit `run` command
+uses the configured headless provider.
+
 ## Sources of truth
 
 Before modifying code:

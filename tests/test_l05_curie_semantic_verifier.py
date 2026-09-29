@@ -104,6 +104,32 @@ def test_semantic_verifier_refuses_unlocated_source_before_assessment():
     assert calls == []
 
 
+def test_host_assessor_fields_flow_through_existing_verifier_and_admission_owner():
+    extract = _extract()
+    claim = "Cardiac calcium handling differs under exercise."
+    captured = []
+    verifier = SemanticEvidenceVerifier(
+        assessor=lambda **kwargs: captured.append(kwargs) or _assessment(),
+        assessor_id="host-session/declared",
+    )
+
+    semantic = verifier.verify(extract, claim=claim)
+    admitted = admit_reasoning_evidence([extract], [semantic])
+
+    assert set(captured[0]) == {"extract", "claim"}
+    assert captured[0]["extract"] == extract
+    assert captured[0]["claim"] == claim
+    assert set(_assessment()) == {
+        "entailment", "scope_match", "context_preserved",
+        "qualification_preserved", "reason",
+    }
+    assert semantic["extract_sha256"] == semantic_module.evidence_extract_sha256(extract)
+    assert semantic["claim_sha256"] == hashlib.sha256(claim.encode("utf-8")).hexdigest()
+    assert semantic["source_fidelity"] == "PASS"
+    assert reasoning_authorized(semantic) is True
+    assert admitted == [extract]
+
+
 def test_scope_or_qualification_loss_is_not_reasoning_authorized():
     verifier = SemanticEvidenceVerifier(
         assessor=lambda **_kwargs: _assessment(

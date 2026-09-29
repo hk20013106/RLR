@@ -138,6 +138,56 @@ def test_emit_delta_omits_receipt_when_absent():
     assert "--receipt" not in seen["argv"]
 
 
+def test_emit_delta_normalizes_pathlike_argv_before_argparse(tmp_path):
+    from research_loop.cli import build_parser
+
+    seen = {"argv": [], "parsed": []}
+
+    def parse_with_real_cli_parser(argv):
+        seen["argv"].append(list(argv))
+        seen["parsed"].append(build_parser().parse_args(argv))
+        return 0
+
+    api = EngineAPI(engine_main=parse_with_real_cli_parser)
+    delta_path = tmp_path / "delta.json"
+    context_manifest = tmp_path / "context-manifest.json"
+    provider_receipt = tmp_path / "provider-receipt.json"
+    api.emit_delta(
+        "P", "C", "L0", "Linnaeus", delta_path,
+        context_manifest=context_manifest,
+        provider_receipt=provider_receipt,
+    )
+
+    project_path = tmp_path / "project"
+    legacy_receipt = tmp_path / "legacy-receipt.json"
+    api.emit_delta(
+        project_path, "C", "L0", "Linnaeus", delta_path,
+        receipt=legacy_receipt,
+    )
+
+    assert seen["argv"] == [
+        [
+            "emit-delta", "P", "C", "--node", "L0", "--persona", "Linnaeus",
+            "--file", str(delta_path),
+            "--context-manifest", str(context_manifest),
+            "--provider-receipt", str(provider_receipt),
+        ],
+        [
+            "emit-delta", str(project_path), "C", "--node", "L0", "--persona",
+            "Linnaeus", "--file", str(delta_path), "--receipt", str(legacy_receipt),
+        ],
+    ]
+    assert all(
+        isinstance(argument, str)
+        for argv in seen["argv"]
+        for argument in argv
+    )
+    assert seen["parsed"][0].context_manifest == str(context_manifest)
+    assert seen["parsed"][0].provider_receipt == str(provider_receipt)
+    assert seen["parsed"][1].project_dir == str(project_path)
+    assert seen["parsed"][1].receipt == str(legacy_receipt)
+
+
 def test_default_engine_main_is_the_real_controller():
     """With no injection, the facade lazily binds to research_loop_v04.main."""
     import research_loop_v04

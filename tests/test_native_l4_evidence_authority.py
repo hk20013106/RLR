@@ -24,6 +24,8 @@ from research_loop.context import cmd_assemble_context
 from research_loop.engine import main as engine_main
 from research_loop.hypothesis_ledger import HypothesisLedger
 from research_loop.providers.base import RunReceipt
+from research_loop.api import EngineAPI
+import run_loop
 
 RL = Path(__file__).resolve().parents[1] / "research_loop_v04.py"
 
@@ -492,3 +494,108 @@ def test_n2b_assembly_fails_closed_when_evidence_runs_are_ambiguous(
     assert rc == 3
     assert "requires an exact evidence run" in captured.err
     assert _manifests(project) == before, "no new manifest may be created"
+
+
+def test_agent_native_l4_literature_prepares_request_for_existing_persistence_owner(
+    tmp_path, monkeypatch
+):
+    """L4 literature cognition must use the host request before persistence."""
+    project = tmp_path / "project"
+    project.mkdir()
+    store = tmp_path / "hypotheses.sqlite"
+    ledger = HypothesisLedger(store)
+    binding = ledger.bind_project(
+        project, "PROJECT:agent-native-l4-test", profile_id=PROFILE_V21_CATALOG_1
+    )
+    monkeypatch.setenv("RLR_HYPOTHESIS_STORE", str(store))
+    cursor = HypothesisLedger(store).snapshot_candidate(project, "C1", "1")
+    step = {
+        "node": "L4", "persona": "Curie", "profile_id": PROFILE_V21_CATALOG_1,
+        "schema_version": "2.1", "advance_command": "aggregate-report",
+    }
+    action = {
+        "kind": "pre_research", "step": step,
+        "profile_id": PROFILE_V21_CATALOG_1, "cursor": cursor,
+        "identity": {"profile_id": PROFILE_V21_CATALOG_1, "cursor": cursor},
+    }
+    monkeypatch.setattr(run_loop, "current_action", lambda *_args: action)
+    monkeypatch.setattr(run_loop, "_recover_committed_advance", lambda *_args: None)
+    monkeypatch.setattr(run_loop, "ENGINE", EngineAPI())
+    commands = []
+
+    def controlled_command(*argv):
+        commands.append(argv[0])
+        if argv[0] == "audit-literature-evidence":
+            return SimpleNamespace(returncode=1, stdout="", stderr="no pack")
+        if argv[0] == "pre-research":
+            return SimpleNamespace(
+                returncode=0, stdout="L4 literature review task for H1", stderr=""
+            )
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(run_loop, "_ctl", controlled_command)
+    args = SimpleNamespace(
+        mode="agent_native", knowledge_store=str(store), config=str(RL),
+        evidence_run_ids={}, authorization_ids={},
+    )
+    cfg = SimpleNamespace(stop_policy={}, source_path=str(RL), data={})
+
+    prepared = run_loop.prepare_host_step(
+        project, "C1", cfg, args, "1", {"cursor": cursor}
+    )
+
+    assert prepared["kind"] == "needs_host"
+    request = prepared["request"]
+    assert request["kind"] == "literature"
+    assert request["identity"]["node"] == "L4"
+    assert request["identity"]["stage"] == "literature_review"
+    assert request["identity"]["project_id"] == binding["project_id"]
+    assert request["inputs"]["literature_prompt"] == "L4 literature review task for H1"
+    assert commands == ["audit-literature-evidence", "pre-research"]
+
+    payload = {
+        "schema_version": dr.SCHEMA_VERSION,
+        "queries": ["H1 method evidence"],
+        "papers": [{
+            "url": "https://example.invalid/host-l4-paper",
+            "title": "Host supplied L4 source",
+            "source_database": "host-session",
+            "source_metadata_response": {"candidate_id": "C1", "node": "L4"},
+            "open_access": False,
+            "extracts": [{
+                "section": section, "text": f"{section} evidence",
+                "locator": f"{section} paragraph 1",
+            } for section in ("Results", "Discussion", "Conclusion", "Methods")],
+        }],
+        "review_search": {"status": "none_found", "receipt": "host search found no review"},
+    }
+    response_path = project / "host-l4-response.json"
+    response_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    def audit_after_persist(*argv):
+        assert argv[:4] == ("audit-literature-evidence", project, "C1", "--node")
+        assert argv[4] == "L4"
+        artifact = dr._artifact(project, "C1", "L4")
+        valid, reason = dr.audit_evidence_pack(
+            project, "C1", "L4", run_id=artifact["run_id"]
+        )
+        assert valid, reason
+        return SimpleNamespace(
+            returncode=0, stdout=json.dumps({"run_id": artifact["run_id"]}), stderr=""
+        )
+
+    monkeypatch.setattr(run_loop, "_ctl", audit_after_persist)
+    committed = run_loop.submit_host_step(
+        project, "C1", request["request_id"], response_path,
+        session_identity={"source": "declared", "session_id": "l4-review-session"},
+    )
+    assert committed["kind"] == "committed"
+    assert committed["host_receipt_schema"] == "DeepResearchHostReceipt/v1"
+    persisted = dr._artifact(project, "C1", "L4", run_id=committed["evidence_run_id"])
+    assert persisted["skill_receipt"]["raw_response_sha256"]
+    assert persisted["skill_receipt"].get("exit_code") is None
+    assert not persisted["skill_receipt"].get("command_hash")
+    valid, reason = dr.audit_evidence_pack(
+        project, "C1", "L4", run_id=committed["evidence_run_id"]
+    )
+    assert valid, reason

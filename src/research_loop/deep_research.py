@@ -21,6 +21,7 @@ from research_loop.providers.executor import DEFAULT_EXECUTOR, ProviderExecution
 
 SCHEMA_VERSION = "1.0"
 _STAGES = {"L1", "L4", "L8.5"}
+HOST_RECEIPT_SCHEMA = "DeepResearchHostReceipt/v1"
 
 # Deep Research backends. Deliberately closed: every backend needs a verified
 # invocation shape, a skill/plugin layout, and evidence-gate coverage, so a name
@@ -546,6 +547,85 @@ def _run_paths(project_dir: Path) -> tuple[Path, Path, Path]:
     return base / "runs", base / "papers", base / "sources"
 
 
+def _host_literature_payload(project_dir: Path, candidate_id: str, node: str,
+                             receipt: dict) -> dict:
+    """Verify a host-session research receipt against the generic handoff owner."""
+    from research_loop.host_handoff import load_request
+
+    root = project_dir.resolve(strict=True)
+
+    def inside(raw_path, label):
+        path = Path(str(raw_path or "")).resolve(strict=True)
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise DeepResearchError(f"host literature {label} escapes project") from exc
+        return path
+
+    if receipt.get("schema_version") != HOST_RECEIPT_SCHEMA:
+        raise DeepResearchError("host literature receipt schema is unsupported")
+    if receipt.get("source") != "host_session":
+        raise DeepResearchError("host literature receipt source must be host_session")
+    request_id = str(receipt.get("request_id") or "")
+    try:
+        request = load_request(root, request_id)
+    except (ValueError, OSError) as exc:
+        raise DeepResearchError(f"host literature request is invalid: {exc}") from exc
+    request_path = inside(receipt.get("host_request_path"), "request path")
+    request_hash = hashlib.sha256(request_path.read_bytes()).hexdigest()
+    if (str(request_path) != str(Path(request["request_path"]).resolve(strict=True))
+            or request_hash != receipt.get("host_request_sha256")
+            or request_hash != request.get("request_sha256")):
+        raise DeepResearchError("host literature request path/hash differs from handoff owner")
+    identity = request.get("identity") or {}
+    expected_identity = {
+        "candidate_id": str(candidate_id),
+        "node": str(node),
+        "stage": "literature_review",
+    }
+    for field, expected in expected_identity.items():
+        if str(identity.get(field) or "") != expected:
+            raise DeepResearchError(f"host literature request {field} does not match stage")
+    response_path = inside(receipt.get("raw_response_path"), "response path")
+    try:
+        response_bytes = response_path.read_bytes()
+    except OSError as exc:
+        raise DeepResearchError("host literature response is missing") from exc
+    response_hash = hashlib.sha256(response_bytes).hexdigest()
+    if response_hash != receipt.get("raw_response_sha256"):
+        raise DeepResearchError("host literature response hash differs from exact bytes")
+    response_receipt_path = response_path.with_suffix(".json")
+    try:
+        response_receipt = json.loads(response_receipt_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise DeepResearchError("host literature response receipt is missing or invalid") from exc
+    if (
+        response_receipt.get("schema_version") != "HostResponseReceipt/v1"
+        or response_receipt.get("request_id") != request_id
+        or response_receipt.get("request_sha256") != request_hash
+        or response_receipt.get("raw_response_path") != str(response_path)
+        or response_receipt.get("raw_response_sha256") != response_hash
+    ):
+        raise DeepResearchError("host literature response receipt does not bind request and bytes")
+    try:
+        payload = json.loads(response_bytes.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise DeepResearchError("host literature response is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise DeepResearchError("host literature response must be an object")
+    if receipt.get("host_session_id_source") not in {"declared", "unavailable"}:
+        raise DeepResearchError("host literature session identity source is invalid")
+    if receipt.get("host_session_id_source") == "declared":
+        if not str(receipt.get("host_session_id") or "").strip():
+            raise DeepResearchError("declared host literature session ID is required")
+    elif receipt.get("host_session_id") not in (None, ""):
+        raise DeepResearchError("unavailable host literature session cannot claim an ID")
+    for field in ("exit_code", "command_hash", "prompt_hash"):
+        if receipt.get(field) not in (None, ""):
+            raise DeepResearchError(f"host literature receipt cannot claim {field}")
+    return payload
+
+
 def _is_source_located_extract(extract: object) -> bool:
     return (
         isinstance(extract, dict)
@@ -627,11 +707,20 @@ def persist_run(
     """Persist immutable paper records and a run artifact from a validated payload."""
     if node not in _STAGES:
         raise DeepResearchError(f"unsupported Deep Research stage {node!r}")
+    project_dir = Path(project_dir)
+    if receipt.get("schema_version") == HOST_RECEIPT_SCHEMA:
+        host_payload = _host_literature_payload(
+            project_dir, candidate_id, node, receipt
+        )
+        if host_payload != payload:
+            raise DeepResearchError(
+                "host literature response payload differs from submitted content"
+            )
+    else:
+        if receipt.get("exit_code") != 0 or not receipt.get("command_hash") or not receipt.get("prompt_hash"):
+            raise DeepResearchError("skill receipt is incomplete or records a failed invocation")
     payload, rejected_papers = _filter_unidentifiable_papers(payload)
     validate_payload(payload)
-    if receipt.get("exit_code") != 0 or not receipt.get("command_hash") or not receipt.get("prompt_hash"):
-        raise DeepResearchError("skill receipt is incomplete or records a failed invocation")
-    project_dir = Path(project_dir)
     runs_dir, papers_dir, sources_dir = _run_paths(project_dir)
     for directory in (runs_dir, papers_dir, sources_dir):
         directory.mkdir(parents=True, exist_ok=True)
@@ -932,9 +1021,32 @@ def audit_evidence_pack(project_dir: str | Path, candidate_id: str, node: str,
     if not artifact:
         return False, f"evidence pack missing for {candidate_id} {node}"
     receipt = artifact.get("skill_receipt") or {}
-    if artifact.get("status") != "completed" or receipt.get("exit_code") != 0:
+    host_receipt = receipt.get("schema_version") == HOST_RECEIPT_SCHEMA
+    if host_receipt:
+        try:
+            raw_payload = _host_literature_payload(
+                Path(project_dir), candidate_id, node, receipt
+            )
+            filtered_payload, _ = _filter_unidentifiable_papers(raw_payload)
+            validate_payload(filtered_payload)
+            expected_run_seed = json.dumps({
+                "candidate_id": candidate_id,
+                "node": node,
+                "payload": filtered_payload,
+                "receipt": receipt,
+            }, ensure_ascii=False, sort_keys=True)
+            expected_run_id = f"{_safe_id(candidate_id)}_{node.replace('.', '_')}_{_sha(expected_run_seed)[:12]}"
+            if artifact.get("run_id") != expected_run_id:
+                return False, "host literature response no longer matches persisted run identity"
+        except (DeepResearchError, TypeError, ValueError) as exc:
+            return False, f"host literature receipt failed audit: {exc}"
+    elif artifact.get("status") != "completed" or receipt.get("exit_code") != 0:
         return False, "evidence pack has no successful skill receipt"
-    if receipt.get("skill") not in {"academic-research-suite", "academic-research-skills"}:
+    if artifact.get("status") != "completed":
+        return False, "evidence pack is not completed"
+    if not host_receipt and receipt.get("skill") not in {
+        "academic-research-suite", "academic-research-skills"
+    }:
         return False, "evidence pack was not produced by Academic Research Skills"
     records = []
     root = Path(project_dir)
@@ -1085,7 +1197,19 @@ def render_pre_research_markdown(artifact: dict) -> str:
         identifiers.append(f"{paper['paper_id']} ({identifier})")
     receipt = artifact["skill_receipt"]
     queries = "\n".join(f"- {q}" for q in artifact.get("queries", []))
-    return f"""# Pre-Research: {artifact['node']}\n\n## Runtime digest\nVerified Academic Research evidence pack `{artifact['run_id']}` with paper IDs: {', '.join(identifiers)}.\n\n## Evidence pack\n- {artifact['path']}\n\n## Query log\n{queries}\n\n## Tool receipt\n- {receipt['backend']} / {receipt['skill']} {receipt.get('skill_version', '')}; command_hash={receipt['command_hash']}; prompt_hash={receipt['prompt_hash']}\n\n## Source count\n{len(artifact.get('papers', []))}\n"""
+    if receipt.get("schema_version") == HOST_RECEIPT_SCHEMA:
+        tool_receipt = (
+            f"Host session request={receipt['request_id']}; "
+            f"raw_response_sha256={receipt['raw_response_sha256']}"
+        )
+    else:
+        tool_receipt = (
+            f"{receipt['backend']} / {receipt['skill']} "
+            f"{receipt.get('skill_version', '')}; "
+            f"command_hash={receipt['command_hash']}; "
+            f"prompt_hash={receipt['prompt_hash']}"
+        )
+    return f"""# Pre-Research: {artifact['node']}\n\n## Runtime digest\nVerified Academic Research evidence pack `{artifact['run_id']}` with paper IDs: {', '.join(identifiers)}.\n\n## Evidence pack\n- {artifact['path']}\n\n## Query log\n{queries}\n\n## Tool receipt\n- {tool_receipt}\n\n## Source count\n{len(artifact.get('papers', []))}\n"""
 
 
 def execute_provider_invocation(

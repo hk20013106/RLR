@@ -192,3 +192,43 @@ def test_l0_source_input_exception_preserved(context_project):
     assert rc == 0 and manifest is not None
     allowed = manifest["allowed_inputs"]
     assert allowed == ["candidate_frontmatter"], allowed
+
+
+def test_agent_native_context_uses_authorized_input_and_hides_adjacent_node_sentinel(
+    tmp_path, monkeypatch
+):
+    project = tmp_path / "agent-native-context"
+    created = subprocess.run(
+        [sys.executable, str(HERE / "research_loop_v04.py"),
+         "new-project", str(project), "Topic"],
+        capture_output=True, text=True, cwd=str(HERE),
+    )
+    assert created.returncode == 0, created.stderr
+    env = bootstrap_project_ready(
+        project, HERE / "research_loop_v04.py", cwd=str(HERE)
+    )
+    monkeypatch.setenv("OBSIDIAN_VAULT", env["OBSIDIAN_VAULT"])
+    candidate = subprocess.run(
+        [sys.executable, str(HERE / "research_loop_v04.py"), "new-candidate",
+         str(project), "--title", "AUTHORIZED_L0_CONTEXT_SENTINEL",
+         "--question", "Q", "--claim", "C", "--input", "synthetic"],
+        capture_output=True, text=True, cwd=str(HERE), env=env,
+    )
+    assert candidate.returncode == 0, candidate.stderr
+    candidate_id = candidate.stdout.splitlines()[0]
+
+    adjacent = project / "02_Agent_Notes" / "Einstein" / "L1_einstein_delta.json"
+    adjacent.parent.mkdir(parents=True, exist_ok=True)
+    adjacent.write_text(
+        '{"sentinel":"UNAUTHORIZED_ADJACENT_L1_SENTINEL"}\n',
+        encoding="utf-8",
+    )
+
+    rc, manifest = _assemble("L0", project, candidate_id)
+
+    assert rc == 0 and manifest is not None
+    assert manifest["schema_version"] == "ContextManifest/v2"
+    assert manifest["allowed_inputs"] == ["candidate_frontmatter"]
+    rendered = Path(manifest["rendered_context_path"]).read_text(encoding="utf-8")
+    assert "AUTHORIZED_L0_CONTEXT_SENTINEL" in rendered
+    assert "UNAUTHORIZED_ADJACENT_L1_SENTINEL" not in rendered

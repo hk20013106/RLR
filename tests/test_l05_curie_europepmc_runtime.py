@@ -13,6 +13,7 @@ from research_loop import l0_contract, research_seed
 from research_loop import deep_research, structured_execution
 from research_loop.l05_curie import CurieContractError, load_frozen_evidence_pack
 from research_loop.l05_curie import europepmc_runtime
+from research_loop.l05_curie import query_planner
 from research_loop.l05_curie.europepmc_runtime import (
     run_europepmc_acquisition as _run_europepmc_acquisition,
 )
@@ -22,6 +23,8 @@ from research_loop.l05_curie.paperqa2_runtime import (
     PaperQA2CurieRuntime,
     align_paperqa2_chunks,
 )
+from research_loop.compatibility import PROFILE_V21_CATALOG_1
+from research_loop.hypothesis_ledger import HypothesisLedger
 from research_loop import cli
 
 
@@ -74,6 +77,84 @@ def _project(tmp_path: Path):
         encoding="utf-8",
     )
     return project, research_seed.load_l1_research_seed(project, "C001")
+
+
+def _host_planner_plan(seed):
+    def anchor(field, snippet, concept_id):
+        source = seed[field]
+        start = source.index(snippet)
+        return {
+            "concept_id": concept_id,
+            "term": snippet,
+            "source_type": "QUESTION" if field == "scientific_question" else "INITIAL_HYPOTHESIS",
+            "source_field": field,
+            "text_snippet": snippet,
+            "source_hash": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+            "start": start,
+            "end": start + len(snippet),
+            "synonyms": [],
+        }
+
+    return {
+        "schema_version": query_planner.SCIENTIFIC_QUERY_PLAN_V2,
+        "planner": query_planner.SCIENTIFIC_QUERY_PLANNER_V2,
+        "seed_sha256": research_seed.seed_sha256(seed),
+        "reformulation_index": 0,
+        "core_anchors": [
+            anchor("scientific_question", "carbon dioxide", "carbon-dioxide"),
+            anchor("hypothesis_seed", "Rca1p", "rca1p"),
+        ],
+        "optional_concepts": [],
+        "unresolved_entities": [],
+        "advisory_search_constraints": [],
+        "intents": [{
+            "intent_id": "target-evidence",
+            "core_concept_ids": ["carbon-dioxide", "rca1p"],
+            "optional_concept_ids": [],
+        }],
+    }
+
+
+def test_host_and_headless_planners_compile_identical_query_content(tmp_path, monkeypatch):
+    _project_dir, seed = _project(tmp_path)
+    payload = {"status": "PLAN", "reason": "direct seed concepts", "plan": _host_planner_plan(seed)}
+    raw_response = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    prepare = getattr(query_planner, "prepare_scientific_query_plan_request", None)
+    submit = getattr(query_planner, "validate_scientific_query_plan_response", None)
+    assert callable(prepare), (
+        "PLANNER_HANDOFF_MISSING: prepare_scientific_query_plan_request is absent"
+    )
+    assert callable(submit), (
+        "PLANNER_HANDOFF_MISSING: validate_scientific_query_plan_response is absent"
+    )
+    request = prepare(seed, reformulation_index=0, feedback=None)
+    host_result = submit(seed, request=request, raw_response=raw_response)
+
+    monkeypatch.setattr(
+        structured_execution,
+        "run_structured_model",
+        lambda *_args, **_kwargs: {
+            "payload": payload,
+            "receipt": {"validation_status": "PASS"},
+            "raw_output": raw_response.decode("utf-8"),
+        },
+    )
+    headless_result = query_planner.propose_scientific_query_plan(
+        seed, spec=object(), work_dir=tmp_path / "headless",
+        reformulation_index=0,
+    )
+
+    host_query_hashes = [item["query_content_hash"] for item in host_result["compiled_queries"]]
+    headless_query_hashes = [
+        item["query_content_hash"]
+        for item in query_planner.compile_scientific_query_plan(
+            headless_result["plan"], seed=seed
+        )
+    ]
+    assert host_result["plan"]["plan_content_hash"] == headless_result["plan"]["plan_content_hash"]
+    assert host_query_hashes == headless_query_hashes
 
 
 def _search_record(
@@ -611,7 +692,11 @@ def test_production_no_admissible_replan_stops_after_real_zero_discovery(tmp_pat
     assert len(searches) == 1
     manifest = json.loads((project / result["acquisition_manifest_path"]).read_text(encoding="utf-8"))
     assert len(manifest["attempts"]) == 1
-    assert manifest["planner_terminal"]["status"] == "NO_ADMISSIBLE_REPLAN"
+    terminal = manifest["planner_terminal"]
+    assert terminal["schema_version"] == "L05PlannerTerminal/v1"
+    assert terminal["status"] == "NO_ADMISSIBLE_REPLAN"
+    assert terminal["receipt"]["validation_status"] == "PASS"
+    assert terminal["proposal_sha256"] == terminal["receipt"]["stdout_hash"]
 
 
 def _controlled_three_plan_builder(seed, *, seed_sha256, round_index,
@@ -1616,3 +1701,915 @@ def test_systemic_outage_fails_closed_even_with_prior_evidence(tmp_path):
             project, "C001", explicit_queries=["outage masked by evidence"],
             max_papers=4, run_id="SYSOUT", http_get=http_get,
         )
+
+
+def _acquisition_host_api():
+    prepare = getattr(europepmc_runtime, "prepare_acquisition_host_step", None)
+    assert callable(prepare), (
+        "ACQUISITION_HANDOFF_MISSING: prepare_acquisition_host_step is absent"
+    )
+    submit = getattr(europepmc_runtime, "submit_acquisition_host_response", None)
+    assert callable(submit), (
+        "ACQUISITION_HANDOFF_MISSING: submit_acquisition_host_response is absent"
+    )
+    continue_run = getattr(europepmc_runtime, "continue_acquisition", None)
+    assert callable(continue_run), (
+        "ACQUISITION_HANDOFF_MISSING: continue_acquisition is absent"
+    )
+    return prepare, submit, continue_run
+
+
+def _host_project(tmp_path, monkeypatch):
+    project, seed = _project(tmp_path)
+    store = tmp_path / "host-hypotheses.sqlite"
+    ledger = HypothesisLedger(store)
+    ledger.bind_project(
+        project, "PROJECT:l05-host-test", profile_id=PROFILE_V21_CATALOG_1,
+    )
+    monkeypatch.setenv("RLR_HYPOTHESIS_STORE", str(store))
+    return project, seed
+
+
+def test_host_acquisition_checkpoint_is_versioned_and_resumes_same_request(
+    tmp_path, monkeypatch,
+):
+    project, _seed = _host_project(tmp_path, monkeypatch)
+    prepare, _submit, continue_run = _acquisition_host_api()
+    prepared = prepare(project, "C001", run_id="HOST_RESUME")
+
+    assert prepared["kind"] == "needs_host"
+    checkpoint = prepared["checkpoint"]
+    assert checkpoint["schema_version"] == "L05AcquisitionCheckpoint/v1"
+    assert checkpoint["phase"] == "REQUEST_PREPARED"
+    assert checkpoint["attempt_index"] == 1
+    assert checkpoint["execution_mode"] == "agent_native"
+    request = prepared["request"]
+    assert request["request_id"] == prepared["request_id"]
+    assert request["request_sha256"] == hashlib.sha256(
+        Path(request["request_path"]).read_bytes()
+    ).hexdigest()
+
+    monkeypatch.setattr(
+        europepmc_runtime, "_default_http_get",
+        lambda *_args: pytest.fail("resume issued HTTP before host submission"),
+    )
+    resumed = continue_run(project, "C001", run_id="HOST_RESUME")
+    assert resumed["kind"] == "needs_host"
+    assert resumed["request_id"] == prepared["request_id"]
+    assert resumed["checkpoint"]["attempt_index"] == 1
+    assert resumed["checkpoint"]["phase"] == "REQUEST_PREPARED"
+
+
+def test_host_acquisition_resume_after_validated_checkpoint_does_not_repeat_http(
+    tmp_path, monkeypatch,
+):
+    project, seed = _host_project(tmp_path, monkeypatch)
+    prepare, submit, continue_run = _acquisition_host_api()
+    prepared = prepare(project, "C001", run_id="VALIDATED_RESUME")
+    response_path = project / "validated-planner-response.json"
+    response_path.write_bytes(json.dumps({
+        "status": "PLAN", "reason": "fixture plan",
+        "plan": _host_planner_plan(seed),
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    submit(project, "C001", prepared["request_id"], response_path)
+    http_calls = []
+    monkeypatch.setattr(europepmc_runtime, "_default_http_get", lambda url, _timeout: (
+        http_calls.append(url) or b'{"hitCount":0,"resultList":{"result":[]}}'
+    ))
+
+    original_save = europepmc_runtime._save_acquisition_checkpoint
+    interrupted = {"done": False}
+    def interrupt_after_validated(path, checkpoint):
+        saved = original_save(path, checkpoint)
+        if checkpoint.get("phase") == "VALIDATED" and not interrupted["done"]:
+            interrupted["done"] = True
+            raise RuntimeError("simulated interruption after VALIDATED")
+        return saved
+    monkeypatch.setattr(europepmc_runtime, "_save_acquisition_checkpoint", interrupt_after_validated)
+    with pytest.raises(RuntimeError, match="after VALIDATED"):
+        continue_run(project, "C001", run_id="VALIDATED_RESUME")
+    checkpoint_path = project / prepared["checkpoint_path"]
+    saved_checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert saved_checkpoint["phase"] == "VALIDATED"
+
+    monkeypatch.setattr(europepmc_runtime, "_save_acquisition_checkpoint", original_save)
+    resumed = continue_run(project, "C001", run_id="VALIDATED_RESUME")
+    assert resumed["kind"] == "needs_host"
+    assert resumed["request_id"] != prepared["request_id"]
+    assert len(http_calls) == 1
+    same_request = continue_run(project, "C001", run_id="VALIDATED_RESUME")
+    assert same_request["request_id"] == resumed["request_id"]
+    assert len(http_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "tampered_field",
+    ["seed_sha256", "feedback_sha256", "source_sha256", "attempt_index", "execution_mode"],
+)
+def test_host_acquisition_resume_rejects_checkpoint_identity_tampering(
+    tmp_path, monkeypatch, tampered_field,
+):
+    project, _seed = _host_project(tmp_path, monkeypatch)
+    prepare, _submit, continue_run = _acquisition_host_api()
+    prepared = prepare(project, "C001", run_id="HOST_TAMPER")
+    checkpoint_path = project / prepared["checkpoint_path"]
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint[tampered_field] = (
+        999 if tampered_field == "attempt_index"
+        else "headless" if tampered_field == "execution_mode"
+        else "0" * 64
+    )
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+    with pytest.raises((CurieContractError, europepmc_runtime.CurieAcquisitionError),
+                       match="(?i)(checkpoint|hash|attempt|seed|feedback|source|mode)"):
+        continue_run(project, "C001", run_id="HOST_TAMPER")
+
+
+def test_uncertain_http_result_blocks_and_resume_does_not_retry(tmp_path, monkeypatch):
+    project, _seed = _host_project(tmp_path, monkeypatch)
+    prepare, submit, continue_run = _acquisition_host_api()
+    prepared = prepare(project, "C001", run_id="UNCERTAIN_HTTP")
+    plan_response = project / "planner-response.json"
+    plan_response.write_bytes(json.dumps({
+        "status": "PLAN", "reason": "fixture plan",
+        "plan": _host_planner_plan(_seed),
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    submitted = submit(project, "C001", prepared["request_id"], plan_response)
+    assert submitted["raw_response_sha256"] == hashlib.sha256(
+        plan_response.read_bytes()
+    ).hexdigest()
+    checkpoint = json.loads(
+        (project / prepared["checkpoint_path"]).read_text(encoding="utf-8")
+    )
+    assert checkpoint["phase"] == "RESPONSE_RECORDED"
+    assert checkpoint["response_sha256"] == submitted["raw_response_sha256"]
+    requests = []
+
+    def sent_then_lost(url, _timeout):
+        requests.append(url)
+        raise TimeoutError("request may have reached Europe PMC; response was lost")
+
+    monkeypatch.setattr(europepmc_runtime, "_default_http_get", sent_then_lost)
+    first = continue_run(project, "C001", run_id="UNCERTAIN_HTTP")
+    second = continue_run(project, "C001", run_id="UNCERTAIN_HTTP")
+
+    assert first["kind"] == second["kind"] == "blocked"
+    assert first["reason"] == second["reason"] == "uncertain_external_result"
+    assert len(requests) == 1
+
+
+def test_host_and_headless_receipt_variants_use_shared_manifest_validator(
+    tmp_path, monkeypatch,
+):
+    project, _seed = _host_project(tmp_path, monkeypatch)
+    seed = _seed
+    semantic_step, submit, continue_run, _http_calls = _host_semantic_pending(
+        project, seed, "HOST_MANIFEST", monkeypatch,
+    )
+    submitted_evidence = []
+    while semantic_step["kind"] == "needs_host":
+        request = semantic_step["request"]
+        evidence_id = request["inputs"]["extract"]["evidence_id"]
+        response_path = project / f"host-manifest-semantic-{len(submitted_evidence) + 1}.json"
+        response_path.write_bytes(json.dumps({
+            "entailment": "SUPPORTED", "scope_match": True,
+            "context_preserved": True, "qualification_preserved": True,
+            "reason": "manifest receipt dispatch fixture",
+        }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        submit(project, "C001", semantic_step["request_id"], response_path)
+        submitted_evidence.append(evidence_id)
+        semantic_step = continue_run(project, "C001", run_id="HOST_MANIFEST")
+    attempt_path = project / "08_Audit" / "l05_acquisition" / "C001" / "HOST_MANIFEST" / "attempt_001.json"
+    located = json.loads(attempt_path.read_text(encoding="utf-8"))["located_evidence"]
+    assert submitted_evidence == [item["evidence_id"] for item in located]
+    assert semantic_step["kind"] in {"FROZEN", "INSUFFICIENT_STOP"}
+    manifest = json.loads((project / semantic_step["acquisition_manifest_path"]).read_text(
+        encoding="utf-8"
+    ))
+    assert manifest["attempts"][0]["query_plan"]["planning_provenance"]["receipt"]["schema_version"] == (
+        "L05PlannerHostReceipt/v1"
+    )
+    assert callable(europepmc_runtime._validate_acquisition_manifest)
+    assert callable(europepmc_runtime.validate_europepmc_acquisition_result)
+
+
+def _host_semantic_pending(project, seed, run_id, monkeypatch, *, xml=XML):
+    prepare, submit, continue_run = _acquisition_host_api()
+    prepared = prepare(project, "C001", run_id=run_id)
+    plan_response = project / f"{run_id}-planner-response.json"
+    plan_response.write_bytes(json.dumps({
+        "status": "PLAN", "reason": "fixture plan",
+        "plan": _host_planner_plan(seed),
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    submit(project, "C001", prepared["request_id"], plan_response)
+    paper = _search_record(title=_GOOD_TITLE)
+
+    http_calls = []
+    def http_get(url, _timeout):
+        http_calls.append(url)
+        if "/search?" in url:
+            return _search_payload(records=[paper])
+        if url.endswith(f"/{paper['pmcid']}/fullTextXML"):
+            return xml
+        raise AssertionError(url)
+
+    monkeypatch.setattr(europepmc_runtime, "_default_http_get", http_get)
+    semantic_step = continue_run(project, "C001", run_id=run_id)
+    return semantic_step, submit, continue_run, http_calls
+
+
+def test_single_located_host_receipt_is_bound_into_manifest_attempt(tmp_path, monkeypatch):
+    project, seed = _host_project(tmp_path, monkeypatch)
+    one_located_xml = b'''<?xml version="1.0" encoding="UTF-8"?>
+    <article><body><sec><title>Results</title>
+    <p>Rca1p was required for the transcriptional response to carbon dioxide.</p>
+    </sec></body></article>'''
+    semantic_step, submit, continue_run, http_calls = _host_semantic_pending(
+        project, seed, "HOST_SINGLE_LOCATED", monkeypatch, xml=one_located_xml,
+    )
+    assert semantic_step["kind"] == "needs_host"
+    request = semantic_step["request"]
+    inputs = request["inputs"]
+    assert inputs["extract"]["verification_status"] == "LOCATED"
+    assert inputs["extract_sha256"] == hashlib.sha256(
+        json.dumps(inputs["extract"], ensure_ascii=False, sort_keys=True,
+                   separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    response_path = project / "single-located-semantic-response.json"
+    response_path.write_bytes(json.dumps({
+        "entailment": "SUPPORTED", "scope_match": True,
+        "context_preserved": True, "qualification_preserved": True,
+        "reason": "single extract manifest provenance fixture",
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    response_receipt = submit(project, "C001", semantic_step["request_id"], response_path)
+    completed = continue_run(project, "C001", run_id="HOST_SINGLE_LOCATED")
+    assert completed["kind"] in {"FROZEN", "INSUFFICIENT_STOP"}
+    assert len(http_calls) == 2
+    canonical_result = {key: value for key, value in completed.items() if key != "kind"}
+    assert europepmc_runtime.validate_europepmc_acquisition_result(
+        project, "C001", canonical_result,
+    ) == canonical_result
+    response_artifact = Path(response_receipt["raw_response_path"])
+    original_response_bytes = response_artifact.read_bytes()
+    response_artifact.write_bytes(original_response_bytes + b"\nchanged")
+    with pytest.raises((CurieContractError, europepmc_runtime.CurieAcquisitionError),
+                       match="(?i)(response|receipt|hash|changed|provenance)"):
+        europepmc_runtime.validate_europepmc_acquisition_result(
+            project, "C001", canonical_result,
+        )
+    response_artifact.write_bytes(original_response_bytes)
+    manifest = json.loads((project / completed["acquisition_manifest_path"]).read_text(
+        encoding="utf-8"
+    ))
+    attempt = manifest["attempts"][0]
+    host_receipts = attempt["semantic_host_receipts"]
+    assert len(host_receipts) == 1
+    provenance = host_receipts[0]
+    assert provenance["evidence_id"] == inputs["extract"]["evidence_id"]
+    assert provenance["host_request"] == {
+        "request_id": request["request_id"],
+        "request_path": request["request_path"],
+        "request_sha256": request["request_sha256"],
+    }
+    assert provenance["host_response_receipt"] == response_receipt
+    assert provenance["extract_sha256"] == inputs["extract_sha256"]
+    assert provenance["claim_sha256"] == inputs["claim_sha256"]
+    assert provenance["source_sha256"] == inputs["source_sha256"]
+    assert hashlib.sha256(Path(request["request_path"]).read_bytes()).hexdigest() == (
+        request["request_sha256"]
+    )
+    assert hashlib.sha256(Path(response_receipt["raw_response_path"]).read_bytes()).hexdigest() == (
+        response_receipt["raw_response_sha256"]
+    )
+
+
+def test_host_located_semantic_handoff_binds_source_and_uses_shared_manifest_owner(
+    tmp_path, monkeypatch,
+):
+    project, seed = _host_project(tmp_path, monkeypatch)
+    verify_calls = []
+    original_verify = europepmc_runtime.SemanticEvidenceVerifier.verify
+    def counted_verify(verifier, *args, **kwargs):
+        verify_calls.append(args[0].get("evidence_id"))
+        return original_verify(verifier, *args, **kwargs)
+    monkeypatch.setattr(
+        europepmc_runtime.SemanticEvidenceVerifier, "verify", counted_verify,
+    )
+    semantic_step, submit, continue_run, http_calls = _host_semantic_pending(
+        project, seed, "HOST_SEMANTIC", monkeypatch,
+    )
+    request_ids = []
+    request_evidence_ids = []
+    request_hashes = {}
+    expected_receipts = {}
+    final_inputs = {}
+    original_save = europepmc_runtime._save_acquisition_checkpoint
+    interrupted = {"done": False}
+    def interrupt_after_commit(path, checkpoint):
+        saved = original_save(path, checkpoint)
+        if checkpoint.get("phase") == "COMMITTED" and not interrupted["done"]:
+            interrupted["done"] = True
+            raise RuntimeError("simulated interruption after COMMITTED")
+        return saved
+    while semantic_step["kind"] == "needs_host":
+        request = semantic_step["request"]
+        inputs = request["inputs"]
+        extract = inputs["extract"]
+        assert extract["verification_status"] == "LOCATED"
+        assert inputs["extract_sha256"] == hashlib.sha256(
+            json.dumps(extract, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        assert inputs["claim_sha256"] == hashlib.sha256(inputs["claim"].encode("utf-8")).hexdigest()
+        assert inputs["source_sha256"] == extract["retrieval"]["source_sha256"]
+        assert request["request_id"] not in request_ids
+        request_ids.append(request["request_id"])
+        request_evidence_ids.append(extract["evidence_id"])
+        request_hashes[extract["evidence_id"]] = inputs["extract_sha256"]
+        final_inputs = inputs
+        assessor_response = project / f"semantic-response-{len(request_ids)}.json"
+        assessor_response.write_bytes(json.dumps({
+            "entailment": "SUPPORTED", "scope_match": True,
+            "context_preserved": True, "qualification_preserved": True,
+            "reason": "The located passage supports the scoped claim.",
+        }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        response_receipt = submit(project, "C001", request["request_id"], assessor_response)
+        expected_receipts[extract["evidence_id"]] = {
+            "request_id": request["request_id"],
+            "request_path": request["request_path"],
+            "request_sha256": request["request_sha256"],
+            "raw_response_path": response_receipt["raw_response_path"],
+            "raw_response_sha256": response_receipt["raw_response_sha256"],
+            "extract_sha256": inputs["extract_sha256"],
+            "claim_sha256": inputs["claim_sha256"],
+            "source_sha256": inputs["source_sha256"],
+        }
+        monkeypatch.setattr(
+            europepmc_runtime, "_save_acquisition_checkpoint", interrupt_after_commit,
+        )
+        try:
+            next_step = continue_run(project, "C001", run_id="HOST_SEMANTIC")
+        except RuntimeError as exc:
+            if "after COMMITTED" not in str(exc):
+                raise
+            monkeypatch.setattr(
+                europepmc_runtime, "_save_acquisition_checkpoint", original_save,
+            )
+            completed = continue_run(project, "C001", run_id="HOST_SEMANTIC")
+            break
+        monkeypatch.setattr(
+            europepmc_runtime, "_save_acquisition_checkpoint", original_save,
+        )
+        semantic_step = next_step
+    attempt_path = project / "08_Audit" / "l05_acquisition" / "C001" / "HOST_SEMANTIC" / "attempt_001.json"
+    located = json.loads(attempt_path.read_text(encoding="utf-8"))["located_evidence"]
+    assert request_evidence_ids == [item["evidence_id"] for item in located]
+    assert len(set(request_ids)) == len(located)
+    assert len(http_calls) == 2
+    verify_counts = {evidence_id: verify_calls.count(evidence_id) for evidence_id in request_evidence_ids}
+    assert verify_counts == {evidence_id: 2 for evidence_id in request_evidence_ids}
+    assert completed["kind"] in {"FROZEN", "INSUFFICIENT_STOP"}
+    canonical_result = {key: value for key, value in completed.items() if key != "kind"}
+    assert europepmc_runtime.validate_europepmc_acquisition_result(
+        project, "C001", canonical_result,
+    ) == canonical_result
+    manifest = json.loads((project / completed["acquisition_manifest_path"]).read_text(
+        encoding="utf-8"
+    ))
+    semantic = manifest["attempts"][0]["semantic_verifications"]
+    assert [item["evidence_id"] for item in semantic] == request_evidence_ids
+    assert all(item["verdict"] == "PASS" and item["assessor_id"] for item in semantic)
+    assert {item["evidence_id"]: item["extract_sha256"] for item in semantic} == request_hashes
+    assert {item["evidence_id"]: item["claim_sha256"] for item in semantic} == {
+        item["evidence_id"]: final_inputs["claim_sha256"] for item in semantic
+    }
+    assert [item["evidence_id"] for item in manifest["attempts"][0]["verified_evidence"]] == (
+        request_evidence_ids
+    )
+    from research_loop import host_handoff
+    semantic_host_receipts = manifest["attempts"][0]["semantic_host_receipts"]
+    manifest_host_receipts = {
+        item["evidence_id"]: item for item in semantic_host_receipts
+    }
+    assert set(manifest_host_receipts) == set(request_evidence_ids)
+    for evidence_id, expected in expected_receipts.items():
+        provenance = manifest_host_receipts[evidence_id]
+        assert provenance["extract_sha256"] == expected["extract_sha256"]
+        assert provenance["claim_sha256"] == expected["claim_sha256"]
+        assert provenance["source_sha256"] == expected["source_sha256"]
+        request_ref = provenance["host_request"]
+        response_receipt = provenance["host_response_receipt"]
+        assert response_receipt["schema_version"] == "HostResponseReceipt/v1"
+        assert request_ref["request_id"] == expected["request_id"]
+        assert request_ref["request_path"] == expected["request_path"]
+        assert request_ref["request_sha256"] == expected["request_sha256"]
+        assert response_receipt["request_id"] == expected["request_id"]
+        assert response_receipt["request_path"] == expected["request_path"]
+        assert response_receipt["request_sha256"] == expected["request_sha256"]
+        assert response_receipt["raw_response_path"] == expected["raw_response_path"]
+        assert response_receipt["raw_response_sha256"] == expected["raw_response_sha256"]
+        assert hashlib.sha256(Path(request_ref["request_path"]).read_bytes()).hexdigest() == (
+            expected["request_sha256"]
+        )
+        assert hashlib.sha256(Path(response_receipt["raw_response_path"]).read_bytes()).hexdigest() == (
+            expected["raw_response_sha256"]
+        )
+        host_request = host_handoff.load_request(project, expected["request_id"])
+        assert host_request["request_sha256"] == expected["request_sha256"]
+        inputs = host_request["inputs"]
+        assert inputs["extract_sha256"] == expected["extract_sha256"]
+        assert inputs["claim_sha256"] == expected["claim_sha256"]
+        assert inputs["source_sha256"] == expected["source_sha256"]
+        assert inputs["extract"]["evidence_id"] == evidence_id
+    verification_calls_after_completion = list(verify_calls)
+    resumed = continue_run(project, "C001", run_id="HOST_SEMANTIC")
+    assert resumed == completed
+    assert len(http_calls) == 2
+    assert verify_calls == verification_calls_after_completion
+
+
+@pytest.mark.parametrize(
+    "forged_field",
+    ["verdict", "source_fidelity", "evidence_id", "verification_id"],
+)
+def test_host_semantic_response_cannot_supply_verifier_authority(
+    tmp_path, monkeypatch, forged_field,
+):
+    project, seed = _host_project(tmp_path, monkeypatch)
+    semantic_step, submit, _continue_run, _http_calls = _host_semantic_pending(
+        project, seed, "HOST_FORGED_SEMANTIC", monkeypatch,
+    )
+    assert "extract_sha256" in semantic_step["request"]["inputs"]
+    response = {
+        "entailment": "SUPPORTED", "scope_match": True,
+        "context_preserved": True, "qualification_preserved": True,
+        "reason": "fixture", forged_field: "PASS",
+    }
+    response_path = project / "forged-semantic-response.json"
+    response_path.write_bytes(json.dumps(response).encode("utf-8"))
+    with pytest.raises((CurieContractError, europepmc_runtime.CurieAcquisitionError),
+                       match="(?i)(semantic|unsupported|assessor|authority|response)"):
+        submit(project, "C001", semantic_step["request_id"], response_path)
+
+
+def test_host_semantic_response_rejects_changed_located_extract(tmp_path, monkeypatch):
+    project, seed = _host_project(tmp_path, monkeypatch)
+    semantic_step, submit, _continue_run, _http_calls = _host_semantic_pending(
+        project, seed, "HOST_CHANGED_EXTRACT", monkeypatch,
+    )
+    assert "extract_sha256" in semantic_step["request"]["inputs"]
+    request_path = Path(semantic_step["request"]["request_path"])
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    request["inputs"]["extract"]["text"] += " changed after review"
+    request_path.write_text(json.dumps(request, sort_keys=True), encoding="utf-8")
+    response_path = project / "changed-extract-response.json"
+    response_path.write_bytes(json.dumps({
+        "entailment": "SUPPORTED", "scope_match": True,
+        "context_preserved": True, "qualification_preserved": True,
+        "reason": "fixture",
+    }).encode("utf-8"))
+    with pytest.raises((CurieContractError, europepmc_runtime.CurieAcquisitionError),
+                       match="(?i)(request|extract|hash|changed|checkpoint)"):
+        submit(project, "C001", semantic_step["request_id"], response_path)
+
+
+def test_host_acquisition_without_located_extract_creates_no_semantic_request(
+    tmp_path, monkeypatch,
+):
+    project, seed = _host_project(tmp_path, monkeypatch)
+    result, _submit, _continue_run, _http_calls = _host_semantic_pending(
+        project, seed, "HOST_NO_LOCATED", monkeypatch,
+        xml=XML_WITHOUT_TARGET_SECTIONS,
+    )
+    request = result.get("request") or {}
+    assert result["kind"] in {"needs_host", "deterministic", "FROZEN", "INSUFFICIENT_STOP"}
+    assert "extract_sha256" not in request.get("inputs", {})
+
+
+def test_agent_native_prepare_rejects_active_headless_acquisition_owner(
+    tmp_path, monkeypatch,
+):
+    project, _seed = _host_project(tmp_path, monkeypatch)
+    empty = b'{"hitCount":0,"resultList":{"result":[]}}'
+    run_europepmc_acquisition(
+        project, "C001", explicit_queries=["headless owner"],
+        run_id="MODE_HEADLESS_OWNER", http_get=lambda *_args: empty,
+    )
+    prepare, _submit, _continue_run = _acquisition_host_api()
+    with pytest.raises((CurieContractError, europepmc_runtime.CurieAcquisitionError),
+                       match="(?i)(mode|headless|owner|execution)"):
+        prepare(project, "C001", run_id="MODE_HEADLESS_OWNER")
+
+
+def test_headless_run_rejects_active_agent_native_acquisition_owner(
+    tmp_path, monkeypatch,
+):
+    project, _seed = _host_project(tmp_path, monkeypatch)
+    prepare, _submit, _continue_run = _acquisition_host_api()
+    prepare(project, "C001", run_id="MODE_AGENT_NATIVE_OWNER")
+    with pytest.raises((CurieContractError, europepmc_runtime.CurieAcquisitionError),
+                       match="(?i)(mode|agent.native|owner|execution)"):
+        run_europepmc_acquisition(
+            project, "C001", explicit_queries=["must not switch mode"],
+            run_id="MODE_AGENT_NATIVE_OWNER",
+            http_get=lambda *_args: pytest.fail("mode mismatch performed HTTP"),
+        )
+
+
+def test_host_resume_rejects_legacy_orphan_without_versioned_checkpoint(
+    tmp_path, monkeypatch,
+):
+    project, seed = _host_project(tmp_path, monkeypatch)
+    run_id = "LEGACY_ORPHAN"
+    audit_root = project / "08_Audit" / "l05_acquisition" / "C001"
+    owner_path = audit_root / "first_1.json"
+    owner_path.parent.mkdir(parents=True, exist_ok=True)
+    owner_path.write_text(json.dumps({
+        "schema_version": "L05FirstAcquisitionOwner/v1",
+        "candidate_id": "C001", "round_id": "1",
+        "seed_sha256": research_seed.seed_sha256(seed),
+        "acquisition_run_id": run_id,
+    }), encoding="utf-8")
+    orphan = audit_root / run_id / "planner_001" / "proposal.json"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_text('{"status":"PLAN"}', encoding="utf-8")
+
+    prepare, _submit, _continue_run = _acquisition_host_api()
+    with pytest.raises((CurieContractError, europepmc_runtime.CurieAcquisitionError),
+                       match="(?i)(incomplete|checkpoint|recovery|owner)"):
+        prepare(project, "C001", run_id=run_id)
+
+
+def test_host_idempotent_old_planner_response_does_not_rewind_current_semantic_request(
+    tmp_path, monkeypatch,
+):
+    project, seed = _host_project(tmp_path, monkeypatch)
+    prepare, submit, continue_run = _acquisition_host_api()
+    run_id = "IDEMPOTENT_OLD_PLANNER"
+    planner = prepare(project, "C001", run_id=run_id)
+    planner_response = project / "idempotent-planner-response.json"
+    planner_response.write_bytes(json.dumps({
+        "status": "PLAN", "reason": "fixture plan",
+        "plan": _host_planner_plan(seed),
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    submit(project, "C001", planner["request_id"], planner_response)
+    paper = _search_record(title=_GOOD_TITLE)
+    xml = b'''<?xml version="1.0" encoding="UTF-8"?>
+    <article><body><sec><title>Results</title>
+    <p>Rca1p was required for the transcriptional response to carbon dioxide.</p>
+    </sec></body></article>'''
+    monkeypatch.setattr(europepmc_runtime, "_default_http_get", lambda url, _timeout: (
+        _search_payload(records=[paper]) if "/search?" in url else xml
+    ))
+    semantic = continue_run(project, "C001", run_id=run_id)
+    assert semantic["kind"] == "needs_host"
+    assert semantic["request"]["identity"]["stage"].startswith("semantic:")
+    checkpoint_path = project / semantic["checkpoint_path"]
+    before = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert before["current_request_id"] == semantic["request_id"]
+    assert before["phase"] == "REQUEST_PREPARED"
+
+    submit(project, "C001", planner["request_id"], planner_response)
+
+    after = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert after["current_request_id"] == semantic["request_id"]
+    assert after["phase"] == "REQUEST_PREPARED"
+    semantic_response = project / "semantic-response-after-old-idempotent-submit.json"
+    semantic_response.write_bytes(json.dumps({
+        "entailment": "SUPPORTED", "scope_match": True,
+        "context_preserved": True, "qualification_preserved": True,
+        "reason": "the current semantic request remains submit-able",
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    receipt = submit(project, "C001", semantic["request_id"], semantic_response)
+    assert receipt["request_id"] == semantic["request_id"]
+
+
+def test_host_terminal_no_admissible_replan_persists_validated_planner_receipt(
+    tmp_path, monkeypatch,
+):
+    project, seed = _host_project(tmp_path, monkeypatch)
+    prepare, submit, continue_run = _acquisition_host_api()
+    run_id = "HOST_NO_ADMISSIBLE"
+    planner = prepare(project, "C001", run_id=run_id)
+    first_plan_response = project / "host-no-admissible-plan.json"
+    first_plan_response.write_bytes(json.dumps({
+        "status": "PLAN", "reason": "fixture plan",
+        "plan": _host_planner_plan(seed),
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    submit(project, "C001", planner["request_id"], first_plan_response)
+    http_calls = []
+    monkeypatch.setattr(europepmc_runtime, "_default_http_get", lambda url, _timeout: (
+        http_calls.append(url) or b'{"hitCount":0,"resultList":{"result":[]}}'
+    ))
+    replan = continue_run(project, "C001", run_id=run_id)
+    assert replan["kind"] == "needs_host"
+    assert replan["request"]["identity"]["stage"] == "planner"
+    terminal_response = project / "host-no-admissible-terminal.json"
+    terminal_response.write_bytes(json.dumps({
+        "status": "NO_ADMISSIBLE_REPLAN", "reason": "finite candidates exhausted",
+        "plan": None,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    terminal_receipt = submit(project, "C001", replan["request_id"], terminal_response)
+    completed = continue_run(project, "C001", run_id=run_id)
+    assert completed["kind"] == "INSUFFICIENT_STOP"
+    assert len(http_calls) == 1
+    canonical = {key: value for key, value in completed.items() if key != "kind"}
+    assert europepmc_runtime.validate_europepmc_acquisition_result(
+        project, "C001", canonical,
+    ) == canonical
+    manifest = json.loads((project / completed["acquisition_manifest_path"]).read_text(
+        encoding="utf-8"
+    ))
+    terminal = manifest["planner_terminal"]
+    assert terminal["status"] == "NO_ADMISSIBLE_REPLAN"
+    assert terminal["receipt"]["host_response_receipt"] == terminal_receipt
+    assert terminal["receipt"]["schema_version"] == "L05PlannerHostReceipt/v1"
+    assert terminal["proposal_sha256"] == terminal_receipt["raw_response_sha256"]
+
+
+def test_host_reproposal_required_issues_distinct_followup_handoff(tmp_path, monkeypatch):
+    project, seed = _host_project(tmp_path, monkeypatch)
+    prepare, submit, continue_run = _acquisition_host_api()
+    run_id = "HOST_REPROPOSAL_REQUIRED"
+    initial_plan = _host_planner_plan(seed)
+    question = seed["scientific_question"]
+    yeast_start = question.index("yeast")
+    initial_plan["optional_concepts"] = [{
+        "concept_id": "yeast", "term": "yeast",
+        "source_type": "QUESTION", "source_field": "scientific_question",
+        "text_snippet": "yeast",
+        "source_hash": hashlib.sha256(question.encode("utf-8")).hexdigest(),
+        "start": yeast_start, "end": yeast_start + len("yeast"), "synonyms": [],
+    }]
+    initial_plan["intents"][0]["optional_concept_ids"] = ["yeast"]
+
+    first = prepare(project, "C001", run_id=run_id)
+    first_response = project / "host-reproposal-initial.json"
+    first_response.write_bytes(json.dumps({
+        "status": "PLAN", "reason": "fixture plan with optional concept",
+        "plan": initial_plan,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    submit(project, "C001", first["request_id"], first_response)
+
+    http_calls = []
+    paper = _search_record(title=_GOOD_TITLE)
+    xml = b'''<?xml version="1.0" encoding="UTF-8"?>
+    <article><body><sec><title>Results</title>
+    <p>Rca1p was required for the transcriptional response to carbon dioxide.</p>
+    </sec></body></article>'''
+    search_count = {"value": 0}
+    def http_get(url, _timeout):
+        http_calls.append(url)
+        if "/search?" not in url:
+            return xml
+        search_count["value"] += 1
+        if search_count["value"] == 1:
+            return b'{"hitCount":0,"resultList":{"result":[]}}'
+        return _search_payload(records=[paper])
+    monkeypatch.setattr(europepmc_runtime, "_default_http_get", http_get)
+    replan = continue_run(project, "C001", run_id=run_id)
+    assert replan["kind"] == "needs_host"
+    assert replan["request"]["identity"]["stage"] == "planner"
+    first_replan_request = replan["request"]["inputs"]["planner_request"]
+    feedback = first_replan_request["feedback"]
+    candidates, _enumeration = query_planner._admissible_replan_candidates(
+        feedback["previous_plan"], seed, feedback, 1,
+    )
+    assert candidates
+
+    no_plan = project / "host-reproposal-no-plan.json"
+    no_plan.write_bytes(json.dumps({
+        "status": "NO_ADMISSIBLE_REPLAN", "reason": "no plan proposed",
+        "plan": None,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    no_plan_receipt = submit(project, "C001", replan["request_id"], no_plan)
+
+    followup = continue_run(project, "C001", run_id=run_id)
+    assert followup["kind"] == "needs_host"
+    assert followup["request"]["identity"]["stage"] == "planner"
+    assert followup["request_id"] != replan["request_id"]
+    next_request = followup["request"]["inputs"]["planner_request"]
+    assert next_request["prompt"] != first_replan_request["prompt"]
+    assert candidates[0][1]["plan_content_hash"] in next_request["prompt"]
+
+    _operation, candidate_plan = candidates[0]
+    proposal_plan = {
+        key: candidate_plan[key]
+        for key in (
+            "schema_version", "planner", "seed_sha256", "reformulation_index",
+            "core_anchors", "optional_concepts", "unresolved_entities",
+            "advisory_search_constraints", "intents",
+        )
+    }
+    accepted_response = project / "host-reproposal-accepted-plan.json"
+    accepted_response.write_bytes(json.dumps({
+        "status": "PLAN", "reason": f"validated candidate: {_operation}",
+        "plan": proposal_plan,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    followup_receipt = submit(project, "C001", followup["request_id"], accepted_response)
+
+    semantic = continue_run(project, "C001", run_id=run_id)
+    assert semantic["kind"] == "needs_host"
+    assert semantic["request"]["identity"]["stage"].startswith("semantic:")
+    semantic_response = project / "host-reproposal-semantic.json"
+    semantic_response.write_bytes(json.dumps({
+        "entailment": "SUPPORTED", "scope_match": True,
+        "context_preserved": True, "qualification_preserved": True,
+        "reason": "fixture semantic support",
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    submit(project, "C001", semantic["request_id"], semantic_response)
+
+    completed = continue_run(project, "C001", run_id=run_id)
+    assert completed["kind"] in {"FROZEN", "INSUFFICIENT_STOP"}
+    canonical = {key: value for key, value in completed.items() if key != "kind"}
+    assert europepmc_runtime.validate_europepmc_acquisition_result(
+        project, "C001", canonical,
+    ) == canonical
+    manifest = json.loads((project / completed["acquisition_manifest_path"]).read_text(
+        encoding="utf-8"
+    ))
+    accepted_attempt = next(
+        attempt for attempt in manifest["attempts"]
+        if attempt["query_plan"].get("planning_provenance", {}).get("proposal_sha256")
+        == followup_receipt["raw_response_sha256"]
+    )
+    planner_receipt = accepted_attempt["query_plan"]["planning_provenance"]["receipt"]
+    assert planner_receipt["host_response_receipt"] == followup_receipt
+    assert planner_receipt["reproposal"]["source_request_id"] == replan["request_id"]
+    assert planner_receipt["reproposal"]["source_response_receipt"] == no_plan_receipt
+    assert planner_receipt["reproposal"]["followup_request"]["request_id"] == followup["request_id"]
+    assert len(http_calls) >= 2
+
+
+def test_host_reproposal_budget_rejects_second_no_admissible_response(tmp_path, monkeypatch):
+    project, seed = _host_project(tmp_path, monkeypatch)
+    prepare, submit, continue_run = _acquisition_host_api()
+    run_id = "HOST_REPROPOSAL_BUDGET"
+    initial_plan = _host_planner_plan(seed)
+    question = seed["scientific_question"]
+    yeast_start = question.index("yeast")
+    initial_plan["optional_concepts"] = [{
+        "concept_id": "yeast", "term": "yeast",
+        "source_type": "QUESTION", "source_field": "scientific_question",
+        "text_snippet": "yeast",
+        "source_hash": hashlib.sha256(question.encode("utf-8")).hexdigest(),
+        "start": yeast_start, "end": yeast_start + len("yeast"), "synonyms": [],
+    }]
+    initial_plan["intents"][0]["optional_concept_ids"] = ["yeast"]
+    first = prepare(project, "C001", run_id=run_id)
+    first_response = project / "host-reproposal-budget-initial.json"
+    first_response.write_bytes(json.dumps({
+        "status": "PLAN", "reason": "fixture plan with optional concept",
+        "plan": initial_plan,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    submit(project, "C001", first["request_id"], first_response)
+    monkeypatch.setattr(europepmc_runtime, "_default_http_get", lambda *_: (
+        b'{"hitCount":0,"resultList":{"result":[]}}'
+    ))
+
+    replan = continue_run(project, "C001", run_id=run_id)
+    feedback = replan["request"]["inputs"]["planner_request"]["feedback"]
+    candidates, _enumeration = query_planner._admissible_replan_candidates(
+        feedback["previous_plan"], seed, feedback, 1,
+    )
+    assert candidates
+    first_no_plan = project / "host-reproposal-budget-first-no-plan.json"
+    first_no_plan.write_bytes(json.dumps({
+        "status": "NO_ADMISSIBLE_REPLAN", "reason": "first no-plan proposal",
+        "plan": None,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    submit(project, "C001", replan["request_id"], first_no_plan)
+    followup = continue_run(project, "C001", run_id=run_id)
+    assert followup["kind"] == "needs_host"
+    assert followup["request_id"] != replan["request_id"]
+
+    second_no_plan = project / "host-reproposal-budget-second-no-plan.json"
+    second_no_plan.write_bytes(json.dumps({
+        "status": "NO_ADMISSIBLE_REPLAN", "reason": "second no-plan proposal",
+        "plan": None,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    submit(project, "C001", followup["request_id"], second_no_plan)
+    with pytest.raises(europepmc_runtime.CurieAcquisitionError, match="reproposal budget exhausted"):
+        continue_run(project, "C001", run_id=run_id)
+    checkpoint = json.loads((project / followup["checkpoint_path"]).read_text(encoding="utf-8"))
+    assert checkpoint["current_request_id"] == followup["request_id"]
+    assert len(checkpoint["planner_requests"]) == 3
+
+
+def test_host_replan_rebinds_same_located_evidence_to_attempt_specific_extract(
+    tmp_path, monkeypatch,
+):
+    project, seed = _host_project(tmp_path, monkeypatch)
+    prepare, submit, continue_run = _acquisition_host_api()
+    run_id = "HOST_CROSS_ATTEMPT_EVIDENCE"
+    first_plan = _host_planner_plan(seed)
+    question = seed["scientific_question"]
+    yeast_start = question.index("yeast")
+    first_plan["optional_concepts"] = [{
+        "concept_id": "yeast",
+        "term": "yeast",
+        "source_type": "QUESTION",
+        "source_field": "scientific_question",
+        "text_snippet": "yeast",
+        "source_hash": hashlib.sha256(question.encode("utf-8")).hexdigest(),
+        "start": yeast_start,
+        "end": yeast_start + len("yeast"),
+        "synonyms": [],
+    }]
+    first_plan["intents"][0]["optional_concept_ids"] = ["yeast"]
+    planner = prepare(project, "C001", run_id=run_id)
+    first_planner_response = project / "cross-attempt-planner-1.json"
+    first_planner_response.write_bytes(json.dumps({
+        "status": "PLAN", "reason": "include seed-bound optional term",
+        "plan": first_plan,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    submit(project, "C001", planner["request_id"], first_planner_response)
+
+    paper = _search_record(title=_GOOD_TITLE)
+    one_located_xml = b'''<?xml version="1.0" encoding="UTF-8"?>
+    <article><body><sec><title>Results</title>
+    <p>Rca1p was required for the transcriptional response to carbon dioxide.</p>
+    </sec></body></article>'''
+    http_calls = []
+    def http_get(url, _timeout):
+        http_calls.append(url)
+        if "/search?" in url:
+            return _search_payload(records=[paper])
+        return one_located_xml
+    monkeypatch.setattr(europepmc_runtime, "_default_http_get", http_get)
+
+    semantic_attempt_1 = continue_run(project, "C001", run_id=run_id)
+    assert semantic_attempt_1["kind"] == "needs_host"
+    first_extract = semantic_attempt_1["request"]["inputs"]["extract"]
+    first_evidence_id = first_extract["evidence_id"]
+    first_extract_sha = semantic_attempt_1["request"]["inputs"]["extract_sha256"]
+    first_path = first_extract["retrieval"]["snapshot_path"]
+    first_semantic_response = project / "cross-attempt-semantic-1.json"
+    first_semantic_response.write_bytes(json.dumps({
+        "entailment": "UNRELATED", "scope_match": True,
+        "context_preserved": True, "qualification_preserved": True,
+        "reason": "first acquisition attempt is semantically unrelated",
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    submit(project, "C001", semantic_attempt_1["request_id"], first_semantic_response)
+
+    replan = continue_run(project, "C001", run_id=run_id)
+    assert replan["kind"] == "needs_host"
+    assert replan["request"]["identity"]["stage"] == "planner"
+    planner_request = replan["request"]["inputs"]["planner_request"]
+    feedback = planner_request["feedback"]
+    request_inputs = replan["request"]["inputs"]
+    canonical_feedback_sha256 = hashlib.sha256(
+        query_planner._canonical(feedback)
+    ).hexdigest()
+    assert request_inputs["feedback"] == feedback
+    assert request_inputs["feedback_sha256"] == planner_request["feedback_sha256"]
+    assert planner_request["feedback_sha256"] == canonical_feedback_sha256
+    candidates, _enumeration = query_planner._admissible_replan_candidates(
+        feedback["previous_plan"], seed, feedback, 1,
+    )
+    assert candidates
+    _operation, candidate_plan = candidates[0]
+    proposal_plan = {
+        key: candidate_plan[key]
+        for key in (
+            "schema_version", "planner", "seed_sha256", "reformulation_index",
+            "core_anchors", "optional_concepts", "unresolved_entities",
+            "advisory_search_constraints", "intents",
+        )
+    }
+    second_planner_response = project / "cross-attempt-planner-2.json"
+    second_planner_response.write_bytes(json.dumps({
+        "status": "PLAN", "reason": f"validated replan: {_operation}",
+        "plan": proposal_plan,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    submit(project, "C001", replan["request_id"], second_planner_response)
+
+    semantic_attempt_2 = continue_run(project, "C001", run_id=run_id)
+    assert semantic_attempt_2["kind"] == "needs_host"
+    second_extract = semantic_attempt_2["request"]["inputs"]["extract"]
+    assert second_extract["evidence_id"] == first_evidence_id
+    assert semantic_attempt_2["request"]["inputs"]["extract_sha256"] != first_extract_sha
+    assert second_extract["retrieval"]["snapshot_path"] != first_path
+    assert semantic_attempt_2["request_id"] != semantic_attempt_1["request_id"]
+    second_semantic_response = project / "cross-attempt-semantic-2.json"
+    second_semantic_response.write_bytes(json.dumps({
+        "entailment": "SUPPORTED", "scope_match": True,
+        "context_preserved": True, "qualification_preserved": True,
+        "reason": "the second attempt independently supports the claim",
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    submit(project, "C001", semantic_attempt_2["request_id"], second_semantic_response)
+    completed = continue_run(project, "C001", run_id=run_id)
+    assert completed["kind"] in {"FROZEN", "INSUFFICIENT_STOP"}
+    canonical = {key: value for key, value in completed.items() if key != "kind"}
+    assert europepmc_runtime.validate_europepmc_acquisition_result(
+        project, "C001", canonical,
+    ) == canonical
+    manifest = json.loads((project / completed["acquisition_manifest_path"]).read_text(
+        encoding="utf-8"
+    ))
+    assert [attempt["attempt_index"] for attempt in manifest["attempts"]] == [1, 2]
+    assert manifest["attempts"][0]["semantic_verifications"][0]["verdict"] == "FAIL"
+    assert manifest["attempts"][1]["semantic_verifications"][0]["verdict"] == "PASS"
+    assert manifest["attempts"][0]["located_evidence"][0]["evidence_id"] == first_evidence_id
+    assert manifest["attempts"][1]["located_evidence"][0]["evidence_id"] == first_evidence_id
+    assert len(http_calls) == 4

@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import sys
@@ -82,6 +83,505 @@ def test_engine_api_binds_receipt_to_goal2_persisted_context_bytes(tmp_path):
     assert receipt["context_hash"] == (
         "a42bf53714531498af7bd71955b39d5e8e941bb542ab77286926722786a6d725"
     )
+
+
+def _host_receipt_fixture(tmp_path):
+    """Create byte-backed v3-host artifacts for the versioned receipt contract."""
+    context = tmp_path / "rendered-context.txt"
+    context.write_bytes(b"host context\n")
+    context_hash = hashlib.sha256(context.read_bytes()).hexdigest()
+    manifest = tmp_path / "context-manifest.json"
+    manifest_bytes = json.dumps({
+        "schema_version": "ContextManifest/v2",
+        "project_id": "PROJECT:host-test",
+        "candidate_id": "C1",
+        "round_id": "1",
+        "node": "L2",
+        "persona": "Linnaeus",
+        "profile_id": "v2.1-catalog-1",
+        "persona_catalog_sha256": "1" * 64,
+        "persona_catalog_entry_sha256": "2" * 64,
+        "persona_template_sha256": "3" * 64,
+        "persona_body_sha256": "4" * 64,
+        "rendered_context_path": str(context),
+        "rendered_context_sha256": context_hash,
+        "tools_policy": "no-fs",
+    }, sort_keys=True).encode("utf-8")
+    manifest.write_bytes(manifest_bytes)
+    config_path = tmp_path / "runner.yaml"
+    config_path.write_bytes(b"provider: host_session\n")
+
+    request = tmp_path / "host-request.json"
+    request_body = {
+        "schema_version": "HostRequest/v1",
+        "kind": "cognitive",
+        "identity": {
+            "project_id": "PROJECT:host-test",
+            "candidate_id": "C1",
+            "round_id": "1",
+            "node": "L2",
+            "persona": "Linnaeus",
+            "profile_id": "v2.1-catalog-1",
+            "stage": "cognitive",
+            "attempt": 1,
+            "cursor": {
+                "project_id": "PROJECT:host-test",
+                "candidate_id": "C1",
+                "round_id": "1",
+                "as_of_commit_seq": 0,
+            },
+        },
+        "inputs": {
+            "context_manifest_path": str(manifest),
+            "context_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+            "rendered_context_path": str(context),
+            "rendered_context_sha256": context_hash,
+            "context_hash": context_hash,
+            "persona_catalog_sha256": "1" * 64,
+            "persona_catalog_entry_sha256": "2" * 64,
+            "persona_template_sha256": "3" * 64,
+            "persona_body_sha256": "4" * 64,
+            "runner_config_path": str(config_path),
+            "runner_config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
+        },
+        "tools_policy": "no-fs",
+        "output_contract": {"schema_version": "2.1", "type": "object"},
+    }
+    request_id = hashlib.sha256(json.dumps(
+        request_body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")).hexdigest()
+    request_bytes = (json.dumps(
+        {**request_body, "request_id": request_id},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ) + "\n").encode("utf-8")
+    request.write_bytes(request_bytes)
+    raw_response = tmp_path / "host-response.json"
+    raw_response_bytes = b'{"answer":"host supplied"}\r\n'
+    raw_response.write_bytes(raw_response_bytes)
+    canonical_delta = tmp_path / "canonical-delta.json"
+    canonical_bytes = b'{"candidate_id":"C1","schema_version":"2.1"}\n'
+    canonical_delta.write_bytes(canonical_bytes)
+
+    receipt = {
+        "schema_version": "RunReceipt/v3-host",
+        "node": "L2",
+        "persona": "Linnaeus",
+        "provider": "host_session",
+        "timestamp": "2026-09-28T00:00:00Z",
+        "context_hash": context_hash,
+        "project_id": "PROJECT:host-test",
+        "candidate_id": "C1",
+        "round_id": "1",
+        "profile_id": "v2.1-catalog-1",
+        "context_manifest_path": str(manifest),
+        "context_manifest_hash": hashlib.sha256(manifest_bytes).hexdigest(),
+        "rendered_context_path": str(context),
+        "rendered_context_hash": context_hash,
+        "provider_delta_path": str(canonical_delta),
+        "provider_delta_hash": hashlib.sha256(canonical_bytes).hexdigest(),
+        "host_request_path": str(request),
+        "host_request_hash": hashlib.sha256(request_bytes).hexdigest(),
+        "raw_response_path": str(raw_response),
+        "raw_response_hash": hashlib.sha256(raw_response_bytes).hexdigest(),
+        "canonical_delta_path": str(canonical_delta),
+        "canonical_delta_hash": hashlib.sha256(canonical_bytes).hexdigest(),
+        "host_session_id": "session-1",
+        "host_session_id_source": "verified",
+        "allowed_tools": ["no-fs"],
+        "everos_scope": [],
+        "git_head": "a" * 40,
+        "git_dirty": False,
+        "working_tree_diff_sha256": "b" * 64,
+        "config_sha256": "c" * 64,
+        "code_state_id": "d" * 64,
+        "exit_code": None,
+        "timed_out": None,
+        "terminal_state": None,
+        "execution_status": None,
+    }
+    receipt_path = tmp_path / "host-receipt.json"
+    receipt_path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    return receipt_path, receipt, request, raw_response, canonical_delta
+
+
+def test_host_v3_receipt_accepts_only_exact_artifact_and_context_bindings(tmp_path):
+    receipt_path, receipt, request, raw_response, canonical_delta = (
+        _host_receipt_fixture(tmp_path)
+    )
+    try:
+        accepted = RunReceipt.read(receipt_path)
+    except ValueError as exc:
+        pytest.fail(f"valid RunReceipt/v3-host rejected: {exc}")
+    assert accepted.schema_version == "RunReceipt/v3-host"
+
+    for field in (
+        "host_request_hash",
+        "raw_response_hash",
+        "canonical_delta_hash",
+    ):
+        changed = copy.deepcopy(receipt)
+        changed[field] = "0" * 64
+        receipt_path.write_text(json.dumps(changed), encoding="utf-8")
+        with pytest.raises(ValueError):
+            RunReceipt.read(receipt_path)
+
+    changed = copy.deepcopy(receipt)
+    changed["context_hash"] = "0" * 64
+    receipt_path.write_text(json.dumps(changed), encoding="utf-8")
+    with pytest.raises(ValueError):
+        RunReceipt.read(receipt_path)
+
+    context_path = Path(receipt["rendered_context_path"])
+    for artifact_path in (request, context_path, raw_response, canonical_delta):
+        artifact_bytes = artifact_path.read_bytes()
+        artifact_path.write_bytes(artifact_bytes + b"tampered")
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        with pytest.raises(ValueError):
+            RunReceipt.read(receipt_path)
+        artifact_path.write_bytes(artifact_bytes)
+
+    changed_request = json.loads(request.read_text(encoding="utf-8"))
+    changed_request["request_id"] = "0" * 64
+    changed_request_bytes = (json.dumps(
+        changed_request, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ) + "\n").encode("utf-8")
+    request.write_bytes(changed_request_bytes)
+    changed_receipt = copy.deepcopy(receipt)
+    changed_receipt["host_request_hash"] = hashlib.sha256(
+        changed_request_bytes
+    ).hexdigest()
+    receipt_path.write_text(json.dumps(changed_receipt), encoding="utf-8")
+    with pytest.raises(ValueError, match="(?i)request ID"):
+        RunReceipt.read(receipt_path)
+
+    for field, changed_value in (
+        ("context_manifest_path", str(Path(receipt["context_manifest_path"]).with_name("other-manifest.json"))),
+        ("context_manifest_sha256", "e" * 64),
+        ("rendered_context_path", str(Path(receipt["rendered_context_path"]).with_name("other-context.txt"))),
+        ("rendered_context_sha256", "f" * 64),
+    ):
+        changed_request = json.loads(request.read_text(encoding="utf-8"))
+        changed_request["inputs"][field] = changed_value
+        request_body = {
+            name: changed_request[name]
+            for name in (
+                "schema_version", "kind", "identity", "inputs", "tools_policy",
+                "output_contract",
+            )
+        }
+        changed_request["request_id"] = hashlib.sha256(json.dumps(
+            request_body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")).hexdigest()
+        changed_request_bytes = (json.dumps(
+            changed_request, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ) + "\n").encode("utf-8")
+        request.write_bytes(changed_request_bytes)
+        changed_receipt = copy.deepcopy(receipt)
+        changed_receipt["host_request_hash"] = hashlib.sha256(
+            changed_request_bytes
+        ).hexdigest()
+        receipt_path.write_text(json.dumps(changed_receipt), encoding="utf-8")
+        with pytest.raises(ValueError, match="(?i)(request|context|path|hash)"):
+            RunReceipt.read(receipt_path)
+
+
+def test_host_submit_validation_rejects_rehashed_request_with_changed_persona_template(
+    tmp_path,
+):
+    receipt_path, receipt, request_path, *_ = _host_receipt_fixture(tmp_path)
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    request["inputs"]["persona_template_sha256"] = "f" * 64
+    request_body = {key: value for key, value in request.items() if key != "request_id"}
+    request_id = hashlib.sha256(json.dumps(
+        request_body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")).hexdigest()
+    request["request_id"] = request_id
+    request_bytes = (json.dumps(
+        request, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ) + "\n").encode("utf-8")
+    request_path.write_bytes(request_bytes)
+    changed_receipt = copy.deepcopy(receipt)
+    changed_receipt["host_request_hash"] = hashlib.sha256(request_bytes).hexdigest()
+    receipt_path.write_text(json.dumps(changed_receipt), encoding="utf-8")
+
+    request.update({
+        "request_path": str(request_path),
+        "request_sha256": hashlib.sha256(request_bytes).hexdigest(),
+    })
+    action = {
+        "profile_id": request["identity"]["profile_id"],
+        "cursor": request["identity"]["cursor"],
+        "step": {
+            "node": request["identity"]["node"],
+            "persona": request["identity"]["persona"],
+            "tools_policy": request["tools_policy"],
+        },
+    }
+    with pytest.raises(RuntimeError, match="(?i)(persona|template)"):
+        run_loop._validate_host_step_request(
+            tmp_path, "C1", "1", action, request
+        )
+
+
+def test_unavailable_host_session_source_does_not_require_an_invented_id(tmp_path):
+    receipt_path, receipt, *_ = _host_receipt_fixture(tmp_path)
+    receipt["host_session_id"] = None
+    receipt["host_session_id_source"] = "unavailable"
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    try:
+        accepted = RunReceipt.read(receipt_path)
+    except ValueError as exc:
+        pytest.fail(f"unavailable host session ID should be representable: {exc}")
+    assert accepted.host_session_id is None
+    assert accepted.host_session_id_source == "unavailable"
+
+
+@pytest.mark.parametrize("source", ["verified", "declared"])
+def test_verified_or_declared_host_session_source_requires_an_id(tmp_path, source):
+    receipt_path, receipt, *_ = _host_receipt_fixture(tmp_path)
+    receipt["host_session_id"] = None
+    receipt["host_session_id_source"] = source
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="(?i)host_session_id"):
+        RunReceipt.read(receipt_path)
+
+
+def test_emit_delta_rejects_host_request_missing_context_artifact_references(
+    tmp_path, monkeypatch
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    context = project / "rendered-context.txt"
+    context.write_bytes(b"frozen context\n")
+    context_hash = hashlib.sha256(context.read_bytes()).hexdigest()
+    manifest = project / "context-manifest.json"
+    auth = {
+        "authorization_id": "AUTH:fixture",
+        "as_of_commit_seq": 0,
+        "projection_hash": "a" * 64,
+        "artifact_hash": "b" * 64,
+        "event_ids": [],
+    }
+    manifest_data = {
+        "schema_version": "ContextManifest/v2",
+        "project_id": "PROJECT:host-test",
+        "candidate_id": "C1",
+        "round_id": "1",
+        "node": "L2",
+        "persona": "Linnaeus",
+        "profile_id": "v2.1-catalog-1",
+        "persona_catalog_sha256": "c" * 64,
+        "persona_catalog_entry_sha256": "d" * 64,
+        "persona_template_sha256": "e" * 64,
+        "persona_body_sha256": "f" * 64,
+        "rendered_context_path": str(context),
+        "rendered_context_sha256": context_hash,
+        "tools_policy": "no-fs",
+        "hypothesis_authorization": auth,
+        "injected_deltas": [],
+    }
+    manifest.write_text(json.dumps(manifest_data), encoding="utf-8")
+    manifest_hash = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    cursor = {
+        "project_id": "PROJECT:host-test",
+        "candidate_id": "C1",
+        "round_id": "1",
+        "as_of_commit_seq": 0,
+        "authorized_events": [],
+        "projection_hash": "a" * 64,
+    }
+    identity = {
+        "project_id": "PROJECT:host-test",
+        "candidate_id": "C1",
+        "round_id": "1",
+        "node": "L2",
+        "persona": "Linnaeus",
+        "profile_id": "v2.1-catalog-1",
+        "cursor": cursor,
+    }
+    request = project / "08_Audit" / "host_handoff" / "requests" / "request.json"
+    request.parent.mkdir(parents=True)
+    request_data = {
+        "schema_version": "HostRequest/v1",
+        "kind": "cognitive",
+        "identity": identity,
+        "inputs": {
+            "context_hash": context_hash,
+        },
+        "tools_policy": "no-fs",
+        "output_contract": {"type": "object"},
+        "request_id": "request-id",
+    }
+    request.write_text(json.dumps(request_data), encoding="utf-8")
+    request_hash = hashlib.sha256(request.read_bytes()).hexdigest()
+    raw_response = project / "08_Audit" / "host_handoff" / "responses" / "request.raw"
+    raw_response.parent.mkdir(parents=True)
+    raw_response.write_bytes(b'{"answer":1}\n')
+    raw_hash = hashlib.sha256(raw_response.read_bytes()).hexdigest()
+    response_receipt = raw_response.with_suffix(".json")
+    response_receipt.write_text(json.dumps({
+        "request_id": "request-id",
+        "request_path": str(request),
+        "request_sha256": request_hash,
+        "raw_response_path": str(raw_response),
+        "raw_response_sha256": raw_hash,
+        "cursor": cursor,
+    }), encoding="utf-8")
+    delta = project / "delta.json"
+    delta.write_bytes(b'{"candidate_id":"C1","schema_version":"2.1"}\n')
+    delta_hash = hashlib.sha256(delta.read_bytes()).hexdigest()
+    receipt_path = project / "host-receipt.json"
+    expected = {
+        "project_id": "PROJECT:host-test",
+        "candidate_id": "C1",
+        "round_id": "1",
+        "node": "L2",
+        "persona": "Linnaeus",
+        "profile_id": "v2.1-catalog-1",
+    }
+    provider = SimpleNamespace(
+        **expected,
+        schema_version="RunReceipt/v3-host",
+        context_manifest_hash=manifest_hash,
+        rendered_context_hash=context_hash,
+        context_hash=context_hash,
+        provider_delta_path=str(delta),
+        provider_delta_hash=delta_hash,
+        raw_provider_delta_path=None,
+        raw_provider_delta_hash=None,
+        prompt_file=None,
+        prompt_hash=None,
+        host_request_path=str(request),
+        host_request_hash=request_hash,
+        raw_response_path=str(raw_response),
+        raw_response_hash=raw_hash,
+        canonical_delta_path=str(delta),
+        canonical_delta_hash=delta_hash,
+        transformation_receipt_path=None,
+        transformation_receipt_hash=None,
+        host_session_id="session-1",
+        host_session_id_source="verified",
+        allowed_tools=["no-fs"],
+        git_head="1" * 40,
+        git_dirty=False,
+        working_tree_diff_sha256="2" * 64,
+        config_sha256="3" * 64,
+        code_state_id="4" * 64,
+    )
+    monkeypatch.setattr(
+        ledger_commands.RunReceipt,
+        "read",
+        classmethod(lambda _cls, _path: provider),
+    )
+    monkeypatch.setattr(
+        ledger_commands,
+        "resolve_persona_template",
+        lambda *_args: SimpleNamespace(
+            catalog_sha256="c" * 64,
+            entry_sha256="d" * 64,
+            template_sha256="e" * 64,
+            body_sha256="f" * 64,
+        ),
+    )
+
+    class Ledger:
+        def load_authorized_context(self, _project, _authorization_id):
+            return {
+                **auth,
+                "candidate_id": "C1",
+                "round_id": "1",
+                "node": "L2",
+            }
+
+        def snapshot_candidate(self, _project, candidate_id, round_id):
+            assert candidate_id == "C1"
+            assert round_id == "1"
+            return cursor
+
+    args = SimpleNamespace(
+        context_manifest=str(manifest),
+        receipt=None,
+        provider_receipt=str(receipt_path),
+        cand_id="C1",
+        node="L2",
+        persona="Linnaeus",
+        project_dir=str(project),
+    )
+    profile = SimpleNamespace(
+        delta_schema_version="2.1",
+        profile_id="v2.1-catalog-1",
+        l9_parallel=False,
+    )
+
+    with pytest.raises(ledger_commands.LedgerError, match="context artifact"):
+        ledger_commands._validate_native_receipts(
+            args,
+            profile,
+            source_file=delta,
+            project_id="PROJECT:host-test",
+            round_id="1",
+            ledger=Ledger(),
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        pytest.param({"exit_code": 0}, id="fabricated-exit-code"),
+        pytest.param({"timed_out": False}, id="fabricated-timeout"),
+        pytest.param({"command": "claude --print"}, id="fabricated-subprocess-command"),
+        pytest.param({"http_status": 200}, id="fabricated-http-status"),
+        pytest.param({"persona": "DifferentPersona"}, id="changed-persona"),
+        pytest.param({"allowed_tools": ["filesystem-write"]}, id="changed-tool-policy"),
+    ],
+)
+def test_host_v3_receipt_rejects_fabricated_execution_or_changed_identity(tmp_path, mutation):
+    receipt_path, receipt, *_ = _host_receipt_fixture(tmp_path)
+    changed = copy.deepcopy(receipt)
+    changed.update(mutation)
+    receipt_path.write_text(json.dumps(changed), encoding="utf-8")
+    with pytest.raises(ValueError):
+        RunReceipt.read(receipt_path)
+
+
+@pytest.mark.parametrize("schema_version", ["RunReceipt/v1", "RunReceipt/v2"])
+def test_existing_v1_and_v2_receipts_remain_readable(tmp_path, schema_version):
+    receipt = {
+        "schema_version": schema_version,
+        "node": "L2",
+        "persona": "Linnaeus",
+        "provider": "command",
+        "timestamp": "2026-09-28T00:00:00Z",
+        "context_hash": "a" * 64,
+        "project_id": "PROJECT:host-test",
+        "candidate_id": "C1",
+        "round_id": "1",
+        "profile_id": "v2.1-catalog-1",
+        "context_manifest_path": str(tmp_path / "manifest.json"),
+        "context_manifest_hash": "b" * 64,
+        "rendered_context_path": str(tmp_path / "context.txt"),
+        "rendered_context_hash": "a" * 64,
+        "prompt_file": str(tmp_path / "prompt.txt"),
+        "prompt_hash": "c" * 64,
+        "provider_delta_path": str(tmp_path / "delta.json"),
+        "provider_delta_hash": "d" * 64,
+    }
+    if schema_version == "RunReceipt/v2":
+        receipt.update({
+            "git_head": "e" * 40,
+            "git_dirty": False,
+            "working_tree_diff_sha256": "f" * 64,
+            "config_sha256": "1" * 64,
+            "code_state_id": "2" * 64,
+            "raw_provider_delta_path": str(tmp_path / "delta.json"),
+            "raw_provider_delta_hash": "d" * 64,
+        })
+    path = tmp_path / f"{schema_version.replace('/', '-')}.json"
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    assert RunReceipt.read(path).schema_version == schema_version
 
 
 def test_write_receipt_rejects_context_text_that_does_not_match_manifest_bytes(tmp_path):
@@ -354,6 +854,85 @@ def test_run_round_contract_escalation_stops_before_second_provider_dispatch(
     assert outcome == "node_failed:L4"
     assert provider_calls == ["called"]
     assert state["last_loopx_failure"]["recommended_action"] == "ESCALATE_ARCHITECTURE_REVIEW"
+
+
+def test_headless_round_dispatches_l05_through_existing_acquisition_owner(
+    monkeypatch, tmp_path
+):
+    l05_step = {
+        "node": "L0.5", "persona": "Curie", "profile_id": "v2.1-catalog-1",
+        "schema_version": "2.1",
+    }
+    steps = iter([l05_step, {"terminal": True, "status": "IDEA_PROPOSED"}])
+    dispatches = []
+    monkeypatch.setattr(run_loop, "next_step", lambda *_args: next(steps))
+    monkeypatch.setattr(
+        run_loop, "exec_l05",
+        lambda *args: dispatches.append(args[2]) or {"terminal_status": "FROZEN"},
+    )
+
+    outcome = run_loop.run_round(
+        str(tmp_path), "C1", SimpleNamespace(stop_policy={}),
+        SimpleNamespace(), 1, 1, {"l7_failures": 0, "node_failures": {}},
+    )
+
+    assert outcome == "terminal"
+    assert dispatches == [l05_step]
+
+
+def test_headless_round_dispatches_l7_through_existing_execution_owner(
+    monkeypatch, tmp_path
+):
+    l7_step = {
+        "node": "L7", "persona": "Turing", "profile_id": "v2.1-catalog-1",
+        "schema_version": "2.1",
+    }
+    steps = iter([
+        l7_step, l7_step, {"terminal": True, "status": "EXECUTED"},
+    ])
+    dispatches = []
+    monkeypatch.setattr(run_loop, "next_step", lambda *_args: next(steps))
+    monkeypatch.setattr(run_loop, "ensure_pre_research", lambda *_args: True)
+    monkeypatch.setattr(
+        run_loop, "exec_turing",
+        lambda *args: dispatches.append(args[2]) or True,
+    )
+
+    outcome = run_loop.run_round(
+        str(tmp_path), "C1",
+        SimpleNamespace(stop_policy={"max_l7_failures": 2, "max_node_failures": 2}),
+        SimpleNamespace(), 1, 1, {"l7_failures": 0, "node_failures": {}},
+    )
+
+    assert outcome == "terminal"
+    assert dispatches == [l7_step]
+
+
+def test_headless_round_finalizes_l10c_through_existing_report_command(
+    monkeypatch, tmp_path
+):
+    l10c_step = {
+        "node": "L10c", "persona": "Jobs", "profile_id": "v2.1-catalog-1",
+        "schema_version": "2.1",
+    }
+    calls = []
+    monkeypatch.setattr(run_loop, "next_step", lambda *_args: l10c_step)
+    monkeypatch.setattr(run_loop, "ensure_pre_research", lambda *_args: True)
+    monkeypatch.setattr(
+        run_loop, "_ctl",
+        lambda *args: calls.append(args) or SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        ),
+    )
+
+    outcome = run_loop.run_round(
+        str(tmp_path), "C1",
+        SimpleNamespace(stop_policy={"max_l7_failures": 2, "max_node_failures": 2}),
+        SimpleNamespace(), 1, 1, {"l7_failures": 0, "node_failures": {}},
+    )
+
+    assert outcome == "completed"
+    assert calls == [("aggregate-report", str(tmp_path), "C1")]
 
 
 def test_exec_cognitive_classifies_provider_exception_and_fails_closed(
@@ -659,7 +1238,7 @@ def test_cmd_run_records_incomplete_l05_stop_without_stop_policy(tmp_path, monke
     monkeypatch.setattr(pre_e2e_closure, "audit_static_closure",
                         lambda *_: {"e2e_start_allowed": True})
     monkeypatch.setattr(run_loop, "preflight_providers", lambda *_: True)
-    monkeypatch.setattr(run_loop, "run_round", lambda *_: {
+    monkeypatch.setattr(run_loop, "run_round", lambda *_, **__: {
         "terminal_status": "L0_5_INSUFFICIENT_STOP", "completed": False,
         "full_dag_completed": False, "terminal_reason": "no_admissible_replan",
         "acquisition_run_id": "EMPTY", "acquisition_manifest_path": "manifest.json",
@@ -810,6 +1389,110 @@ def test_existing_l7_pre_research_continues_without_provider_dispatch(
         str(project), "C1", "L7", SimpleNamespace(),
         SimpleNamespace(provider=None), tmp_path / "run",
     ) is True
+
+
+def test_malformed_review_response_is_a_blocker_not_a_skipped_review(
+    tmp_path, monkeypatch
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "FINAL_REPORT.md").write_text("Reviewable report\n", encoding="utf-8")
+    monkeypatch.setattr(run_loop, "next_step", lambda *_args: {
+        "profile_id": PROFILE_V21_CATALOG_1,
+    })
+    monkeypatch.setattr(run_loop, "load_delta", lambda *_args: None)
+    monkeypatch.setattr(run_loop, "provider_for", lambda *_args: SimpleNamespace(
+        run_agent=lambda *_a, **_kw: {"unexpected": "no review schema fields"}
+    ))
+
+    with pytest.raises((ValueError, RuntimeError), match="(?i)(review|schema|contract)"):
+        run_loop.run_review_gate(
+            str(project), "C1", SimpleNamespace(), SimpleNamespace(), tmp_path / "run"
+        )
+
+
+def test_optional_review_disabled_never_starts_review_provider(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    candidate_dir = project / "01_Candidates"
+    candidate_dir.mkdir(parents=True)
+    (candidate_dir / "C1.md").write_text("candidate\n", encoding="utf-8")
+    config = project / "runner.yaml"
+    config.write_text("provider: fixture\n", encoding="utf-8")
+    cfg = SimpleNamespace(
+        mode=None, max_rounds=1, review={"enabled": False}, stop_policy={},
+        source_path=str(config),
+    )
+    monkeypatch.setattr(run_loop.l0_preflight, "validate_project_ready",
+                        lambda *_args, **_kwargs: {"status": "PASS"})
+    monkeypatch.setattr(run_loop, "_formal_runtime_preflight", lambda: True)
+    monkeypatch.setattr(run_loop, "_ctl", lambda *_args: SimpleNamespace(
+        returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr(run_loop.orch.ProviderConfig, "load", lambda *_args: cfg)
+    monkeypatch.setattr(run_loop, "restore_previous_round",
+                        lambda *_args: {"binding_status": "NOT_APPLICABLE"})
+    from research_loop import pre_e2e_closure
+    monkeypatch.setattr(pre_e2e_closure, "audit_static_closure",
+                        lambda *_args: {"e2e_start_allowed": True})
+    monkeypatch.setattr(run_loop, "preflight_providers", lambda *_args: True)
+    monkeypatch.setattr(run_loop, "run_round", lambda *_args, **_kwargs: "completed")
+    monkeypatch.setattr(run_loop, "status_of", lambda *_args: "KEEP")
+    monkeypatch.setattr(run_loop, "load_delta", lambda *_args: None)
+    monkeypatch.setattr(run_loop, "evidence_sig", lambda *_args: "fixture")
+    monkeypatch.setattr(run_loop.StopPolicy, "decide", lambda *_args, **_kwargs: {
+        "stop": True, "reason": "fixture terminal",
+    })
+    monkeypatch.setattr(
+        run_loop, "run_review_gate",
+        lambda *_args: pytest.fail("disabled optional REVIEW invoked provider path"),
+    )
+    args = SimpleNamespace(
+        project_dir=str(project), cand_id="C1", knowledge_store=None,
+        dry_run=False, config=str(config), provider=None, max_rounds=1,
+        no_review=False, resume=False,
+    )
+
+    assert run_loop.cmd_run(args) == 0
+
+
+@pytest.mark.parametrize("node", ["L4", "L8.5", "L7"])
+def test_agent_native_pre_research_helper_fails_closed_without_host_cursor(
+    node, tmp_path, monkeypatch
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "02_Agent_Notes" / "_pre_research" / f"{node}_research.md"
+    monkeypatch.setattr(run_loop, "_bound_profile_id",
+                        lambda *_args: PROFILE_V21_CATALOG_1)
+    commands = []
+
+    def controlled_command(*argv):
+        commands.append(argv)
+        if argv[0] == "audit-literature-evidence":
+            return SimpleNamespace(returncode=1, stdout="", stderr="not yet present")
+        if argv[0] == "pre-research":
+            return SimpleNamespace(returncode=0, stdout="authorized search prompt", stderr="")
+        pytest.fail(f"NESTED_COGNITION_FORBIDDEN: {argv[0]}")
+
+    monkeypatch.setattr(run_loop, "_ctl", controlled_command)
+
+    class Provider:
+        def run_text(self, *_args, **_kwargs):
+            pytest.fail("HOST_PROVIDER_FORBIDDEN: agent-native pre-research called run_text")
+
+    monkeypatch.setattr(run_loop, "provider_for", lambda *_args: Provider())
+    args = SimpleNamespace(mode="agent_native", provider=None, evidence_run_ids={})
+    result = run_loop.ensure_pre_research(
+        str(project), "C1", node, SimpleNamespace(), args, tmp_path / "run"
+    )
+
+    assert result is False, (
+        f"AGENT_NATIVE_FALLBACK: ensure_pre_research must fail closed and direct "
+        f"agent-native callers to prepare_host_step for {node}"
+    )
+    assert not target.exists()
+    assert all(command[0] != "deep-research-run" for command in commands)
+
+
 
 
 def test_runner_forwards_explicit_context_budget_to_engine(monkeypatch):
