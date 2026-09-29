@@ -1,0 +1,35 @@
+{
+  "schema_version": "ExternalReuseAudit/v1",
+  "change_id": "2026-09-28-l05-p1-strict-schema-boundary",
+  "EXISTING_IMPLEMENTATIONS_REVIEWED": [
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/l05_curie/query_planner.py",
+      "finding": "The existing Curie planner owns the model proposal schema and the authoritative L05ScientificQueryPlan/v2 validation. Its plan transport branch was an unconstrained object-or-null union."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/structured_execution.py and src/research_loop/deep_research.py",
+      "finding": "The generic structured-model boundary already checks ordinary JSON Schema, persists the schema and prompt, invokes the existing executor, and validates returned JSON. The deep-research schema shows closed nested objects with complete required lists."
+    },
+    {
+      "scope": "external",
+      "reference": "https://github.com/openai/openai-python/blob/main/src/openai/lib/_pydantic.py",
+      "finding": "OpenAI's strict-schema conversion recurses through definitions, object properties, array items, and anyOf branches, closes objects, and lists all properties as required. RLR adopts the relevant structural checks but rejects incompatible transport schemas instead of silently rewriting them."
+    }
+  ],
+  "REUSABLE_COMPONENTS": [
+    {
+      "reference": "src/research_loop/l05_curie/query_planner.py",
+      "disposition": "EXTEND",
+      "reason": "Expand the one existing proposal schema to describe the complete model-owned plan shape while leaving scientific validation and RLR-owned provenance in place."
+    },
+    {
+      "reference": "src/research_loop/structured_execution.py",
+      "disposition": "EXTEND",
+      "reason": "Add a small Codex strict transport check next to the existing JSON Schema check before persistence or provider dispatch; do not introduce a new validator framework."
+    }
+  ],
+  "ADOPTED_PATTERN": "EXTEND",
+  "WHY_NEW_CODE_IS_NECESSARY": "Ordinary Draft 2020-12 validation accepts the old open plan object, while Codex strict Structured Outputs rejects it. Extending the existing proposal schema and provider boundary closes that transport gap without moving scientific or provenance authority."
+}

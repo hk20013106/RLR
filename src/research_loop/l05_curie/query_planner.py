@@ -14,6 +14,8 @@ from itertools import combinations
 from pathlib import Path
 from typing import Any
 
+from jsonschema import Draft202012Validator
+
 from research_loop import research_seed
 
 from .contracts import CurieContractError
@@ -22,13 +24,99 @@ SCIENTIFIC_QUERY_PLAN_SCHEMA_VERSION = "L05ScientificQueryPlan/v1"
 SCIENTIFIC_QUERY_PLANNER_VERSION = "scientific-query-planner/v1"
 SCIENTIFIC_QUERY_PLAN_V2 = "L05ScientificQueryPlan/v2"
 SCIENTIFIC_QUERY_PLANNER_V2 = "scientific-query-planner/v2"
+_SYNONYM_PROPOSAL_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "term": {"type": "string"},
+        "source_type": {"type": "string"},
+        "source_field": {"type": "string"},
+        "text_snippet": {"type": "string"},
+        "source_hash": {"type": "string"},
+        "start": {"type": "integer"},
+        "end": {"type": "integer"},
+        "mapping_source": {"type": "string"},
+        "mapping_version": {"type": "string"},
+        "mapping_evidence": {"type": "string"},
+        "mapping_evidence_start": {"type": "integer"},
+        "mapping_key": {"type": "string"},
+    },
+    "required": [
+        "term", "source_type", "source_field", "text_snippet", "source_hash",
+        "start", "end", "mapping_source", "mapping_version", "mapping_evidence",
+        "mapping_evidence_start", "mapping_key",
+    ],
+}
+_ANCHOR_PROPOSAL_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "concept_id": {"type": "string"},
+        "term": {"type": "string"},
+        "source_type": {"type": "string"},
+        "source_field": {"type": "string"},
+        "text_snippet": {"type": "string"},
+        "source_hash": {"type": "string"},
+        "start": {"type": "integer"},
+        "end": {"type": "integer"},
+        "synonyms": {"type": "array", "items": _SYNONYM_PROPOSAL_SCHEMA},
+    },
+    "required": [
+        "concept_id", "term", "source_type", "source_field", "text_snippet",
+        "source_hash", "start", "end", "synonyms",
+    ],
+}
+_PLAN_PROPOSAL_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "schema_version": {"type": "string", "const": SCIENTIFIC_QUERY_PLAN_V2},
+        "planner": {"type": "string", "const": SCIENTIFIC_QUERY_PLANNER_V2},
+        "seed_sha256": {"type": "string"},
+        "reformulation_index": {"type": "integer"},
+        "core_anchors": {"type": "array", "items": _ANCHOR_PROPOSAL_SCHEMA},
+        "optional_concepts": {"type": "array", "items": _ANCHOR_PROPOSAL_SCHEMA},
+        "unresolved_entities": {"type": "array", "items": {"type": "string"}},
+        "advisory_search_constraints": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "text": {"type": "string"},
+                    "source_attempt": {"type": "integer"},
+                    "evidence_ids": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["text", "source_attempt", "evidence_ids"],
+            },
+        },
+        "intents": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "intent_id": {"type": "string"},
+                    "core_concept_ids": {"type": "array", "items": {"type": "string"}},
+                    "optional_concept_ids": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["intent_id", "core_concept_ids", "optional_concept_ids"],
+            },
+        },
+    },
+    "required": [
+        "schema_version", "planner", "seed_sha256", "reformulation_index",
+        "core_anchors", "optional_concepts", "unresolved_entities",
+        "advisory_search_constraints", "intents",
+    ],
+}
 _PROPOSAL_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
         "status": {"type": "string", "enum": ["PLAN", "NO_ADMISSIBLE_REPLAN"]},
         "reason": {"type": "string", "minLength": 1},
-        "plan": {"type": ["object", "null"]},
+        "plan": {"anyOf": [_PLAN_PROPOSAL_SCHEMA, {"type": "null"}]},
     },
     "required": ["status", "reason", "plan"],
 }

@@ -6,6 +6,7 @@ import json
 from itertools import combinations
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from research_loop import research_seed
 from research_loop.l05_curie import CurieContractError
@@ -67,6 +68,127 @@ def _plan(seed):
             "optional_concept_ids": [],
         }],
     }
+
+
+def _strict_schema_plan_payload():
+    seed = _seed()
+    seed["scientific_question"] = "Does carbon dioxide (CO2) alter yeast sensing?"
+    plan = _plan(seed)
+    for key in (
+        "target_question_sha256", "parent_plan_content_hash", "feedback_sha256",
+        "feedback_gap_ids",
+    ):
+        plan.pop(key)
+    plan["reformulation_index"] = 1
+    plan["core_anchors"][0]["synonyms"] = [{
+        "term": "CO2", "source_type": "QUESTION", "source_field": "scientific_question",
+        "text_snippet": "CO2",
+        "source_hash": hashlib.sha256(seed["scientific_question"].encode()).hexdigest(),
+        "start": seed["scientific_question"].index("CO2"),
+        "end": seed["scientific_question"].index("CO2") + 3,
+        "mapping_source": "authorized_seed_parenthetical", "mapping_version": "v1",
+        "mapping_evidence": "carbon dioxide (CO2)",
+        "mapping_evidence_start": seed["scientific_question"].index("carbon dioxide (CO2)"),
+        "mapping_key": hashlib.sha256(b"carbon dioxide (CO2)").hexdigest(),
+    }]
+    plan["core_anchors"][1]["synonyms"] = []
+    plan["optional_concepts"] = [_anchor(seed, "scientific_question", "yeast", "yeast")]
+    plan["optional_concepts"][0]["synonyms"] = []
+    plan["advisory_search_constraints"] = [{
+        "text": "prior limitation", "source_attempt": 1, "evidence_ids": ["E1"],
+    }]
+    plan["intents"][0]["optional_concept_ids"] = ["yeast"]
+    return {"status": "PLAN", "reason": "source-bound terms", "plan": plan}
+
+
+def _assert_strict_schema_objects(schema, path="$"):
+    kind = schema.get("type")
+    if kind == "object" or isinstance(kind, list) and "object" in kind:
+        assert schema.get("additionalProperties") is False, path
+        properties = schema.get("properties")
+        assert isinstance(properties, dict), path
+        required = schema.get("required")
+        assert isinstance(required, list) and len(required) == len(properties), path
+        assert set(required) == set(properties), path
+    for key, child in schema.get("properties", {}).items():
+        _assert_strict_schema_objects(child, f"{path}.properties.{key}")
+    if "items" in schema:
+        _assert_strict_schema_objects(schema["items"], f"{path}.items")
+    for index, child in enumerate(schema.get("anyOf", [])):
+        _assert_strict_schema_objects(child, f"{path}.anyOf[{index}]")
+
+
+def test_strict_schema_planner_objects_are_closed_and_complete():
+    schema = query_planner._PROPOSAL_SCHEMA
+    assert schema["type"] == "object"
+    assert "anyOf" not in schema
+    _assert_strict_schema_objects(schema)
+    plan = schema["properties"]["plan"]["anyOf"][0]
+    assert plan["type"] == "object"
+    assert schema["properties"]["plan"]["anyOf"][1] == {"type": "null"}
+    assert set(plan["properties"]) == {
+        "schema_version", "planner", "seed_sha256", "reformulation_index",
+        "core_anchors", "optional_concepts", "unresolved_entities",
+        "advisory_search_constraints", "intents",
+    }
+
+
+def test_strict_schema_full_plan_payload_is_admitted():
+    Draft202012Validator(query_planner._PROPOSAL_SCHEMA).validate(
+        _strict_schema_plan_payload()
+    )
+
+
+def test_strict_schema_no_admissible_replan_null_is_admitted():
+    Draft202012Validator(query_planner._PROPOSAL_SCHEMA).validate({
+        "status": "NO_ADMISSIBLE_REPLAN", "reason": "exhausted", "plan": None,
+    })
+
+
+@pytest.mark.parametrize("location,key", [
+    ("root", "untrusted"),
+    ("plan", "target_question_sha256"),
+    ("core", "untrusted"),
+    ("optional", "untrusted"),
+    ("synonym", "untrusted"),
+    ("advisory", "untrusted"),
+    ("intent", "untrusted"),
+])
+def test_strict_schema_rejects_extra_fields_at_every_object(location, key):
+    payload = _strict_schema_plan_payload()
+    target = {
+        "root": payload,
+        "plan": payload["plan"],
+        "core": payload["plan"]["core_anchors"][0],
+        "optional": payload["plan"]["optional_concepts"][0],
+        "synonym": payload["plan"]["core_anchors"][0]["synonyms"][0],
+        "advisory": payload["plan"]["advisory_search_constraints"][0],
+        "intent": payload["plan"]["intents"][0],
+    }[location]
+    target[key] = "unauthorized"
+    assert not Draft202012Validator(query_planner._PROPOSAL_SCHEMA).is_valid(payload)
+
+
+@pytest.mark.parametrize("location,key", [
+    ("plan", "optional_concepts"),
+    ("core", "synonyms"),
+    ("optional", "synonyms"),
+    ("synonym", "mapping_key"),
+    ("advisory", "evidence_ids"),
+    ("intent", "optional_concept_ids"),
+])
+def test_strict_schema_requires_all_nested_fields(location, key):
+    payload = _strict_schema_plan_payload()
+    target = {
+        "plan": payload["plan"],
+        "core": payload["plan"]["core_anchors"][0],
+        "optional": payload["plan"]["optional_concepts"][0],
+        "synonym": payload["plan"]["core_anchors"][0]["synonyms"][0],
+        "advisory": payload["plan"]["advisory_search_constraints"][0],
+        "intent": payload["plan"]["intents"][0],
+    }[location]
+    target.pop(key)
+    assert not Draft202012Validator(query_planner._PROPOSAL_SCHEMA).is_valid(payload)
 
 
 def _composite_replan_fixture(*, execute_last_singleton=False):

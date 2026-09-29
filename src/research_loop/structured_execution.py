@@ -34,6 +34,39 @@ def _sha(value: str | bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _check_codex_strict_schema(schema: dict) -> None:
+    """Check transport shape only; domain validators own payload semantics."""
+    if schema.get("type") != "object" or "anyOf" in schema:
+        raise StructuredExecutionError("structured model schema $: root must be an object without anyOf")
+
+    def visit(node: dict, path: str) -> None:
+        kind = node.get("type")
+        if kind == "object" or isinstance(kind, list) and "object" in kind:
+            if node.get("additionalProperties") is not False:
+                raise StructuredExecutionError(
+                    f"structured model schema {path}: additionalProperties must be false"
+                )
+            properties = node.get("properties")
+            if not isinstance(properties, dict):
+                raise StructuredExecutionError(
+                    f"structured model schema {path}: object must define properties"
+                )
+            required = node.get("required")
+            if (not isinstance(required, list) or len(required) != len(properties)
+                    or set(required) != set(properties)):
+                raise StructuredExecutionError(
+                    f"structured model schema {path}: required must list every property exactly once"
+                )
+        for name, child in node.get("properties", {}).items():
+            visit(child, f"{path}.properties.{name}")
+        if "items" in node:
+            visit(node["items"], f"{path}.items")
+        for index, child in enumerate(node.get("anyOf", [])):
+            visit(child, f"{path}.anyOf[{index}]")
+
+    visit(schema, "$")
+
+
 def build_invocation(spec: Any, schema_path: str | Path) -> list[str]:
     backend = str(getattr(spec, "backend", "") or "").strip()
     executable = str(getattr(spec, "executable", "") or "").strip()
@@ -109,6 +142,8 @@ def run_structured_model(
         Draft202012Validator.check_schema(schema)
     except Exception as exc:
         raise StructuredExecutionError(f"structured model schema is invalid: {exc}") from exc
+    if getattr(spec, "backend", None) == "codex":
+        _check_codex_strict_schema(schema)
     work = Path(work_dir)
     schema_bytes = json.dumps(schema, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
     schema_path = work / "structured_model_output.schema.json"
