@@ -69,6 +69,20 @@ def test_run_cli_forwards_argv_verbatim():
     assert seen["argv"] == ["emit-delta", "P", "C", "--node", "L0"]
 
 
+def test_run_cli_normalizes_pathlike_before_real_argparse(tmp_path):
+    project_path = tmp_path / "project"
+    try:
+        result = EngineAPI().run_cli("audit-pre-research", project_path)
+    except TypeError as exc:
+        pytest.fail(
+            "run_cli passed pathlib.Path to the real argparse parser without "
+            f"converting it to a CLI string: {exc}"
+        )
+
+    assert result.returncode == 0
+    assert Path(json.loads(result.stdout)["project_dir"]) == project_path
+
+
 # --- typed methods: same parse / raise as the old run_loop helpers -----------
 
 def test_next_step_parses_json():

@@ -27,6 +27,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,9 +108,13 @@ class EngineAPI:
         out, err = io.StringIO(), io.StringIO()
         rc = 0
         main = self._main()
+        cli_argv = [
+            os.fspath(arg) if isinstance(arg, os.PathLike) else arg
+            for arg in argv
+        ]
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
-                rc = main(list(argv))
+                rc = main(cli_argv)
             except SystemExit as e:  # argparse / --help / --version
                 rc = _norm_exit(e.code)
         return CtlResult(0 if rc is None else int(rc),
