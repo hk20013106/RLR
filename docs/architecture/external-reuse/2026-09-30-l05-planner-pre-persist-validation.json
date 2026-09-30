@@ -1,0 +1,35 @@
+{
+  "schema_version": "ExternalReuseAudit/v1",
+  "change_id": "2026-09-30-l05-planner-pre-persist-validation",
+  "EXISTING_IMPLEMENTATIONS_REVIEWED": [
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/l05_curie/query_planner.py",
+      "finding": "validate_scientific_query_plan_response is the existing authoritative validator for raw L0.5 planner response bytes and the ResearchSeed-bound planner request."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/l05_curie/europepmc_runtime.py and src/research_loop/host_handoff.py",
+      "finding": "The L0.5 runtime owns planner submission and checkpoint updates; host_handoff.submit_response owns immutable raw bytes and receipt persistence. Planner validation currently occurs later during continuation."
+    },
+    {
+      "scope": "external",
+      "reference": "https://github.com/VilledeMontreal/express-idempotency/blob/master/src/services/idempotencyService.ts",
+      "finding": "The implementation validates whether a completed response is eligible for persistence before updating the idempotency resource, and deletes the in-progress resource when response validation or processing fails so a corrected attempt can proceed. This is a lifecycle pattern, not reusable RLR code."
+    }
+  ],
+  "REUSABLE_COMPONENTS": [
+    {
+      "reference": "src/research_loop/l05_curie/query_planner.py:validate_scientific_query_plan_response",
+      "disposition": "REUSE",
+      "reason": "Use the single existing planner contract validator before the durable host response write; do not add a competing validator."
+    },
+    {
+      "reference": "src/research_loop/host_handoff.py:submit_response",
+      "disposition": "REUSE",
+      "reason": "Keep the generic write-once raw and receipt semantics unchanged and call them only after the L0.5 planner contract accepts the response."
+    }
+  ],
+  "ADOPTED_PATTERN": "ADAPT",
+  "WHY_NEW_CODE_IS_NECESSARY": "The existing canonical validator is already sufficient, but the L0.5 planner submit boundary currently calls it only after immutable response persistence during continuation. Adapt the caller ordering to validate the submitted planner bytes first, then reuse the existing immutable persistence owner; no new validator, retry framework, or host_handoff behavior is needed."
+}

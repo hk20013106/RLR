@@ -2500,6 +2500,18 @@ def submit_acquisition_host_response(
         allowed = {"entailment", "scope_match", "context_preserved", "qualification_preserved", "reason"}
         if not isinstance(answer, dict) or set(answer) != allowed:
             raise CurieAcquisitionError("MODEL_CONTRACT_ERROR", "semantic host response must contain only assessor fields")
+    elif stage == "planner":
+        try:
+            raw = Path(response_path).read_bytes()
+            validate_scientific_query_plan_response(
+                seed,
+                request=request["inputs"]["planner_request"],
+                raw_response=raw,
+            )
+        except (OSError, CurieContractError) as exc:
+            raise CurieAcquisitionError(
+                "MODEL_CONTRACT_ERROR", f"planner host response rejected: {exc}"
+            ) from exc
     try:
         receipt = host_handoff.submit_response(
             project, str(request_id), response_path,

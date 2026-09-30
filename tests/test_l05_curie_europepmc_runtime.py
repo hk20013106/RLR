@@ -1760,6 +1760,71 @@ def test_host_acquisition_checkpoint_is_versioned_and_resumes_same_request(
     assert resumed["checkpoint"]["phase"] == "REQUEST_PREPARED"
 
 
+def test_host_planner_invalid_contract_is_rejected_before_persist_and_same_request_can_be_corrected(
+    tmp_path, monkeypatch,
+):
+    project, seed = _host_project(tmp_path, monkeypatch)
+    prepare, submit, _continue_run = _acquisition_host_api()
+    prepared = prepare(project, "C001", run_id="HOST_INVALID_CORRECTION")
+    request_id = prepared["request_id"]
+    response_dir = project / "08_Audit" / "host_handoff" / "responses"
+    raw_path = response_dir / f"{request_id}.raw"
+    receipt_path = response_dir / f"{request_id}.json"
+
+    invalid_plan = _host_planner_plan(seed)
+    invalid_plan["core_anchors"][0]["source_type"] = "question"
+    invalid_response = project / "invalid-planner-response.json"
+    invalid_response.write_bytes(json.dumps({
+        "status": "PLAN", "reason": "invalid source type", "plan": invalid_plan,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+
+    rejection = None
+    try:
+        submit(project, "C001", request_id, invalid_response)
+    except CurieContractError as exc:
+        rejection = exc
+
+    if rejection is None:
+        checkpoint_after_invalid_submit = json.loads(
+            (project / prepared["checkpoint_path"]).read_text(encoding="utf-8")
+        )
+        assert raw_path.is_file()
+        assert receipt_path.is_file()
+        assert request_id in checkpoint_after_invalid_submit["planner_responses"]
+        pytest.fail(
+            "contract-invalid planner response was durably persisted before validation"
+        )
+
+    assert "MODEL_CONTRACT_ERROR" in str(rejection)
+    assert "source is not authorized" in str(rejection)
+    assert not raw_path.exists()
+    assert not receipt_path.exists()
+    checkpoint_after_rejection = json.loads(
+        (project / prepared["checkpoint_path"]).read_text(encoding="utf-8")
+    )
+    assert checkpoint_after_rejection["phase"] == "REQUEST_PREPARED"
+    assert checkpoint_after_rejection["current_request_id"] == request_id
+    assert request_id not in checkpoint_after_rejection["planner_responses"]
+    assert checkpoint_after_rejection.get("response_sha256") is None
+
+    corrected_response = project / "corrected-planner-response.json"
+    corrected_response.write_bytes(json.dumps({
+        "status": "PLAN", "reason": "valid fixture plan",
+        "plan": _host_planner_plan(seed),
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    receipt = submit(project, "C001", request_id, corrected_response)
+
+    assert receipt["request_id"] == request_id
+    assert raw_path.is_file()
+    assert receipt_path.is_file()
+    checkpoint_after_correction = json.loads(
+        (project / prepared["checkpoint_path"]).read_text(encoding="utf-8")
+    )
+    assert checkpoint_after_correction["phase"] == "RESPONSE_RECORDED"
+    assert checkpoint_after_correction["planner_responses"][request_id] == receipt
+    assert checkpoint_after_correction["response_sha256"] == receipt["raw_response_sha256"]
+
+
 def test_host_acquisition_resume_after_validated_checkpoint_does_not_repeat_http(
     tmp_path, monkeypatch,
 ):
