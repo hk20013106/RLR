@@ -24,91 +24,36 @@ SCIENTIFIC_QUERY_PLAN_SCHEMA_VERSION = "L05ScientificQueryPlan/v1"
 SCIENTIFIC_QUERY_PLANNER_VERSION = "scientific-query-planner/v1"
 SCIENTIFIC_QUERY_PLAN_V2 = "L05ScientificQueryPlan/v2"
 SCIENTIFIC_QUERY_PLANNER_V2 = "scientific-query-planner/v2"
-_SYNONYM_PROPOSAL_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "term": {"type": "string"},
-        "source_type": {"type": "string"},
-        "source_field": {"type": "string"},
-        "text_snippet": {"type": "string"},
-        "source_hash": {"type": "string"},
-        "start": {"type": "integer"},
-        "end": {"type": "integer"},
-        "mapping_source": {"type": "string"},
-        "mapping_version": {"type": "string"},
-        "mapping_evidence": {"type": "string"},
-        "mapping_evidence_start": {"type": "integer"},
-        "mapping_key": {"type": "string"},
-    },
-    "required": [
-        "term", "source_type", "source_field", "text_snippet", "source_hash",
-        "start", "end", "mapping_source", "mapping_version", "mapping_evidence",
-        "mapping_evidence_start", "mapping_key",
-    ],
-}
 _ANCHOR_PROPOSAL_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "concept_id": {"type": "string"},
-        "term": {"type": "string"},
-        "source_type": {"type": "string"},
-        "source_field": {"type": "string"},
-        "text_snippet": {"type": "string"},
-        "source_hash": {"type": "string"},
-        "start": {"type": "integer"},
-        "end": {"type": "integer"},
-        "synonyms": {"type": "array", "items": _SYNONYM_PROPOSAL_SCHEMA},
+        "source_field": {"type": "string", "enum": ["scientific_question", "hypothesis_seed"]},
+        "text_snippet": {"type": "string", "minLength": 1},
     },
-    "required": [
-        "concept_id", "term", "source_type", "source_field", "text_snippet",
-        "source_hash", "start", "end", "synonyms",
-    ],
+    "required": ["source_field", "text_snippet"],
 }
 _PLAN_PROPOSAL_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "schema_version": {"type": "string", "const": SCIENTIFIC_QUERY_PLAN_V2},
-        "planner": {"type": "string", "const": SCIENTIFIC_QUERY_PLANNER_V2},
-        "seed_sha256": {"type": "string"},
-        "reformulation_index": {"type": "integer"},
-        "core_anchors": {"type": "array", "items": _ANCHOR_PROPOSAL_SCHEMA},
-        "optional_concepts": {"type": "array", "items": _ANCHOR_PROPOSAL_SCHEMA},
-        "unresolved_entities": {"type": "array", "items": {"type": "string"}},
-        "advisory_search_constraints": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "text": {"type": "string"},
-                    "source_attempt": {"type": "integer"},
-                    "evidence_ids": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["text", "source_attempt", "evidence_ids"],
-            },
-        },
+        "core_anchors": {"type": "array", "minItems": 1, "items": _ANCHOR_PROPOSAL_SCHEMA},
+        "optional_anchors": {"type": "array", "items": _ANCHOR_PROPOSAL_SCHEMA},
         "intents": {
-            "type": "array",
+            "type": "array", "minItems": 1,
             "items": {
-                "type": "object",
-                "additionalProperties": False,
+                "type": "object", "additionalProperties": False,
                 "properties": {
-                    "intent_id": {"type": "string"},
-                    "core_concept_ids": {"type": "array", "items": {"type": "string"}},
-                    "optional_concept_ids": {"type": "array", "items": {"type": "string"}},
+                    "optional_anchor_indices": {
+                        "type": "array", "uniqueItems": True,
+                        "items": {"type": "integer", "minimum": 0},
+                    },
                 },
-                "required": ["intent_id", "core_concept_ids", "optional_concept_ids"],
+                "required": ["optional_anchor_indices"],
             },
         },
     },
-    "required": [
-        "schema_version", "planner", "seed_sha256", "reformulation_index",
-        "core_anchors", "optional_concepts", "unresolved_entities",
-        "advisory_search_constraints", "intents",
-    ],
+    "required": ["core_anchors", "optional_anchors", "intents"],
 }
 _PROPOSAL_SCHEMA = {
     "type": "object",
@@ -119,6 +64,15 @@ _PROPOSAL_SCHEMA = {
         "plan": {"anyOf": [_PLAN_PROPOSAL_SCHEMA, {"type": "null"}]},
     },
     "required": ["status", "reason", "plan"],
+}
+_CANDIDATE_SELECTION_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "status": {"type": "string", "enum": ["SELECT_CANDIDATE"]},
+        "reason": {"type": "string", "minLength": 1},
+        "candidate_id": {"type": "string", "minLength": 1},
+    },
+    "required": ["status", "reason", "candidate_id"],
 }
 MIN_QUERY_CANDIDATES = 3
 MAX_QUERY_CANDIDATES = 6
@@ -808,36 +762,49 @@ def compile_scientific_query_plan(plan: dict, *, seed: dict) -> list[dict]:
     return result
 
 
+def _scientific_intent(plan: dict) -> dict:
+    """Project a formal plan into the scientific choices exposed to cognition."""
+    optional_indices = {item["concept_id"]: index
+                        for index, item in enumerate(plan["optional_concepts"])}
+    return {
+        "core_anchors": [{"source_field": item["source_field"],
+                          "text_snippet": item["text_snippet"]}
+                         for item in plan["core_anchors"]],
+        "optional_anchors": [{"source_field": item["source_field"],
+                              "text_snippet": item["text_snippet"]}
+                             for item in plan["optional_concepts"]],
+        "intents": [{"optional_anchor_indices": [optional_indices[key]
+                     for key in intent.get("optional_concept_ids", [])]}
+                    for intent in plan["intents"]],
+    }
+
+
 def _planner_prompt(seed: dict, *, reformulation_index: int,
                     feedback: dict | None) -> str:
-    authorized = {
-        "candidate_id": seed.get("candidate_id"),
-        "round_id": seed.get("round_id"),
-        "scientific_question": seed.get("scientific_question"),
-        "hypothesis_seed": seed.get("hypothesis_seed"),
-        "seed_sha256": research_seed.seed_sha256(seed),
-        "question_sha256": hashlib.sha256(
-            str(seed.get("scientific_question") or "").encode("utf-8")
-        ).hexdigest(),
-        "hypothesis_sha256": hashlib.sha256(
-            str(seed.get("hypothesis_seed") or "").encode("utf-8")
-        ).hexdigest(),
-    }
     context = {
-        "authorized_seed": authorized,
+        "authorized_seed": {field: seed[field]
+                            for field in ("scientific_question", "hypothesis_seed")},
         "reformulation_index": reformulation_index,
-        "validated_feedback": feedback,
+        "validated_feedback": None if feedback is None else {
+            "previous_scientific_intent": _scientific_intent(feedback["previous_plan"]),
+            "attempt_outcome": feedback.get("attempt_outcome"),
+            "validated_coverage_gaps": feedback.get("validated_coverage_gaps", []),
+            "semantic_rejections": feedback.get("semantic_rejections", []),
+            "executed_queries": [item["query"] for item in feedback.get("executed_queries", [])],
+        },
     }
     return (
-        "Propose only a L05ScientificQueryPlan/v2 for Europe PMC. Use CORE terms "
-        "only as exact spans of the supplied question or initial hypothesis; mark "
-        "source field, source type, snippet, source hash and span. Do not invent "
-        "synonyms or entity mappings. Keep unknown abbreviations unresolved. "
-        "Do not generate NOT, negative exclusions, evidence judgments or claimed "
-        "scientific results. Search must remain open to support, refutation and "
-        "limitations. For replans use only validated feedback; preserve all prior "
-        "CORE anchors. A proposal without a legal new query may use "
-        "NO_ADMISSIBLE_REPLAN only after feedback. Return the schema object.\n"
+        "Propose only scientific intent for Europe PMC. In plan choose core_anchors "
+        "and optional_anchors using only source_field and text_snippet. Each snippet "
+        "must be an exact, uniquely located span of the supplied seed field. Select "
+        "optional_anchor_indices for each intent; every intent automatically includes "
+        "all CORE anchors. Include a question CORE anchor. RLR materializes the formal "
+        "plan and all machine fields. Do not invent synonyms or entity mappings, "
+        "negative exclusions, evidence judgments or scientific results. Search must "
+        "remain open to support, refutation and limitations. For replans use only "
+        "validated feedback and preserve prior CORE spans. A proposal without a legal "
+        "new query may use NO_ADMISSIBLE_REPLAN with plan null only after feedback. "
+        "Return the schema object.\n"
         + json.dumps(context, ensure_ascii=False, sort_keys=True)
     )
 
@@ -896,11 +863,13 @@ def prepare_scientific_query_plan_request(
 def _check_planner_request(seed: dict, request: dict) -> tuple[dict, int, dict | None]:
     if not isinstance(request, dict) or request.get(
         "schema_version"
-    ) != "L05ScientificQueryPlanRequest/v1":
+    ) not in {"L05ScientificQueryPlanRequest/v1", "L05ScientificQueryPlanSelectionRequest/v1"}:
         raise CurieContractError("scientific planner request schema is invalid")
     if not isinstance(request.get("prompt"), str) or not request["prompt"].strip():
         raise CurieContractError("scientific planner request prompt is missing")
-    if request.get("schema") != _PROPOSAL_SCHEMA:
+    selection = request["schema_version"] == "L05ScientificQueryPlanSelectionRequest/v1"
+    expected_schema = _CANDIDATE_SELECTION_SCHEMA if selection else _PROPOSAL_SCHEMA
+    if request.get("schema") != expected_schema:
         raise CurieContractError("scientific planner request schema bytes are missing or changed")
     if request.get("seed") != seed or request.get("seed_sha256") != research_seed.seed_sha256(seed):
         raise CurieContractError("scientific planner request seed identity/hash is stale")
@@ -914,26 +883,144 @@ def _check_planner_request(seed: dict, request: dict) -> tuple[dict, int, dict |
         raise CurieContractError("scientific planner request previous-plan hash is stale")
     if request.get("request_sha256") != _planner_request_hash(request):
         raise CurieContractError("scientific planner request hash does not match its bytes")
+    if selection:
+        if feedback is None:
+            raise CurieContractError("candidate selection requires prior plan and feedback")
+        candidates = _frozen_replan_candidates(seed, feedback, index)
+        if (not candidates or request.get("candidates") != candidates
+                or request.get("candidate_set_sha256") != _sha(candidates)):
+            raise CurieContractError("candidate selection enumeration/hash binding changed")
     return seed, index, feedback
 
 
+def _frozen_replan_candidates(seed: dict, feedback: dict, index: int) -> list[dict]:
+    candidates, _audit = _admissible_replan_candidates(
+        feedback["previous_plan"], seed, feedback, index,
+    )
+    return [{"candidate_id": "candidate-" + _sha(plan), "operation": operation,
+             "candidate_sha256": _sha(plan), "plan": plan}
+            for operation, plan in candidates]
+
+
+def _candidate_selection_request(request: dict, candidates: list[dict]) -> dict:
+    """Freeze exact enumerated plans; cognition selects an identity only."""
+    next_request = copy.deepcopy(request)
+    next_request["schema_version"] = "L05ScientificQueryPlanSelectionRequest/v1"
+    next_request["schema"] = copy.deepcopy(_CANDIDATE_SELECTION_SCHEMA)
+    next_request["candidates"] = copy.deepcopy(candidates)
+    next_request["candidate_set_sha256"] = _sha(candidates)
+    summaries = [{
+        "candidate_id": item["candidate_id"], "candidate_sha256": item["candidate_sha256"],
+        "plan_content_hash": item["plan"]["plan_content_hash"], "operation": item["operation"],
+        "core_terms": [anchor["term"] for anchor in item["plan"]["core_anchors"]],
+        "queries": compile_scientific_query_plan(item["plan"], seed=request["seed"]),
+    } for item in candidates]
+    next_request["prompt"] = (
+        "Validated, unexecuted formal replan candidates exist. Choose exactly one "
+        "authorized candidate_id using the scientific summaries below. Return only "
+        "SELECT_CANDIDATE, reason and candidate_id. RLR retrieves the exact frozen "
+        "plan. Do not recreate plans, anchors, spans, hashes, provenance or queries. "
+        "NO_ADMISSIBLE_REPLAN is unavailable while these candidates remain.\n"
+        + json.dumps({"scientific_question": request["seed"]["scientific_question"],
+                      "hypothesis_seed": request["seed"]["hypothesis_seed"],
+                      "attempt_outcome": request["feedback"].get("attempt_outcome"),
+                      "validated_coverage_gaps": request["feedback"].get("validated_coverage_gaps", [])},
+                     ensure_ascii=False, sort_keys=True)
+        + "\n" + json.dumps(summaries, ensure_ascii=False, sort_keys=True)
+    )
+    next_request["request_sha256"] = _planner_request_hash(next_request)
+    return next_request
+
+
+def materialize_scientific_query_plan(seed: dict, *, request: dict, proposal: dict) -> dict:
+    """Derive formal v2 bookkeeping solely from validated scientific choices."""
+    _seed, index, feedback = _check_planner_request(seed, request)
+    errors = list(Draft202012Validator(_PLAN_PROPOSAL_SCHEMA).iter_errors(proposal))
+    if errors:
+        raise CurieContractError(f"scientific intent schema invalid: {errors[0].message}")
+
+    def anchor(choice: dict) -> dict:
+        field, snippet = choice["source_field"], choice["text_snippet"]
+        source = seed[field]
+        start = source.find(snippet)
+        if start < 0:
+            raise CurieContractError("scientific intent requires an exact seed span")
+        if source.find(snippet, start + 1) >= 0:
+            raise CurieContractError("scientific intent requires a unique exact seed span")
+        term = _normalized_term(snippet)
+        return {
+            "concept_id": "concept-" + term.replace(" ", "-") + "-" + _sha(
+                {"field": field, "start": start, "end": start + len(snippet)}
+            )[:16],
+            "term": term,
+            "source_type": "QUESTION" if field == "scientific_question" else "INITIAL_HYPOTHESIS",
+            "source_field": field, "text_snippet": snippet,
+            "source_hash": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+            "start": start, "end": start + len(snippet), "synonyms": [],
+        }
+
+    core = [anchor(choice) for choice in proposal["core_anchors"]]
+    optional = [anchor(choice) for choice in proposal["optional_anchors"]]
+    intents = []
+    for choice in proposal["intents"]:
+        indices = choice["optional_anchor_indices"]
+        if any(value >= len(optional) for value in indices):
+            raise CurieContractError("scientific intent optional anchor index is out of range")
+        core_ids = [item["concept_id"] for item in core]
+        optional_ids = [optional[value]["concept_id"] for value in indices]
+        intents.append({
+            "intent_id": "intent-" + _sha({"core": sorted(core_ids), "optional": sorted(optional_ids)})[:16],
+            "core_concept_ids": core_ids, "optional_concept_ids": optional_ids,
+        })
+    previous = feedback["previous_plan"] if feedback else None
+    if previous is not None:
+        # Preserve already-authorized equivalences in minimal intent replans.
+        for item in core + optional:
+            prior = next((old for old in previous["core_anchors"] + previous["optional_concepts"]
+                          if (old["source_field"], old["start"], old["end"]) ==
+                          (item["source_field"], item["start"], item["end"])), None)
+            if prior is not None:
+                item["synonyms"] = copy.deepcopy(prior.get("synonyms", []))
+    plan = {
+        "schema_version": SCIENTIFIC_QUERY_PLAN_V2, "planner": SCIENTIFIC_QUERY_PLANNER_V2,
+        "seed_sha256": research_seed.seed_sha256(seed), "reformulation_index": index,
+        "core_anchors": core, "optional_concepts": optional, "intents": intents,
+        "unresolved_entities": copy.deepcopy(previous["unresolved_entities"]) if previous else [],
+        "advisory_search_constraints": copy.deepcopy(previous["advisory_search_constraints"]) if previous else [],
+        "target_question_sha256": hashlib.sha256(seed["scientific_question"].encode("utf-8")).hexdigest(),
+        "parent_plan_content_hash": previous["plan_content_hash"] if previous else None,
+        "feedback_sha256": _sha(feedback) if feedback else None,
+        "feedback_gap_ids": sorted(item["gap_id"] for item in feedback["validated_coverage_gaps"]) if feedback else [],
+    }
+    return validate_scientific_query_plan(plan, seed=seed)
+
+
 def _validated_plan_result(seed: dict, request: dict, proposal: dict,
-                            proposal_sha256: str, *,
-                            schema_validated: bool = False) -> dict:
+                            proposal_sha256: str) -> dict:
     _seed, reformulation_index, feedback = _check_planner_request(seed, request)
     if not isinstance(proposal, dict):
         raise CurieContractError("scientific planner response must be an object")
-    if not schema_validated:
-        schema_errors = sorted(
-            Draft202012Validator(_PROPOSAL_SCHEMA).iter_errors(proposal),
-            key=lambda error: list(error.absolute_path),
+    schema_errors = sorted(
+        Draft202012Validator(request["schema"]).iter_errors(proposal),
+        key=lambda error: list(error.absolute_path),
+    )
+    if schema_errors:
+        error = schema_errors[0]
+        field = ".".join(str(item) for item in error.absolute_path) or "response"
+        raise CurieContractError(
+            f"scientific planner response schema invalid at {field}: {error.message}"
         )
-        if schema_errors:
-            error = schema_errors[0]
-            field = ".".join(str(item) for item in error.absolute_path) or "response"
-            raise CurieContractError(
-                f"scientific planner response schema invalid at {field}: {error.message}"
-            )
+    if request["schema_version"] == "L05ScientificQueryPlanSelectionRequest/v1":
+        selected = next((item for item in request["candidates"]
+                         if item["candidate_id"] == proposal["candidate_id"]), None)
+        if selected is None:
+            raise CurieContractError("candidate_id is not authorized by the current request")
+        validated = validate_scientific_query_plan(copy.deepcopy(selected["plan"]), seed=seed)
+        if _sha(validated) != selected["candidate_sha256"]:
+            raise CurieContractError("selected candidate hash binding changed")
+        return {"status": "PLAN", "plan": validated, "reason": proposal["reason"],
+                "compiled_queries": compile_scientific_query_plan(validated, seed=seed),
+                "proposal_sha256": proposal_sha256}
     if proposal["status"] == "NO_ADMISSIBLE_REPLAN":
         if reformulation_index == 0 or feedback is None or proposal["plan"] is not None:
             raise CurieContractError("initial or malformed no_admissible_replan proposal")
@@ -955,46 +1042,20 @@ def _validated_plan_result(seed: dict, request: dict, proposal: dict,
                 "replan_enumeration": enumeration,
                 "proposal_sha256": proposal_sha256,
             }
-        candidate_set = [
-            {"operation": operation, "plan": candidate}
-            for operation, candidate in candidates
-        ]
-        next_prompt = request["prompt"] + (
-            "\nThe no-plan proposal is invalid: the following validated, unexecuted "
-            "candidates exist. Return one admissible PLAN with the same CORE and "
-            "feedback provenance. Do not return NO_ADMISSIBLE_REPLAN.\n"
-            + json.dumps(candidate_set, ensure_ascii=False, sort_keys=True)
-        )
+        candidate_set = _frozen_replan_candidates(seed, feedback, reformulation_index)
+        next_request = _candidate_selection_request(request, candidate_set)
         return {
             "status": "REPROPOSAL_REQUIRED",
             "plan": None,
             "reason": proposal["reason"],
             "candidates": candidate_set,
             "replan_enumeration": enumeration,
-            "next_request_prompt": next_prompt,
+            "next_request": next_request,
             "proposal_sha256": proposal_sha256,
         }
     if proposal["status"] != "PLAN" or not isinstance(proposal["plan"], dict):
         raise CurieContractError("structured planner did not return a plan object")
-    proposed_plan = copy.deepcopy(proposal["plan"])
-    authorized = {
-        "question_sha256": hashlib.sha256(
-            str(seed.get("scientific_question") or "").encode("utf-8")
-        ).hexdigest(),
-    }
-    expected_provenance = {
-        "target_question_sha256": authorized["question_sha256"],
-        "parent_plan_content_hash": feedback["previous_plan"]["plan_content_hash"] if feedback else None,
-        "feedback_sha256": _sha(feedback) if feedback else None,
-        "feedback_gap_ids": sorted(item["gap_id"] for item in feedback["validated_coverage_gaps"]) if feedback else [],
-    }
-    for key, value in expected_provenance.items():
-        if key in proposed_plan and proposed_plan[key] != value:
-            raise CurieContractError(f"structured planner supplied false {key}")
-        proposed_plan[key] = value
-    validated = validate_scientific_query_plan(proposed_plan, seed=seed)
-    if validated["reformulation_index"] != reformulation_index:
-        raise CurieContractError("structured planner reformulation index mismatch")
+    validated = materialize_scientific_query_plan(seed, request=request, proposal=proposal["plan"])
     if feedback is not None:
         executed_queries = {item.get("query_content_hash") for item in feedback.get("executed_queries", [])}
         executed_plans = {item.get("plan_content_hash") for item in feedback.get("executed_plans", [])}
@@ -1063,13 +1124,6 @@ def validate_scientific_query_plan_response(
     return _validated_plan_result(seed, request, proposal, proposal_sha256)
 
 
-def _request_with_prompt(request: dict, prompt: str) -> dict:
-    next_request = copy.deepcopy(request)
-    next_request["prompt"] = prompt
-    next_request["request_sha256"] = _planner_request_hash(next_request)
-    return next_request
-
-
 def propose_scientific_query_plan(
     seed: dict, *, spec: Any, work_dir: str | Path,
     reformulation_index: int, feedback: dict | None = None,
@@ -1096,13 +1150,13 @@ def propose_scientific_query_plan(
         _check_planner_request(seed, active_request)
         decision = _validated_plan_result(
             seed, active_request, raw_proposal,
-            hashlib.sha256(raw_bytes).hexdigest(), schema_validated=True,
+            hashlib.sha256(raw_bytes).hexdigest(),
         )
         return decision, result["receipt"]
 
     decision, receipt = checked_proposal(request, work_dir)
     if decision["status"] == "REPROPOSAL_REQUIRED":
-        retry_request = _request_with_prompt(request, decision["next_request_prompt"])
+        retry_request = decision["next_request"]
         second, second_receipt = checked_proposal(
             retry_request, Path(work_dir) / "reproposal"
         )

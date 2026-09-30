@@ -72,33 +72,10 @@ def _plan(seed):
 
 def _strict_schema_plan_payload():
     seed = _seed()
-    seed["scientific_question"] = "Does carbon dioxide (CO2) alter yeast sensing?"
     plan = _plan(seed)
-    for key in (
-        "target_question_sha256", "parent_plan_content_hash", "feedback_sha256",
-        "feedback_gap_ids",
-    ):
-        plan.pop(key)
-    plan["reformulation_index"] = 1
-    plan["core_anchors"][0]["synonyms"] = [{
-        "term": "CO2", "source_type": "QUESTION", "source_field": "scientific_question",
-        "text_snippet": "CO2",
-        "source_hash": hashlib.sha256(seed["scientific_question"].encode()).hexdigest(),
-        "start": seed["scientific_question"].index("CO2"),
-        "end": seed["scientific_question"].index("CO2") + 3,
-        "mapping_source": "authorized_seed_parenthetical", "mapping_version": "v1",
-        "mapping_evidence": "carbon dioxide (CO2)",
-        "mapping_evidence_start": seed["scientific_question"].index("carbon dioxide (CO2)"),
-        "mapping_key": hashlib.sha256(b"carbon dioxide (CO2)").hexdigest(),
-    }]
-    plan["core_anchors"][1]["synonyms"] = []
     plan["optional_concepts"] = [_anchor(seed, "scientific_question", "yeast", "yeast")]
-    plan["optional_concepts"][0]["synonyms"] = []
-    plan["advisory_search_constraints"] = [{
-        "text": "prior limitation", "source_attempt": 1, "evidence_ids": ["E1"],
-    }]
     plan["intents"][0]["optional_concept_ids"] = ["yeast"]
-    return {"status": "PLAN", "reason": "source-bound terms", "plan": plan}
+    return {"status": "PLAN", "reason": "source-bound terms", "plan": _planner_schema_plan(plan)}
 
 
 def _assert_strict_schema_objects(schema, path="$"):
@@ -127,13 +104,11 @@ def test_strict_schema_planner_objects_are_closed_and_complete():
     assert plan["type"] == "object"
     assert schema["properties"]["plan"]["anyOf"][1] == {"type": "null"}
     assert set(plan["properties"]) == {
-        "schema_version", "planner", "seed_sha256", "reformulation_index",
-        "core_anchors", "optional_concepts", "unresolved_entities",
-        "advisory_search_constraints", "intents",
+        "core_anchors", "optional_anchors", "intents",
     }
 
 
-def test_strict_schema_full_plan_payload_is_admitted():
+def test_strict_schema_scientific_intent_payload_is_admitted():
     Draft202012Validator(query_planner._PROPOSAL_SCHEMA).validate(
         _strict_schema_plan_payload()
     )
@@ -150,8 +125,6 @@ def test_strict_schema_no_admissible_replan_null_is_admitted():
     ("plan", "target_question_sha256"),
     ("core", "untrusted"),
     ("optional", "untrusted"),
-    ("synonym", "untrusted"),
-    ("advisory", "untrusted"),
     ("intent", "untrusted"),
 ])
 def test_strict_schema_rejects_extra_fields_at_every_object(location, key):
@@ -160,9 +133,7 @@ def test_strict_schema_rejects_extra_fields_at_every_object(location, key):
         "root": payload,
         "plan": payload["plan"],
         "core": payload["plan"]["core_anchors"][0],
-        "optional": payload["plan"]["optional_concepts"][0],
-        "synonym": payload["plan"]["core_anchors"][0]["synonyms"][0],
-        "advisory": payload["plan"]["advisory_search_constraints"][0],
+        "optional": payload["plan"]["optional_anchors"][0],
         "intent": payload["plan"]["intents"][0],
     }[location]
     target[key] = "unauthorized"
@@ -170,21 +141,17 @@ def test_strict_schema_rejects_extra_fields_at_every_object(location, key):
 
 
 @pytest.mark.parametrize("location,key", [
-    ("plan", "optional_concepts"),
-    ("core", "synonyms"),
-    ("optional", "synonyms"),
-    ("synonym", "mapping_key"),
-    ("advisory", "evidence_ids"),
-    ("intent", "optional_concept_ids"),
+    ("plan", "optional_anchors"),
+    ("core", "source_field"),
+    ("optional", "text_snippet"),
+    ("intent", "optional_anchor_indices"),
 ])
 def test_strict_schema_requires_all_nested_fields(location, key):
     payload = _strict_schema_plan_payload()
     target = {
         "plan": payload["plan"],
         "core": payload["plan"]["core_anchors"][0],
-        "optional": payload["plan"]["optional_concepts"][0],
-        "synonym": payload["plan"]["core_anchors"][0]["synonyms"][0],
-        "advisory": payload["plan"]["advisory_search_constraints"][0],
+        "optional": payload["plan"]["optional_anchors"][0],
         "intent": payload["plan"]["intents"][0],
     }[location]
     target.pop(key)
@@ -313,7 +280,7 @@ def test_v2_structured_proposal_adapts_to_shared_query_plan(tmp_path, monkeypatc
 
     def fake_structured(_spec, *, prompt, schema, work_dir, purpose):
         seen.update(prompt=prompt, schema=schema, work_dir=work_dir, purpose=purpose)
-        payload = {"status": "PLAN", "reason": "direct seed concepts", "plan": _plan(seed)}
+        payload = {"status": "PLAN", "reason": "direct seed concepts", "plan": _planner_schema_plan(_plan(seed))}
         return {
             "payload": payload,
             "receipt": {"prompt_hash": "p", "validation_status": "PASS"},
@@ -362,7 +329,7 @@ def test_no_admissible_replan_requires_exhausted_seed_bound_transforms(tmp_path,
     monkeypatch.setattr(structured_execution, "run_structured_model", lambda *_args, **_kwargs: {
         "payload": payload, "receipt": {}, "raw_output": json.dumps(payload),
     })
-    with pytest.raises(CurieContractError, match="synonym"):
+    with pytest.raises(CurieContractError, match="schema invalid"):
         propose_scientific_query_plan(seed, spec=object(), work_dir=tmp_path,
                                       reformulation_index=1, feedback=feedback)
 
@@ -401,21 +368,16 @@ def test_no_admissible_replan_must_use_gap_targeted_seed_intent(tmp_path, monkey
         "semantic_rejections": [],
         "attempt_outcome": {"type": "COVERAGE_GAP"},
     }
-    targeted = _plan(seed)
-    targeted["reformulation_index"] = 1
-    for key in ("parent_plan_content_hash", "feedback_sha256", "feedback_gap_ids"):
-        targeted.pop(key)
-    targeted["optional_concepts"] = [_anchor(seed, "scientific_question", "yeast sensing", "gap-term")]
-    targeted["intents"][0]["optional_concept_ids"] = ["gap-term"]
-    proposals = [
-        {"status": "NO_ADMISSIBLE_REPLAN", "reason": "none", "plan": None},
-        {"status": "PLAN", "reason": "target validated yeast sensing gap", "plan": targeted},
-    ]
     calls = []
 
     def fake_structured(*_args, **kwargs):
         calls.append(kwargs)
-        payload = proposals.pop(0)
+        if len(calls) == 1:
+            payload = {"status": "NO_ADMISSIBLE_REPLAN", "reason": "none", "plan": None}
+        else:
+            candidates = json.loads(kwargs["prompt"].rsplit("\n", 1)[-1])
+            payload = {"status": "SELECT_CANDIDATE", "reason": "target yeast sensing gap",
+                       "candidate_id": candidates[0]["candidate_id"]}
         return {"payload": payload, "receipt": {"validation_status": "PASS"},
                 "raw_output": json.dumps(payload)}
 
@@ -506,12 +468,10 @@ def test_composite_split_prevents_premature_no_admissible_replan(tmp_path, monke
             offered = json.loads(kwargs["prompt"].rsplit("\n", 1)[-1])
             split = [item for item in offered if item["operation"] == "composite intent split"]
             assert split, "the correction prompt must contain a validated split"
-            assert all(item["plan"]["core_anchors"] == previous["core_anchors"] for item in split)
-            assert all(item["plan"]["intents"][0]["core_concept_ids"] ==
-                       previous["intents"][0]["core_concept_ids"] for item in split)
-            selected = next(item["plan"] for item in split
-                            if item["plan"]["intents"][0]["optional_concept_ids"] == ["nutrient"])
-            payload = {"status": "PLAN", "reason": "split composite", "plan": selected}
+            selected = next(item for item in split
+                            if "(nutrient)" in item["queries"][0]["query"])
+            payload = {"status": "SELECT_CANDIDATE", "reason": "split composite",
+                       "candidate_id": selected["candidate_id"]}
         return {"payload": payload, "receipt": {"validation_status": "PASS"},
                 "raw_output": json.dumps(payload)}
 
@@ -522,7 +482,8 @@ def test_composite_split_prevents_premature_no_admissible_replan(tmp_path, monke
     )
     assert decision["status"] == "PLAN"
     assert len(calls) == 2
-    assert decision["plan"]["core_anchors"] == previous["core_anchors"]
+    assert (_planner_schema_plan(decision["plan"])["core_anchors"] ==
+            _planner_schema_plan(previous)["core_anchors"])
     assert compile_scientific_query_plan(decision["plan"], seed=seed)[0]["query_content_hash"] not in {
         item["query_content_hash"] for item in feedback["executed_queries"]
     }
@@ -722,7 +683,7 @@ def test_zero_discovery_replan_cannot_narrow_prior_boolean_query(tmp_path, monke
         proposed.pop(key)
     proposed["optional_concepts"] = [_anchor(seed, "hypothesis_seed", "sensing", "new-optional")]
     proposed["intents"][0]["optional_concept_ids"] = ["new-optional"]
-    payload = {"status": "PLAN", "reason": "try narrower query", "plan": proposed}
+    payload = {"status": "PLAN", "reason": "try narrower query", "plan": _planner_schema_plan(proposed)}
     monkeypatch.setattr(structured_execution, "run_structured_model", lambda *_args, **_kwargs: {
         "payload": payload, "receipt": {}, "raw_output": json.dumps(payload),
     })
@@ -770,16 +731,17 @@ def _planner_response(status, plan=None, reason="proposal"):
 
 
 def _planner_schema_plan(plan):
-    """Return the model proposal shape, omitting RLR-owned provenance fields."""
-    proposal = copy.deepcopy(plan)
-    for key in (
-        "target_question_sha256", "parent_plan_content_hash", "feedback_sha256",
-        "feedback_gap_ids", "plan_content_hash",
-    ):
-        proposal.pop(key, None)
-    for anchor in proposal.get("core_anchors", []) + proposal.get("optional_concepts", []):
-        anchor.setdefault("synonyms", [])
-    return proposal
+    """Independent fixture projection of formal plans to scientific choices."""
+    optional = plan["optional_concepts"]
+    ids = [item["concept_id"] for item in optional]
+    return {
+        "core_anchors": [{"source_field": item["source_field"], "text_snippet": item["text_snippet"]}
+                         for item in plan["core_anchors"]],
+        "optional_anchors": [{"source_field": item["source_field"], "text_snippet": item["text_snippet"]}
+                             for item in optional],
+        "intents": [{"optional_anchor_indices": [ids.index(key) for key in intent["optional_concept_ids"]]}
+                    for intent in plan["intents"]],
+    }
 
 
 def test_host_planner_plan_uses_existing_validator_and_compiler():
@@ -807,8 +769,7 @@ def test_host_planner_feedback_replan_binds_feedback_and_previous_plan_hash():
     prepare, submit = _host_planner_seams()
     seed, previous, feedback = _composite_replan_fixture()
     proposal = _planner_schema_plan(previous)
-    proposal["reformulation_index"] = 1
-    proposal["intents"][0]["optional_concept_ids"] = ["nutrient"]
+    proposal["intents"][0]["optional_anchor_indices"] = [2]
     request = prepare(seed, reformulation_index=1, feedback=feedback)
 
     assert request["feedback_sha256"] == query_planner._sha(feedback)
@@ -863,9 +824,8 @@ def test_host_planner_returns_reproposal_checkpoint_when_candidates_remain():
     assert result["candidates"]
     assert all(item.get("operation") and isinstance(item.get("plan"), dict)
                for item in result["candidates"])
-    assert isinstance(result["next_request_prompt"], str)
-    assert result["next_request_prompt"].strip()
-    assert result["next_request_prompt"] != request["prompt"]
+    assert result["next_request"]["prompt"] != request["prompt"]
+    assert result["next_request"]["schema"]["required"] == ["status", "reason", "candidate_id"]
 
 
 def test_host_planner_rejects_no_admissible_for_initial_plan():
@@ -885,7 +845,6 @@ def test_host_planner_rejects_repeated_query_content():
     prepare, submit = _host_planner_seams()
     seed, previous, feedback = _composite_replan_fixture()
     repeated = _planner_schema_plan(previous)
-    repeated["reformulation_index"] = 1
     request = prepare(seed, reformulation_index=1, feedback=feedback)
 
     with pytest.raises(CurieContractError, match="(?i)(repeat|executed|query content)"):
@@ -903,7 +862,7 @@ def test_host_planner_rejects_model_supplied_false_rlr_provenance():
     forged["seed_sha256"] = "0" * 64
     request = prepare(seed, reformulation_index=0, feedback=None)
 
-    with pytest.raises(CurieContractError, match="(?i)(seed|identity|provenance)"):
+    with pytest.raises(CurieContractError, match="schema invalid"):
         submit(
             seed,
             request=request,
@@ -915,8 +874,7 @@ def test_host_planner_rejects_request_with_stale_feedback_snapshot():
     prepare, submit = _host_planner_seams()
     seed, previous, feedback = _composite_replan_fixture()
     proposal = _planner_schema_plan(previous)
-    proposal["reformulation_index"] = 1
-    proposal["intents"][0]["optional_concept_ids"] = ["nutrient"]
+    proposal["intents"][0]["optional_anchor_indices"] = [2]
     request = prepare(seed, reformulation_index=1, feedback=feedback)
     request["feedback"]["validated_coverage_gaps"][0]["gap_id"] = "G_CHANGED"
 

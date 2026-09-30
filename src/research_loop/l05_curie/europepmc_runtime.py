@@ -915,6 +915,7 @@ def _verify_acquisition_reference(project: Path, relative: str, digest: str,
 def _validated_planner_proposal(
     project: Path, candidate_id: str, run_id: str, planner_index: int,
     receipt: dict, proposal_sha256: str, *, seed: dict | None = None,
+    feedback: dict | None = None,
     expected_status: str = "PLAN", expected_proposal_status: str | None = None,
 ) -> dict:
     if isinstance(receipt, dict) and receipt.get("schema_version") == PLANNER_HOST_RECEIPT_SCHEMA_VERSION:
@@ -961,10 +962,14 @@ def _validated_planner_proposal(
             decision = validate_scientific_query_plan_response(
                 seed, request=planner_request, raw_response=response_raw,
             )
-            if (proposal.get("status") != (expected_proposal_status or expected_status)
+            proposal_status = ("SELECT_CANDIDATE" if planner_request.get("schema_version") ==
+                               "L05ScientificQueryPlanSelectionRequest/v1" else expected_status)
+            if (proposal.get("status") != (expected_proposal_status or proposal_status)
                     or decision.get("status") != expected_status):
                 raise CurieContractError("host planner proposal status differs from its manifest role")
             reproposal = receipt.get("reproposal")
+            if (proposal_status == "SELECT_CANDIDATE" and reproposal is None):
+                raise CurieContractError("selection reproposal provenance is missing")
             if reproposal is not None:
                 expected_reproposal_keys = {
                     "schema_version", "acquisition_attempt_index", "proposal_index",
@@ -1022,10 +1027,7 @@ def _validated_planner_proposal(
                 expected_candidate_sha = hashlib.sha256(
                     _canonical_bytes(source_decision.get("candidates"))
                 ).hexdigest()
-                from . import query_planner
-                expected_followup = query_planner._request_with_prompt(
-                    source_planner_request, source_decision.get("next_request_prompt"),
-                )
+                expected_followup = source_decision.get("next_request")
                 expected_followup_identity = dict(source_request["identity"])
                 expected_followup_identity["attempt"] = planner_index * 10 + 1
                 expected_followup_ref = {
@@ -1045,9 +1047,11 @@ def _validated_planner_proposal(
                         ).hexdigest()
                         or reproposal.get("followup_request") != expected_followup_ref
                         or request.get("identity") != expected_followup_identity
+                        or request.get("output_contract") != {"type": "object", "schema": expected_followup["schema"]}
                         or request.get("inputs") != expected_inputs):
                     raise CurieContractError("host planner reproposal candidate/prompt/request binding differs")
-            return proposal
+            return {**proposal, "status": "PLAN" if decision["status"] == "PLAN" else proposal["status"],
+                    "plan": decision["plan"]}
         except (UnicodeError, deep_research.DeepResearchError, CurieContractError) as exc:
             raise CurieAcquisitionError("RECOVERY_ERROR", f"host planner proposal invalid: {exc}") from exc
     expected_dir = (project / "08_Audit" / "l05_acquisition" / candidate_id
@@ -1070,8 +1074,41 @@ def _validated_planner_proposal(
             raise CurieAcquisitionError("RECOVERY_ERROR", f"structured planner {path_key} provenance mismatch")
     try:
         raw = Path(receipt["output_path"]).read_text(encoding="utf-8")
-        return deep_research._parse_cli_output(raw)
-    except (UnicodeError, deep_research.DeepResearchError) as exc:
+        proposal = deep_research._parse_cli_output(raw)
+        if seed is None:
+            raise CurieContractError("planner manifest validation requires ResearchSeed")
+        planner_request = prepare_scientific_query_plan_request(
+            seed, reformulation_index=planner_index - 1, feedback=feedback,
+        )
+        if "prior_proposal_receipt" in receipt:
+            prior_receipt = receipt["prior_proposal_receipt"]
+            prior_sha = receipt.get("prior_proposal_sha256")
+            _validated_planner_proposal(
+                project, candidate_id, run_id, planner_index, prior_receipt, prior_sha,
+                seed=seed, feedback=feedback, expected_status="REPROPOSAL_REQUIRED",
+                expected_proposal_status="NO_ADMISSIBLE_REPLAN",
+            )
+            prior_raw = Path(prior_receipt["output_path"]).read_bytes()
+            prior_decision = validate_scientific_query_plan_response(
+                seed, request=planner_request, raw_response=prior_raw,
+            )
+            if receipt.get("replan_enumeration") != prior_decision.get("replan_enumeration"):
+                raise CurieContractError("planner selection enumeration receipt changed")
+            planner_request = prior_decision["next_request"]
+        if (Path(receipt["prompt_path"]).read_text(encoding="utf-8") != planner_request["prompt"]
+                or _read_object(Path(receipt["schema_path"])) != planner_request["schema"]):
+            raise CurieContractError("planner prompt/schema differs from authorized request")
+        decision = validate_scientific_query_plan_response(
+            seed, request=planner_request, raw_response=raw.encode("utf-8"),
+        )
+        proposal_status = ("SELECT_CANDIDATE" if planner_request.get("schema_version") ==
+                           "L05ScientificQueryPlanSelectionRequest/v1" else expected_status)
+        if (proposal.get("status") != (expected_proposal_status or proposal_status)
+                or decision.get("status") != expected_status):
+            raise CurieContractError("planner proposal status differs from its manifest role")
+        return {**proposal, "status": "PLAN" if decision["status"] == "PLAN" else proposal["status"],
+                "plan": decision["plan"]}
+    except (UnicodeError, deep_research.DeepResearchError, CurieContractError) as exc:
         raise CurieAcquisitionError("RECOVERY_ERROR", f"structured planner proposal invalid: {exc}") from exc
 
 
@@ -1262,11 +1299,12 @@ def _validate_acquisition_manifest(project: Path, manifest: dict, *,
             proposal = _validated_planner_proposal(
                 project, candidate_id, run_id, index, receipt,
                 provenance.get("proposal_sha256"), seed=seed,
+                feedback=attempts[index - 2].get("planner_feedback") if index > 1 else None,
             )
             model_plan = proposal.get("plan") if isinstance(proposal, dict) else None
             if (proposal.get("status") != "PLAN" or not isinstance(model_plan, dict)
                     or proposal.get("reason") != provenance.get("reason")
-                    or any(validated_planning.get(key) != value for key, value in model_plan.items())):
+                    or validated_planning != model_plan):
                 raise CurieAcquisitionError("RECOVERY_ERROR", "validated scientific plan differs from model proposal")
         if plan["candidate_id"] != candidate_id or plan["round_id"] != round_id or plan["round_index"] != 1:
             raise CurieAcquisitionError("RECOVERY_ERROR", "v2 acquisition QueryPlan identity mismatch")
@@ -1423,6 +1461,7 @@ def _validate_acquisition_manifest(project: Path, manifest: dict, *,
         terminal_proposal = _validated_planner_proposal(
             project, candidate_id, run_id, len(attempts) + 1,
             receipt, planner_terminal.get("proposal_sha256"), seed=seed,
+            feedback=attempts[-1].get("planner_feedback"),
             expected_status="NO_ADMISSIBLE_REPLAN",
         )
         if (manifest.get("terminal_reason") != "no_admissible_replan"
@@ -2310,20 +2349,15 @@ def _planner_reproposal_for(
     project: Path, seed: dict, checkpoint: dict, checkpoint_path: Path, *,
     attempt_index: int, base_request: dict, base_receipt: dict, decision: dict,
 ) -> tuple[dict, dict]:
-    from . import query_planner
-
     if (decision.get("status") != "REPROPOSAL_REQUIRED"
             or not isinstance(decision.get("candidates"), list)
             or not decision["candidates"]
-            or not isinstance(decision.get("next_request_prompt"), str)
-            or not decision["next_request_prompt"].strip()):
+            or not isinstance(decision.get("next_request"), dict)):
         raise CurieAcquisitionError("RECOVERY_ERROR", "planner reproposal decision is invalid")
     original_planner_request = (base_request.get("inputs") or {}).get("planner_request")
     if not isinstance(original_planner_request, dict):
         raise CurieAcquisitionError("RECOVERY_ERROR", "planner reproposal source request is missing")
-    followup_planner_request = query_planner._request_with_prompt(
-        original_planner_request, decision["next_request_prompt"],
-    )
+    followup_planner_request = decision["next_request"]
     followup_attempt = attempt_index * 10 + 1
     inputs = dict(base_request["inputs"])
     inputs["planner_request"] = followup_planner_request
@@ -2331,7 +2365,7 @@ def _planner_reproposal_for(
         project, candidate_id=str(seed["candidate_id"]),
         round_id=str(seed["round_id"]), attempt_index=followup_attempt,
         stage="planner", persona="L05 Scientific Query Planner", inputs=inputs,
-        output_contract=base_request["output_contract"],
+        output_contract={"type": "object", "schema": followup_planner_request["schema"]},
     )
     ref = _request_ref(request, attempt_index=followup_attempt, stage="planner")
     record = {

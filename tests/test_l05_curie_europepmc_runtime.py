@@ -26,6 +26,7 @@ from research_loop.l05_curie.paperqa2_runtime import (
 from research_loop.compatibility import PROFILE_V21_CATALOG_1
 from research_loop.hypothesis_ledger import HypothesisLedger
 from research_loop import cli
+from test_l05_curie_p1_planning import _planner_schema_plan
 
 
 XML = b'''<?xml version="1.0" encoding="UTF-8"?>
@@ -117,7 +118,7 @@ def _host_planner_plan(seed):
 
 def test_host_and_headless_planners_compile_identical_query_content(tmp_path, monkeypatch):
     _project_dir, seed = _project(tmp_path)
-    payload = {"status": "PLAN", "reason": "direct seed concepts", "plan": _host_planner_plan(seed)}
+    payload = {"status": "PLAN", "reason": "direct seed concepts", "plan": _planner_schema_plan(_host_planner_plan(seed))}
     raw_response = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
@@ -387,6 +388,69 @@ def _structured_fixture_receipt(work_dir, *, prompt, schema, raw):
     return receipt
 
 
+@pytest.mark.parametrize("corruption", [None, "prior_bytes", "prompt_rehash", "enumeration_receipt"])
+def test_headless_candidate_selection_replays_exact_plan_and_bound_receipts(tmp_path, monkeypatch, corruption):
+    project, seed = _project(tmp_path)
+    initial = _planner_schema_plan(_host_planner_plan(seed))
+    initial["optional_anchors"] = [{"source_field": "scientific_question", "text_snippet": "yeast"}]
+    initial["intents"] = [{"optional_anchor_indices": [0]}]
+    request = query_planner.prepare_scientific_query_plan_request(seed, reformulation_index=0, feedback=None)
+    previous = query_planner.validate_scientific_query_plan_response(
+        seed, request=request, raw_response=json.dumps({
+            "status": "PLAN", "reason": "initial", "plan": initial,
+        }).encode(),
+    )["plan"]
+    feedback = {
+        "previous_plan": previous,
+        "executed_queries": query_planner.compile_scientific_query_plan(previous, seed=seed),
+        "executed_plans": [{"plan_content_hash": previous["plan_content_hash"]}],
+        "validated_coverage_gaps": [{"gap_id": "G1"}], "semantic_rejections": [],
+        "attempt_outcome": {"type": "ZERO_DISCOVERY"},
+    }
+    candidates, _audit = query_planner._admissible_replan_candidates(previous, seed, feedback, 1)
+    calls = []
+
+    def model(_spec, *, prompt, schema, work_dir, purpose):
+        calls.append(prompt)
+        if len(calls) == 1:
+            payload = {"status": "NO_ADMISSIBLE_REPLAN", "reason": "needs choice", "plan": None}
+        else:
+            offered = json.loads(prompt.rsplit("\n", 1)[-1])
+            payload = {"status": "SELECT_CANDIDATE", "reason": "remove optional restriction",
+                       "candidate_id": offered[0]["candidate_id"]}
+        raw = json.dumps(payload)
+        return {"payload": payload, "raw_output": raw,
+                "receipt": _structured_fixture_receipt(work_dir, prompt=prompt, schema=schema, raw=raw)}
+
+    monkeypatch.setattr(structured_execution, "run_structured_model", model)
+    run_id = "HEADLESS_SELECTION"
+    work_dir = project / "08_Audit" / "l05_acquisition" / "C001" / run_id / "planner_002"
+    decision = query_planner.propose_scientific_query_plan(
+        seed, spec=object(), work_dir=work_dir, reformulation_index=1, feedback=feedback,
+    )
+    assert len(calls) == 2
+    assert decision["plan"] == candidates[0][1]
+    receipt = decision["receipt"]
+    if corruption == "prior_bytes":
+        Path(receipt["prior_proposal_receipt"]["output_path"]).write_bytes(b"{}")
+    elif corruption == "prompt_rehash":
+        Path(receipt["prompt_path"]).write_bytes(b"changed candidate summaries")
+        receipt["prompt_hash"] = hashlib.sha256(b"changed candidate summaries").hexdigest()
+    elif corruption == "enumeration_receipt":
+        receipt["replan_enumeration"]["feedback_sha256"] = "0" * 64
+    if corruption:
+        with pytest.raises(europepmc_runtime.CurieAcquisitionError, match="provenance mismatch|authorized request|enumeration receipt"):
+            europepmc_runtime._validated_planner_proposal(
+                project, "C001", run_id, 2, receipt, decision["proposal_sha256"], seed=seed, feedback=feedback,
+            )
+    else:
+        recovered = europepmc_runtime._validated_planner_proposal(
+            project, "C001", run_id, 2, receipt, decision["proposal_sha256"], seed=seed, feedback=feedback,
+        )
+        assert recovered["status"] == "PLAN"
+        assert recovered["plan"] == candidates[0][1]
+
+
 def run_europepmc_acquisition(*args, **kwargs):
     """Exercise P0 lifecycle with a controlled planner and semantic assessor."""
     kwargs.setdefault("semantic_assessor", _supported_semantic_assessment)
@@ -547,7 +611,7 @@ def test_production_structured_feedback_replan_uses_query_content(tmp_path, monk
             "intents": [{"intent_id": "question", "core_concept_ids": ["co2", "rca1p"],
                          "optional_concept_ids": ["transcriptional"] if index == 0 else []}],
         }
-        payload = {"status": "PLAN", "reason": "validated gap", "plan": plan}
+        payload = {"status": "PLAN", "reason": "validated gap", "plan": _planner_schema_plan(plan)}
         raw = json.dumps(payload)
         return {"payload": payload,
                 "receipt": _structured_fixture_receipt(work_dir, prompt=prompt, schema=schema, raw=raw),
@@ -664,7 +728,7 @@ def test_production_no_admissible_replan_stops_after_real_zero_discovery(tmp_pat
                 "intents": [{"intent_id": "question", "core_concept_ids": ["co2", "rca1p"],
                              "optional_concept_ids": []}],
             }
-            payload = {"status": "PLAN", "reason": "initial", "plan": plan}
+            payload = {"status": "PLAN", "reason": "initial", "plan": _planner_schema_plan(plan)}
         else:
             assert "ZERO_DISCOVERY" in prompt
             payload = {"status": "NO_ADMISSIBLE_REPLAN", "reason": "finite variants exhausted", "plan": None}
@@ -1796,7 +1860,7 @@ def test_host_planner_invalid_contract_is_rejected_before_persist_and_same_reque
         )
 
     assert "MODEL_CONTRACT_ERROR" in str(rejection)
-    assert "source is not authorized" in str(rejection)
+    assert "schema invalid" in str(rejection)
     assert not raw_path.exists()
     assert not receipt_path.exists()
     checkpoint_after_rejection = json.loads(
@@ -1810,7 +1874,7 @@ def test_host_planner_invalid_contract_is_rejected_before_persist_and_same_reque
     corrected_response = project / "corrected-planner-response.json"
     corrected_response.write_bytes(json.dumps({
         "status": "PLAN", "reason": "valid fixture plan",
-        "plan": _host_planner_plan(seed),
+        "plan": _planner_schema_plan(_host_planner_plan(seed)),
     }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     receipt = submit(project, "C001", request_id, corrected_response)
 
@@ -1834,7 +1898,7 @@ def test_host_acquisition_resume_after_validated_checkpoint_does_not_repeat_http
     response_path = project / "validated-planner-response.json"
     response_path.write_bytes(json.dumps({
         "status": "PLAN", "reason": "fixture plan",
-        "plan": _host_planner_plan(seed),
+        "plan": _planner_schema_plan(_host_planner_plan(seed)),
     }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     submit(project, "C001", prepared["request_id"], response_path)
     http_calls = []
@@ -1898,7 +1962,7 @@ def test_uncertain_http_result_blocks_and_resume_does_not_retry(tmp_path, monkey
     plan_response = project / "planner-response.json"
     plan_response.write_bytes(json.dumps({
         "status": "PLAN", "reason": "fixture plan",
-        "plan": _host_planner_plan(_seed),
+        "plan": _planner_schema_plan(_host_planner_plan(_seed)),
     }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     submitted = submit(project, "C001", prepared["request_id"], plan_response)
     assert submitted["raw_response_sha256"] == hashlib.sha256(
@@ -1965,7 +2029,7 @@ def _host_semantic_pending(project, seed, run_id, monkeypatch, *, xml=XML):
     plan_response = project / f"{run_id}-planner-response.json"
     plan_response.write_bytes(json.dumps({
         "status": "PLAN", "reason": "fixture plan",
-        "plan": _host_planner_plan(seed),
+        "plan": _planner_schema_plan(_host_planner_plan(seed)),
     }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     submit(project, "C001", prepared["request_id"], plan_response)
     paper = _search_record(title=_GOOD_TITLE)
@@ -2315,7 +2379,7 @@ def test_host_idempotent_old_planner_response_does_not_rewind_current_semantic_r
     planner_response = project / "idempotent-planner-response.json"
     planner_response.write_bytes(json.dumps({
         "status": "PLAN", "reason": "fixture plan",
-        "plan": _host_planner_plan(seed),
+        "plan": _planner_schema_plan(_host_planner_plan(seed)),
     }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     submit(project, "C001", planner["request_id"], planner_response)
     paper = _search_record(title=_GOOD_TITLE)
@@ -2359,7 +2423,7 @@ def test_host_terminal_no_admissible_replan_persists_validated_planner_receipt(
     first_plan_response = project / "host-no-admissible-plan.json"
     first_plan_response.write_bytes(json.dumps({
         "status": "PLAN", "reason": "fixture plan",
-        "plan": _host_planner_plan(seed),
+        "plan": _planner_schema_plan(_host_planner_plan(seed)),
     }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     submit(project, "C001", planner["request_id"], first_plan_response)
     http_calls = []
@@ -2412,7 +2476,7 @@ def test_host_reproposal_required_issues_distinct_followup_handoff(tmp_path, mon
     first_response = project / "host-reproposal-initial.json"
     first_response.write_bytes(json.dumps({
         "status": "PLAN", "reason": "fixture plan with optional concept",
-        "plan": initial_plan,
+        "plan": _planner_schema_plan(initial_plan),
     }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     submit(project, "C001", first["request_id"], first_response)
 
@@ -2457,19 +2521,26 @@ def test_host_reproposal_required_issues_distinct_followup_handoff(tmp_path, mon
     assert next_request["prompt"] != first_replan_request["prompt"]
     assert candidates[0][1]["plan_content_hash"] in next_request["prompt"]
 
+    response_dir = project / "08_Audit" / "host_handoff" / "responses"
+    checkpoint_before = (project / followup["checkpoint_path"]).read_bytes()
+    invalid_choice = project / "host-invalid-candidate-choice.json"
+    for response in (
+        {"status": "SELECT_CANDIDATE", "reason": "unknown", "candidate_id": "unknown"},
+        {"status": "SELECT_CANDIDATE", "reason": "forged",
+         "candidate_id": next_request["candidates"][0]["candidate_id"], "plan": candidates[0][1]},
+    ):
+        invalid_choice.write_bytes(json.dumps(response).encode("utf-8"))
+        with pytest.raises(europepmc_runtime.CurieAcquisitionError, match="planner host response rejected"):
+            submit(project, "C001", followup["request_id"], invalid_choice)
+        assert not (response_dir / f"{followup['request_id']}.raw").exists()
+        assert not (response_dir / f"{followup['request_id']}.json").exists()
+        assert (project / followup["checkpoint_path"]).read_bytes() == checkpoint_before
+
     _operation, candidate_plan = candidates[0]
-    proposal_plan = {
-        key: candidate_plan[key]
-        for key in (
-            "schema_version", "planner", "seed_sha256", "reformulation_index",
-            "core_anchors", "optional_concepts", "unresolved_entities",
-            "advisory_search_constraints", "intents",
-        )
-    }
     accepted_response = project / "host-reproposal-accepted-plan.json"
     accepted_response.write_bytes(json.dumps({
-        "status": "PLAN", "reason": f"validated candidate: {_operation}",
-        "plan": proposal_plan,
+        "status": "SELECT_CANDIDATE", "reason": f"validated candidate: {_operation}",
+        "candidate_id": next_request["candidates"][0]["candidate_id"],
     }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     followup_receipt = submit(project, "C001", followup["request_id"], accepted_response)
 
@@ -2498,12 +2569,20 @@ def test_host_reproposal_required_issues_distinct_followup_handoff(tmp_path, mon
         if attempt["query_plan"].get("planning_provenance", {}).get("proposal_sha256")
         == followup_receipt["raw_response_sha256"]
     )
+    assert accepted_attempt["query_plan"]["planning"] == candidate_plan
     planner_receipt = accepted_attempt["query_plan"]["planning_provenance"]["receipt"]
     assert planner_receipt["host_response_receipt"] == followup_receipt
     assert planner_receipt["reproposal"]["source_request_id"] == replan["request_id"]
     assert planner_receipt["reproposal"]["source_response_receipt"] == no_plan_receipt
     assert planner_receipt["reproposal"]["followup_request"]["request_id"] == followup["request_id"]
     assert len(http_calls) >= 2
+    stripped_receipt = dict(planner_receipt)
+    stripped_receipt.pop("reproposal")
+    with pytest.raises(europepmc_runtime.CurieAcquisitionError, match="selection reproposal provenance is missing"):
+        europepmc_runtime._validated_planner_proposal(
+            project, "C001", run_id, accepted_attempt["attempt_index"], stripped_receipt,
+            followup_receipt["raw_response_sha256"], seed=seed,
+        )
 
 
 def test_host_reproposal_budget_rejects_second_no_admissible_response(tmp_path, monkeypatch):
@@ -2525,7 +2604,7 @@ def test_host_reproposal_budget_rejects_second_no_admissible_response(tmp_path, 
     first_response = project / "host-reproposal-budget-initial.json"
     first_response.write_bytes(json.dumps({
         "status": "PLAN", "reason": "fixture plan with optional concept",
-        "plan": initial_plan,
+        "plan": _planner_schema_plan(initial_plan),
     }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     submit(project, "C001", first["request_id"], first_response)
     monkeypatch.setattr(europepmc_runtime, "_default_http_get", lambda *_: (
@@ -2553,9 +2632,11 @@ def test_host_reproposal_budget_rejects_second_no_admissible_response(tmp_path, 
         "status": "NO_ADMISSIBLE_REPLAN", "reason": "second no-plan proposal",
         "plan": None,
     }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
-    submit(project, "C001", followup["request_id"], second_no_plan)
-    with pytest.raises(europepmc_runtime.CurieAcquisitionError, match="reproposal budget exhausted"):
-        continue_run(project, "C001", run_id=run_id)
+    with pytest.raises(europepmc_runtime.CurieAcquisitionError, match="schema invalid"):
+        submit(project, "C001", followup["request_id"], second_no_plan)
+    response_dir = project / "08_Audit" / "host_handoff" / "responses"
+    assert not (response_dir / f"{followup['request_id']}.json").exists()
+    assert not (response_dir / f"{followup['request_id']}.raw").exists()
     checkpoint = json.loads((project / followup["checkpoint_path"]).read_text(encoding="utf-8"))
     assert checkpoint["current_request_id"] == followup["request_id"]
     assert len(checkpoint["planner_requests"]) == 3
@@ -2586,7 +2667,7 @@ def test_host_replan_rebinds_same_located_evidence_to_attempt_specific_extract(
     first_planner_response = project / "cross-attempt-planner-1.json"
     first_planner_response.write_bytes(json.dumps({
         "status": "PLAN", "reason": "include seed-bound optional term",
-        "plan": first_plan,
+        "plan": _planner_schema_plan(first_plan),
     }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     submit(project, "C001", planner["request_id"], first_planner_response)
 
@@ -2645,7 +2726,7 @@ def test_host_replan_rebinds_same_located_evidence_to_attempt_specific_extract(
     second_planner_response = project / "cross-attempt-planner-2.json"
     second_planner_response.write_bytes(json.dumps({
         "status": "PLAN", "reason": f"validated replan: {_operation}",
-        "plan": proposal_plan,
+        "plan": _planner_schema_plan(proposal_plan),
     }, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     submit(project, "C001", replan["request_id"], second_planner_response)
 

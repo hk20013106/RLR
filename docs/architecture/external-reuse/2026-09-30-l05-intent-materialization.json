@@ -1,0 +1,17 @@
+{
+  "schema_version": "ExternalReuseAudit/v1",
+  "change_id": "l05-scientific-intent-materialization",
+  "EXISTING_IMPLEMENTATIONS_REVIEWED": [
+    {"scope": "internal", "reference": "src/research_loop/l05_curie/query_planner.py", "finding": "Existing request/response owner, source-bound validation, content identity, finite replan enumeration and Boolean compiler already own the formal v2 boundary. History 541918b establishes the strict structured-output envelope."},
+    {"scope": "internal", "reference": "src/research_loop/l05_curie/europepmc_runtime.py", "finding": "Agent-native submission validates raw planner response through the shared owner before immutable response/receipt persistence. Existing reproposal checkpoint and recovery bind the source request, candidate set and follow-up receipt; extend these rather than add a selection workflow."},
+    {"scope": "internal", "reference": "src/research_loop/host_handoff.py", "finding": "Existing request identity/hash freezing and validate-before-persist submit_response remain the handoff authority. query_planner history 620805b already enumerates and validates finite formal replan candidates; these are exact selectable objects, not materialization inputs."},
+    {"scope": "external", "reference": "https://github.com/pydantic/pydantic-ai/blob/main/pydantic_ai_slim/pydantic_ai/_output.py", "finding": "Read ObjectOutputProcessor.validate/call: function output validates model-produced input against its schema before executing application-owned output transformation. This separates cognitive arguments from program output materialization."}
+  ],
+  "REUSABLE_COMPONENTS": [
+    {"reference": "src/research_loop/l05_curie/query_planner.py", "disposition": "EXTEND", "reason": "Add one pure materialization boundary to the existing owner; reuse source normalization, hashes, formal validator, compiler and finite replan enumeration unchanged."},
+    {"reference": "src/research_loop/l05_curie/europepmc_runtime.py", "disposition": "EXTEND", "reason": "Wire the existing reproposal handoff to the selection schema and replay the shared validator to recover exact formal candidates from immutable request/response receipts. Keep retrieval and generic persistence owners unchanged."},
+    {"reference": "https://github.com/pydantic/pydantic-ai/blob/main/pydantic_ai_slim/pydantic_ai/_output.py", "disposition": "ADAPT", "reason": "Adopt validation-before-application-transformation ordering using existing jsonschema and Curie boundaries; introducing another framework would duplicate provider and contract owners."}
+  ],
+  "ADOPTED_PATTERN": "EXTEND",
+  "WHY_NEW_CODE_IS_NECESSARY": "Extend the canonical planner to materialize initial minimal scientific choices and to freeze deterministic validated replan candidates with identities and full hashes. Formal-to-minimal reprojection loses duplicate-span offsets and synonym mappings; the follow-up host must select only a candidate_id, then the existing owner checks enumeration, feedback and parent bindings and retrieves the exact frozen formal plan. No new subsystem, dependency, validator or downstream formal contract is needed."
+}
