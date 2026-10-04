@@ -353,13 +353,26 @@ def lookup_exact_identifiers(
     return resolved
 
 
-def parse_jats_paragraphs(raw: bytes) -> list[dict]:
+class JatsSourceMismatchError(CurieContractError):
+    """A schema-valid known-paper proposal does not match its independently read source."""
+
+
+def _check_parser_profile(parser_profile: str) -> None:
+    if parser_profile not in {"jats-paragraphs/v1", "jats-paragraphs/v2"}:
+        raise CurieContractError("unsupported JATS parser_profile")
+
+
+def parse_jats_paragraphs(raw: bytes, *, parser_profile: str = "jats-paragraphs/v1") -> list[dict]:
     """Parse source-located paragraphs from JATS XML without guessing section semantics."""
+    _check_parser_profile(parser_profile)
     try:
         root = ET.fromstring(raw)
-    except ET.ParseError as exc:
+    except (ET.ParseError, LookupError, UnicodeError) as exc:
         raise CurieContractError(f"Europe PMC fullTextXML is invalid XML: {exc}") from exc
     extracted: list[dict] = []
+    # The same legacy enumeration supplies every sec alias. V2 keeps its deepest
+    # entry per node, then walks source document order without text deduplication.
+    deepest = {}
     section_index = 0
     for element in root.iter():
         if _local_name(element.tag) != "sec":
@@ -375,11 +388,55 @@ def parse_jats_paragraphs(raw: bytes) -> list[dict]:
             text = _element_text(paragraph)
             if not text:
                 continue
-            extracted.append({
+            unit = {
                 "section": title or "Untitled section",
                 "text": text,
                 "locator": f"sec:{section_index}/p:{paragraph_index}",
-            })
+            }
+            if parser_profile == "jats-paragraphs/v1":
+                extracted.append(unit)
+            else:
+                deepest[paragraph] = unit
+    if parser_profile == "jats-paragraphs/v1":
+        return extracted
+    parents = {child: parent for parent in root.iter() for child in parent}
+    abstract_locations = {}
+    body_locations = {}
+    abstract_index = 0
+    body_ordinal = 0
+    for element in root.iter():
+        tag = _local_name(element.tag)
+        if tag == "abstract":
+            abstract_index += 1
+            for ordinal, paragraph in enumerate((p for p in element.iter() if _local_name(p.tag) == "p"), 1):
+                abstract_locations[paragraph] = f"jats:v2/abstract:{abstract_index}/p:{ordinal}"
+        elif tag == "body":
+            for paragraph in element.iter():
+                if _local_name(paragraph.tag) == "p":
+                    body_ordinal += 1
+                    body_locations[paragraph] = f"jats:v2/body/p:{body_ordinal}"
+    excluded = {"back", "ref-list", "ref", "contrib-group", "author-notes", "supplementary-material",
+                "table", "td", "th", "disp-formula", "inline-formula"}
+    for paragraph in root.iter():
+        if _local_name(paragraph.tag) != "p":
+            continue
+        ancestor_tags = set()
+        ancestor = parents.get(paragraph)
+        while ancestor is not None:
+            ancestor_tags.add(_local_name(ancestor.tag))
+            ancestor = parents.get(ancestor)
+        if ancestor_tags & excluded or not ancestor_tags & {"abstract", "body"}:
+            continue
+        text = _element_text(paragraph)
+        if not text:
+            continue
+        text.encode("utf-8")
+        if paragraph in deepest:
+            extracted.append(deepest[paragraph])
+        elif paragraph in abstract_locations:
+            extracted.append({"section": "Abstract", "text": text, "locator": abstract_locations[paragraph]})
+        else:
+            extracted.append({"section": "Body", "text": text, "locator": body_locations[paragraph]})
     return extracted
 
 
@@ -390,8 +447,8 @@ def _parse_target_paragraphs(raw: bytes) -> list[dict]:
     ]
 
 
-def _paragraph_locator_map(raw: bytes) -> dict[str, dict]:
-    return {item["locator"]: item for item in parse_jats_paragraphs(raw)}
+def _paragraph_locator_map(raw: bytes, *, parser_profile: str = "jats-paragraphs/v1") -> dict[str, dict]:
+    return {item["locator"]: item for item in parse_jats_paragraphs(raw, parser_profile=parser_profile)}
 
 
 class EuropePmcEvidenceRetriever:
@@ -423,7 +480,8 @@ class EuropePmcEvidenceRetriever:
         )
         return relative, self.project_dir / relative
 
-    def retrieve(self, paper: dict, *, seed: dict) -> dict:
+    def retrieve(self, paper: dict, *, seed: dict, parser_profile: str = "jats-paragraphs/v1") -> dict:
+        _check_parser_profile(parser_profile)
         if not isinstance(paper, dict):
             raise CurieContractError("selected Europe PMC paper must be an object")
         paper_id = _require_text(paper.get("paper_id"), "selected paper paper_id")
@@ -446,7 +504,8 @@ class EuropePmcEvidenceRetriever:
         if not isinstance(raw, (bytes, bytearray)):
             raise CurieContractError("Europe PMC http_get must return bytes")
         raw = bytes(raw)
-        paragraphs = _parse_target_paragraphs(raw)
+        paragraphs = (_parse_target_paragraphs(raw) if parser_profile == "jats-paragraphs/v1"
+                      else parse_jats_paragraphs(raw, parser_profile=parser_profile))
         relative, path = self._snapshot_path(paper_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
@@ -476,7 +535,8 @@ class EuropePmcEvidenceRetriever:
                 "paper_failure": {
                     "paper_id": paper_id,
                     "pmcid": pmcid,
-                    "reason_code": "NO_TARGET_SECTIONS",
+                    "reason_code": ("NO_TARGET_SECTIONS" if parser_profile == "jats-paragraphs/v1"
+                                    else "NO_USABLE_PARAGRAPHS"),
                 },
             }
         candidates = [
@@ -540,6 +600,7 @@ def verify_jats_candidates(
     paper_id: str,
     role_override: str = "",
     retrieval_base: dict | None = None,
+    parser_profile: str = "jats-paragraphs/v1",
 ) -> list[dict]:
     """Independently relocate candidates in exact JATS bytes and emit LOCATED extracts."""
     if not isinstance(raw, (bytes, bytearray)):
@@ -548,11 +609,15 @@ def verify_jats_candidates(
     paper_id = _require_text(paper_id, "JATS source paper_id")
     if not isinstance(candidates, list) or not candidates:
         raise CurieContractError("Europe PMC evidence candidates must be a non-empty list")
-    locator_map = _paragraph_locator_map(raw)
+    locator_map = _paragraph_locator_map(raw, parser_profile=parser_profile)
     source_sha256 = hashlib.sha256(raw).hexdigest()
     base = json.loads(json.dumps(retrieval_base or {}))
     base.setdefault("engine", "independent-jats-verifier/v1")
     base.setdefault("source_sha256", source_sha256)
+    if parser_profile == "jats-paragraphs/v2":
+        if base["source_sha256"] != source_sha256:
+            raise CurieContractError("JATS retrieval source hash mismatch")
+        base["parser_profile"] = parser_profile
     verified: list[dict] = []
     for candidate in candidates:
         if not isinstance(candidate, dict):
@@ -572,19 +637,27 @@ def verify_jats_candidates(
         if candidate.get("paper_id") != paper_id:
             raise CurieContractError("Europe PMC evidence candidate paper_id mismatch")
         locator = _require_text(candidate.get("locator"), "evidence candidate locator")
+        if parser_profile == "jats-paragraphs/v2":
+            for key in ("text", "section", "locator"):
+                text = _require_text(candidate.get(key), f"evidence candidate {key}")
+                try:
+                    text.encode("utf-8")
+                except UnicodeError as exc:
+                    raise CurieContractError("JATS proposal must be strict UTF-8") from exc
+        mismatch = JatsSourceMismatchError if parser_profile == "jats-paragraphs/v2" else CurieContractError
         located = locator_map.get(locator)
         if located is None:
-            raise CurieContractError(
+            raise mismatch(
                 f"Europe PMC evidence locator cannot be resolved: {locator}"
             )
         candidate_text = _normalize_text(candidate.get("text"))
         if candidate_text != located["text"]:
-            raise CurieContractError(
+            raise mismatch(
                 f"Europe PMC evidence text does not match source at locator {locator}"
             )
         section = _require_text(candidate.get("section"), "evidence candidate section")
         if _normalize_text(section) != located["section"]:
-            raise CurieContractError(
+            raise mismatch(
                 f"Europe PMC evidence section does not match source at locator {locator}"
             )
         role = _require_text(
@@ -674,11 +747,12 @@ class EuropePmcEvidenceVerifier:
         _require_text(paper_id, "source snapshot paper_id")
         return raw
 
-    def verify(self, snapshot: dict, candidates: list[dict]) -> list[dict]:
+    def verify(self, snapshot: dict, candidates: list[dict], *, parser_profile: str = "jats-paragraphs/v1") -> list[dict]:
         raw = self._load_snapshot(snapshot)
         return verify_jats_candidates(
             raw,
             candidates,
+            parser_profile=parser_profile,
             paper_id=str(snapshot.get("paper_id") or ""),
             retrieval_base={
                 "engine": "europe-pmc-fulltext-xml/v1",

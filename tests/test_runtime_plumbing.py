@@ -6,6 +6,7 @@ import sys
 import json
 from pathlib import Path
 from types import SimpleNamespace
+import pytest
 
 import run_loop
 from research_loop import cli, context, runtime_preflight
@@ -13,6 +14,49 @@ from native_v2_helpers import ensure_catalog_paperqa2_binding
 
 
 CONTROLLER = Path(__file__).resolve().parents[1] / "research_loop_v04.py"
+
+
+def test_corpus_required_capability_keeps_l4_optional_config(tmp_path, monkeypatch):
+    from research_loop.l05_curie import paperqa2_runtime as worker
+    from test_l05_curie_corpus_replay import corpus_host_project
+    project, seed, config = corpus_host_project(tmp_path, monkeypatch)
+    factory = getattr(worker, "corpus_backend_from_config", None)
+    assert callable(factory), "missing corpus config adapter"
+    backend = factory(config)
+    assert isinstance(backend, worker.PaperQA2SubprocessBackend)
+    required = getattr(runtime_preflight, "require_bound_corpus_paperqa2", None)
+    assert callable(required), "missing explicit corpus capability"
+    assert isinstance(required(SimpleNamespace(paperqa2=config)), worker.PaperQA2SubprocessBackend)
+    old = {k: config[k] for k in ("python_executable", "bridge_script", "paperqa_repo", "pqa_home")}
+    assert isinstance(runtime_preflight.require_bound_paperqa2(SimpleNamespace(paperqa2=old)), worker.PaperQA2CurieRuntime)
+    with pytest.raises(runtime_preflight.RuntimePreflightError): required(SimpleNamespace(paperqa2=old))
+
+
+def test_preflight_retains_corpus_settings_and_rejects_invalid_binding(tmp_path, monkeypatch, capsys):
+    from research_loop import deep_research
+    from research_loop.commands import lifecycle
+    from research_loop.l05_curie import europepmc_runtime as owner
+    from test_l05_curie_corpus_replay import corpus_host_project
+    project, seed, config = corpus_host_project(tmp_path, monkeypatch)
+    (project / "00_Project_Index.md").write_text("---\nproject_name: fixture\n---\n", encoding="utf-8")
+    args = SimpleNamespace(project_dir=str(project), backend="codex", force=True,
+        paperqa_python=config["python_executable"], paperqa_bridge=config["bridge_script"],
+        paperqa_repo=config["paperqa_repo"], pqa_home=config["pqa_home"])
+    assert lifecycle.cmd_preflight(args) == 0
+    bound = json.loads(deep_research.runtime_config_path(project).read_bytes())["paperqa2"]
+    assert bound["worker_mode"] == config["worker_mode"] and bound["settings"] == config["settings"]
+    invalid_root = tmp_path / "invalid-binding"
+    invalid_root.mkdir()
+    project, _, config = corpus_host_project(invalid_root, monkeypatch)
+    (project / "00_Project_Index.md").write_text("---\nproject_name: fixture\n---\n", encoding="utf-8")
+    config["settings"].pop("embedding")
+    owner._atomic_json(deep_research.runtime_config_path(project), {"backend": "codex", "paperqa2": config})
+    before = deep_research.runtime_config_path(project).read_bytes()
+    args = SimpleNamespace(project_dir=str(project), backend="codex", force=False,
+        paperqa_python=config["python_executable"], paperqa_bridge=config["bridge_script"],
+        paperqa_repo=config["paperqa_repo"], pqa_home=config["pqa_home"])
+    assert lifecycle.cmd_preflight(args) == 2
+    assert deep_research.runtime_config_path(project).read_bytes() == before
 
 
 def _candidate_project(tmp_path):
@@ -253,3 +297,29 @@ print(json.dumps({
     }
     assert "FORMAL RUNTIME PREFLIGHT PASS" in smoke.stdout
     assert "--stop-after-node L0" in smoke.stdout
+@pytest.mark.parametrize("prefix", ["", "a", "aa"])
+def test_process_runner_strict_utf8_bounded_diagnostics(prefix):
+    """Byte cuts are diagnostic boundaries, not invalid source characters."""
+    from research_loop.process_runner import ProcessRunner
+    import sys
+
+    text = prefix + "中文" * 100
+    result = ProcessRunner().run(
+        [sys.executable, "-c", "import sys;sys.stdout.buffer.write(sys.argv[1].encode('utf-8'))", text],
+        timeout=5, encoding="utf-8", errors="strict", max_output_bytes=32,
+    )
+    assert result.returncode == 0
+    assert result.stdout_truncated is True
+    assert result.stdout_bytes == len(text.encode("utf-8"))
+    assert text.startswith(result.stdout) and text.endswith(result.stdout_tail)
+    assert "\ufffd" not in result.stdout + result.stdout_tail
+
+
+@pytest.mark.parametrize("payload", [b"abc\xff" + b"x" * 100, b"x" * 100 + b"\xe4\xb8"])
+def test_process_runner_strict_utf8_still_rejects_invalid_captured_bytes(payload):
+    from research_loop.process_runner import ProcessRunner
+    with pytest.raises(UnicodeDecodeError):
+        ProcessRunner().run(
+            [sys.executable, "-c", "import sys;sys.stdout.buffer.write(bytes.fromhex(sys.argv[1]))", payload.hex()],
+            timeout=5, encoding="utf-8", errors="strict", max_output_bytes=32,
+        )

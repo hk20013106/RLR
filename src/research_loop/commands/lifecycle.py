@@ -1214,7 +1214,16 @@ def cmd_preflight(args):
                 return 3
             paperqa_binding = persisted_paperqa
         else:
-            paperqa_binding = explicit_paperqa
+            paperqa_binding = {**(persisted_paperqa if isinstance(persisted_paperqa, dict) else {}), **explicit_paperqa}
+
+    if isinstance(paperqa_binding, dict) and "worker_mode" in paperqa_binding:
+        from research_loop.l05_curie.paperqa2_runtime import validate_corpus_worker_config
+        from research_loop.l05_curie.contracts import CurieContractError
+        try:
+            paperqa_binding = validate_corpus_worker_config(paperqa_binding)
+        except CurieContractError as exc:
+            print(f"ERROR: invalid corpus PaperQA2 binding: {exc}", file=sys.stderr)
+            return 2
 
     runtime_config_to_write = None
     if not runtime_file.exists():

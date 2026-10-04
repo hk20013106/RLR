@@ -192,6 +192,13 @@ def load_runtime_spec(project_dir: str | Path, overrides: dict | None = None) ->
     paperqa2 = config.get("paperqa2")
     if paperqa2 is not None and not isinstance(paperqa2, dict):
         raise DeepResearchError("runtime paperqa2 config must be an object")
+    if isinstance(paperqa2, dict) and "worker_mode" in paperqa2:
+        from research_loop.l05_curie.paperqa2_runtime import validate_corpus_worker_config
+        from research_loop.l05_curie.contracts import CurieContractError
+        try:
+            paperqa2 = validate_corpus_worker_config(paperqa2)
+        except CurieContractError as exc:
+            raise DeepResearchError(f"invalid corpus PaperQA2 binding: {exc}") from exc
     return RuntimeSpec(
         backend=backend, executable=str(config.get("executable") or backend),
         plugin_dir=config.get("plugin_dir") or None, model=config.get("model") or None,

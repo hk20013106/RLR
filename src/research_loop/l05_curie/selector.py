@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import copy
 from pathlib import Path
 from typing import Callable
 
 from .contracts import CurieContractError, validate_record_query_provenance
+from .contracts import _require_int
+from .multisource import match_existing_corpus_record
 
 SELECTOR_DECISION_SCHEMA_VERSION = "L05SelectorDecision/v1"
 _SELECTOR_RUN_SCHEMA_VERSION = "L05SelectorRun/v1"
@@ -25,6 +28,87 @@ _SCORE_FIELDS = (
 )
 _ROOT = Path("08_Audit") / "l05_selector"
 _NON_PAPER_PUBLICATION_TYPES = {"component"}
+
+
+def allocate_corpus_candidates(discovery: dict, *, query_plan: dict,
+                               existing_papers: list[dict], failed_aliases: list[dict],
+                               max_new_papers: int, eligibility: Callable) -> dict:
+    """Allocate already-canonical sources mechanically in query/provider order."""
+    _require_int(max_new_papers, "max_new_papers", minimum=0, maximum=30)
+    if not isinstance(existing_papers, list) or len(existing_papers) > 90:
+        raise CurieContractError("existing corpus exceeds cumulative budget")
+    max_new_papers = min(max_new_papers, 90 - len(existing_papers))
+    queries = query_plan.get("queries") if isinstance(query_plan, dict) else None
+    if not isinstance(queries, list) or not queries:
+        raise CurieContractError("corpus allocation requires QueryPlan queries")
+    if not isinstance(discovery, dict) or not isinstance(discovery.get("records"), list) or not isinstance(discovery.get("batches"), list):
+        raise CurieContractError("corpus allocation requires canonical discovery and raw batches")
+    query_ids = {str(q["query_id"]) for q in queries}
+    if len(query_ids) != len(queries):
+        raise CurieContractError("corpus allocation duplicate query_id")
+    records = discovery["records"]
+    if len({p["paper_id"] for p in records}) != len(records):
+        raise CurieContractError("duplicate canonical discovery paper_id")
+    for record in records:
+        validate_record_query_provenance(record, authorized_query_ids=query_ids)
+    batches = {}
+    for batch in discovery["batches"]:
+        key = (batch["query_id"], batch["provider"])
+        if key in batches:
+            raise CurieContractError("duplicate raw discovery batch")
+        batches[key] = batch
+    queues = []
+    for query in queries:
+        queue = []
+        for provider in query["providers"]:
+            batch = batches.pop((query["query_id"], provider), None)
+            if batch is None:
+                raise CurieContractError("missing declared discovery batch")
+            for raw in batch["records"]:
+                canonical = match_existing_corpus_record(raw, existing_papers=records)
+                if canonical is None:
+                    raise CurieContractError("raw discovery record has no canonical identity")
+                queue.append(canonical)
+        queues.append(iter(queue))
+    if batches:
+        raise CurieContractError("undeclared discovery batch")
+    ordered = []
+    seen = set()
+    active = list(queues)
+    while active:
+        remaining = []
+        for queue in active:
+            for paper in queue:
+                if paper["paper_id"] in seen:
+                    continue
+                seen.add(paper["paper_id"])
+                ordered.append(paper)
+                remaining.append(queue)
+                break
+        active = remaining
+    if seen != {p["paper_id"] for p in records}:
+        raise CurieContractError("canonical discovery lacks raw batch origin")
+    eligible = []
+    excluded = []
+    for record in ordered:
+        old = match_existing_corpus_record(record, existing_papers=existing_papers)
+        failed = match_existing_corpus_record(record, existing_papers=failed_aliases)
+        if old is not None or failed is not None:
+            reason = "EXISTING_CORPUS" if old is not None else "KNOWN_FAILED_SOURCE"
+            excluded.append({"paper": record, "reason_code": reason})
+            continue
+        allowed, reason = _source_type_eligibility(record)
+        if allowed:
+            gate = eligibility(record)
+            if not isinstance(gate, tuple) or len(gate) != 2 or type(gate[0]) is not bool:
+                raise CurieContractError("corpus eligibility must return (bool, reason_code)")
+            allowed, reason = gate
+        if allowed:
+            eligible.append(record)
+        else:
+            excluded.append({"paper": record, "reason_code": _text(reason, "eligibility reason_code")})
+    return copy.deepcopy({"selected": eligible[:max_new_papers], "reserves": eligible[max_new_papers:],
+                          "excluded": excluded, "provenance": {"query_order": [q["query_id"] for q in queries]}})
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -140,7 +224,7 @@ def _select_candidates(
     records: list[dict], *, seed: dict,
     scorer: Callable[[dict, dict], dict],
     eligibility: Callable[[dict], tuple[bool, str]],
-    max_papers: int = 3,
+    max_papers: int = 30,
     project_dir: str | Path | None = None,
     candidate_id: str | None = None,
     run_id: str | None = None,
@@ -243,7 +327,7 @@ def select_candidates(
     records: list[dict], *, seed: dict,
     scorer: Callable[[dict, dict], dict],
     eligibility: Callable[[dict], tuple[bool, str]],
-    max_papers: int = 3,
+    max_papers: int = 30,
     project_dir: str | Path | None = None,
     candidate_id: str | None = None,
     run_id: str | None = None,
@@ -270,7 +354,7 @@ def select_candidates_strict(
     records: list[dict], *, seed: dict,
     scorer: Callable[[dict, dict], dict],
     eligibility: Callable[[dict], tuple[bool, str]],
-    max_papers: int = 3,
+    max_papers: int = 30,
     project_dir: str | Path | None = None,
     candidate_id: str | None = None,
     run_id: str | None = None,

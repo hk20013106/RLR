@@ -96,6 +96,15 @@ def require_bound_paperqa2(spec):
         ) from exc
 
 
+def require_bound_corpus_paperqa2(spec):
+    """Explicit L0.5 corpus capability; existing L4 document gate stays separate."""
+    from research_loop.l05_curie.paperqa2_runtime import corpus_backend_from_config
+    try:
+        return corpus_backend_from_config(getattr(spec, "paperqa2", None))
+    except Exception as exc:
+        raise RuntimePreflightError(f"bound corpus PaperQA2 capability is not ready: {exc}") from exc
+
+
 def formal_runtime_command(*args: str | Path) -> list[str]:
     """Build the sole formal launcher from the configured interpreter."""
 

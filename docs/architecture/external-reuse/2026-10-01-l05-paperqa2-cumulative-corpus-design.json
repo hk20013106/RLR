@@ -1,0 +1,115 @@
+{
+  "schema_version": "ExternalReuseAudit/v1",
+  "change_id": "l05-paperqa2-cumulative-corpus-design",
+  "EXISTING_IMPLEMENTATIONS_REVIEWED": [
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/l05_curie/europepmc_runtime.py @ c60632afdb3aabd6e7c55ffea8dd6a43c50c7982",
+      "finding": "Existing first-acquisition owner, attempt manifest, host checkpoint, planner and semantic request receipts, HTTP replay and freeze transaction are the canonical acquisition lifecycle. They lack cumulative worker result replay and whole-question scientific coverage; extend this owner rather than create a corpus ledger or orchestration subsystem."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/l05_curie/europepmc.py; multisource.py; selector.py; contracts.py; store.py; semantic_verifier.py; src/research_loop/host_handoff.py",
+      "finding": "Existing owners provide retained XML, exact source verification, canonical identifier dedupe, strict eligibility, coverage contracts/routing, immutable EvidencePack, semantic admission and validate-before-persist host handoff. Existing JATS parser repeats nested paragraphs and omits unsectioned text; adapt its source-location boundary without rebuilding retrieval."
+    },
+    {
+      "scope": "internal",
+      "reference": "scripts/paperqa2_rlr_bridge.py; src/research_loop/l05_curie/paperqa2.py; paperqa2_runtime.py; src/research_loop/deep_research.py; src/research_loop/process_runner.py",
+      "finding": "Current subprocess bridge uses one document, sparse embedding, skip-summary and manual retrieval/MMR; existing runtime binding and ProcessRunner already own integration. ProcessRunner bounds in-memory stdout to 256 KiB and exposes on_stdout/on_stderr observers for complete artifact capture. Reuse that integration boundary and observers, replace new L0.5 worker mode with native multi-document evidence generation and preserve unrelated document-runtime consumers."
+    },
+    {
+      "scope": "external",
+      "reference": "https://github.com/Future-House/paper-qa/tree/57e89f7223b0960d5ee5ea048c69e3c47e088572/src/paperqa",
+      "finding": "Read installed clean source docs.py aadd_texts/aget_evidence, core.py map_fxn_summary, types.py Text/Context and settings.py; also opened upstream fixed-commit docs.py/core.py and tagged readers.py. Native Docs already owns multi-document embedding, retrieval, summary and relevance. Context preserves original Text and Doc. Native readers do not supply JATS locator semantics. Some terminal LLMContextError cases log exception records then return None; process success or an empty Context list cannot establish successful evidence generation."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/l05_curie/contracts.py; paperqa2.py; paperqa2_runtime.py; research_loop/research_seed.py — Task 1 implementation",
+      "finding": "Task 1 extends these existing owners with strict pure corpus Task/Result and scientific coverage validation, shares Curie canonical JSON encoding and native Settings validation, and reuses canonical ResearchSeed hashing. Dict validators do not claim duplicate JSON key detection; raw transport decoding remains Task 4/5. No filesystem, provider, retrieval, ranking, summary, relevance or lifecycle implementation was added in Task 1."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/l05_curie/europepmc.py — Task 2 implementation",
+      "finding": "Extends the same parser and independently re-read source verifier with explicit v2 profile; reuses legacy sec enumeration and normalization, chooses deepest node locator and preserves document-order ordinals. V1/L4 callers retain default behavior. Legal source XML encodings remain raw bytes; table/formula/reference exclusions apply only v2."
+    },
+    {
+      "scope": "internal",
+      "reference": "multisource.py; selector.py; europepmc_runtime.py — Task 3 implementation",
+      "finding": "Reuses stable identifier/alias conflict rules, raw discovery batch ordering, strict source eligibility and fullTextXML resource classification. Adds mechanical round-robin allocation and append-only cumulative entries within existing owners; explicit corpus preparation/execution bypasses scientific ranking and defers source/semantic admission to later owners. No new acquisition loop or mutable corpus registry."
+    },
+    {
+      "scope": "external",
+      "reference": "PaperQA2 Docs.aadd_texts/aget_evidence, core.map_fxn_summary, Text/Context @ 57e89f7223b0960d5ee5ea048c69e3c47e088572 — Task 4 offline native execution",
+      "finding": "Actual pinned native Doc/Text/Context identity survives deep copy, hash/set and summary. Real map_fxn_summary returns zero contexts without terminal error at score 0; malformed summaries fail twice and log one terminal error, first bad then valid recovers without terminal record, actual controlled Timeout emits one non-retryable terminal error. Uses a controlled provider adapter only; no model/network requests or monkey-patched native map function."
+    },
+    {
+      "scope": "internal",
+      "reference": "process_runner.py; paperqa2_runtime.py — Task 5 actual subprocess evidence",
+      "finding": "Shared bounded capture cuts inside valid UTF-8 characters. Real owner tests fail in strict head/tail decoding despite valid complete output. Extend that same owner only to decode clipped diagnostic boundaries; malformed source bytes still reject. Corpus observer spools complete raw streams, strict decoder rejects raw duplicate keys, and existing immutable writer records result/completion; no second runner or replay engine."
+    },
+    {
+      "scope": "internal",
+      "reference": "europepmc_runtime.py checkpoint/continue/run/HTTP/first-writer — Task 6",
+      "finding": "Extends same checkpoint owner with explicit v2 frozen configuration and worker transaction slots, strict existing decoder/canonical writer, PREPARED/IN_FLIGHT/durable group recovery, actual origin receipt/focus binding and ordered known HTTP failure replay. The public controller calls that private transaction while already holding the existing candidate/round writer lock; no second lifecycle loop or replay engine."
+    },
+    {
+      "scope": "internal",
+      "reference": "EuropePmcEvidenceVerifier; SemanticEvidenceVerifier; europepmc_runtime.py semantic receipt validator — Task 7",
+      "finding": "Reuses independent XML source verifier and existing extract ID formula, stable source artifact writer, five-field semantic assessor/preservation policy, and same origin host receipt validator. Worker score/summary remain separate proposal audit refs; exact extract/claim/contract/assessor binding reuses original verification and receipt across attempts. Complete source reread still occurs for zero contexts."
+    },
+    {
+      "scope": "internal",
+      "reference": "contracts.judge_coverage; host_handoff; europepmc_runtime coverage/focus receipt proof — Task 8",
+      "finding": "Existing contract routing accepts bounded acquisition facts without changing pack version wire. New scientific stage uses same current-host request/receipt owner and pure assessment validator; origin proof is shared with focus validation. Scientific fingerprint binds full frozen question, hypothesis, source scope, corpus snapshots and admitted exact semantics, while budgets only reroute the validated assessment. New mode bypasses structural section sufficiency."
+    },
+    {
+      "scope": "internal",
+      "reference": "europepmc_runtime manifest/freeze; store; native binding - Task 9",
+      "finding": "Extends the same versioned manifest owner with cumulative order/origin, canonical worker completion, independent source, semantic and scientific coverage proofs; native L1 delegates that validator without changing binding wire. Recovery reuses store load or create-only freeze, while committed entry validates actual artifacts. Alias conflict checking uses deep copies before the existing merge to preserve frozen provenance."
+    },
+    {
+      "scope": "internal",
+      "reference": "deep_research.py; commands/lifecycle.py; runtime_preflight.py; run_loop.py; paperqa2_runtime.py - Task 10",
+      "finding": "The sole runtime configuration validates explicit corpus mode with the existing Task 1 validator; preflight merges explicit paths while preserving frozen settings. Corpus capability factory uses the same subprocess backend; document/L4 factory stays unchanged. Public host-submit routes coverage to existing submit/continue, and omitted custom run IDs resolve only through validated canonical first-owner metadata. Legacy acquisition refuses an existing corpus owner; retired algorithms have sentinel tests. No second config, serializer, acquisition controller, retrieval/ranking/summary/relevance implementation or host model path."
+    }
+  ],
+  "REUSABLE_COMPONENTS": [
+    {
+      "reference": "PaperQA2 Docs.aadd_texts + Docs.aget_evidence @ 57e89f7223b0960d5ee5ea048c69e3c47e088572",
+      "disposition": "ADAPT",
+      "reason": "Invoke the complete installed corpus evidence system. Adapt deterministic source-located Text input and strict output/diagnostic handling; no local retrieval, ranking, summary or relevance replacement."
+    },
+    {
+      "reference": "PaperQA2 autonomous agent/paper_search",
+      "disposition": "REJECT",
+      "reason": "Whole-agent direct use owns discovery and iterative planning, while this task requires a closed RLR-authorized corpus and existing host search/replan authority. Native Docs evidence generation satisfies the required specialized worker scope without that authority mismatch."
+    },
+    {
+      "reference": "src/research_loop/l05_curie/europepmc_runtime.py; src/research_loop/host_handoff.py; src/research_loop/l05_curie/store.py; src/research_loop/l05_native_binding.py",
+      "disposition": "EXTEND",
+      "reason": "Keep the existing lifecycle, persistence and authority owners. Version their contracts where cumulative worker replay and coverage receipts change semantics; no second ledger, checkpoint engine or pack writer."
+    },
+    {
+      "reference": "src/research_loop/l05_curie/europepmc.py; multisource.py; selector.py",
+      "disposition": "ADAPT",
+      "reason": "Keep original snapshots, identifier matching, strict full-text eligibility and independent SourceVerifier. Supply source paragraphs to native Text with existing compatible locators; use mechanical allocation rather than scientific lexical ranking."
+    },
+    {
+      "reference": "src/research_loop/l05_curie/paperqa2.py; paperqa2_runtime.py; scripts/paperqa2_rlr_bridge.py; src/research_loop/deep_research.py",
+      "disposition": "ADAPT",
+      "reason": "Reuse the subprocess, project binding, runtime provenance and contract owners. Distinct versioned corpus worker mode replaces the single-paper authoritative L0.5 use; do not silently reinterpret legacy PDF/document request schemas."
+    },
+    {
+      "reference": "src/research_loop/l05_curie/contracts.py; query_planner.py; semantic_verifier.py",
+      "disposition": "EXTEND",
+      "reason": "Reuse query compilation, bounded replan, semantic policy and coverage routing. Add a validated seed-bound whole-question coverage assessment in the existing contract/handoff owners, without delegating decisions to PaperQA2."
+    },
+    {
+      "reference": "src/research_loop/process_runner.py::_BoundedCapture",
+      "disposition": "EXTEND",
+      "reason": "Demonstrated clipped UTF-8 diagnostics production bug; preserve strict actual bytes and existing runner/timeout/tree-cleanup ownership."
+    }
+  ],
+  "ADOPTED_PATTERN": "ADAPT",
+  "WHY_NEW_CODE_IS_NECESSARY": "Approved Tasks 1-10 adapt existing RLR owners to invoke complete pinned native PaperQA2 corpus evidence APIs. Reuse canonical serializer, seed/identity matching, JATS location, source and semantic verification, coverage routing, checkpoint/replay, store, binding, host protocol, subprocess and configuration owners. New code is the versioned contract and adaptation needed for cumulative corpus, validated request-bound evidence focus, durable worker completion and scientific coverage. Offline validation is separate from Task 11 live acceptance, which is NOT AUTHORIZED / NOT ATTEMPTED."
+}

@@ -4,6 +4,18 @@ This is the compact architecture and operational context for an agent taking
 over Research Loop (RLR). It complements, but never overrides, executable
 code, validators, and tests.
 
+L0.5 cumulative corpus uses an explicit `corpus-evidence-v1` submode in the
+existing PaperQA2 runtime binding. The same acquisition controller owns
+discovery, cumulative snapshots, checkpoint/replay and freeze. The external
+worker delegates evidence retrieval/summary to pinned native PaperQA2 Docs;
+RLR independently verifies source, semantic admission and current-host
+scientific coverage. See [the host protocol](AGENT_NATIVE_RUN.md#l05-cumulative-paperqa2-corpus)
+and [approved design](superpowers/specs/2026-10-01-l05-paperqa2-cumulative-corpus-design.md).
+Acquisition manifest v3 is mandatory for the new mode; L1 validates its actual
+worker/coverage proofs through the existing native binding. Historical wire
+contracts and L4/document behavior remain separately validated. Live acceptance
+is a separate user authorization gate, not inferred from offline tests.
+
 ## Read order
 
 1. [`AGENTS.md`](../AGENTS.md): non-negotiable safety, scientific-integrity,

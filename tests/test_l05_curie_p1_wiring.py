@@ -5,6 +5,46 @@ import json
 import pytest
 
 import run_loop
+
+
+@pytest.mark.parametrize("case", ["missing-settings", "invalid-mode", "invalid-budget"])
+def test_runtime_binding_validates_explicit_corpus_at_unique_config_owner(tmp_path, monkeypatch, case):
+    from research_loop import deep_research
+    from research_loop.l05_curie import europepmc_runtime as owner
+    from test_l05_curie_corpus_replay import corpus_host_project
+    project, seed, config = corpus_host_project(tmp_path, monkeypatch)
+    if case == "missing-settings": config.pop("settings")
+    elif case == "invalid-mode": config["worker_mode"] = "unknown"
+    else: config["acquisition_budget"] = {"max_acquisition_attempts": True}
+    path = deep_research.runtime_config_path(project)
+    owner._atomic_json(path, {"backend": "codex", "paperqa2": config})
+    raw = path.read_bytes()
+    with pytest.raises(deep_research.DeepResearchError): deep_research.load_runtime_spec(project)
+    assert path.read_bytes() == raw
+
+
+def test_legacy_commands_cannot_take_corpus_owner_or_fallback(tmp_path, monkeypatch):
+    from research_loop.l05_curie import europepmc_runtime as owner, paperqa2_runtime as worker
+    from test_l05_curie_corpus_replay import corpus_host_project
+    project, seed, config = corpus_host_project(tmp_path, monkeypatch)
+    pending = owner.prepare_acquisition_host_step(project, "C001", run_id="owned-corpus")
+    path = project / "01_Candidates/C001.md"; raw = path.read_bytes()
+    monkeypatch.setattr(owner, "_prepare_europepmc_acquisition", lambda *_a, **_kw: pytest.fail("legacy discovery took corpus owner"))
+    with pytest.raises(owner.CurieContractError, match="corpus"):
+        owner.run_paperqa2_europepmc_acquisition(project, "C001", paperqa_runtime=worker.runtime_from_config(config),
+            pdf_paths={}, semantic_assessor=lambda **_: {}, run_id="legacy-attempt")
+    assert path.read_bytes() == raw
+
+
+def test_corpus_path_never_calls_retired_scientific_helpers(tmp_path, monkeypatch):
+    from research_loop.l05_curie import europepmc_runtime as owner, europepmc, paperqa2_runtime as worker
+    from test_l05_curie_corpus_integration import drive
+    def retired(*_a, **_kw): pytest.fail("retired per-paper retrieval, alignment or structural coverage")
+    for module, name in [(owner, "_europepmc_selector_score"), (owner, "_paperqa2_retrieval_query"),
+        (owner, "_coverage_for"), (worker, "align_paperqa2_chunks"), (europepmc, "_parse_target_paragraphs")]:
+        monkeypatch.setattr(module, name, retired)
+    project, seed, result, calls = drive(tmp_path, monkeypatch, rounds=1)
+    assert result["kind"] == "FROZEN" and calls["worker"] == [30]
 from research_loop import l05_curie_cli
 from research_loop.providers import ProviderConfig
 

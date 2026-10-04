@@ -547,6 +547,249 @@ def test_replan_without_optional_has_explicit_inapplicable_split(tmp_path, monke
     assert split["reason"]
 
 
+def _keyword_sha(value):
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _keyword_api(name):
+    method = getattr(query_planner, name, None)
+    assert callable(method), f"missing planned behavior: {name}"
+    return method
+
+
+def _keyword_invocation(seed, scientific_plan):
+    return {
+        "acquisition_run_id": "run-keyword-1",
+        "attempt_index": 1,
+        "seed_sha256": research_seed.seed_sha256(seed),
+        "scientific_plan_content_hash": scientific_plan["plan_content_hash"],
+        "bridge_sha256": "a" * 64,
+        "settings_sha256": "b" * 64,
+        "planner_receipt_sha256": _keyword_sha({
+            "validation_status": "PASS", "prompt_hash": "host-receipt"}),
+        "planner_proposal_sha256": "c" * 64,
+        "planner_feedback_sha256": scientific_plan["feedback_sha256"],
+        "expected_runtime": {
+            "package": "paper-qa",
+            "version": "2026.8.12",
+            "upstream_tag": "v2026.08.12",
+            "upstream_commit": "57e89f7223b0960d5ee5ea048c69e3c47e088572",
+            "module_path": "D:/paper-qa/src/paperqa/agents/helpers.py",
+            "clean_checkout": True,
+            "llm_model": "deepseek/deepseek-flash",
+        },
+    }
+
+
+def _keyword_generation(seed, scientific_plan, proposals, invocation):
+    validated = _keyword_api("validate_keyword_proposals")(
+        proposals, generation_year=2026, prior_queries=[])
+    return {
+        "mode": "paperqa2-keyword-proposals-v1",
+        "invocation_sha256": _keyword_sha(invocation),
+        "bridge_sha256": invocation["bridge_sha256"],
+        "settings_sha256": invocation["settings_sha256"],
+        "requested_count": 3,
+        "proposals": validated,
+        "runtime": {
+            **invocation["expected_runtime"],
+            "generation_year": 2026,
+        },
+        "completion": {
+            "terminal_state": "completed",
+            "returncode": 0,
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+            "process_tree_cleanup": {
+                "attempted": False, "targeted_pids": [], "terminated_pids": [],
+                "killed_pids": [], "errors": [], "alive_after_cleanup": False,
+            },
+        },
+    }
+
+
+def test_keyword_question_contains_frozen_claim_whole_plan_and_only_validated_gaps():
+    materialize = _keyword_api("materialize_keyword_question")
+    seed = _seed()
+    scientific_plan = validate_scientific_query_plan(_plan(seed), seed=seed)
+    gap = {"gap_id": "G1", "topic": "SCIENTIFIC_QUESTION", "reason": "Need broader range",
+           "search_directions": ["yeast sensing", "carbon dioxide"]}
+    feedback = {"validated_coverage_gaps": [gap], "untrusted_model_text": "MUST_NOT_LEAK"}
+
+    question = materialize(seed, scientific_plan=scientific_plan, feedback=feedback)
+    expected_projection = {
+        "core_anchors": scientific_plan["core_anchors"],
+        "optional_concepts": scientific_plan["optional_concepts"],
+        "intents": scientific_plan["intents"],
+    }
+    expected = "\n".join([
+        "Scientific question:", seed["scientific_question"], "",
+        "Hypothesis to evaluate:", seed["hypothesis_seed"], "",
+        "Validated scientific plan:",
+        json.dumps(expected_projection, ensure_ascii=False, sort_keys=True, separators=(",", ":")), "",
+        "Validated coverage gaps:",
+        json.dumps([gap], ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+    ])
+    assert question == expected
+    assert "MUST_NOT_LEAK" not in question
+    assert materialize(seed, scientific_plan=scientific_plan, feedback=feedback) == question
+
+
+def test_keyword_question_initial_attempt_uses_no_coverage_gaps():
+    materialize = _keyword_api("materialize_keyword_question")
+    seed = _seed()
+    scientific_plan = validate_scientific_query_plan(_plan(seed), seed=seed)
+
+    question = materialize(seed, scientific_plan=scientific_plan, feedback=None)
+
+    assert question.endswith("Validated coverage gaps:\n[]")
+
+
+@pytest.mark.parametrize("proposals", [
+    ["broad cardiac evidence"],
+    ["broad cardiac evidence", "narrow cross-species comparison, 2020-2024"],
+    ["broad cardiac evidence", "narrow cross-species comparison, 2020-2024", "comparative physiology, 2018-"],
+])
+def test_keyword_proposals_accept_one_to_three_and_preserve_native_order(proposals):
+    validate = _keyword_api("validate_keyword_proposals")
+
+    validated = validate(proposals, generation_year=2026, prior_queries=[])
+
+    assert [item["proposal"] for item in validated] == proposals
+    assert [item["query"] for item in validated] == [
+        "broad cardiac evidence", "narrow cross-species comparison", "comparative physiology",
+    ][:len(proposals)]
+    assert [item["year_start"] for item in validated] == [None, 2020, 2018][:len(proposals)]
+    assert [item["year_end"] for item in validated] == [None, 2024, None][:len(proposals)]
+
+
+@pytest.mark.parametrize("proposals", [[], ["one", "two", "three", "four"]])
+def test_keyword_proposal_count_outside_one_to_three_is_model_contract_failure(proposals):
+    validate = _keyword_api("validate_keyword_proposals")
+    with pytest.raises(CurieContractError, match="MODEL CONTRACT FAILURE"):
+        validate(proposals, generation_year=2026, prior_queries=[])
+
+
+@pytest.mark.parametrize("proposals,prior", [
+    (["broad evidence", " BROAD EVIDENCE, 2020-2024"], []),
+    (["fresh evidence"], [{"query": "Fresh evidence"}]),
+    (["good result", "bad AND query"], []),
+    (["good result", "two lines\nnot one query"], []),
+    (["gene therapy, 2025-2020"], []),
+    (["future evidence, 2027-"], []),
+    (["https://example.org/query"], []),
+    (["parent (phase two)"], []),
+    (["x" * 241], []),
+])
+def test_keyword_proposals_reject_invalid_batch_without_partial_admission(proposals, prior):
+    validate = _keyword_api("validate_keyword_proposals")
+    with pytest.raises(CurieContractError):
+        validate(proposals, generation_year=2026, prior_queries=prior)
+
+
+def test_keyword_query_plan_v2_binds_batch_to_scientific_plan_and_invocation():
+    import inspect
+
+    assert "keyword_generation" in inspect.signature(build_multisource_query_plan).parameters
+    seed = _seed()
+    scientific_plan = validate_scientific_query_plan(_plan(seed), seed=seed)
+    invocation = _keyword_invocation(seed, scientific_plan)
+    generation = _keyword_generation(
+        seed, scientific_plan,
+        ["broad cardiac evidence", "narrow cross-species comparison, 2020-2024"],
+        invocation,
+    )
+    provenance = {"receipt": {"validation_status": "PASS", "prompt_hash": "host-receipt"},
+                  "proposal_sha256": "c" * 64}
+    plan = build_multisource_query_plan(
+        seed, seed_sha256=research_seed.seed_sha256(seed), providers=["europe-pmc"],
+        scientific_plan=scientific_plan, planning_provenance=provenance,
+        keyword_generation=generation,
+    )
+
+    assert plan["schema_version"] == "L05QueryPlan/v2"
+    assert [item["query"] for item in plan["queries"]] == [
+        "broad cardiac evidence", "narrow cross-species comparison",
+    ]
+    assert [item["intent"] for item in plan["queries"]] == [
+        "paperqa2_keyword_batch", "paperqa2_keyword_batch",
+    ]
+    assert [item["concepts"] for item in plan["queries"]] == [
+        ["carbon-dioxide", "rca1p"], ["carbon-dioxide", "rca1p"],
+    ]
+    assert plan["planning_provenance"]["receipt"] == provenance["receipt"]
+    assert plan["planning_provenance"]["keyword_generation"]["proposals"][1]["proposal"] == \
+        "narrow cross-species comparison, 2020-2024"
+    validate = _keyword_api("validate_keyword_query_plan")
+    assert validate(plan, seed=seed, scientific_plan=scientific_plan,
+                    invocation=invocation, prior_plans=[]) == plan
+
+    changed = copy.deepcopy(plan)
+    changed["queries"][0]["query"] = "unassociated model output"
+    with pytest.raises(CurieContractError):
+        validate(changed, seed=seed, scientific_plan=scientific_plan,
+                 invocation=invocation, prior_plans=[])
+
+    changed_receipt = copy.deepcopy(plan)
+    changed_receipt["planning_provenance"]["receipt"]["prompt_hash"] = "different-receipt"
+    with pytest.raises(CurieContractError):
+        validate(changed_receipt, seed=seed, scientific_plan=scientific_plan,
+                 invocation=invocation, prior_plans=[])
+
+    changed_proposal = copy.deepcopy(plan)
+    del changed_proposal["planning_provenance"]["proposal_sha256"]
+    with pytest.raises(CurieContractError):
+        validate(changed_proposal, seed=seed, scientific_plan=scientific_plan,
+                 invocation=invocation, prior_plans=[])
+
+    changed_invocation = {**invocation, "attempt_index": 2}
+    with pytest.raises(CurieContractError):
+        validate(plan, seed=seed, scientific_plan=scientific_plan,
+                 invocation=changed_invocation, prior_plans=[])
+
+
+def test_keyword_intent_exhaustion_uses_scientific_fingerprints_not_actual_keywords():
+    seed = _seed()
+    previous = validate_scientific_query_plan(_plan(seed), seed=seed)
+    base_feedback = {
+        "previous_plan": previous,
+        "executed_plans": [{
+            "plan_content_hash": previous["plan_content_hash"],
+            "intent_query_content_hashes": [
+                item["query_content_hash"]
+                for item in compile_scientific_query_plan(previous, seed=seed)
+            ],
+        }],
+        "executed_queries": [],
+        "validated_coverage_gaps": [{
+            "gap_id": "G1", "topic": "SCIENTIFIC_QUESTION", "reason": "Need yeast evidence",
+            "search_directions": ["yeast"],
+        }],
+        "attempt_outcome": {"type": "COVERAGE_GAP"},
+    }
+    candidates, _audit = query_planner._admissible_replan_candidates(
+        previous, seed, base_feedback, 1)
+    targeted = next(candidate for operation, candidate in candidates
+                    if operation == "validated gap targeted intent")
+    generated_keyword = compile_scientific_query_plan(targeted, seed=seed)[0]
+    base_feedback["executed_queries"] = [{
+        "query_id": "Q001", "query": generated_keyword["query"],
+        "query_content_hash": generated_keyword["query_content_hash"],
+    }]
+
+    candidates, audit = query_planner._admissible_replan_candidates(
+        previous, seed, base_feedback, 1)
+
+    assert any(candidate["plan_content_hash"] == targeted["plan_content_hash"]
+               for operation, candidate in candidates
+               if operation == "validated gap targeted intent")
+    targeted_audit = next(item for item in audit["transformations"]
+                          if item["kind"] == "validated gap targeted intent")
+    assert targeted_audit["candidates"][0]["outcome"] == "admissible"
+
+
 def test_replan_candidate_contract_error_is_not_exhaustion(tmp_path, monkeypatch):
     seed, _previous, feedback = _composite_replan_fixture()
     payload = {"status": "NO_ADMISSIBLE_REPLAN", "reason": "exhausted", "plan": None}

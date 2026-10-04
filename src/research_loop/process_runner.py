@@ -8,6 +8,7 @@ to higher layers.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import inspect
 import os
 import subprocess
@@ -58,6 +59,20 @@ class _BoundedCapture:
     @property
     def truncated(self) -> bool:
         return self.total > self.max_bytes
+
+    def decode(self, encoding: str, errors: str) -> tuple[str, str]:
+        head, tail = bytes(self.head), bytes(self.tail)
+        if self.truncated and codecs.lookup(encoding).name == "utf-8":
+            # Bounded diagnostics may end/start inside a legal source character.
+            # Defer only an incomplete head suffix; reject malformed bytes and
+            # the actual stream's incomplete EOF as before.
+            decoder = codecs.getincrementaldecoder(encoding)(errors=errors)
+            head_text = decoder.decode(head, final=False)
+            start = 0
+            while start < min(3, len(tail)) and 0x80 <= tail[start] <= 0xBF:
+                start += 1
+            return head_text, tail[start:].decode(encoding, errors=errors)
+        return head.decode(encoding, errors=errors), tail.decode(encoding, errors=errors)
 
 
 async def _notify(observer: Any, method: str, *args: Any) -> Any:
@@ -342,10 +357,8 @@ class ProcessRunner:
         await _notify(
             observer, "on_finish", process.pid, process.returncode, terminal_state
         )
-        stdout = bytes(stdout_capture.head).decode(encoding, errors=errors)
-        stderr = bytes(stderr_capture.head).decode(encoding, errors=errors)
-        stdout_tail = bytes(stdout_capture.tail).decode(encoding, errors=errors)
-        stderr_tail = bytes(stderr_capture.tail).decode(encoding, errors=errors)
+        stdout, stdout_tail = stdout_capture.decode(encoding, errors)
+        stderr, stderr_tail = stderr_capture.decode(encoding, errors)
         return ProcessResult(
             returncode=process.returncode,
             terminal_state=terminal_state,

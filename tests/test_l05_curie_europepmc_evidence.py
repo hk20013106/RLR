@@ -178,3 +178,68 @@ def test_verifier_rejects_tampered_source_snapshot(tmp_path):
     verifier = EuropePmcEvidenceVerifier(tmp_path, candidate_id="C001")
     with pytest.raises(CurieContractError, match="source snapshot SHA-256"):
         verifier.verify(result["snapshot"], result["candidates"])
+
+
+def test_v2_reads_abstract_methods_captions_unsectioned_body():
+    from research_loop.l05_curie.europepmc import parse_jats_paragraphs
+    raw = b'''<article><front><abstract><p/><p>abstract</p></abstract></front>
+      <body><p>body</p><sec><title>Methods</title><p>method</p>
+      <fig><caption><p>caption</p></caption></fig></sec>
+      <table-wrap><table><tr><td><p>cell excluded</p></td></tr></table></table-wrap>
+      <disp-formula><p>formula excluded</p></disp-formula><p>last</p></body>
+      <back><ref-list><sec><title>References</title><p>ref excluded</p></sec></ref-list></back></article>'''
+    assert parse_jats_paragraphs(raw, parser_profile="jats-paragraphs/v2") == [
+        {"locator": "jats:v2/abstract:1/p:2", "section": "Abstract", "text": "abstract"},
+        {"locator": "jats:v2/body/p:1", "section": "Body", "text": "body"},
+        {"locator": "sec:1/p:1", "section": "Methods", "text": "method"},
+        {"locator": "sec:1/p:2", "section": "Methods", "text": "caption"},
+        {"locator": "jats:v2/body/p:6", "section": "Body", "text": "last"},
+    ]
+
+
+def test_v2_nested_node_once_deepest_locator():
+    from research_loop.l05_curie.europepmc import parse_jats_paragraphs
+    raw = b'<article><body><sec><title>A</title><p/><p>same</p><sec><title>B</title><p>same</p></sec><p>tail</p></sec></body></article>'
+    units = parse_jats_paragraphs(raw, parser_profile="jats-paragraphs/v2")
+    assert [u["locator"] for u in units] == ["sec:1/p:2", "sec:2/p:1", "sec:1/p:4"]
+    assert [u["section"] for u in units] == ["A", "B", "A"]
+    assert [u["text"] for u in units] == ["same", "same", "tail"]
+
+
+def test_v2_identical_text_at_distinct_nodes_survives():
+    from research_loop.l05_curie.europepmc import parse_jats_paragraphs
+    raw = b'<article><body><p>same</p><p>same</p></body></article>'
+    assert parse_jats_paragraphs(raw, parser_profile="jats-paragraphs/v2") == [
+        {"locator": "jats:v2/body/p:1", "section": "Body", "text": "same"},
+        {"locator": "jats:v2/body/p:2", "section": "Body", "text": "same"}]
+
+
+def test_long_paragraph_not_truncated_and_invalid_encoding_rejected():
+    from research_loop.l05_curie.europepmc import parse_jats_paragraphs
+    text = "正文 " * 20000
+    raw = ("<article><body><p>" + text + "</p></body></article>").encode("utf-8")
+    assert parse_jats_paragraphs(raw, parser_profile="jats-paragraphs/v2")[0]["text"] == text.strip()
+    latin = b'<?xml version="1.0" encoding="ISO-8859-1"?><article><body><p>caf\xe9</p></body></article>'
+    assert parse_jats_paragraphs(latin, parser_profile="jats-paragraphs/v2")[0]["text"] == "café"
+    for bad in (b'<article><p>\xff</p></article>', b'<article>', b'<?xml version="1.0" encoding="no-such-encoding"?><article/>'):
+        with pytest.raises(CurieContractError):
+            parse_jats_paragraphs(bad, parser_profile="jats-paragraphs/v2")
+    with pytest.raises(CurieContractError):
+        parse_jats_paragraphs(raw, parser_profile="unknown")
+
+
+def test_v2_retriever_and_independent_verifier_preserve_profile_and_scope(tmp_path):
+    raw = b'<article><front><abstract><p>abstract</p></abstract></front><body><sec><title>Methods</title><p>method</p></sec></body></article>'
+    retriever = EuropePmcEvidenceRetriever(tmp_path, candidate_id="C001", run_id="R2",
+                                         http_get=lambda _url, _timeout: raw)
+    result = retriever.retrieve(canonicalize_europepmc_record(_raw()), seed=_seed(),
+                                parser_profile="jats-paragraphs/v2")
+    assert [c["text"] for c in result["candidates"]] == ["abstract", "method"]
+    verified = EuropePmcEvidenceVerifier(tmp_path, candidate_id="C001").verify(
+        result["snapshot"], result["candidates"], parser_profile="jats-paragraphs/v2")
+    assert [e["text"] for e in verified] == ["abstract", "method"]
+    assert all(e["retrieval"]["parser_profile"] == "jats-paragraphs/v2" for e in verified)
+    empty = EuropePmcEvidenceRetriever(tmp_path, candidate_id="C001", run_id="R3",
+                                       http_get=lambda _url, _timeout: b'<article><body><p/></body></article>')
+    assert empty.retrieve(canonicalize_europepmc_record(_raw()), seed=_seed(),
+                          parser_profile="jats-paragraphs/v2")["paper_failure"]["reason_code"] == "NO_USABLE_PARAGRAPHS"

@@ -85,13 +85,20 @@ def _load_pack(project_dir: Path, seed: dict, pack_manifest: dict, research_seed
     from research_loop import l05_curie
 
     try:
-        return l05_curie.load_frozen_evidence_pack(
+        pack = l05_curie.load_frozen_evidence_pack(
             project_dir,
             pack_manifest,
             candidate_id=str(seed["candidate_id"]),
             round_id=str(seed["round_id"]),
             seed_sha256=research_seed_module.seed_sha256(seed),
         )
+        if int(pack["version"]) == 1:
+            from research_loop.l05_curie.europepmc_runtime import validate_corpus_acquisition_for_pack
+            validate_corpus_acquisition_for_pack(project_dir, seed=seed, pack=pack)
+        # Versions 2/3 are existing authorized retries, not first acquisitions.
+        # _validated_retry_authorization checks their lineage and loads the
+        # actual parent binding, retaining the initial corpus provenance proof.
+        return pack
     except l05_curie.CurieContractError as exc:
         raise research_seed_module.ResearchSeedError(
             f"frozen L0.5 EvidencePack is invalid: {exc}"

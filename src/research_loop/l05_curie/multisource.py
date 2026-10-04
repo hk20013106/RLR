@@ -24,6 +24,7 @@ from .contracts import (
     DISCOVERY_BATCH_SCHEMA_VERSION,
     DISCOVERY_TRANSPORT_SCHEMA_VERSION,
     QUERY_PLAN_SCHEMA_VERSION,
+    QUERY_PLAN_SCHEMA_VERSION_V2,
     CurieContractError,
     validate_discovery_batch,
     validate_query_plan,
@@ -33,7 +34,9 @@ from .contracts import (
 from .query_planner import (
     SCIENTIFIC_QUERY_PLAN_V2, SCIENTIFIC_QUERY_PLANNER_V2,
     SCIENTIFIC_QUERY_PLANNER_VERSION, build_scientific_query_plan,
-    compile_scientific_query_plan, validate_scientific_query_plan,
+    _keyword_query_plan_id, _keyword_query_rows,
+    compile_scientific_query_plan, validate_keyword_proposals,
+    validate_scientific_query_plan,
 )
 HttpGet = Callable[[str, int], bytes]
 _PROVIDERS = ("europe-pmc", "pubmed", "openalex", "crossref", "semantic-scholar")
@@ -357,6 +360,39 @@ def _stable_ids(record: dict) -> set[tuple[str, str]]:
     }
 
 
+def _corpus_aliases(record: dict) -> set[tuple[str, str]]:
+    identities = _stable_ids(record)
+    aliases = (record.get("provenance") or {}).get("identifier_aliases") or {}
+    if not isinstance(aliases, dict):
+        raise CurieContractError("corpus identifier_aliases must be an object")
+    for key, values in aliases.items():
+        if key not in _STABLE_NAMESPACES or not isinstance(values, list):
+            raise CurieContractError("corpus identifier aliases must use stable namespaces")
+        identities.update((key, str(value)) for value in values if str(value).strip())
+    return identities
+
+
+def match_existing_corpus_record(record: dict, *, existing_papers: list[dict]) -> dict | None:
+    """Match immutable paper identities without recomputing a frozen paper_id."""
+    if not isinstance(record, dict) or not isinstance(existing_papers, list):
+        raise CurieContractError("corpus identity matching requires records")
+    paper_id = _require_text(record.get("paper_id"), "corpus paper_id")
+    aliases = _corpus_aliases(record)
+    matched = []
+    for frozen in existing_papers:
+        if not isinstance(frozen, dict):
+            raise CurieContractError("frozen corpus paper must be an object")
+        if frozen.get("paper_id") == paper_id or aliases & _corpus_aliases(frozen):
+            matched.append(frozen)
+    if len(matched) > 1:
+        raise CurieContractError("corpus alias points to multiple frozen identities")
+    if not matched:
+        return None
+    # Reuse canonical conflict/alias rules on a copy; never enrich old bytes.
+    _merge(copy.deepcopy(matched[0]), copy.deepcopy(record))
+    return copy.deepcopy(matched[0])
+
+
 def _source_record(record: dict) -> dict:
     provenance = record.get("provenance") if isinstance(record.get("provenance"), dict) else {}
     return {
@@ -533,6 +569,7 @@ def build_multisource_query_plan(
     query_id_prefix: str = "Q",
     scientific_plan: dict | None = None,
     planning_provenance: dict | None = None,
+    keyword_generation: dict | None = None,
 ) -> dict:
     if not isinstance(seed, dict):
         raise CurieContractError("ResearchSeed must be an object")
@@ -550,8 +587,39 @@ def build_multisource_query_plan(
     unknown = [item for item in provider_list if item not in _PROVIDERS]
     if unknown:
         raise CurieContractError(f"unsupported discovery providers: {unknown}")
+    if keyword_generation is not None and (explicit_queries is not None
+                                           or scientific_plan is None
+                                           or provider_list != ["europe-pmc"]):
+        raise CurieContractError(
+            "PaperQA2 keyword generation requires a scientific plan and Europe PMC only"
+        )
     if explicit_queries is None:
-        if scientific_plan is None:
+        if keyword_generation is not None:
+            planning = validate_scientific_query_plan(scientific_plan, seed=seed)
+            if (planning["schema_version"] != SCIENTIFIC_QUERY_PLAN_V2
+                    or planning["reformulation_index"] != reformulation_index):
+                raise CurieContractError("keyword QueryPlan requires the current scientific planner v2 plan")
+            if not isinstance(planning_provenance, dict) or not isinstance(
+                planning_provenance.get("receipt"), dict
+            ):
+                raise CurieContractError("keyword QueryPlan requires the current host planner receipt")
+            if not isinstance(keyword_generation, dict):
+                raise CurieContractError("keyword_generation must be an object")
+            try:
+                generation_year = keyword_generation["runtime"]["generation_year"]
+                received = keyword_generation["proposals"]
+                proposals = validate_keyword_proposals(
+                    [item["proposal"] for item in received],
+                    generation_year=generation_year, prior_queries=[],
+                )
+            except (KeyError, TypeError) as exc:
+                raise CurieContractError("keyword_generation proposal/runtime fields are invalid") from exc
+            if proposals != received:
+                raise CurieContractError("keyword_generation proposals are not in canonical validated form")
+            query_items = _keyword_query_rows(
+                planning, proposals, query_id_prefix=query_id_prefix)
+            planner = "paperqa2-keyword-proposals-v1"
+        elif scientific_plan is None:
             planning = build_scientific_query_plan(seed, reformulation_index=reformulation_index)
             query_items = [{"query_id": f"{query_id_prefix}{index:03d}", "intent": item["intent"], "query": item["query"], "concepts": list(item["concepts"]), "providers": list(provider_list)} for index, item in enumerate(planning["queries"], 1)]
             planner = SCIENTIFIC_QUERY_PLANNER_VERSION
@@ -576,12 +644,25 @@ def build_multisource_query_plan(
         "round_index": round_index,
         "queries": query_items,
     }
+    if keyword_generation is not None:
+        plan_id = _keyword_query_plan_id(
+            candidate_id=candidate_id,
+            round_id=round_id,
+            seed_sha256=supplied_seed_sha256,
+            round_index=round_index,
+            scientific_plan_content_hash=planning["plan_content_hash"],
+            invocation_sha256=keyword_generation.get("invocation_sha256"),
+            queries=query_items,
+        )
+    else:
+        plan_id = "QP_MULTI_" + _sha(identity)[:16]
     plan = {
-        "schema_version": QUERY_PLAN_SCHEMA_VERSION,
+        "schema_version": (QUERY_PLAN_SCHEMA_VERSION_V2 if keyword_generation is not None
+                           else QUERY_PLAN_SCHEMA_VERSION),
         "candidate_id": candidate_id,
         "round_id": round_id,
         "seed_sha256": supplied_seed_sha256,
-        "plan_id": "QP_MULTI_" + _sha(identity)[:16],
+        "plan_id": plan_id,
         "round_index": round_index,
         "queries": query_items,
         "coverage_targets": ["cross_provider_discovery", "canonical_identity"],
@@ -590,7 +671,10 @@ def build_multisource_query_plan(
     if planning is not None:
         plan["reformulation_index"] = reformulation_index
         plan["planning"] = planning
-        if planning_provenance is not None:
+        if keyword_generation is not None:
+            plan["planning_provenance"] = copy.deepcopy(planning_provenance)
+            plan["planning_provenance"]["keyword_generation"] = copy.deepcopy(keyword_generation)
+        elif planning_provenance is not None:
             plan["planning_provenance"] = planning_provenance
     validate_query_plan(plan, seed_sha256=str(seed_sha256))
     if planning is not None:

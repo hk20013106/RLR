@@ -2752,7 +2752,7 @@ def host_protocol_submit(project, cand, request_id, response_path, *,
     request = ENGINE.load_host_request(project, request_id)
     identity = request.get("identity") or {}
     stage = str(identity.get("stage") or "")
-    if stage == "planner" or stage == "semantic" or stage.startswith("semantic:"):
+    if stage == "planner" or stage == "semantic" or stage.startswith(("semantic:", "coverage:")):
         receipt = europepmc_runtime.submit_acquisition_host_response(
             project, cand, request_id, response_path
         )

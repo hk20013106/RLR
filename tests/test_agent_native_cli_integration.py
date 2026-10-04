@@ -4,12 +4,44 @@ import json
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 from native_v2_helpers import bootstrap_project_ready
 from research_loop.compatibility import PROFILE_V21_CATALOG_1
 from research_loop.runtime_preflight import formal_runtime_command
 from research_loop.yamlio import _load_yaml_front
+
+
+def test_public_host_submit_routes_coverage_to_l05owner(tmp_path, monkeypatch, capsys):
+    import run_loop
+    from research_loop.l05_curie import europepmc_runtime as owner
+    from test_l05_curie_corpus_integration import drive
+    original_continue = owner.continue_acquisition
+    original_submit = owner.submit_acquisition_host_response
+    continued, receipts, stages = [], [], []
+    def continuation(*args, **kwargs):
+        result = original_continue(*args, **kwargs); continued.append(result); return result
+    def submit(*args, **kwargs):
+        receipt = original_submit(*args, **kwargs); receipts.append(receipt); return receipt
+    monkeypatch.setattr(owner, "continue_acquisition", continuation)
+    monkeypatch.setattr(owner, "submit_acquisition_host_response", submit)
+    def public_submit(project, seed, step, response):
+        # Isolated first-mile fixture already has an activated ledger. Exercise
+        # the real CLI command and all acquisition persistence/cognition owners.
+        monkeypatch.setattr(run_loop, "_host_command_configuration", lambda _args: (project, "C001", None))
+        request = step["request"]; stages.append(request["identity"]["stage"])
+        before = len(receipts)
+        args = SimpleNamespace(request_id=step["request_id"], response_path=str(response))
+        assert run_loop.cmd_host_submit(args) == 0
+        result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert result["status"] == "committed" and len(receipts) == before + 1
+        assert result["response_receipt"]["request_sha256"] == request["request_sha256"]
+        assert result["response_receipt"]["cursor"] == request["identity"]["cursor"]
+        return continued[-1]
+    project, seed, result, calls = drive(tmp_path, monkeypatch, rounds=1, submitter=public_submit)
+    assert stages[0] == "planner" and stages[-1] == "coverage:1"
+    assert result["kind"] == "FROZEN" and calls["worker"] == [30]
 
 
 ROOT = Path(__file__).resolve().parents[1]

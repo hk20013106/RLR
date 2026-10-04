@@ -18,7 +18,10 @@ from jsonschema import Draft202012Validator
 
 from research_loop import research_seed
 
-from .contracts import CurieContractError
+from .contracts import (
+    KEYWORD_QUERY_REQUEST_COUNT, QUERY_PLAN_SCHEMA_VERSION_V2,
+    CurieContractError, validate_query_plan,
+)
 
 SCIENTIFIC_QUERY_PLAN_SCHEMA_VERSION = "L05ScientificQueryPlan/v1"
 SCIENTIFIC_QUERY_PLANNER_VERSION = "scientific-query-planner/v1"
@@ -79,6 +82,8 @@ MAX_QUERY_CANDIDATES = 6
 MAX_REFORMULATION_INDEX = 1
 MAX_QUERY_CHARS = 240
 _TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9+]*(?:[-/][A-Za-z0-9+]+)*")
+_KEYWORD_DATE_RANGE = re.compile(r",\s*(\d{4})-(\d{4}|)$")
+_KEYWORD_DATE_LIKE = re.compile(r",\s*\d+\s*-\s*\d*$|,\s*\d{4}$")
 _STOPWORDS = frozenset({
     "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "for",
     "from", "how", "in", "is", "of", "on", "or", "that", "the", "to",
@@ -229,6 +234,105 @@ def _canonical(value: object) -> bytes:
 
 def _sha(value: object) -> str:
     return hashlib.sha256(_canonical(value)).hexdigest()
+
+
+def materialize_keyword_question(
+    seed: dict, *, scientific_plan: dict, feedback: dict | None
+) -> str:
+    """Freeze the original claim with its validated plan and current gaps."""
+    if not isinstance(seed, dict):
+        raise CurieContractError("ResearchSeed must be an object")
+    question = seed.get("scientific_question")
+    hypothesis = seed.get("hypothesis_seed")
+    if not isinstance(question, str) or not question.strip():
+        raise CurieContractError("ResearchSeed scientific_question must be non-empty text")
+    if not isinstance(hypothesis, str) or not hypothesis.strip():
+        raise CurieContractError("ResearchSeed hypothesis_seed must be non-empty text")
+    planning = validate_scientific_query_plan(scientific_plan, seed=seed)
+    if planning["schema_version"] != SCIENTIFIC_QUERY_PLAN_V2:
+        raise CurieContractError("keyword query generation requires a validated scientific plan v2")
+    if feedback is not None and not isinstance(feedback, dict):
+        raise CurieContractError("keyword query feedback must be an object")
+    gaps = [] if feedback is None else feedback.get("validated_coverage_gaps", [])
+    if not isinstance(gaps, list):
+        raise CurieContractError("validated_coverage_gaps must be a list")
+    projection = {
+        "core_anchors": planning["core_anchors"],
+        "optional_concepts": planning["optional_concepts"],
+        "intents": planning["intents"],
+    }
+    return "\n".join([
+        "Scientific question:", question, "",
+        "Hypothesis to evaluate:", hypothesis, "",
+        "Validated scientific plan:", _canonical(projection).decode("utf-8"), "",
+        "Validated coverage gaps:", _canonical(gaps).decode("utf-8"),
+    ])
+
+
+def validate_keyword_proposals(
+    proposals: object, *, generation_year: int, prior_queries: list[dict | str]
+) -> list[dict]:
+    """Validate the complete native proposal batch without repairing or reordering it."""
+    if (isinstance(generation_year, bool) or not isinstance(generation_year, int)
+            or generation_year < 1):
+        raise CurieContractError("generation_year must be a positive integer")
+    if not isinstance(proposals, list) or not 1 <= len(proposals) <= KEYWORD_QUERY_REQUEST_COUNT:
+        raise CurieContractError(
+            "MODEL CONTRACT FAILURE: PaperQA2 must return 1 to 3 keyword proposals"
+        )
+    if not isinstance(prior_queries, list):
+        raise CurieContractError("prior_queries must be a list")
+
+    prior_keys: set[str] = set()
+    for index, item in enumerate(prior_queries, 1):
+        if isinstance(item, dict):
+            item = item.get("query")
+        if not isinstance(item, str) or not item.strip():
+            raise CurieContractError(f"prior query {index} must contain non-empty query text")
+        prior_keys.add(item.strip().casefold())
+
+    validated: list[dict] = []
+    seen = set(prior_keys)
+    for index, proposal in enumerate(proposals, 1):
+        if not isinstance(proposal, str) or not proposal.strip():
+            raise CurieContractError(f"keyword proposal {index} must be non-empty text")
+        value = proposal.strip()
+        if any(unicodedata.category(char) == "Cc" for char in value) or len(value.splitlines()) != 1:
+            raise CurieContractError(f"keyword proposal {index} must be a single line without controls")
+
+        start_year = end_year = None
+        match = _KEYWORD_DATE_RANGE.search(value)
+        if match:
+            start_year = int(match.group(1))
+            end_year = int(match.group(2)) if match.group(2) else None
+            if (start_year < 1 or start_year > generation_year
+                    or end_year is not None and (end_year < start_year or end_year > generation_year)):
+                raise CurieContractError(f"keyword proposal {index} has an invalid advisory year range")
+            query = value[:match.start()].strip()
+        else:
+            if _KEYWORD_DATE_LIKE.search(value):
+                raise CurieContractError(f"keyword proposal {index} has a malformed advisory year range")
+            query = value
+
+        if not query or len(query) > MAX_QUERY_CHARS:
+            raise CurieContractError(f"keyword proposal {index} query is empty or exceeds {MAX_QUERY_CHARS} characters")
+        if re.search(r"(?<!\w)(?:AND|OR|NOT)(?!\w)", query, flags=re.IGNORECASE):
+            raise CurieContractError(f"keyword proposal {index} contains a Boolean operator")
+        if re.search(r"\b[a-z][a-z0-9+.-]*://", query, flags=re.IGNORECASE):
+            raise CurieContractError(f"keyword proposal {index} contains a URL scheme")
+        if any(char in query for char in '(){}[]:\"=<>'):
+            raise CurieContractError(f"keyword proposal {index} contains unsupported search syntax")
+        key = query.strip().casefold()
+        if key in seen:
+            raise CurieContractError(f"keyword proposal {index} duplicates an executed query")
+        seen.add(key)
+        validated.append({
+            "proposal": proposal,
+            "query": query,
+            "year_start": start_year,
+            "year_end": end_year,
+        })
+    return validated
 
 
 def _normalized_term(value: object) -> str:
@@ -506,10 +610,36 @@ def _replan_candidates(previous: dict, seed: dict, feedback: dict, index: int):
         yield kind, empty_reason, applicable_reason, generate()
 
 
+def _intent_exhaustion_hashes(feedback: dict) -> tuple[bool, set[str]]:
+    executed_plans = feedback.get("executed_plans", [])
+    if not isinstance(executed_plans, list):
+        raise CurieContractError("executed_plans must be a list")
+    keyword_mode = any(
+        isinstance(item, dict) and "intent_query_content_hashes" in item
+        for item in executed_plans
+    )
+    if not keyword_mode:
+        return False, set()
+    hashes: set[str] = set()
+    for index, item in enumerate(executed_plans, 1):
+        if not isinstance(item, dict) or "intent_query_content_hashes" not in item:
+            raise CurieContractError("keyword replan feedback mixes intent and legacy query fingerprints")
+        values = item["intent_query_content_hashes"]
+        if (not isinstance(values, list) or not values
+                or not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+                           for value in values)
+                or len(values) != len(set(values))):
+            raise CurieContractError(f"executed_plans[{index}].intent_query_content_hashes is invalid")
+        hashes.update(values)
+    return True, hashes
+
+
 def _admissible_replan_candidates(previous: dict, seed: dict, feedback: dict, index: int):
     """Validate and deduplicate every class before proving exhaustion."""
     executed_queries = {item.get("query_content_hash") for item in feedback.get("executed_queries", [])}
     executed_plans = {item.get("plan_content_hash") for item in feedback.get("executed_plans", [])}
+    keyword_mode, intent_query_hashes = _intent_exhaustion_hashes(feedback)
+    exhausted_queries = intent_query_hashes if keyword_mode else executed_queries
     candidates: list[tuple[str, dict]] = []
     seen_plans: set[str] = set()
     seen_queries: set[str] = set()
@@ -536,7 +666,7 @@ def _admissible_replan_candidates(previous: dict, seed: dict, feedback: dict, in
                 outcome = "duplicate_candidate"
             elif identity in executed_plans:
                 outcome = "executed_plan"
-            elif any(value in executed_queries for value in query_hashes):
+            elif any(value in exhausted_queries for value in query_hashes):
                 outcome = "executed_query"
             elif any(value in seen_queries for value in query_hashes):
                 outcome = "duplicate_candidate_query"
@@ -760,6 +890,136 @@ def compile_scientific_query_plan(plan: dict, *, seed: dict) -> list[dict]:
         result.append({"intent": intent["intent_id"], "query": query,
                        "concepts": ids, "query_content_hash": _sha({"query": query})})
     return result
+
+
+def _keyword_query_rows(
+    scientific_plan: dict, proposals: list[dict], *, query_id_prefix: str
+) -> list[dict]:
+    concepts = [item["concept_id"] for item in
+                scientific_plan["core_anchors"] + scientific_plan["optional_concepts"]]
+    return [{
+        "query_id": f"{query_id_prefix}{index:03d}",
+        "intent": "paperqa2_keyword_batch",
+        "query": proposal["query"],
+        "concepts": concepts,
+        "providers": ["europe-pmc"],
+        "query_content_hash": _sha({"query": proposal["query"]}),
+        "origin": "generated",
+    } for index, proposal in enumerate(proposals, 1)]
+
+
+def _keyword_query_plan_id(
+    *, candidate_id: str, round_id: str, seed_sha256: str, round_index: int,
+    scientific_plan_content_hash: str, invocation_sha256: str, queries: list[dict],
+) -> str:
+    return "QP_MULTI_" + _sha({
+        "candidate_id": candidate_id,
+        "round_id": round_id,
+        "seed_sha256": seed_sha256,
+        "round_index": round_index,
+        "scientific_plan_content_hash": scientific_plan_content_hash,
+        "invocation_sha256": invocation_sha256,
+        "queries": queries,
+    })[:16]
+
+
+def validate_keyword_query_plan(
+    plan: dict, *, seed: dict, scientific_plan: dict, invocation: dict,
+    prior_plans: list[dict],
+) -> dict:
+    """Verify a v2 plan's actual queries against its frozen scientific and runtime inputs."""
+    if not isinstance(seed, dict) or not isinstance(invocation, dict):
+        raise CurieContractError("keyword QueryPlan validation requires frozen seed and invocation objects")
+    if not isinstance(prior_plans, list):
+        raise CurieContractError("prior_plans must be a list")
+    seed_sha256 = research_seed.seed_sha256(seed)
+    validated_plan = validate_query_plan(plan, seed_sha256=seed_sha256)
+    if validated_plan["schema_version"] != QUERY_PLAN_SCHEMA_VERSION_V2:
+        raise CurieContractError("keyword QueryPlan validation requires L05QueryPlan/v2")
+
+    planning = validate_scientific_query_plan(scientific_plan, seed=seed)
+    if planning["schema_version"] != SCIENTIFIC_QUERY_PLAN_V2:
+        raise CurieContractError("keyword QueryPlan requires a validated scientific plan v2")
+    if validated_plan.get("planning") != planning:
+        raise CurieContractError("keyword QueryPlan scientific plan association mismatch")
+    if (validated_plan["candidate_id"] != seed.get("candidate_id")
+            or validated_plan["round_id"] != seed.get("round_id")
+            or validated_plan.get("reformulation_index") != planning["reformulation_index"]):
+        raise CurieContractError("keyword QueryPlan identity differs from its frozen inputs")
+
+    if (invocation.get("acquisition_run_id") is None
+            or not isinstance(invocation.get("acquisition_run_id"), str)
+            or not invocation["acquisition_run_id"].strip()
+            or type(invocation.get("attempt_index")) is not int
+            or invocation["attempt_index"] < 1
+            or invocation.get("seed_sha256") != seed_sha256
+            or invocation.get("scientific_plan_content_hash") != planning["plan_content_hash"]):
+        raise CurieContractError("keyword invocation does not bind the current acquisition and scientific plan")
+    try:
+        invocation_sha256 = _sha(invocation)
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise CurieContractError("keyword invocation is not canonical JSON") from exc
+
+    generation = validated_plan["planning_provenance"]["keyword_generation"]
+    if generation["invocation_sha256"] != invocation_sha256:
+        raise CurieContractError("keyword QueryPlan invocation hash mismatch")
+    if generation["bridge_sha256"] != invocation.get("bridge_sha256"):
+        raise CurieContractError("keyword QueryPlan bridge hash mismatch")
+    if generation["settings_sha256"] != invocation.get("settings_sha256"):
+        raise CurieContractError("keyword QueryPlan Settings hash mismatch")
+    provenance = validated_plan["planning_provenance"]
+    if invocation.get("planner_receipt_sha256") != _sha(provenance["receipt"]):
+        raise CurieContractError("keyword QueryPlan host receipt hash mismatch")
+    proposal_sha256 = provenance.get("proposal_sha256")
+    if (not isinstance(proposal_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", proposal_sha256) is None
+            or invocation.get("planner_proposal_sha256") != proposal_sha256):
+        raise CurieContractError("keyword QueryPlan host proposal hash mismatch")
+    if invocation.get("planner_feedback_sha256") != planning.get("feedback_sha256"):
+        raise CurieContractError("keyword QueryPlan planner feedback hash mismatch")
+    expected_runtime = invocation.get("expected_runtime")
+    runtime_fields = {
+        "package", "version", "upstream_tag", "upstream_commit",
+        "module_path", "clean_checkout", "llm_model",
+    }
+    if (not isinstance(expected_runtime, dict) or set(expected_runtime) != runtime_fields
+            or any(generation["runtime"].get(key) != value
+                   for key, value in expected_runtime.items())):
+        raise CurieContractError("keyword QueryPlan runtime differs from the frozen PaperQA2 binding")
+
+    prior_queries = []
+    for index, previous in enumerate(prior_plans, 1):
+        previous = validate_query_plan(previous, seed_sha256=seed_sha256)
+        prior_queries.extend(previous["queries"])
+    actual_proposals = [item["proposal"] for item in generation["proposals"]]
+    normalized = validate_keyword_proposals(
+        actual_proposals,
+        generation_year=generation["runtime"]["generation_year"],
+        prior_queries=prior_queries,
+    )
+    if normalized != generation["proposals"]:
+        raise CurieContractError("keyword QueryPlan proposal projection mismatch")
+    first_query_id = validated_plan["queries"][0]["query_id"]
+    if not first_query_id.endswith("001"):
+        raise CurieContractError("keyword QueryPlan query IDs must be sequential")
+    query_id_prefix = first_query_id[:-3]
+    expected_queries = _keyword_query_rows(
+        planning, normalized, query_id_prefix=query_id_prefix)
+    if validated_plan["queries"] != expected_queries:
+        raise CurieContractError("keyword QueryPlan queries differ from validated native proposals")
+
+    expected_plan_id = _keyword_query_plan_id(
+        candidate_id=validated_plan["candidate_id"],
+        round_id=validated_plan["round_id"],
+        seed_sha256=validated_plan["seed_sha256"],
+        round_index=validated_plan["round_index"],
+        scientific_plan_content_hash=planning["plan_content_hash"],
+        invocation_sha256=invocation_sha256,
+        queries=expected_queries,
+    )
+    if validated_plan["plan_id"] != expected_plan_id:
+        raise CurieContractError("keyword QueryPlan identity hash mismatch")
+    return validated_plan
 
 
 def _scientific_intent(plan: dict) -> dict:
@@ -1059,8 +1319,10 @@ def _validated_plan_result(seed: dict, request: dict, proposal: dict,
     if feedback is not None:
         executed_queries = {item.get("query_content_hash") for item in feedback.get("executed_queries", [])}
         executed_plans = {item.get("plan_content_hash") for item in feedback.get("executed_plans", [])}
+        keyword_mode, intent_query_hashes = _intent_exhaustion_hashes(feedback)
+        exhausted_queries = intent_query_hashes if keyword_mode else executed_queries
         if validated["plan_content_hash"] in executed_plans or any(
-            item["query_content_hash"] in executed_queries
+            item["query_content_hash"] in exhausted_queries
             for item in compile_scientific_query_plan(validated, seed=seed)
         ):
             raise CurieContractError("scientific replan repeats executed plan or query content")

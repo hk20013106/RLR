@@ -1,0 +1,65 @@
+{
+  "schema_version": "ExternalReuseAudit/v1",
+  "change_id": "2026-10-03-l05-paperqa2-keyword-query-generation",
+  "EXISTING_IMPLEMENTATIONS_REVIEWED": [
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/l05_curie/query_planner.py; history c60632a, 541918b, 620805b",
+      "finding": "The current host owns source-bound scientific intent and finite replan selection. The Boolean compiler currently supplies executable queries and its hashes also participate in replan exhaustion. Preserve scientific ownership but distinguish intent fingerprints from actual keyword query fingerprints."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/l05_curie/multisource.py; src/research_loop/l05_curie/europepmc_runtime.py",
+      "finding": "Existing QueryPlan construction, Europe PMC transport, host handoff, immutable acquisition artifacts, checkpoint replay and manifest validation already own discovery and persistence. Both fresh dispatch and replay currently require queries to equal Boolean compiler output; they need one shared version-aware validation boundary."
+    },
+    {
+      "scope": "internal",
+      "reference": "src/research_loop/l05_curie/paperqa2_runtime.py; scripts/paperqa2_rlr_bridge.py; src/research_loop/process_runner.py",
+      "finding": "ProcessRunner/ProcessResult, bound interpreter, existing bridge operation dispatch, hashed checkpoint external_state, immutable acquisition writes and current plan/manifest consumers already provide the execution boundary. Corpus completion mandates corpus diagnostics and cannot be reused as a query receipt without changing its contract."
+    },
+    {
+      "scope": "external",
+      "reference": "https://github.com/Future-House/paper-qa/blob/57e89f7223b0960d5ee5ea048c69e3c47e088572/src/paperqa/agents/helpers.py",
+      "finding": "Pinned helper owns its prompt/postprocessing and requests unique broad/narrow searches. Pinned agents/main.py calls once with count=3. Reuse one whole-plan batch per attempt with template=None and an explicit Settings model object; count is a request, so RLR accepts 1-3 valid unique proposals and fails closed for 0 or more than 3."
+    },
+    {
+      "scope": "external",
+      "reference": "https://github.com/Future-House/paper-qa/blob/57e89f7223b0960d5ee5ea048c69e3c47e088572/src/paperqa/agents/tools.py",
+      "finding": "Read PaperSearch and agents/main.py locally. Whole-system PaperSearch/agent execution also owns searches, introduces papers and controls repeated searches. This concretely conflicts with the required Europe PMC discovery/acquisition owner and current-host replan authority; helper-only invocation is the authorized boundary."
+    }
+  ],
+  "REUSABLE_COMPONENTS": [
+    {
+      "reference": "paperqa.agents.helpers.litellm_get_search_query",
+      "disposition": "REUSE",
+      "reason": "Use the installed pinned helper directly, including its native prompt and postprocessing."
+    },
+    {
+      "reference": "paperqa.Settings.get_summary_llm",
+      "disposition": "REUSE",
+      "reason": "Construct an explicit model object from the existing frozen summary provider configuration; introduce no second provider profile or default model."
+    },
+    {
+      "reference": "src/research_loop/l05_curie/query_planner.py; src/research_loop/l05_curie/contracts.py; src/research_loop/l05_curie/multisource.py",
+      "disposition": "EXTEND",
+      "reason": "Extend existing QueryPlan to v2 for changed keyword association semantics while preserving v1 replay. Retain existing scientific plan and finite replan authority; use intent fingerprints separately from actual keyword hashes."
+    },
+    {
+      "reference": "src/research_loop/l05_curie/paperqa2_runtime.py; src/research_loop/process_runner.py; scripts/paperqa2_rlr_bridge.py",
+      "disposition": "ADAPT",
+      "reason": "Extend existing bridge dispatcher and backend query operation. Reuse ProcessResult, interpreter/environment, strict transport and runner; no new bridge, task/result/completion artifact family or corpus refactoring."
+    },
+    {
+      "reference": "src/research_loop/l05_curie/europepmc_runtime.py",
+      "disposition": "EXTEND",
+      "reason": "Extend existing planning checkpoint external_state and success-only QueryPlan references, immutable writer and uncertain_external_result policy. Accepted proposals and actual process facts live in QueryPlan provenance. No second worker state table or recovery engine."
+    },
+    {
+      "reference": "paperqa.agents.tools.PaperSearch and PaperQA2 agent loop",
+      "disposition": "REJECT",
+      "reason": "They introduce external discovery and search-loop authority, violating the explicit owner boundaries."
+    }
+  ],
+  "ADOPTED_PATTERN": "ADAPT",
+  "WHY_NEW_CODE_IS_NECESSARY": "Whole-system PaperQA2 search conflicts with Europe PMC discovery and current-host replan ownership. Direct native helper reuse solves keyword generation in one count=3 request, while RLR accepts 1-3 validated proposals and rejects 0 or more than 3. Existing planning, bridge transport, ProcessResult and acquisition transaction are extended; no second worker transaction is justified. One QueryPlan version extension is necessary because historical v1 dispatch/replay requires compiler-query equality. Inline input/process association and checkpoint references are necessary to freeze accepted queries before discovery and block uncertain redispatch. No new source/test/config files, named Task/Result/Completion/Binding/Attempts contracts, provider profile, local keyword algorithm or corpus-worker change is planned. This audit supports the approved offline Tasks 1-2; live acceptance remains unauthorized."
+}

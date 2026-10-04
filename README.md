@@ -8,6 +8,13 @@ RLR has **15 formal DAG nodes (L0 → L10c)** and **10 expert personas**. Each c
 
 > **Core principle:** cognitive agents are isolated by information invisibility (Path B). Turing is isolated by an allowlisted workspace and command boundary (Path A). RLR does not pretend that an agent process is an operating-system sandbox.
 
+L0.5 has an explicit cumulative PaperQA2 corpus mode with native Docs evidence
+retrieval, independent source/semantic checks and current-host scientific
+coverage. It reuses the existing acquisition and native binding owners; the
+first frozen pack remains version 1. See the [configuration and host protocol](docs/AGENT_NATIVE_RUN.md#l05-cumulative-paperqa2-corpus).
+Offline software validation and separately authorized live scientific acceptance
+are distinct gates.
+
 ## Current main status
 
 `main` now contains the validated **V0.9 / native-v2.1 architecture line**.
