@@ -4,27 +4,29 @@ This is the compact architecture and operational context for an agent taking
 over Research Loop (RLR). It complements, but never overrides, executable
 code, validators, and tests.
 
-L0.5 cumulative corpus uses an explicit `corpus-evidence-v1` submode in the
-existing PaperQA2 runtime binding. The same acquisition controller owns
-discovery, cumulative snapshots, checkpoint/replay and freeze. The external
-worker delegates evidence retrieval/summary to pinned native PaperQA2 Docs;
-RLR independently verifies source, semantic admission and current-host
-scientific coverage. See [the host protocol](AGENT_NATIVE_RUN.md#l05-cumulative-paperqa2-corpus)
+The agent's end-to-end operating entry point is the
+[RLR Agent E2E Runbook](AGENT_NATIVE_RUN.md). It covers fresh-project setup,
+preflight, candidate creation, the current-host `host-next` / `host-submit`
+loop, resume, L0.5, downstream nodes, continuation, and terminal reporting.
+For current native projects, L0.5 can use the explicit `corpus-evidence-v1`
+submode of the existing PaperQA2 runtime binding. The same acquisition
+controller owns discovery, cumulative snapshots, checkpoint/replay, and freeze;
+RLR independently verifies sources, semantic admission, and current-host
+scientific coverage. See the [L0.5 section](AGENT_NATIVE_RUN.md#l05-cumulative-paperqa2-corpus)
 and [approved design](superpowers/specs/2026-10-01-l05-paperqa2-cumulative-corpus-design.md).
-Acquisition manifest v3 is mandatory for the new mode; L1 validates its actual
-worker/coverage proofs through the existing native binding. Historical wire
-contracts and L4/document behavior remain separately validated. Live acceptance
-is a separate user authorization gate, not inferred from offline tests.
+Live acceptance is distinct from offline software validation.
 
 ## Read order
 
 1. [`AGENTS.md`](../AGENTS.md): non-negotiable safety, scientific-integrity,
    compatibility, and verification rules.
-2. This file: runtime map and handoff procedure.
-3. [`DAG_TOPOLOGY.md`](DAG_TOPOLOGY.md): node protocol. The historical
+2. This file: runtime map and architecture context.
+3. [`AGENT_NATIVE_RUN.md`](AGENT_NATIVE_RUN.md): end-to-end operating procedure
+   when the current agent session owns cognition.
+4. [`DAG_TOPOLOGY.md`](DAG_TOPOLOGY.md): node protocol. The historical
    [`MAIN_AGENT_RUN.md`](MAIN_AGENT_RUN.md) path is a retirement notice.
-4. The narrow source module and test for the behavior being changed.
-5. [`architecture/EXTERNAL_REUSE_GATE.md`](architecture/EXTERNAL_REUSE_GATE.md):
+5. The narrow source module and test for the behavior being changed.
+6. [`architecture/EXTERNAL_REUSE_GATE.md`](architecture/EXTERNAL_REUSE_GATE.md):
    before any architecture-level change, prove internal and external reuse was
    evaluated; the machine check is `tools/external_reuse_gate.py`.
 
@@ -63,12 +65,12 @@ Run public commands from the repository root:
 ```powershell
 micromamba run -n rlr python research_loop_v04.py --help
 micromamba run -n rlr python run_loop.py --help
-micromamba run -n rlr python run_loop.py run PROJECT CANDIDATE
+micromamba run -n rlr python run_loop.py host-next PROJECT CANDIDATE --resume
 ```
 
 For agent-native cognition, use the persisted `host-next` / `host-submit`
-protocol in [`AGENT_NATIVE_RUN.md`](AGENT_NATIVE_RUN.md). `run` is the explicit
-headless path and dispatches its configured provider.
+protocol in [`AGENT_NATIVE_RUN.md`](AGENT_NATIVE_RUN.md). `run` is the separate
+explicit headless path and dispatches its configured provider.
 
 The historical `research_loop_v04.py` filename is an intentional compatibility
 surface. Do not silently change CLI spelling, public shims, schema meaning,
@@ -80,7 +82,7 @@ The executable source of truth is
 [`src/research_loop/topology.py`](../src/research_loop/topology.py).
 
 ```text
-L0 → L1 → L2 → L3 → L4 → L5 → L6 → L7 → L8 → L8.5
+L0 → L0.5 → L1 → L2 → L3 → L4 → L5 → L6 → L7 → L8 → L8.5
   → L9a → finalized L9a snapshot → L9b → L10a → L10b → L10c
 ```
 
@@ -111,10 +113,13 @@ micromamba run -n rlr python -m research_loop.runtime_preflight
 
 ### Path B: cognitive context invisibility
 
-For any cognitive node, call `assemble-context` and use only that output. It
-uses the node's `context_inputs` in `topology.py`. Do not read a disallowed
-delta file directly, manually merge contexts, or carry private reasoning from
-one persona to another.
+In agent-native execution, use the exact rendered context and manifest bound
+into the active `host-next` request; do not assemble a broader or replacement
+context. For a direct node workflow that explicitly requires context assembly,
+call `assemble-context` and use only its output. It uses the node's
+`context_inputs` in `topology.py`. Do not read a disallowed delta file
+directly, manually merge contexts, or carry private reasoning from one persona
+to another.
 
 For native v2.1, L9a cannot see L9b. L9b may run only after L9a is finalized
 and receives only the L9a snapshot authorized by the fixed ledger cursor.
@@ -165,9 +170,10 @@ Never bypass a gate with a sentinel, `verified: false`, inferred lineage,
 weakened validation, swallowed error, or a fixture change made only to hide a
 real production failure.
 
-## Evidence and research stages
+## Explicit Academic Research Skills workflows
 
-Before L1, L4, and L8.5, run:
+When an explicit Academic Research Skills evidence workflow is needed and the
+active controller or host request directs it, use the public command:
 
 ```powershell
 micromamba run -n rlr python research_loop_v04.py deep-research-run PROJECT CANDIDATE --node NODE
@@ -186,7 +192,10 @@ The task logs are under
 `08_Audit/deep_research_runtime/tasks/TASK_ID/`. The wrapper deliberately has
 no crash-recovery scheduler: if an operating-system termination leaves a task
 at `running` indefinitely, inspect `stdout.log` and `stderr.log`, then start a
-new task.
+new task. In an agent-native E2E run, continue through `host-next` /
+`host-submit`; do not invoke this workflow independently to skip or duplicate
+the active controller's L0.5 or node stage. See the
+[RLR Agent E2E Runbook](AGENT_NATIVE_RUN.md) for the operating path.
 
 ### Staged L4 responsibility model
 
@@ -224,33 +233,34 @@ Separate observed inputs, computed results, and interpretation in all deltas
 and reports. A passing synthetic test is evidence of software behavior only,
 not a scientific conclusion.
 
-## Canonical production operating loop
+## Canonical production execution modes
 
-`src/run_loop.py` is the sole production orchestrator. Codex, Claude, and
-other command backends are node cognition providers; they do not execute a
-parallel host-session DAG protocol.
+`src/run_loop.py` is the sole production DAG orchestrator. Both documented
+modes use the same controller, persisted candidate state, validators, and
+declared advancement owners:
 
 ```text
-preflight / check-deps
-repeat until terminal:
-    run_round
-    provider_for(node) → AgentProvider
-    canonical provider output → RunReceipt
-    emit-delta → HypothesisLedger
-    execute the declared advance command
-L7: prepare workspace → execute approved scripts → emit L7 delta
-L9: emit/finalize L9a → assemble L9b from its authorized snapshot → emit L9b
-L10c: aggregate-report → human-readable sync → StopPolicy
+agent-native: host-next → [current host cognition → host-submit] → resume
+headless:     run → configured provider for each requested cognitive node
 ```
 
-The runner uses the controller's `next-step` packet rather than reconstructing
-control flow. It owns pre-research, scoped context assembly, provider dispatch,
-receipt writing, emission, and advancement in that order.
+In agent-native mode, `host-next` returns one persisted action. The current host
+session answers only `needs_host` actions through `host-submit`; deterministic
+owners advance their own stages. This is the existing host protocol, not a
+second DAG or an implicit provider. A `continued` result with a child candidate
+comes only from the persisted round StopPolicy. `run` remains an explicit
+headless mode and does not become a fallback when a host request is blocked.
 
-After L10c, stop for terminal outcomes. Only a genuine committed `REVISE`
-decision with an L10b successor may continue. The runner first emits immutable
-loop-memory and then calls `new-candidate --from-memory --loop-type`; it never
-edits child frontmatter directly.
+The runner uses the controller's `next-step` packet rather than reconstructing
+control flow. The active host request binds the authorized context artifacts;
+use those exact artifacts for cognition and do not manually assemble a broader
+context.
+
+After L10c, the host protocol may complete the configured read-only REVIEW
+action before applying the round StopPolicy. Only a genuine committed `REVISE`
+decision with a persisted successor may continue. The runner first emits
+immutable loop-memory and then calls `new-candidate --from-memory --loop-type`;
+it never edits child frontmatter directly.
 
 The prescribed end-of-round human-readable sync needs an explicit Obsidian
 vault (`OBSIDIAN_VAULT` or `--vault`) and fails loudly if unavailable.
